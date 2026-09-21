@@ -3,6 +3,8 @@
 import copy
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
@@ -10,7 +12,11 @@ from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
 import numpy as np
 
 from frequensolve.geometry.frame import CoordinateSystem
-from frequensolve.mesh.boundary_conditions import BoundaryCondition, BoundaryConditions
+from frequensolve.mesh.boundary_conditions import (
+    BoundaryCondition,
+    BoundaryConditions,
+    GravitySurfaceBC,
+)
 from frequensolve.mesh.mesh_generators import BaseMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.model.model import ModelBase
@@ -238,6 +244,30 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             self.project_path = Path(self.project_path)
         if self.model.dimension == 0:
             self.model.dimension = model_dimension(self.dimension)
+        self._synchronize_gravity_surface_loadings()
+
+    def _synchronize_gravity_surface_loadings(self) -> None:
+        """Expose BC pressure shortcuts through the Acquisition source catalog."""
+
+        shortcut_attribute = "_gravity_surface_bc_shortcut"
+        explicit_loadings = [
+            loading
+            for loading in self.acquisition.boundary_loadings
+            if not getattr(loading, shortcut_attribute, False)
+        ]
+        shortcut_loadings = []
+        for bc in self.BCs:
+            if not isinstance(bc, GravitySurfaceBC):
+                continue
+            loading = bc.boundary_loading()
+            if loading is None:
+                continue
+            setattr(loading, shortcut_attribute, True)
+            shortcut_loadings.append(loading)
+        self.acquisition.boundary_loadings = [
+            *explicit_loadings,
+            *shortcut_loadings,
+        ]
 
     @classmethod
     def from_fs(cls, data: Dict) -> "SeismicSimulation":
@@ -536,6 +566,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             JSON-compatible ``fs-simulation-1`` payload.
         """
 
+        self._synchronize_gravity_surface_loadings()
         ctx = ctx or self.export_context()
         if getattr(ctx, "default_length_units", None) is None:
             ctx.default_length_units = self.units.defaults.get("length")
@@ -549,6 +580,43 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             payload["coordinate_systems"] = [
                 cs.to_fs() for cs in self.coordinate_systems
             ]
+        gravity_bcs = [bc for bc in self.BCs if bc.has_condition("gravity_surface")]
+        gravity_names = [bc.name for bc in gravity_bcs if bc.name is not None]
+        if len(gravity_names) != len(set(gravity_names)):
+            raise ValueError("GravitySurfaceBC assignments require unique names")
+
+        explicit_loadings = list(self.acquisition.boundary_loadings)
+        loading_targets = [
+            (
+                loading.boundary_condition
+                if hasattr(loading, "boundary_condition")
+                else loading.get("boundary_condition")
+            )
+            for loading in explicit_loadings
+        ]
+        unknown_targets = sorted(
+            {str(target) for target in loading_targets if target not in gravity_names}
+        )
+        if unknown_targets:
+            unknown = ", ".join(repr(name) for name in unknown_targets)
+            raise ValueError(
+                "Surface-pressure loading targets must name a boundary with gravity_surface; "
+                f"unknown target(s): {unknown}"
+            )
+        missing_loadings = [
+            bc.name
+            for bc in gravity_bcs
+            if isinstance(bc, GravitySurfaceBC)
+            and not bc.unforced
+            and bc.name not in loading_targets
+        ]
+        if missing_loadings:
+            missing = ", ".join(repr(name) for name in missing_loadings)
+            raise ValueError(
+                "Every forced GravitySurfaceBC requires a surface-pressure loading; "
+                f"missing loading for: {missing}. Supply pressure on the boundary, "
+                "add a SurfacePressureLoading to Acquisition, or set unforced=True."
+            )
         if self.acquisition:
             payload["Acquisition"] = self.acquisition.to_fs(ctx)
         return merge_extra(payload, self.extra, "Simulation")
@@ -585,6 +653,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             self.acquisition = other
         else:
             raise ValueError(f"Cannot add {type(other)} to simulation")
+        self._synchronize_gravity_surface_loadings()
         return self
 
     def export_context(
@@ -650,8 +719,27 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         indent = json_kwargs.pop("indent", 3)
         ctx = self.export_context()
         payload = self.to_fs(ctx)
-        with open(file, "w") as f:
-            json.dump(payload, f, cls=CustomJSONEncoder, indent=indent, **json_kwargs)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{file.name}.", suffix=".tmp", dir=file.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w") as stream:
+                json.dump(
+                    payload,
+                    stream,
+                    cls=CustomJSONEncoder,
+                    indent=indent,
+                    **json_kwargs,
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, file)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
         removed = ctx.store.prune_unreferenced(payload)
         if removed:
             logging.getLogger(__name__).debug(
@@ -753,7 +841,10 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     ) -> None:
         """Normalize loaded file references that need project context at runtime."""
 
-        from frequensolve.seismic.receivers import CoordsFromFile
+        from frequensolve.seismic.receivers import (
+            CoordsFromFile,
+            _is_remote_file_reference,
+        )
 
         target_project_path = Path(self.project_path).expanduser().resolve()
         if source_project_path is not None:
@@ -769,6 +860,24 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         if not self.acquisition:
             return
         ctx = self.export_context()
+        geometry = self.acquisition.source_geometry
+        if geometry is not None:
+            geometry._resolve_project_reference(target_project_path)
+        encoding = self.acquisition.source_encoding
+        if encoding is not None:
+            encoding._resolve_project_reference(target_project_path)
+        references = (
+            getattr(group.device, "weight_table", None)
+            for group in self.acquisition.receiver_groups
+        )
+        for reference in references:
+            if reference is None:
+                continue
+            file = getattr(reference, "file", None)
+            if file is not None and not _is_remote_file_reference(file):
+                path = Path(file).expanduser()
+                if not path.is_absolute():
+                    reference.file = target_project_path / path
         for group in self.acquisition.receiver_groups:
             coords = getattr(group, "coordinates", None)
             if isinstance(coords, CoordsFromFile):
@@ -982,7 +1091,7 @@ def _relocate_owned_file_references(
                         target_project_path=target_project_path,
                     ),
                 )
-            elif not name.startswith("_") and name != "extra":
+            elif (not name.startswith("_") or name == "_storage") and name != "extra":
                 visit(item)
 
     visit(owner)

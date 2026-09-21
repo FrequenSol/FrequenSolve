@@ -38,10 +38,10 @@ procs_per_task=$2
 {% endif %}
 
 {% if run_path %}
-cd {{run_path}}
+cd {{run_path_shell}}
 {% endif %}
 
-dir_out={{dir_out}}
+dir_out={{dir_out_shell}}
 mkdir -p "$dir_out/batch"
 find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 
@@ -49,8 +49,9 @@ find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
 {{ line }}
 {% endfor %}
 
-mpi_exec={{mpi}}
-executable={{executable}}
+mpi_exec={{mpi_shell}}
+mpi_args=( {{mpi_args_shell}} )
+executable={{executable_shell}}
 n_threads={{n_threads}}
 export OMP_NUM_THREADS=$n_threads
 {% for line in mpi_async_progress_setup %}
@@ -67,12 +68,12 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
-$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --init > $dir_out/init.log 2>&1
+"$mpi_exec" "${mpi_args[@]}" -n {{init_ranks}} $executable -nthreads $n_threads --job $input_file $fresh_flag --init > $dir_out/init.log 2>&1
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i"
-   $mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i >> $dir_out/task_${i}.log 2>&1 &
+   "$mpi_exec" "${mpi_args[@]}" -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i >> $dir_out/task_${i}.log 2>&1 &
    if [[ $((($i - 1) % n_workers)) -eq $((n_workers - 1)) ]]; then
       wait
       echo "Group done"
@@ -82,7 +83,7 @@ wait
 
 {% if imaging_job %}
 echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth"
-$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth >> $dir_out/smooth.log 2>&1
+"$mpi_exec" "${mpi_args[@]}" -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth >> $dir_out/smooth.log 2>&1
 {% endif %}
 
 {% if pack_job %}

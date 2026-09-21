@@ -93,9 +93,46 @@
         },
         "weight": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/complexNumber"
-        }
+        },
+        "weights": false
       },
       "additionalProperties": true
+    },
+    "receiverWeightTable": {
+      "type": "object",
+      "required": [
+        "_type",
+        "file",
+        "dataset"
+      ],
+      "properties": {
+        "_type": {
+          "const": "HDF5Dense"
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "enum": [
+            "HDF5",
+            "hdf5"
+          ]
+        },
+        "hash": {
+          "type": "string"
+        },
+        "names_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional encoding-name dataset in the same HDF5 file."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Dense complex EncodedReceiver weights stored as (encoding * component, receiver, complex=2) in HDF5."
     },
     "offsetBound": {
       "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
@@ -331,7 +368,12 @@
             },
             "file": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-              "description": "Coordinate file path or HDF5 object locator, e.g. simulation.h5:inputs/acquisition/receivers/surface/coordinates."
+              "description": "Coordinate file path. Legacy HDF5 object locators remain accepted by the runtime."
+            },
+            "dataset": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Dataset path within an HDF5 coordinate file."
             },
             "format": {
               "type": "string"
@@ -366,6 +408,7 @@
               "enum": [
                 "ReceiverNode",
                 "ReceiverArray",
+                "EncodedReceiver",
                 "ReceiverFiber",
                 "ReceiverFiberOld"
               ]
@@ -376,6 +419,44 @@
               "items": {
                 "$ref": "#/$defs/receiverComponent"
               }
+            },
+            "offsets": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector",
+                "minItems": 2,
+                "maxItems": 3
+              },
+              "description": "Physical ReceiverArray node offsets around every receiver-group coordinate."
+            },
+            "offset_units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            },
+            "encoding_count": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of receiver encodings represented by the HDF5 weight table."
+            },
+            "encoding_names": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "reduction": {
+              "enum": [
+                "none",
+                "sum",
+                "mean"
+              ],
+              "description": "ReceiverArray reduction across offset nodes or EncodedReceiver reduction across the fixed receiver geometry."
+            },
+            "weights": {
+              "$ref": "#/$defs/receiverWeightTable"
             },
             "gauge_length": {
               "description": "Preferred DAS gauge length key. Accepted as a quantity object or legacy solver-scaled scalar.",
@@ -419,6 +500,66 @@
               "description": "DAS sample count per gauge length when sample_spacing is not provided."
             }
           },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "_type": {
+                    "const": "EncodedReceiver"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "components",
+                  "encoding_count",
+                  "weights"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "_type": {
+                    "const": "ReceiverArray"
+                  }
+                }
+              },
+              "then": {
+                "oneOf": [
+                  {
+                    "required": [
+                      "components",
+                      "offsets"
+                    ],
+                    "properties": {
+                      "weights": false
+                    }
+                  },
+                  {
+                    "required": [
+                      "components",
+                      "weights"
+                    ],
+                    "properties": {
+                      "offsets": false
+                    },
+                    "description": "Deprecated weighted ReceiverArray compatibility payload."
+                  },
+                  {
+                    "required": [
+                      "components"
+                    ],
+                    "properties": {
+                      "offsets": false,
+                      "weights": false
+                    },
+                    "description": "Deprecated point-receiver ReceiverArray compatibility payload."
+                  }
+                ]
+              }
+            }
+          ],
           "additionalProperties": true
         }
       },

@@ -66,6 +66,7 @@ class TraceDataset:
             "laplace_map": laplace_map,
             "laplace_map_keys": [int(index) for index in self.manifest.laplace],
             "wavefields": dict(self.manifest.wavefields),
+            "time_reconstruction": dict(self.manifest.time_reconstruction),
             **(
                 {
                     "duplicate_frequencies": self.manifest.run.state[
@@ -228,6 +229,7 @@ class TraceDataset:
                 components=list(manifest.components),
                 sources=list(manifest.sources),
                 wavefields=dict(manifest.wavefields),
+                time_reconstruction=dict(manifest.time_reconstruction),
                 artifacts=list(manifest.artifacts),
                 run=manifest.run,
             ),
@@ -597,6 +599,11 @@ class TraceDataset:
 
         return self.store.receivers(group)
 
+    def properties(self, group: str) -> list[str]:
+        """Return realized material properties stored with a wavefield group."""
+
+        return self.store.properties(group)
+
     def frequencies(self, group: Optional[str] = None):
         """Return available modeled frequencies.
 
@@ -674,6 +681,10 @@ class TraceDataset:
         upscale: int = 1,
         T_max: Optional[float] = None,
         laplace_compensation: str = "auto",
+        reconstruction: Optional[str] = None,
+        target_df: Optional[float] = None,
+        high_frequency_taper: Optional[float | bool] = None,
+        interpolation_time_shift: Optional[float] = None,
         **kwargs,
     ):
         """Read one reconstructed time-domain gather.
@@ -686,6 +697,13 @@ class TraceDataset:
             upscale: Reconstruction upscaling factor.
             T_max: Optional maximum time to return.
             laplace_compensation: Laplace compensation mode.
+            reconstruction: ``"standard"`` or derivative-assisted ``"hermite"``.
+            target_df: Dense Hermite reconstruction spacing in hertz.
+            high_frequency_taper: Optional derivative-informed continuation
+                width or ``True`` for one solved-frequency interval. Available
+                for standard and Hermite reconstruction.
+            interpolation_time_shift: Optional linear-phase removal time in
+                seconds for Hermite interpolation.
             **kwargs: Additional ``TraceStore.read_TD`` options.
         """
 
@@ -697,6 +715,10 @@ class TraceDataset:
             upscale=upscale,
             T_max=T_max,
             laplace_compensation=laplace_compensation,
+            reconstruction=reconstruction,
+            target_df=target_df,
+            high_frequency_taper=high_frequency_taper,
+            interpolation_time_shift=interpolation_time_shift,
             **kwargs,
         )
 
@@ -749,6 +771,10 @@ class TraceDataset:
         upscale: int = 1,
         T_max: Optional[float] = None,
         laplace_compensation: str = "auto",
+        reconstruction: Optional[str] = None,
+        target_df: Optional[float] = None,
+        high_frequency_taper: Optional[float | bool] = None,
+        interpolation_time_shift: Optional[float] = None,
         **kwargs,
     ):
         """Alias for ``time_domain``."""
@@ -761,6 +787,10 @@ class TraceDataset:
             upscale=upscale,
             T_max=T_max,
             laplace_compensation=laplace_compensation,
+            reconstruction=reconstruction,
+            target_df=target_df,
+            high_frequency_taper=high_frequency_taper,
+            interpolation_time_shift=interpolation_time_shift,
             **kwargs,
         )
 
@@ -785,3 +815,8 @@ class TraceDataset:
             T_max=T_max,
             **kwargs,
         )
+
+    def property(self, group: str, name: str) -> Any:
+        """Read one realized material property on a wavefield grid."""
+
+        return self.store.material_property(group, name)

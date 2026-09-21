@@ -1,6 +1,6 @@
 # Pinned Sauce input contracts
 
-These JSON Schema files are copied verbatim from
+These JSON Schema files were initially copied from
 `FrequenSol/Sauce@a54bdda81c98780fb4b805b92cf6df6c6e8bd29a` (`origin/main` on
 2026-07-18). They provide offline consumer-contract fixtures for FrequenSolve
 simulation and acquisition-v2 tests.
@@ -19,3 +19,11 @@ Source paths:
 Refresh these fixtures only when FrequenSolve intentionally adopts newer Sauce
 contracts. Keep the commit SHA and copied paths explicit so test results are
 traceable to the accepted consumer schemas.
+
+The material property fixture additionally adopts the `parameterized` property
+alternative and its parameterized/hat/B-spline/mesh control definitions from
+`FrequenSol/Sauce@e1fd719cb58747022c9a14412adc592c3c13e060`, at the same
+`trunk/contracts/inputs/fs-material-model-1/schema.json` path. This focused
+extension verifies the public `ParameterizedProperty` serializer without
+adopting unrelated newer material representations. The producer reader is
+`trunk/src/Model/Fields/parameterized.sm.f90`.

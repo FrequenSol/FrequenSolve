@@ -72,6 +72,7 @@ hpc = [
     "dask-jobqueue>=0.9.0,<0.10.0",
     "distributed>=2025.1.0,<2026.0.0",
     "keyring>=25.0.0,<26.0.0",
+    "jsonschema>=4.23.0,<5.0.0",
     "paramiko>=3.5.0,<4.0.0",
     "pyfftw>=0.14,<0.16",
 ]
@@ -82,6 +83,7 @@ parallel = [
     "dask-jobqueue>=0.9.0,<0.10.0",
     "distributed>=2025.1.0,<2026.0.0",
     "keyring>=25.0.0,<26.0.0",
+    "jsonschema>=4.23.0,<5.0.0",
     "paramiko>=3.5.0,<4.0.0",
     "pyfftw>=0.14,<0.16",
 ]
@@ -136,7 +138,7 @@ where = ["src"]
 include = ["frequensolve*"]
 
 [tool.setuptools.package-data]
-"frequensolve" = ["frequensolver_compatibility.json"]
+"frequensolve" = ["solver_compatibility.json"]
 "frequensolve.knowledge" = ["*.json"]
 "frequensolve.mcp_server" = ["contracts/*.json"]
 "frequensolve.orchestrator.sites" = ["site_presets.toml"]
@@ -165,8 +167,10 @@ filterwarnings = [
 markers = [
     "cloud: requires AWS/Cognito/S3 or the FrequenSol cloud control plane",
     "hpc: requires SLURM, SSH, or a configured remote cluster",
+    "hpc_hermetic: deterministic HPC adapter behavior with no SSH, scheduler, or credentials",
     "integration: requires solver binaries or external services",
     "interactive: requires manual input or an already authenticated user session",
+    "property_contract: bounded generated testing for Python SDK contracts",
     "unit: deterministic unit test with no solver, network, credentials, or scheduler",
     "visual: image comparison or plotting test",
 ]
@@ -229,6 +233,7 @@ module = [
     "botocore.*",
     "distro",
     "h5py",
+    "mpl_toolkits.*",
     "nest_asyncio",
     "paramiko",
     "paramiko.*",

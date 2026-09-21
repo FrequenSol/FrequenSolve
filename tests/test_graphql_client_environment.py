@@ -188,6 +188,87 @@ def test_simulation_status_details_fall_back_for_older_cloud_schemas():
     assert len(client.queries) == 2
 
 
+def test_cloud_log_queries_page_frequency_jobs_and_validate_events():
+    responses = iter(
+        [
+            {
+                "getSimulation": {
+                    "frequencyJobs": {
+                        "items": [
+                            {
+                                "frequencyIndex": 0,
+                                "batchJobId": "batch-1",
+                            }
+                        ],
+                        "nextToken": "page-2",
+                    }
+                }
+            },
+            {
+                "getSimulation": {
+                    "frequencyJobs": {
+                        "items": [
+                            {
+                                "frequencyIndex": 1,
+                                "batchJobId": "batch-2",
+                            }
+                        ],
+                        "nextToken": None,
+                    }
+                }
+            },
+            {
+                "getJobLogs": {
+                    "logs": [
+                        {
+                            "timestamp": "2026-09-06T14:00:00.000Z",
+                            "message": "solver complete",
+                        }
+                    ]
+                }
+            },
+        ]
+    )
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    client.calls = []
+
+    def execute(query, variables=None):
+        client.calls.append((query, variables))
+        return next(responses)
+
+    client.execute = execute
+
+    assert client.list_simulation_frequency_jobs("simulation-1") == [
+        {
+            "frequencyIndex": 0,
+            "batchJobId": "batch-1",
+        },
+        {
+            "frequencyIndex": 1,
+            "batchJobId": "batch-2",
+        },
+    ]
+    assert client.get_job_logs("batch-2") == [
+        {
+            "timestamp": "2026-09-06T14:00:00.000Z",
+            "message": "solver complete",
+        }
+    ]
+    assert [variables for _, variables in client.calls] == [
+        {
+            "id": "simulation-1",
+            "limit": 100,
+            "nextToken": None,
+        },
+        {
+            "id": "simulation-1",
+            "limit": 100,
+            "nextToken": "page-2",
+        },
+        {"batchJobId": "batch-2"},
+    ]
+
+
 def test_deploy_storage_stack_does_not_send_environment_argument():
     client = CapturingGraphQLClient()
 

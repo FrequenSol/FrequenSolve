@@ -2,7 +2,9 @@ import asyncio
 import inspect
 import json
 import logging
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -14,6 +16,7 @@ from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
     RunHandle,
+    RunResult,
     SubmitPlan,
 )
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
@@ -36,9 +39,16 @@ from frequensolve.orchestrator.sites.hpc.stampede3 import (
 from frequensolve.orchestrator.utils.pool import PoolStatus
 from frequensolve.orchestrator.utils.progress import status_table_html, wait_all
 from frequensolve.project.project import Project
-from frequensolve.simulation.jobs import FrequencyDomainJob, SkipPolicy
+from frequensolve.simulation.jobs import (
+    EikonalJob,
+    FrequencyDomainJob,
+    RTMControlSensitivityJob,
+    SkipPolicy,
+)
 from frequensolve.simulation.jobs.imaging import ImagingJob
 from frequensolve.simulation.outputs import WavefieldOutput
+
+pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
 
 class DummyStream:
@@ -508,9 +518,7 @@ def test_slurm_fetch_message_uses_multiline_from_to():
         Path("/local/job/logs"),
     )
 
-    assert message == (
-        "Fetching logs\n" "\tFrom: /remote/job/logs\n" "\tTo: /local/job/logs"
-    )
+    assert message == ("Fetching logs\n\tFrom: /remote/job/logs\n\tTo: /local/job/logs")
 
 
 def test_slurm_site_rejects_string_modules_and_secret_environment(monkeypatch):
@@ -730,6 +738,41 @@ def test_slurm_provision_uses_profile_account(monkeypatch):
     assert "#SBATCH -A allocation-from-profile" in script
 
 
+def test_existing_slurm_directive_formats_remain_supported(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout="/scratch/user/jobs/simple/freq/logs",
+        queue="cpu,gpu",
+        account="project.team+shared",
+        notify_on="all",
+        notify_email="first.last%tag@example.com",
+    )
+
+    assert "#SBATCH -p cpu,gpu" in script
+    assert "#SBATCH -A project.team+shared" in script
+    assert "#SBATCH --mail-type=ALL" in script
+    assert "#SBATCH --mail-user=first.last%tag@example.com" in script
+
+
+@pytest.mark.parametrize("field", ["queue", "account", "notify_email"])
+def test_slurm_directive_newline_is_rejected_at_script_boundary(monkeypatch, field):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    values = {field: "safe\n#SBATCH --array=1-999"}
+
+    with pytest.raises(ValueError, match="control characters"):
+        site._sweep_SLURM_script(
+            n_tasks=1,
+            n_nodes=1,
+            stdout="/scratch/user/jobs/simple/freq/logs",
+            **values,
+        )
+
+
 def test_slurm_site_verbose_initialization(monkeypatch, capsys):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
 
@@ -754,11 +797,12 @@ def test_slurm_submit_auto_uses_batch_when_not_attached(monkeypatch):
 
     monkeypatch.setattr(site, "_submit_slurm_batch", fake_submit)
 
-    run = site.submit(DummyJob())
+    run = site.submit(DummyJob(), fetch=True)
 
     assert isinstance(run, RunHandle)
     assert run.id == "77"
     assert run.mode == "batch"
+    assert run._pending_fetch_fn is not None
     assert seen["config"].nodes == 2
     assert seen["config"].queue == "debug"
 
@@ -854,6 +898,7 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
         duration="00-00:45:00",
         mpi_async_progress=False,
         scheduler_heartbeat_timeout=17,
+        mpi_health_check_timeout="00:03:00",
     )
 
     assert seen["config"].nodes == 3
@@ -862,6 +907,7 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
     assert seen["config"].duration == "00-00:45:00"
     assert seen["config"].mpi_async_progress is False
     assert seen["config"].scheduler_heartbeat_timeout == 17.0
+    assert seen["config"].mpi_health_check_timeout == "0-00:03:00"
     assert run.backend["mpi_async_progress"] is False
     assert run.backend["scheduler_heartbeat_timeout"] == 17.0
 
@@ -911,6 +957,97 @@ def test_slurm_run_config_validates_scheduler_heartbeat_timeout():
         SlurmRunConfig(scheduler_heartbeat_timeout=0)
 
 
+def test_existing_slurm_run_config_public_call_shape_is_unchanged():
+    assert tuple(inspect.signature(SlurmRunConfig).parameters) == (
+        "queue",
+        "nodes",
+        "duration",
+        "ranks_per_node",
+        "ranks_per_task",
+        "mpi_async_progress",
+        "tolerate_failures",
+        "account",
+        "notify_on",
+        "notify_email",
+        "poll_interval",
+        "scheduler_heartbeat_timeout",
+        "run_path",
+        "slurm_args",
+        "mpi_health_check_timeout",
+        "aliases",
+    )
+    config = SlurmRunConfig(
+        "existing-partition",
+        2,
+        "00-00:30:00",
+        4,
+        2,
+        False,
+        3,
+        "existing-account",
+        "fail",
+        "notify@example.com",
+        7,
+        90,
+        "/scratch/project",
+        ["--exclusive"],
+        mpi_health_check_timeout="00:02:00",
+    )
+    assert config.queue == "existing-partition"
+    assert config.account == "existing-account"
+    assert config.poll_interval == 7
+    assert config.scheduler_heartbeat_timeout == 90
+    assert config.run_path == "/scratch/project"
+    assert config.slurm_args == ["--exclusive"]
+    assert config.mpi_health_check_timeout == "0-00:02:00"
+
+
+def test_slurm_site_config_preserves_existing_positional_arguments():
+    config = SlurmSiteConfig(
+        "login.example.edu",
+        2222,
+        None,
+        None,
+        "debug",
+        "SLURM",
+        "srun",
+        7,
+        "existing-account",
+        "/tmp/project",
+        "00-00:30:00",
+        1,
+        2,
+        8,
+        2,
+        32768,
+        1,
+        {},
+        launcher_args=["--wait=30"],
+    )
+    assert config.poll_interval == 7
+    assert config.account == "existing-account"
+    assert config.tmp_dir == "/tmp/project"
+    assert config.max_duration == "00-00:30:00"
+    assert (config.min_nodes, config.max_nodes) == (1, 2)
+    assert (config.cores_per_node, config.sockets_per_node) == (8, 2)
+    assert (config.memory_per_node, config.gpus_per_node) == (32768, 1)
+    assert config.partitions == {}
+    assert config.launcher_args == ("--wait=30",)
+
+
+def test_slurm_run_config_validates_mpi_health_check_timeout():
+    assert SlurmRunConfig().mpi_health_check_timeout is None
+    assert (
+        SlurmRunConfig(mpi_health_check_timeout="00:02:00").mpi_health_check_timeout
+        == "0-00:02:00"
+    )
+
+    with pytest.raises(ValueError, match="mpi_health_check_timeout"):
+        SlurmRunConfig(mpi_health_check_timeout="invalid")
+    with pytest.raises(ValueError, match="greater than zero"):
+        SlurmRunConfig(mpi_health_check_timeout="00:00:00")
+
+
 def test_job_save_for_remote_writes_remote_absolute_result_path(tmp_path):
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
@@ -947,6 +1084,7 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
     config_path = tmp_path / "site.toml"
     config_path.write_text(f'[host]\ntmp_dir = "{staging_parent.as_posix()}"\n')
     captured = {}
+    targets = []
 
     class CaptureSite:
         work_dir = remote
@@ -954,13 +1092,13 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
 
         def put(self, local, target):
             local = Path(local)
+            target = Path(target)
+            targets.append(target)
             if local.is_dir():
-                captured["staging_parent"] = local.parent
-                sim_json = local / "simulations" / "axisym" / "axisym.json"
+                captured["staging_parent"] = local.parent.parent
+                sim_json = local / "axisym" / "axisym.json"
                 captured["simulation"] = json.loads(sim_json.read_text())
-                captured["mesh_exists"] = (
-                    local / "simulations" / "axisym" / "mesh.gmp"
-                ).exists()
+                captured["mesh_exists"] = (local / "axisym" / "mesh.gmp").exists()
 
     sim_payload = json.loads(sim.save().read_text())
 
@@ -970,6 +1108,8 @@ def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
 
     assert captured["mesh_exists"] is True
     assert captured["staging_parent"] == staging_parent
+    assert remote not in targets
+    assert remote / "simulations" in targets
     assert project.path not in captured["staging_parent"].parents
     assert captured["simulation"]["project_path"] == str(remote)
     assert captured["simulation"]["Mesh"]["file"] == "simulations/axisym/mesh.gmp"
@@ -1350,6 +1490,69 @@ def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
     assert "    4" in script
 
 
+def test_adaptive_slurm_mpi_health_failure_is_typed_and_stops_before_sizing(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    launcher = tmp_path / "fake-srun"
+    launcher_args = tmp_path / "launcher-args.txt"
+    launcher.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" > "$FAKE_SRUN_ARGS"\nexit 86\n',
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    monkeypatch.setenv("FAKE_SRUN_ARGS", str(launcher_args))
+    monkeypatch.setenv("SLURM_JOB_ID", "4815")
+    monkeypatch.setenv("SLURM_JOB_NODELIST", "hpcsr[0103,0120]")
+    config = SlurmSiteConfig(
+        hostname="login.example.edu",
+        queue="debug",
+        mpi_wrapper=str(launcher),
+        launcher_args=("--kill-on-bad-exit=1", "--wait=30"),
+        max_nodes=4,
+        cores_per_node=8,
+        memory_per_node=1024,
+    )
+    site = DummySlurmSite("project/run", config=config)
+    output = tmp_path / "logs"
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=2,
+        ranks_per_node=4,
+        stdout=str(output),
+        duration="00-00:10:00",
+        run_path=str(tmp_path),
+        mpi_health_check_timeout="0-00:02:00",
+    )
+    sweep = tmp_path / "sweep.sh"
+    sweep.write_text(script, encoding="utf-8")
+
+    completed = subprocess.run(
+        ["bash", str(sweep), str(tmp_path / "job.json")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 86
+    launched = launcher_args.read_text(encoding="utf-8")
+    assert "--kill-on-bad-exit=1 --wait=30" in launched
+    assert "--time=0-00:02:00" in launched
+    assert "-n 8" in launched
+    assert "--mpi-health-check" in launched
+    health = json.loads((output / "mpi_health_status.json").read_text())
+    assert health["state"] == "failed"
+    assert health["return_code"] == 86
+    assert health["job_id"] == "4815"
+    assert health["nodelist"] == "hpcsr[0103,0120]"
+    status = json.loads((output / "scheduler_status.json").read_text())
+    assert status["state"] == "failed"
+    assert status["phase"] == "mpi_startup"
+    assert status["mpi_health_check"] == health
+    assert not (output / "init.log").exists()
+
+
 def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
@@ -1365,13 +1568,39 @@ def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
         smooth_only=True,
     )
 
-    assert "Skipping frequency sweep; running imaging postprocess only." in script
+    assert "Skipping frequency sweep; running solver postprocess only." in script
     assert (
-        '$mpi_exec -n "$n_procs" "$executable" -nthreads "$n_threads" '
+        '"$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" '
         '--job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1'
     ) in script
     assert "--init" not in script
     assert '"--task", str(task_id)' not in script
+
+
+def test_control_postprocess_artifacts_map_into_remote_project(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("/scratch/user/project")
+    project = Project(name="project", path=tmp_path / "project")
+    simulation = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    gradient = project.path / "controls" / "gradient.h5"
+    job = RTMControlSensitivityJob(
+        "rtm",
+        simulation,
+        [3.0, 5.0],
+        observed=project.path / "observed.h5",
+        gradient=gradient,
+    )
+
+    assert site._remote_postprocess_file(job) == Path(
+        "/scratch/user/project/controls/gradient.h5"
+    )
+    assert site._remote_postprocess_file(job, 2) == Path(
+        "/scratch/user/project/controls/gradient_2.h5"
+    )
+    assert job.postprocess_fetch_files() == [
+        project.path / "controls" / "gradient_raw.h5",
+        gradient,
+    ]
 
 
 def test_slurm_submit_ignores_local_current_without_remote_record(
@@ -1422,11 +1651,12 @@ def test_slurm_submit_reattaches_matching_inflight_run(monkeypatch, tmp_path):
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reran job")),
     )
 
-    run = site.submit(job)
+    run = site.submit(job, fetch=True)
 
     assert run.id == "77"
     assert run.mode == "batch"
     assert run.check is False
+    assert run._pending_fetch_fn is not None
     assert run.backend["reattached"] is True
     assert run.status().state == "running"
     assert job.latest_run(site="Dummy").status == "running"
@@ -2006,6 +2236,67 @@ def test_slurm_fetch_vtk_downloads_configured_output_path(monkeypatch, tmp_path)
     ) in calls
 
 
+@pytest.mark.parametrize(
+    ("kind", "suffix", "expected_fetches"),
+    [
+        (None, ".vtu", 1),
+        (" XDMF ", ".XMF", 1),
+        ("hdf5", ".h5", 0),
+    ],
+)
+def test_slurm_fetch_output_files_downloads_supported_vtk_outputs(
+    monkeypatch,
+    tmp_path,
+    kind,
+    suffix,
+    expected_fetches,
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.vtk("qc", path="paraview/qc", fields="pressure")
+    fetches = []
+    monkeypatch.setattr(site, "fetch_paraview", fetches.append)
+
+    assert site.fetch_output_files(job, kind=kind, suffix=suffix) == job._result_path
+    assert fetches == [job] * expected_fetches
+
+
+def test_slurm_run_result_fetches_vtk_without_initial_run_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+
+    job = SimpleNamespace(
+        _result_path=tmp_path / "results",
+        outputs=SimpleNamespace(paraview=[object()]),
+    )
+    expected = job._result_path / "paraview/qc/qc_00000.vtu"
+    fetches = []
+
+    def fetch_paraview(fetched_job):
+        fetches.append(fetched_job)
+        expected.parent.mkdir(parents=True)
+        expected.write_text("<VTKFile></VTKFile>")
+
+    monkeypatch.setattr(site, "fetch_paraview", fetch_paraview)
+    result = RunResult(
+        job=job,
+        status=JobStatus(state="completed", return_code=0),
+        site=site,
+        run_metadata=None,
+    )
+
+    assert result.output_files(suffix=".vtu", existing=True) == [expected]
+    assert fetches == [job]
+
+
 def test_slurm_batch_poll_reads_scheduler_status(monkeypatch, capsys):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
@@ -2286,7 +2577,7 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     assert "-nthreads $n_threads" in batch_script
     assert "-nthreads $n_threads" in attached_script
     assert (
-        '$mpi_exec -n "$n_procs" "$executable" -nthreads "$n_threads" '
+        '"$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" '
         '--job "$job_file" $fresh_flag --smooth'
     ) in batch_script
     assert (
@@ -2314,6 +2605,7 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     class DummyFuture:
         def done(self):
@@ -2329,10 +2621,56 @@ def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
     assert run.status().state == "running"
 
 
+def test_attached_run_cancel_does_not_cancel_shared_allocation(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+    site.pool.id = "42"
+
+    class DummyFuture:
+        def done(self):
+            return False
+
+    monkeypatch.setattr(
+        site, "_submit_attached", lambda job, ranks_per_task=2, **kwargs: DummyFuture()
+    )
+    monkeypatch.setattr(
+        site,
+        "cancel_job",
+        lambda job_id: pytest.fail(f"cancelled shared allocation {job_id}"),
+    )
+
+    run = site.submit(DummyJob(), mode="attached")
+
+    with pytest.raises(NotImplementedError, match="shared allocation"):
+        run.cancel()
+
+
+def test_fresh_attached_submit_without_allocation_id_fails_before_launch(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
+    site = DummySlurmSite("project/run")
+    launched = []
+    monkeypatch.setattr(
+        site,
+        "_submit_attached",
+        lambda job, ranks_per_task=2, **kwargs: launched.append(job),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^Active SLURM allocation is missing a valid scheduler job id$",
+    ):
+        site.submit(DummyJob(), mode="attached")
+
+    assert launched == []
+
+
 def test_slurm_submit_attached_can_disable_pack(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
     seen = {}
 
     class DummyFuture:
@@ -2365,6 +2703,7 @@ def test_slurm_submit_rejects_mpi_async_progress(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     def fail_submit(*args, **kwargs):
         raise AssertionError("unsupported configuration reached submission")
@@ -2450,6 +2789,7 @@ def test_slurm_attached_run_is_awaitable(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
+    site.pool.id = "42"
 
     async def submit_and_wait():
         future = asyncio.get_running_loop().create_future()
@@ -2543,3 +2883,141 @@ def test_stampede3_site_is_specific_slurm_subclass():
     assert config.memory_per_node == 262144
     assert config.memory_per_core == 3276.8
     assert config.for_partition("spr").cores_per_node == 112
+
+
+@pytest.mark.parametrize("value", ["--wait=30", 30, None, {"wait": 30}, [None], [30]])
+def test_slurm_site_config_rejects_invalid_launcher_arguments(value):
+    with pytest.raises(ValueError, match="launcher_args must be an array of strings"):
+        SlurmSiteConfig(hostname="login.example.edu", launcher_args=value)
+
+
+@pytest.mark.parametrize("value", [["--wait=30"], ("--wait=30",), []])
+def test_slurm_site_config_accepts_launcher_argument_arrays(value):
+    assert SlurmSiteConfig(
+        hostname="login.example.edu", launcher_args=value
+    ).launcher_args == tuple(value)
+
+
+@pytest.mark.parametrize(
+    "launcher,mode,active",
+    [
+        ("ibrun", "batch", False),
+        ("mpirun", "batch", False),
+        ("srun", "attached", True),
+        ("srun", "auto", True),
+    ],
+)
+def test_mpi_health_check_rejects_unsupported_launch_before_sync(
+    monkeypatch, launcher, mode, active
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: active))
+    site = DummySlurmSite("project/run")
+    site.config.mpi_wrapper = launcher
+    site.pool.id = "42" if active else None
+    site.run_config = SlurmRunConfig(mpi_health_check_timeout="00:02:00")
+    sync_calls = []
+    monkeypatch.setattr(
+        site,
+        "prepare_job",
+        lambda *args, **kwargs: sync_calls.append(kwargs.get("sync_project", False)),
+    )
+    with pytest.raises(ValueError, match="requires batch mode with the srun launcher"):
+        site.submit(DummyJob(), mode=mode, fresh=True)
+    assert not any(sync_calls)
+
+
+@pytest.mark.parametrize("limit, expected", [(None, 8), (1, 1), (4, 4)])
+def test_attached_initialization_respects_job_rank_limit(
+    monkeypatch, tmp_path, limit, expected
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    site.pool.nhost = 1
+    site.pool.nproc = 8
+    site.pool.ncore = 8
+    job = DummyJob()
+    job.max_ranks_per_task = limit
+    job.n_tasks = 1
+    launcher = tmp_path / "launcher"
+    log = tmp_path / "launches"
+    launcher.write_text('#!/bin/sh\nprintf "%s\n" "$*" >> "$LAUNCH_LOG"\n')
+    launcher.chmod(0o755)
+    monkeypatch.setenv("LAUNCH_LOG", str(log))
+    monkeypatch.setattr(type(site), "mpi_cmd", property(lambda self: str(launcher)))
+    monkeypatch.setattr(type(site), "work_dir", property(lambda self: tmp_path))
+    script = tmp_path / "sweep.sh"
+    script.write_text(site._sweep_script(job, pack=False))
+    result = subprocess.run(
+        ["bash", str(script), "job.json", "1"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    init = next(line for line in log.read_text().splitlines() if "--init" in line)
+    args = init.split()
+    assert args[args.index("-n") + 1] == str(expected)
+
+
+def test_eikonal_batch_caps_initialization_and_task_launches(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    launcher = tmp_path / "srun"
+    calls = tmp_path / "launches.txt"
+    launcher.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$LAUNCH_LOG"\n')
+    launcher.chmod(0o755)
+    monkeypatch.setenv("LAUNCH_LOG", str(calls))
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    site = DummySlurmSite("project/run", solver_policy="off")
+    site.config.mpi_wrapper = str(launcher)
+    site.config.launcher_args = ("--fake-launch",)
+    monkeypatch.setattr(site, "_sync_project", lambda project: None)
+    runner = Path(hpc.__file__).parent / "templates/sweep/adaptive_scheduler.py"
+    monkeypatch.setattr(site, "_adaptive_scheduler_remote_path", lambda: runner)
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = EikonalJob("first_arrivals", sim)
+    sweep = tmp_path / "sweep.sh"
+    render = site._sweep_SLURM_script
+
+    def local_script(**kwargs):
+        kwargs.update(
+            stdout=str(tmp_path / "logs"),
+            run_path=str(tmp_path),
+            mpi_health_check_timeout=None,
+        )
+        return render(**kwargs)
+
+    def stage(script, job):
+        sweep.write_text(script)
+        return sweep, job.job_file
+
+    monkeypatch.setattr(site, "_sweep_SLURM_script", local_script)
+    monkeypatch.setattr(site, "_transfer_SLURM_job", stage)
+    monkeypatch.setattr(site, "_submit_sbatch", lambda command: "123")
+    monkeypatch.setattr(
+        site, "_store_remote_run_records", lambda job, record=None: None
+    )
+    site.submit(
+        job,
+        mode="batch",
+        nodes=1,
+        ranks_per_node=8,
+        validate=False,
+        launch_delay_seconds=0,
+    )
+    completed = subprocess.run(
+        ["bash", str(sweep), str(job.job_file)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    launches = [line.split() for line in calls.read_text().splitlines()]
+    assert len(launches) == 2
+    assert "--init-no-size" in launches[0]
+    assert "--task" in launches[1]
+    assert launches[0][launches[0].index("-n") + 1] == "1"
+    assert launches[1][launches[1].index("--ntasks") + 1] == "1"
+    config = json.loads((tmp_path / "logs/scheduler_config.json").read_text())
+    assert config["total_ranks"] == 8
+    assert config["max_ranks_per_task"] == 1

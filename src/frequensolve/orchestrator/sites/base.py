@@ -61,6 +61,12 @@ class _TraceFetchingSite(Protocol):
     def fetch_traces(self, job: Any, upscale: int = 1) -> Any: ...
 
 
+class _ImageFetchingSite(Protocol):
+    """Optional imaging capability implemented by concrete sites."""
+
+    def fetch_image(self, job: Any) -> Any: ...
+
+
 __all__ = [
     "BaseSite",
     "JobStatus",
@@ -406,7 +412,7 @@ class SubmitPlan:
             if self.n_accepted_failed_tasks:
                 categories.append(f"{self.n_accepted_failed_tasks} accepted failed")
             category_text = ", ".join(categories) if categories else "0 current"
-            message += f"; {self.n_tasks_to_skip} would skip " f"({category_text})"
+            message += f"; {self.n_tasks_to_skip} would skip ({category_text})"
         if self.pending_tasks:
             message += f"\nPending tasks: {self._task_ranges(self.pending_tasks)}"
         if self.skipped_tasks:
@@ -541,6 +547,25 @@ class RunResult:
             return self.site.fetch_wavefields(self.job, upscale=upscale)
         return self.job.wavefields.open(upscale=upscale)
 
+    def images(self) -> Any:
+        """Open imaging outputs for this run."""
+
+        self.raise_for_status()
+        if self.site is not None:
+            site = cast(_ImageFetchingSite, self.site)
+            return site.fetch_image(self.job)
+        return self.job.load_images()
+
+    def eikonal(self) -> Any:
+        """Open authoritative Eikonal first-arrival results for this run."""
+
+        self.raise_for_status()
+        if getattr(self.job, "workflow", None) != "eikonal":
+            raise TypeError("eikonal() requires an EikonalJob")
+        if self.site is not None and hasattr(self.site, "fetch_outputs"):
+            self.site.fetch_outputs(self.job)
+        return self.job.results
+
     def output_files(
         self,
         *,
@@ -567,13 +592,15 @@ class RunResult:
         """
 
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
-        if metadata is None:
-            return []
-        files = metadata.output_files(
-            kind=kind,
-            suffix=suffix,
-            base=base,
-            existing=existing,
+        files = (
+            metadata.output_files(
+                kind=kind,
+                suffix=suffix,
+                base=base,
+                existing=existing,
+            )
+            if metadata is not None
+            else []
         )
         if files or self.site is None or not fetch_missing:
             return files
@@ -585,7 +612,13 @@ class RunResult:
         fetch_output_files(self.job, kind=kind, suffix=suffix)
         metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
         if metadata is None:
-            return []
+            result_path = getattr(self.job, "_result_path", None)
+            if result_path is None:
+                return []
+            from frequensolve.simulation.jobs.artifacts import RunMetadata
+
+            metadata = RunMetadata(result_path=Path(result_path))
+            self.run_metadata = metadata
         return metadata.output_files(
             kind=kind,
             suffix=suffix,
@@ -604,8 +637,17 @@ class RunResult:
             Path to logs, fetched log mapping, or ``None`` when unavailable.
         """
 
+        if not kwargs and self.logs_path is not None:
+            local_logs = Path(self.logs_path)
+            if local_logs.is_file() or (
+                local_logs.is_dir() and next(local_logs.iterdir(), None) is not None
+            ):
+                return self.logs_path
         if self.site is not None:
-            return self.site.fetch_logs(self.job, **kwargs)
+            fetched = self.site.fetch_logs(self.job, **kwargs)
+            if not kwargs and isinstance(fetched, (str, Path)):
+                self.logs_path = Path(fetched)
+            return fetched
         if hasattr(self.job, "_stdout_path"):
             return self.job._stdout_path
         return None
@@ -671,7 +713,7 @@ class RunHandle:
     _timeout_fn: Optional[Callable[["RunHandle", JobStatus], RunResult]] = None
     _generic_wait: bool = True
     _cancel_fn: Optional[Callable[["RunHandle"], None]] = None
-    _fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
+    _pending_fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
     _result: Optional[RunResult] = None
     _last_status: JobStatus = field(default_factory=JobStatus)
 
@@ -710,12 +752,17 @@ class RunHandle:
         return self.wait_async().__await__()
 
     def _make_result(self, status: JobStatus) -> RunResult:
+        fetch_logs = getattr(self.site, "fetch_logs", None)
         return RunResult(
             job=self.job,
             status=status,
             site=self.site,
             trace_manifest=getattr(self.job, "trace_manifest", None),
-            logs_path=getattr(self.job, "_stdout_path", None),
+            logs_path=(
+                None
+                if callable(fetch_logs)
+                else getattr(self.job, "_stdout_path", None)
+            ),
             run_metadata=getattr(self.job, "run_metadata", None),
         )
 
@@ -774,11 +821,13 @@ class RunHandle:
         if self._result is not None:
             if effective_check:
                 self._result.raise_for_status()
+            self._fetch_pending_outputs()
             return self._result
         if not self._generic_wait and self._wait_fn is not None:
             self._result = self._wait_fn(self, timeout, poll_interval)
             if effective_check:
                 self._result.raise_for_status()
+            self._fetch_pending_outputs()
             return self._result
         from frequensolve.orchestrator.utils.progress import wait
 
@@ -814,11 +863,13 @@ class RunHandle:
         if self._result is not None:
             if effective_check:
                 self._result.raise_for_status()
+            await asyncio.to_thread(self._fetch_pending_outputs)
             return self._result
         if not self._generic_wait and self._wait_async_fn is not None:
             self._result = await self._wait_async_fn(self, timeout, poll_interval)
             if effective_check:
                 self._result.raise_for_status()
+            await asyncio.to_thread(self._fetch_pending_outputs)
             return self._result
         return await asyncio.to_thread(
             self.wait,
@@ -849,6 +900,7 @@ class RunHandle:
             status = self.status()
             if status.is_complete:
                 status = self._complete_from_status(status).status
+                self._fetch_pending_outputs()
             if status.state != last_state:
                 yield status
                 last_state = status.state
@@ -884,11 +936,25 @@ class RunHandle:
             available.
         """
 
-        if self._fetch_fn is not None:
-            return self._fetch_fn(self)
-        if hasattr(self.site, "fetch_outputs"):
-            return self.site.fetch_outputs(self.job)
-        return None
+        pending_fetch = self._pending_fetch_fn
+        if pending_fetch is not None:
+            result = pending_fetch(self)
+            self._pending_fetch_fn = None
+        elif hasattr(self.site, "fetch_outputs"):
+            result = self.site.fetch_outputs(self.job)
+        else:
+            result = None
+        return result
+
+    def _fetch_pending_outputs(self) -> None:
+        """Consume one successful submit-time output fetch when pending."""
+
+        if (
+            self._pending_fetch_fn is not None
+            and self._result is not None
+            and self._result.successful
+        ):
+            self.fetch()
 
     def traces(self, upscale: int = 1) -> Any:
         """Fetch outputs if needed and open receiver traces.
@@ -916,6 +982,14 @@ class RunHandle:
 
         self.fetch()
         return self.site.fetch_wavefields(self.job, upscale=upscale)
+
+    def eikonal(self) -> Any:
+        """Fetch if needed and open authoritative Eikonal results."""
+
+        if getattr(self.job, "workflow", None) != "eikonal":
+            raise TypeError("eikonal() requires an EikonalJob")
+        self.fetch()
+        return self.job.results
 
     def logs(self, **kwargs: Any) -> Any:
         """Return or fetch logs for this run.
@@ -993,7 +1067,6 @@ class BaseSite:
             sync_project: Whether to synchronize the owning project after the
                 job is saved.
             validate: Whether to run job validation before submission.
-
         Returns:
             The same job object, for fluent site implementations.
         """

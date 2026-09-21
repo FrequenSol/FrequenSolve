@@ -50,7 +50,7 @@ verbose = true
 type = "local"
 solver = "/path/to/local/solver"
 # Compatibility policy: "warn" (default), "strict", or "off".
-frequensolver_policy = "warn"
+solver_policy = "warn"
 shutdown_on_completion = true
 verbose = true
 
@@ -63,7 +63,7 @@ ssh_key = "~/.ssh/id_ed25519"
 # HPC launches route every solver phase through this executable.
 solver = "/remote/path/to/solver-installation/FS_seismic"
 # Compatibility policy: "warn" (default), "strict", or "off".
-frequensolver_policy = "warn"
+solver_policy = "warn"
 work_dir = "/remote/writable/directory/frequensolve"
 # Optional future location for models and other high-I/O data.
 scratch_dir = "/remote/scratch/directory/frequensolve"
@@ -72,6 +72,7 @@ default_partition = "debug"
 account = "allocation"
 transfer_method = "rsync"
 modules = []
+launcher_args = []
 verbose = true
 
 # Define one table per partition using limits and node resources supplied by
@@ -96,6 +97,8 @@ ranks_per_node = 4
 ranks_per_task = 1
 poll_interval = 10
 scheduler_heartbeat_timeout = 60
+# Optional full-rank solver MPI check before sizing, using a Slurm step limit.
+# mpi_health_check_timeout = "00:02:00"
 
 # Stampede3 uses built-in host, launcher, partition, and node-shape defaults.
 [sites.stampede3]

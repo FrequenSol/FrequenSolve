@@ -229,8 +229,8 @@ jobs:
         id: generate-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
-          private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
+          private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
           owner: FrequenSol
           repositories: FrequenSolveDockerImage
 

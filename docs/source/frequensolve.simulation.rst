@@ -41,6 +41,14 @@ Forward Jobs
    :show-inheritance:
    :noindex:
 
+Eikonal Jobs
+------------
+
+.. automodule:: frequensolve.simulation.jobs.eikonal
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Imaging Jobs
 ------------
 

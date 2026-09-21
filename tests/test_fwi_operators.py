@@ -8,12 +8,26 @@ import xarray as xr
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
+from frequensolve.model.representation import VariationalSmoothing
 from frequensolve.seismic.acquisition import Acquisition
-from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+from frequensolve.seismic.receivers import (
+    EncodedReceiver,
+    ReceiverComponent,
+    ReceiverNode,
+)
 from frequensolve.seismic.sources import SourceGeometry
-from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.jobs import BaseJob, FrequencyDomainJob
 from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
-from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
+from frequensolve.simulation.jobs.imaging import (
+    HDF5TraceStore,
+    ImageDatabase,
+    ImagingJob,
+    LSRTMGradientJob,
+    LSRTMNormalJob,
+    MisfitComparison,
+    MisfitGroup,
+    ObservedTraceDerivatives,
+)
 from frequensolve.simulation.outputs import VtkOutput
 from frequensolve.simulation.simulation import SeismicSimulation
 
@@ -102,6 +116,32 @@ def test_data_space_packs_trace_groups_in_frequency_source_component_receiver_or
     assert roundtrip["surface"].coords["component"].values.tolist() == ["vz"]
 
 
+def test_data_space_uses_encoded_receiver_outputs_and_reduced_geometry(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    sim.acquisition.receiver_groups[0].device = EncodedReceiver(
+        components=[ReceiverComponent(name="vz", field="velocity")],
+        weights=np.ones((2, 1, 2), dtype=np.complex64),
+        encoding_names=["focus_a", "focus_b"],
+    )
+
+    space = DataSpace.from_simulation(sim, frequencies=[5.0])
+
+    assert space.segments[0].components == ("focus_a", "focus_b")
+    assert space.segments[0].receivers == (1,)
+    assert space.size == 2
+
+    job = FrequencyDomainJob(name="encoded", simulation=sim, f_list=[5.0])
+    assert job.trace_outputs.components == [
+        "surface:focus_a",
+        "surface:focus_b",
+    ]
+
+    sim.acquisition.receiver_groups[0].device.reduction = "none"
+    unreduced = DataSpace.from_simulation(sim, frequencies=[5.0])
+    assert unreduced.segments[0].receivers == (1, 2)
+    assert unreduced.size == 4
+
+
 def test_data_space_requires_known_external_source_count(tmp_path):
     sim = _elastic_simulation(tmp_path)
     sim.acquisition.sources = SourceGeometry.hdf5(
@@ -157,6 +197,88 @@ def test_imaging_job_syntax_serializes_trace_store_roots(tmp_path):
     ]
 
 
+def test_imaging_job_serializes_instantaneous_travel_time_comparison(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    observed = tmp_path / "observed"
+    observed.mkdir()
+
+    job = sim.imaging_job(
+        name="instantaneous_travel_time",
+        observed=observed,
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        comparison=MisfitComparison.phase_derivative(
+            source_derivative="total",
+            relative_amplitude_floor=0.02,
+        ),
+        observed_derivatives=ObservedTraceDerivatives.packed(
+            observed,
+            receiver_group="surface",
+        ),
+    )
+
+    payload = job.to_fs()
+    comparison = payload["Image"]["misfit"]["comparison"]
+
+    assert comparison == {
+        "kind": "phase_derivative",
+        "derivative_axis": "frequency",
+        "source_derivative": "total",
+        "relative_amplitude_floor": 0.02,
+    }
+    assert payload["Image"]["misfit"]["receiver_groups"][0]["observed_derivatives"] == {
+        "df": {
+            "_type": "HDF5TraceStore",
+            "file": observed / "traces.h5",
+            "dataset": "surface_df",
+            "source_basis": "source_encoding",
+        }
+    }
+    loaded = BaseJob.load(job.save())
+    assert loaded.misfit.comparison == MisfitComparison.phase_derivative(
+        source_derivative="total",
+        relative_amplitude_floor=0.02,
+    )
+    assert loaded.misfit.receiver_groups[0].observed_derivatives == (
+        ObservedTraceDerivatives.packed(observed, receiver_group="surface")
+    )
+
+
+@pytest.mark.parametrize(
+    "comparison",
+    [
+        {"kind": "phase_derivative", "derivative_axis": "laplace"},
+        {"kind": "phase_derivative", "relative_amplitude_floor": 0.0},
+        {"kind": "unsupported"},
+    ],
+)
+def test_imaging_job_rejects_invalid_comparison_configuration(tmp_path, comparison):
+    sim = _elastic_simulation(tmp_path)
+
+    with pytest.raises(ValueError):
+        ImagingJob(
+            name="invalid_comparison",
+            simulation=sim,
+            f_list=[5.0],
+            grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+            comparison=comparison,
+        )
+
+
+def test_phase_derivative_imaging_requires_observed_df_reference(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    with pytest.raises(ValueError, match="observed_derivatives"):
+        ImagingJob(
+            name="missing_observed_df",
+            simulation=sim,
+            f_list=[5.0],
+            grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+            comparison=MisfitComparison.phase_derivative(),
+        )
+
+
 def test_imaging_job_outputs_use_canonical_top_level_contract(tmp_path):
     sim = _elastic_simulation(tmp_path)
 
@@ -192,6 +314,118 @@ def test_imaging_job_allows_missing_observed_for_sensitivity_kernels(tmp_path):
     assert payload["Image"]["data_path"] is None
     assert payload["Image"]["misfit"]["receiver_groups"][0]["observed"] is None
     assert job.misfit.receiver_groups[0].observed is None
+
+
+def test_lsrtm_normal_job_serializes_one_fused_born_workflow(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    job = LSRTMNormalJob(
+        name="normal",
+        simulation=sim,
+        data_path=None,
+        f_list=[5.0, 7.0],
+        grid=grid,
+        images={"dVp": "FWI:Vp"},
+        save_path=tmp_path / "images",
+    )
+
+    payload = job.to_fs()
+
+    assert payload["_type"] == "LSRTMNormalJob"
+    assert payload["workflow"] == "born"
+    assert payload["Image"]["gauss_newton"] is True
+    assert payload["Image"]["born_traces_only"] is False
+    assert payload["Image"]["misfit"]["receiver_groups"][0]["observed"] is None
+    assert job.n_tasks == 2
+    assert job.trace_outputs.groups == ["surface_inc"]
+    assert job.trace_outputs.components == ["surface_inc:vz"]
+
+    loaded = BaseJob.load(job.save())
+
+    assert isinstance(loaded, LSRTMNormalJob)
+    assert loaded.workflow == "born"
+    assert loaded.to_fs()["Image"]["gauss_newton"] is True
+
+
+def test_lsrtm_gradient_job_serializes_one_call_residual_workflow(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    observed = tmp_path / "observed"
+    observed.mkdir()
+    job = LSRTMGradientJob(
+        name="gradient",
+        simulation=sim,
+        data_path=observed,
+        f_list=[5.0, 7.0],
+        grid=grid,
+        images={"dVp": "FWI:Vp"},
+        save_path=tmp_path / "images",
+    )
+
+    payload = job.to_fs()
+
+    assert payload["_type"] == "LSRTMGradientJob"
+    assert payload["workflow"] == "lsrtm_gradient"
+    assert payload["Image"]["gauss_newton"] is True
+    assert payload["Image"]["born_traces_only"] is False
+    assert payload["Image"]["zero_direction"] is True
+    assert "background_forward_policy" not in payload["Image"]
+    assert "background_cache_key" not in payload["Image"]
+    assert payload["Image"]["misfit"]["receiver_groups"][0]["observed"] is not None
+    assert job.n_tasks == 2
+    assert job.trace_outputs.groups == ["surface", "surface_inc"]
+    assert job.trace_outputs.components == ["surface:vz", "surface_inc:vz"]
+
+    loaded = BaseJob.load(job.save())
+
+    assert isinstance(loaded, LSRTMGradientJob)
+    assert loaded.workflow == "lsrtm_gradient"
+
+
+def test_lsrtm_gradient_job_requires_observed_data(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+
+    with pytest.raises(ValueError, match="requires observed data"):
+        LSRTMGradientJob(
+            name="gradient",
+            simulation=sim,
+            data_path=None,
+            f_list=[5.0],
+            grid=grid,
+        )
+
+    with pytest.raises(ValueError, match="cannot be trace-only"):
+        LSRTMGradientJob(
+            name="gradient",
+            simulation=sim,
+            data_path=tmp_path / "observed",
+            f_list=[5.0],
+            grid=grid,
+            born_traces_only=True,
+        )
+
+
+def test_lsrtm_normal_job_rejects_conflicting_workflow_flags(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+
+    with pytest.raises(ValueError, match="cannot be trace-only"):
+        LSRTMNormalJob(
+            name="trace_only",
+            simulation=sim,
+            f_list=[5.0],
+            grid=grid,
+            born_traces_only=True,
+        )
+    with pytest.raises(ValueError, match="requires gauss_newton=True"):
+        LSRTMNormalJob(
+            name="legacy",
+            simulation=sim,
+            f_list=[5.0],
+            grid=grid,
+            gauss_newton=False,
+        )
 
 
 def test_legacy_simulation_imaging_method_remains_supported(tmp_path):
@@ -233,6 +467,112 @@ def test_legacy_imaging_images_syntax_still_serializes(tmp_path):
         {"name": "dVp", "IC": "FWI", "property": "Vp"},
         {"name": "p", "IC": "pressure"},
     ]
+
+
+def test_imaging_job_serializes_representation_independent_tgv_smoothing(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = ImagingJob(
+        name="rtm",
+        simulation=sim,
+        f_list=[5.0],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        regularization=VariationalSmoothing(
+            kind="tgv",
+            wavelength_fraction=0.5,
+            tgv_ratio=2.0,
+            epsilon=0.01,
+            iterations=7,
+            input_role="primal",
+        ),
+    )
+
+    assert job.to_fs()["Image"]["Smoothing"] == {
+        "type": "tgv",
+        "lambda": 0.5,
+        "derivative_order": 1,
+        "epsilon": 0.01,
+        "iterations": 7,
+        "tgv_ratio": 2.0,
+        "illumination_normalization": "none",
+    }
+
+
+def test_imaging_job_native_smoothing_mapping_defaults_to_no_illumination(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+
+    job = ImagingJob(
+        name="rtm",
+        simulation=sim,
+        f_list=[5.0],
+        grid=grid,
+        regularization={"type": "tikhonov", "lambda": 0.5},
+    )
+    legacy = ImagingJob(
+        name="legacy_rtm",
+        simulation=sim,
+        f_list=[5.0],
+        grid=grid,
+        regularization={
+            "type": "tikhonov",
+            "lambda": 0.5,
+            "normalize_illumination": True,
+        },
+    )
+
+    assert job.to_fs()["Image"]["Smoothing"]["illumination_normalization"] == "none"
+    assert "illumination_normalization" not in legacy.to_fs()["Image"]["Smoothing"]
+
+
+def test_imaging_job_rejects_dual_or_second_derivative_smoothing(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+
+    with pytest.raises(ValueError, match="input_role='primal'"):
+        ImagingJob(
+            name="dual",
+            simulation=sim,
+            f_list=[5.0],
+            grid=grid,
+            regularization=VariationalSmoothing(),
+        )
+    with pytest.raises(ValueError, match="first-order"):
+        ImagingJob(
+            name="second",
+            simulation=sim,
+            f_list=[5.0],
+            grid=grid,
+            regularization=VariationalSmoothing(
+                derivative_order=2,
+                input_role="primal",
+            ),
+        )
+
+
+def test_imaging_job_resolves_reference_wavelength_before_export(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+
+    job = ImagingJob(
+        name="reference",
+        simulation=sim,
+        f_list=[5.0],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        regularization=VariationalSmoothing(
+            kind="tgv",
+            wavelength_fraction=0.5,
+            reference_wavelength=2.0,
+            tgv_ratio=2.0,
+            input_role="primal",
+        ),
+    )
+
+    smoothing = job.to_fs()["Image"]["Smoothing"]
+    alpha1 = 1.0 / (2.0 * np.pi)
+    assert smoothing["alpha1"] == alpha1
+    assert smoothing["alpha2"] == 2.0 * alpha1**2
+    assert "reference_wavelength" not in smoothing
+    assert "input_role" not in smoothing
 
 
 def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_path):
@@ -282,7 +622,46 @@ def test_imaging_job_save_and_load_round_trips_project_relative_simulation(tmp_p
         "lambda": 1.0,
         "epsilon": 1.0,
         "iterations": 5,
+        "illumination_normalization": "none",
     }
+
+
+def test_imaging_job_saves_trace_weights_in_job_owned_hdf5(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    job = sim.imaging_job(
+        name="weighted_rtm",
+        frequencies=[5.0],
+        parameters=["vp"],
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+    weights = np.asarray([[[0.25, 2.0]]])
+    job.misfit.receiver_groups[0].add_trace_weights(weights)
+
+    job_file = job.save()
+    saved = json.loads(job_file.read_text())
+    reference = saved["Image"]["misfit"]["receiver_groups"][0]["preprocess"][0][
+        "params"
+    ]["weights"]
+
+    assert reference["_type"] == "HDF5Dense"
+    assert reference["file"] == "jobs/smooth/weighted_rtm/inputs.h5"
+    with h5py.File(tmp_path / reference["file"], "r") as h5:
+        stored = h5[reference["dataset"]]
+        np.testing.assert_allclose(stored[:], weights)
+        assert "source" not in stored.attrs
+        assert "receiver" not in stored.attrs
+    loaded = BaseJob.load(job_file)
+    assert (
+        loaded.to_fs()["Image"]["misfit"]["receiver_groups"][0]["preprocess"][0][
+            "params"
+        ]["weights"]
+        == reference
+    )
+    fingerprint = job.fingerprint()
+    job.misfit.receiver_groups[0].preprocess.clear()
+    job.misfit.receiver_groups[0].add_trace_weights(np.asarray([[[0.5, 2.0]]]))
+    assert fingerprint.startswith("blake3:")
+    assert job.fingerprint() != fingerprint
 
 
 def test_imaging_job_without_observed_saves_and_loads_null_data_path(tmp_path):
@@ -447,3 +826,88 @@ def test_fwi_jacobian_dot_test_and_taylor_test_use_hermitian_products(tmp_path):
     assert dot["relative_error"] < 1.0e-12
     assert taylor["passed"]
     assert taylor["rates"][-1] > 1.8
+
+
+@pytest.mark.parametrize("job_type", [ImagingJob, LSRTMGradientJob])
+@pytest.mark.parametrize("descriptor", [False, True])
+def test_imaging_derivative_inputs_are_hashed_and_staged(
+    tmp_path, job_type, descriptor
+):
+    sim = _elastic_simulation(tmp_path)
+    observed = tmp_path / "observed"
+    observed.mkdir()
+    files = [observed / "surface.h5", observed / "other.h5"]
+    for path in files:
+        with h5py.File(path, "w") as h5:
+            h5["df"] = [1.0]
+
+    def reference(path):
+        return ObservedTraceDerivatives(
+            df=HDF5TraceStore(file=path, dataset="df") if descriptor else path
+        )
+
+    job = job_type(
+        name="derivative_inputs",
+        simulation=sim,
+        f_list=[5.0],
+        data_path=observed,
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+        comparison=MisfitComparison.phase_derivative(),
+        observed_derivatives=reference(files[0]),
+    )
+    job.misfit.receiver_groups.append(
+        MisfitGroup(
+            name="other", observed=observed, observed_derivatives=reference(files[1])
+        )
+    )
+    loaded = BaseJob.load(job.save())
+    assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()
+    if isinstance(job, LSRTMGradientJob):
+        assert job._input_fingerprint_payload()["direction"] == {"kind": "zero"}
+
+    remote_root = tmp_path / "remote"
+    staged = loaded.remote_input_files(remote_root)
+    for path in files:
+        assert (path, remote_root / path.relative_to(tmp_path)) in staged
+        before = loaded.fingerprint(), loaded.task_fingerprint(1)
+        with h5py.File(path, "r+") as h5:
+            h5["df"][0] += 1.0
+        after = loaded.fingerprint(), loaded.task_fingerprint(1)
+        assert all(old != new for old, new in zip(before, after))
+    assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()
+
+
+@pytest.mark.parametrize("job_type", [LSRTMGradientJob, LSRTMNormalJob])
+def test_loaded_lsrtm_job_stages_and_fingerprints_direction_file(tmp_path, job_type):
+    sim = _elastic_simulation(tmp_path)
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction")
+    observed = tmp_path / "observed.h5"
+    observed.write_bytes(b"observed")
+    job = job_type(
+        "gradient",
+        sim,
+        f_list=[5.0],
+        data_path=observed,
+        direction=direction,
+        grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
+    )
+    loaded = BaseJob.load(job.save())
+    assert (
+        direction,
+        type(direction)("/remote/project/direction.h5"),
+    ) in loaded.remote_input_files("/remote/project")
+
+    before = (
+        loaded.fingerprint(),
+        loaded.task_fingerprint(1),
+        loaded.task_policy_fingerprint(1, "compatible"),
+    )
+    direction.write_bytes(b"updated direction")
+    after = (
+        loaded.fingerprint(),
+        loaded.task_fingerprint(1),
+        loaded.task_policy_fingerprint(1, "compatible"),
+    )
+    assert all(old != new for old, new in zip(before, after))
+    assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()

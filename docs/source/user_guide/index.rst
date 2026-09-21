@@ -18,9 +18,11 @@ unfamiliar, check the :doc:`../glossary`.
    stampede3_getting_started
    frequensolve_directory
    physics_materials_boundaries
+   control_sensitivities
    api_to_contracts
    velocity_models_coordinates
    mesh_generation_adaptivity
    surveys_sources_receivers
    traces_paraview_outputs
+   eikonal
    boreholes

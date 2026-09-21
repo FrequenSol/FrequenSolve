@@ -9,6 +9,7 @@ from typing import Any, List, Optional, Tuple, Union
 
 SLURM_QUEUE_STATES = {
     "PD": "pending",
+    "CF": "pending",
     "R": "running",
     "CG": "running",
     "CD": "complete",
@@ -39,6 +40,8 @@ SLURM_STATUS_COLORS = {
     "cancelled": "\033[38;5;160m",
     "unknown": "\033[38;5;244m",
 }
+
+_SLURM_JOB_ID = re.compile(r"\d+(?:_\d+)?\Z")
 
 
 def hms_to_seconds(hms: str) -> int:
@@ -75,6 +78,22 @@ def read_stream(stream) -> str:
     return output.strip()
 
 
+def ssh_exit_status(*streams: Any) -> Optional[int]:
+    """Return an SSH command's exit status when a stream exposes its channel.
+
+    Paramiko attaches the same channel to stdout and stderr. Lightweight test
+    doubles and alternative adapters may not expose it, so callers retain their
+    existing stderr-based fallback when this returns ``None``.
+    """
+
+    for stream in streams:
+        channel = getattr(stream, "channel", None)
+        receive = getattr(channel, "recv_exit_status", None)
+        if callable(receive):
+            return int(receive())
+    return None
+
+
 def normalize_slurm_state(state: str) -> str:
     """Map a SLURM queue/accounting state to the public PoolInfo status."""
 
@@ -92,6 +111,15 @@ def parse_sbatch_job_id(output: str) -> str:
     if not match:
         raise ValueError(f"failed to get job ID from sbatch output: {output}")
     return match.group(1)
+
+
+def validate_slurm_job_id(job_id: Union[str, int]) -> str:
+    """Return a command-safe SLURM job or array-task id."""
+
+    value = str(job_id)
+    if not _SLURM_JOB_ID.fullmatch(value):
+        raise ValueError("SLURM job id must be numeric")
+    return value
 
 
 def as_list(value, item_type) -> Tuple[List[Any], bool]:

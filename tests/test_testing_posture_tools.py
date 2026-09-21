@@ -4,11 +4,12 @@ import json
 import subprocess
 import sys
 import tarfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 
-from frequensolve.frequensolver import load_frequensolver_compatibility
+from frequensolve.solver import load_solver_compatibility
 from scripts.check_coverage_thresholds import (
     coverage_percentages,
     failed_thresholds,
@@ -18,18 +19,19 @@ from scripts.compare_release_evidence_pair import (
     compare_release_evidence_pairs,
 )
 from scripts.extract_test_evidence_archive import extract_archive
-from scripts.materialize_frequensolver_compatibility import manifest_from_evidence
-from scripts.validate_frequensolver_identity import validate_identity
+from scripts.materialize_solver_compatibility import manifest_from_evidence
 from scripts.validate_heavy_test_evidence import (
     MARKER_EXPRESSION,
 )
 from scripts.validate_heavy_test_evidence import SCHEMA as HEAVY_SCHEMA
 from scripts.validate_heavy_test_evidence import (
+    load_scenario_manifest,
     validate_heavy_test_evidence,
 )
 from scripts.validate_release_evidence import (
     DOCKER_WORKFLOW_PREFIX,
     LEGACY_SCHEMA,
+    PROFILE_SCHEMA,
     SCHEMA,
     SOLVER_BACKED_PROFILE,
     STANDARD_PROFILE,
@@ -39,6 +41,7 @@ from scripts.validate_release_evidence import (
     release_evidence_profile,
     validate_evidence,
 )
+from scripts.validate_solver_identity import validate_identity
 from scripts.verify_ci_evidence import has_required_job, run_matches
 
 COMMIT = "a" * 40
@@ -66,18 +69,18 @@ def _heavy_evidence():
             "junit": {
                 "path": "junit.xml",
                 "present": True,
-                "counts": {"tests": 501, "failures": 0, "errors": 0, "skipped": 0},
+                "counts": {"tests": 538, "failures": 0, "errors": 0, "skipped": 0},
             },
             "coverage": {
                 "path": "coverage.xml",
                 "present": True,
                 "rates": {
-                    "lineRate": 0.69,
-                    "branchRate": 0.52,
-                    "linesValid": 100,
-                    "linesCovered": 69,
-                    "branchesValid": 100,
-                    "branchesCovered": 52,
+                    "lineRate": 0.7203,
+                    "branchRate": 0.552,
+                    "linesValid": 10000,
+                    "linesCovered": 7203,
+                    "branchesValid": 10000,
+                    "branchesCovered": 5520,
                 },
             },
             "visual": {"path": "fig_comparison.html", "present": True},
@@ -191,13 +194,11 @@ def _release_evidence():
         "dockerDispatchEvidence": docker_dispatch_evidence,
         "sauceRef": "v0.1.0",
         "sauceCommit": "c" * 40,
-        "frequensolverRelease": "v0.1.0",
-        "frequensolverReleaseUrl": (
-            "https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"
-        ),
-        "frequensolverVersion": "v0.1.0",
-        "frequensolverBuildId": "release-v0.1.0",
-        "frequensolverGitCommit": "c" * 40,
+        "solverRelease": "v0.1.0",
+        "solverReleaseUrl": ("https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"),
+        "solverVersion": "v0.1.0",
+        "solverBuildId": "release-v0.1.0",
+        "solverGitCommit": "c" * 40,
         "fsMumpsRef": "d" * 40,
         "fsMumpsCommit": "d" * 40,
     }
@@ -215,10 +216,8 @@ def _standard_release_evidence():
         "ciRequiredJob": "Required CI",
         "sauceRef": "v0.1.0",
         "sauceCommit": "c" * 40,
-        "frequensolverRelease": "v0.1.0",
-        "frequensolverReleaseUrl": (
-            "https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"
-        ),
+        "solverRelease": "v0.1.0",
+        "solverReleaseUrl": ("https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"),
     }
 
 
@@ -236,7 +235,7 @@ def test_release_evidence_accepts_standard_exact_tree_ci_and_solver_identity():
 
 def test_release_evidence_maps_legacy_v2_to_solver_backed():
     evidence = _release_evidence()
-    evidence["schemaVersion"] = LEGACY_SCHEMA
+    evidence = _legacy_release_evidence(evidence, LEGACY_SCHEMA)
     evidence.pop("validationProfile")
     evidence.pop("solverValidationStatus")
 
@@ -253,19 +252,19 @@ def test_standard_release_evidence_forbids_solver_backed_fields():
         validate_evidence(evidence, COMMIT)
 
 
-def test_materialized_frequensolver_manifest_loads(tmp_path):
+def test_materialized_solver_manifest_loads(tmp_path):
     manifest = manifest_from_evidence(
         _release_evidence(),
         package_release="0.3.0",
         package_commit=COMMIT,
     )
-    manifest_path = tmp_path / "frequensolver_compatibility.json"
+    manifest_path = tmp_path / "solver_compatibility.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    loaded = load_frequensolver_compatibility(manifest_path)
+    loaded = load_solver_compatibility(manifest_path)
 
     assert loaded.package_release == "0.3.0"
-    assert loaded.preferred_frequensolver.release == "v0.1.0"
+    assert loaded.preferred_solver.release == "v0.1.0"
     assert loaded.evidence_run_id == 789
     assert loaded.evidence_url == (
         "https://github.com/FrequenSol/FrequenSolveDockerImage/actions/runs/789"
@@ -280,12 +279,12 @@ def test_standard_materialized_manifest_is_ci_backed_but_not_solver_backed(tmp_p
         package_release="0.3.0",
         package_commit=COMMIT,
     )
-    manifest_path = tmp_path / "frequensolver_compatibility.json"
+    manifest_path = tmp_path / "solver_compatibility.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    loaded = load_frequensolver_compatibility(manifest_path)
+    loaded = load_solver_compatibility(manifest_path)
 
-    assert loaded.preferred_frequensolver.release == "v0.1.0"
+    assert loaded.preferred_solver.release == "v0.1.0"
     assert loaded.validation_profile == STANDARD_PROFILE
     assert not loaded.solver_backed
     assert loaded.evidence_run_id == 123
@@ -306,11 +305,11 @@ def test_release_evidence_rejects_mutable_docker_workflow_ref():
         raise AssertionError("mutable Docker workflow reference was accepted")
 
 
-def test_release_evidence_rejects_mutable_frequensolver_ref():
+def test_release_evidence_rejects_mutable_solver_ref():
     evidence = _release_evidence()
     evidence["sauceRef"] = "main"
-    evidence["frequensolverRelease"] = "main"
-    evidence["frequensolverVersion"] = "main"
+    evidence["solverRelease"] = "main"
+    evidence["solverVersion"] = "main"
 
     with pytest.raises(ValueError, match="immutable final release tag"):
         validate_evidence(evidence, COMMIT)
@@ -397,7 +396,7 @@ def test_release_evidence_pair_comparison_accepts_identical_sealed_assets(tmp_pa
     )
 
 
-def test_release_evidence_pair_comparison_rejects_stale_frequensolver_metadata(
+def test_release_evidence_pair_comparison_rejects_stale_solver_metadata(
     tmp_path,
 ):
     expected_evidence, expected_archive = _write_release_evidence_pair(
@@ -407,15 +406,15 @@ def test_release_evidence_pair_comparison_rejects_stale_frequensolver_metadata(
     stale = _release_evidence()
     stale.update(
         sauceRef="v0.0.9",
-        frequensolverRelease="v0.0.9",
-        frequensolverVersion="v0.0.9",
+        solverRelease="v0.0.9",
+        solverVersion="v0.0.9",
     )
     actual_evidence, actual_archive = _write_release_evidence_pair(
         tmp_path / "actual",
         stale,
     )
 
-    with pytest.raises(ValueError, match="frequensolverRelease"):
+    with pytest.raises(ValueError, match="solverRelease"):
         compare_release_evidence_pairs(
             expected_evidence,
             expected_archive,
@@ -481,9 +480,9 @@ def test_materializes_package_compatibility_from_validated_release_evidence():
     )
 
     assert manifest == {
-        "schema": "frequensolve-frequensolver-compatibility/v2",
+        "schema": "frequensolve-solver-compatibility/v2",
         "package_release": "0.3.0rc1",
-        "preferred_frequensolver": {
+        "preferred_solver": {
             "release": "v0.1.0",
             "git_commit": "c" * 40,
             "release_url": ("https://github.com/FrequenSol/Sauce/releases/tag/v0.1.0"),
@@ -499,10 +498,10 @@ def test_materializes_package_compatibility_from_validated_release_evidence():
     }
 
 
-def test_frequensolver_identity_evidence_requires_exact_release_build():
+def test_solver_identity_evidence_requires_exact_release_build():
     identity = {
-        "schema": "frequensolver-identity-1",
-        "product": "FrequenSolver",
+        "schema": "fs-solver-identity-1",
+        "product": "FS_solver",
         "version": "v0.1.0",
         "build_id": "release-v0.1.0",
         "git_commit": "c" * 40,
@@ -534,10 +533,10 @@ def test_frequensolver_identity_evidence_requires_exact_release_build():
     ],
     ids=["newline", "control", "non-ascii"],
 )
-def test_frequensolver_identity_rejects_unsafe_text_fields(field, invalid_value):
+def test_solver_identity_rejects_unsafe_text_fields(field, invalid_value):
     identity = {
-        "schema": "frequensolver-identity-1",
-        "product": "FrequenSolver",
+        "schema": "fs-solver-identity-1",
+        "product": "FS_solver",
         "version": "v0.1.0",
         "build_id": "release-v0.1.0",
         "git_commit": "c" * 40,
@@ -556,11 +555,11 @@ def test_frequensolver_identity_rejects_unsafe_text_fields(field, invalid_value)
         )
 
 
-def test_frequensolver_identity_accepts_all_printable_single_line_ascii():
+def test_solver_identity_accepts_all_printable_single_line_ascii():
     printable_ascii = "".join(chr(codepoint) for codepoint in range(0x20, 0x7F))
     identity = {
-        "schema": "frequensolver-identity-1",
-        "product": "FrequenSolver",
+        "schema": "fs-solver-identity-1",
+        "product": "FS_solver",
         "version": printable_ascii,
         "build_id": printable_ascii,
         "git_commit": "c" * 40,
@@ -574,14 +573,14 @@ def test_frequensolver_identity_accepts_all_printable_single_line_ascii():
     )
 
 
-def test_frequensolver_identity_cli_accepts_leading_hyphen_build_id(tmp_path):
+def test_solver_identity_cli_accepts_leading_hyphen_build_id(tmp_path):
     build_id = "-release-v0.1.0"
-    identity_file = tmp_path / "frequensolver-identity.json"
+    identity_file = tmp_path / "solver-identity.json"
     identity_file.write_text(
         json.dumps(
             {
-                "schema": "frequensolver-identity-1",
-                "product": "FrequenSolver",
+                "schema": "fs-solver-identity-1",
+                "product": "FS_solver",
                 "version": "v0.1.0",
                 "build_id": build_id,
                 "git_commit": "c" * 40,
@@ -593,7 +592,7 @@ def test_frequensolver_identity_cli_accepts_leading_hyphen_build_id(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            str(REPO_ROOT / "scripts/validate_frequensolver_identity.py"),
+            str(REPO_ROOT / "scripts/validate_solver_identity.py"),
             str(identity_file),
             "--version=v0.1.0",
             f"--commit={'c' * 40}",
@@ -607,13 +606,98 @@ def test_frequensolver_identity_cli_accepts_leading_hyphen_build_id(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_heavy_test_evidence_requires_real_test_outputs(tmp_path):
-    (tmp_path / "junit.xml").write_text("<testsuites />", encoding="utf-8")
-    (tmp_path / "coverage.xml").write_text("<coverage />", encoding="utf-8")
+def _write_heavy_test_artifacts(
+    tmp_path,
+    evidence,
+    *,
+    missing_scenario=None,
+    duplicate_scenario=None,
+    renamed_scenario=None,
+    scenario_outcome=None,
+    repeated_filler=False,
+):
+    manifest = load_scenario_manifest()
+    cases = []
+    for scenario in manifest["requiredScenarios"]:
+        if scenario["id"] == missing_scenario:
+            continue
+        name = scenario["junit"]["name"]
+        if scenario["id"] == renamed_scenario:
+            name += "_renamed"
+        case = {
+            "classname": scenario["junit"]["classname"],
+            "name": name,
+            "outcome": (
+                scenario_outcome[1]
+                if scenario_outcome and scenario["id"] == scenario_outcome[0]
+                else None
+            ),
+        }
+        cases.append(case)
+        if scenario["id"] == duplicate_scenario:
+            cases.append(dict(case))
+
+    minimum_tests = manifest["minimums"]["tests"]
+    filler_count = minimum_tests - len(cases)
+    cases.extend(
+        {
+            "classname": "tests.test_release_baseline",
+            "name": (
+                "test_repeated_baseline"
+                if repeated_filler
+                else f"test_baseline_{index:04d}"
+            ),
+            "outcome": None,
+        }
+        for index in range(filler_count)
+    )
+    testsuites = ET.Element("testsuites")
+    testsuite = ET.SubElement(testsuites, "testsuite")
+    derived = {"tests": len(cases), "failures": 0, "errors": 0, "skipped": 0}
+    for case in cases:
+        testcase = ET.SubElement(
+            testsuite,
+            "testcase",
+            {"classname": case["classname"], "name": case["name"]},
+        )
+        if case["outcome"]:
+            ET.SubElement(testcase, case["outcome"])
+            derived[
+                {
+                    "failure": "failures",
+                    "error": "errors",
+                    "skipped": "skipped",
+                }[case["outcome"]]
+            ] += 1
+    testsuite.attrib.update({name: str(value) for name, value in derived.items()})
+    ET.ElementTree(testsuites).write(
+        tmp_path / "junit.xml", encoding="utf-8", xml_declaration=True
+    )
+
+    rates = evidence["pytest"]["coverage"]["rates"]
+    ET.ElementTree(
+        ET.Element(
+            "coverage",
+            {
+                "line-rate": str(rates["lineRate"]),
+                "branch-rate": str(rates["branchRate"]),
+                "lines-valid": str(rates["linesValid"]),
+                "lines-covered": str(rates["linesCovered"]),
+                "branches-valid": str(rates["branchesValid"]),
+                "branches-covered": str(rates["branchesCovered"]),
+            },
+        )
+    ).write(tmp_path / "coverage.xml", encoding="utf-8", xml_declaration=True)
     (tmp_path / "fig_comparison.html").write_text("visual evidence", encoding="utf-8")
+    evidence["pytest"]["junit"]["counts"] = derived
+
+
+def test_heavy_test_evidence_requires_real_test_outputs(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
 
     validate_heavy_test_evidence(
-        _heavy_evidence(),
+        evidence,
         COMMIT,
         evidence_root=tmp_path,
     )
@@ -664,15 +748,137 @@ def test_heavy_test_evidence_rejects_identity_selection_and_branch_mutations(
 
 
 def test_heavy_test_evidence_rejects_missing_visual_member(tmp_path):
-    (tmp_path / "junit.xml").write_text("<testsuites />", encoding="utf-8")
-    (tmp_path / "coverage.xml").write_text("<coverage />", encoding="utf-8")
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    (tmp_path / "fig_comparison.html").unlink()
 
     with pytest.raises(ValueError, match="pytest.visual.path does not exist"):
         validate_heavy_test_evidence(
-            _heavy_evidence(),
+            evidence,
             COMMIT,
             evidence_root=tmp_path,
         )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            {"missing_scenario": "local-2d-acoustic-solve"},
+            "local-2d-acoustic-solve.*found 0",
+        ),
+        (
+            {"duplicate_scenario": "acquisition-v2-init-sizing"},
+            "acquisition-v2-init-sizing.*found 2",
+        ),
+        (
+            {"renamed_scenario": "local-2d-acoustic-gather-visual"},
+            "local-2d-acoustic-gather-visual.*found 0",
+        ),
+        (
+            {
+                "scenario_outcome": (
+                    "local-2d-acoustic-common-frequency-visual",
+                    "skipped",
+                )
+            },
+            "local-2d-acoustic-common-frequency-visual.*must pass",
+        ),
+    ],
+)
+def test_heavy_test_evidence_requires_each_manifest_scenario_once_and_passed(
+    tmp_path,
+    mutation,
+    message,
+):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence, **mutation)
+
+    with pytest.raises(ValueError, match=message):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+def test_heavy_test_evidence_rejects_inconsistent_junit_summary(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    evidence["pytest"]["junit"]["counts"]["tests"] += 1
+
+    with pytest.raises(ValueError, match="counts.tests must match JUnit XML"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+def test_heavy_test_evidence_rejects_duplicate_unrelated_test_identities(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence, repeated_filler=True)
+
+    with pytest.raises(ValueError, match="testcase identity.*must be unique"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+def test_heavy_test_evidence_rejects_inconsistent_coverage_summary(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    evidence["pytest"]["coverage"]["rates"]["lineRate"] = 0.73
+
+    with pytest.raises(ValueError, match="lineRate must match coverage XML"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+@pytest.mark.parametrize("artifact", ["junit.xml", "coverage.xml"])
+def test_heavy_test_evidence_rejects_truncated_xml(tmp_path, artifact):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    (tmp_path / artifact).write_text("<truncated", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not complete, valid XML"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+def test_heavy_test_evidence_rejects_path_escape(tmp_path):
+    evidence = _heavy_evidence()
+    _write_heavy_test_artifacts(tmp_path, evidence)
+    evidence["pytest"]["junit"]["path"] = "../junit.xml"
+
+    with pytest.raises(ValueError, match="must stay within the evidence artifact"):
+        validate_heavy_test_evidence(evidence, COMMIT, evidence_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda evidence: evidence["pytest"]["junit"]["counts"].update(tests=537),
+            "below manifest floor 538",
+        ),
+        (
+            lambda evidence: evidence["pytest"]["junit"]["counts"].update(
+                tests=538,
+                skipped=534,
+            ),
+            "passed test count 4",
+        ),
+        (
+            lambda evidence: evidence["pytest"]["coverage"]["rates"].update(
+                lineRate=0.72,
+                linesCovered=7200,
+            ),
+            "lineRate.*below manifest floor",
+        ),
+        (
+            lambda evidence: evidence["pytest"]["coverage"]["rates"].update(
+                branchRate=0.5519,
+                branchesCovered=5519,
+            ),
+            "branchRate.*below manifest floor",
+        ),
+    ],
+)
+def test_heavy_test_evidence_rejects_below_manifest_floors(mutation, message):
+    evidence = _heavy_evidence()
+    mutation(evidence)
+
+    with pytest.raises(ValueError, match=message):
+        validate_heavy_test_evidence(evidence, COMMIT)
 
 
 def _write_tar_member(archive, name, content=b"evidence", *, member_type=None):
@@ -717,3 +923,47 @@ def test_evidence_archive_extractor_rejects_unsafe_members(
         extract_archive(archive_path, tmp_path / "extracted")
 
     assert not (tmp_path / "outside.txt").exists()
+
+
+def _legacy_release_evidence(evidence, schema):
+    legacy = {**evidence, "schemaVersion": schema}
+    for suffix in ("Release", "ReleaseUrl", "Version", "BuildId", "GitCommit"):
+        current = f"solver{suffix}"
+        if current in legacy:
+            legacy[f"frequensolver{suffix}"] = legacy.pop(current)
+    return legacy
+
+
+@pytest.mark.parametrize("schema", [LEGACY_SCHEMA, PROFILE_SCHEMA])
+def test_sealed_legacy_evidence_validates_and_materializes_without_mutation(schema):
+    evidence = _legacy_release_evidence(_release_evidence(), schema)
+    if schema == LEGACY_SCHEMA:
+        evidence.pop("validationProfile")
+        evidence.pop("solverValidationStatus")
+    before = json.dumps(evidence, sort_keys=True)
+    validate_evidence(evidence, COMMIT)
+    manifest = manifest_from_evidence(
+        evidence, package_release="0.3.0", package_commit=COMMIT
+    )
+    assert manifest["preferred_solver"]["release"] == "v0.1.0"
+    assert json.dumps(evidence, sort_keys=True) == before
+
+
+def test_sealed_v3_standard_evidence_retains_profile_validation():
+    evidence = _legacy_release_evidence(_standard_release_evidence(), PROFILE_SCHEMA)
+    validate_evidence(evidence, COMMIT)
+    assert release_evidence_profile(evidence) == STANDARD_PROFILE
+    evidence["solverValidationStatus"] = "passed"
+    with pytest.raises(ValueError, match="solverValidationStatus"):
+        validate_evidence(evidence, COMMIT)
+
+
+@pytest.mark.parametrize("schema", [LEGACY_SCHEMA, PROFILE_SCHEMA, SCHEMA])
+def test_release_evidence_rejects_field_names_from_another_schema(schema):
+    evidence = _release_evidence()
+    if schema == SCHEMA:
+        evidence["frequensolverRelease"] = evidence.pop("solverRelease")
+    else:
+        evidence["schemaVersion"] = schema
+    with pytest.raises(ValueError, match="is not a field"):
+        validate_evidence(evidence, COMMIT)

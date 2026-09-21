@@ -1,0 +1,121 @@
+name: SDK Performance Evidence
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [ "v2" ]
+    paths:
+      - ".github/workflows/sdk-performance.yml"
+      - "pyproject.toml"
+      - "scripts/run_sdk_performance.py"
+      - "src/**"
+      - "tests/test_sdk_performance.py"
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      warmups:
+        description: Warm-up passes before measurement
+        required: true
+        default: "2"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+      samples:
+        description: Repeated measurements retained per scenario
+        required: true
+        default: "7"
+        type: choice
+        options:
+          - "5"
+          - "7"
+          - "10"
+
+concurrency:
+  group: sdk-performance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  smoke:
+    name: SDK performance smoke
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install exact checkout
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . "dask>=2025.1.0,<2026.0.0"
+
+      - name: Execute every SDK scenario once
+        run: |
+          python scripts/run_sdk_performance.py \
+            --output tests/output/sdk-performance/evidence.json \
+            --warmups 0 \
+            --samples 1
+
+      - name: Retain smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sdk-performance-smoke-${{ github.sha }}
+          path: tests/output/sdk-performance/evidence.json
+          if-no-files-found: error
+          retention-days: 14
+
+  stable-evidence:
+    name: Pinned SDK performance evidence
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      WARMUPS: ${{ inputs.warmups || '2' }}
+      SAMPLES: ${{ inputs.samples || '7' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install exact checkout
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . "dask>=2025.1.0,<2026.0.0"
+
+      - name: Collect bounded repeated evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            --output tests/output/sdk-performance/evidence.json
+            --warmups "$WARMUPS"
+            --samples "$SAMPLES"
+          )
+          if [[ -f tests/performance/sdk-baseline.json ]]; then
+            args+=(--baseline tests/performance/sdk-baseline.json)
+          fi
+          python scripts/run_sdk_performance.py "${args[@]}"
+
+      - name: Retain stable-runner evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sdk-performance-stable-${{ github.sha }}-${{ github.run_attempt }}
+          path: tests/output/sdk-performance/evidence.json
+          if-no-files-found: error
+          retention-days: 30

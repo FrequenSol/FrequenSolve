@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Type, Union
@@ -68,9 +69,22 @@ _OUTPUT_DIMENSIONS = {
 
 
 def _relative_output_path(path: Union[str, Path], field: str = "path") -> str:
-    value = Path(path)
-    if value.is_absolute():
-        raise ValueError(f"{field} must be relative to the job result directory")
+    if not isinstance(path, (str, os.PathLike)):
+        raise TypeError(f"{field} must be a string or path-like value")
+    raw = os.fspath(path)
+    if not isinstance(raw, str):
+        raise TypeError(f"{field} must be a string or path-like value")
+    value = Path(raw)
+    if (
+        not raw
+        or value.is_absolute()
+        or value == Path()
+        or ".." in value.parts
+        or any(character in raw for character in ("\\", "\x00", "\n", "\r"))
+    ):
+        raise ValueError(
+            f"{field} must be a safe relative path below the job result directory"
+        )
     return str(value)
 
 
@@ -876,6 +890,7 @@ class VtkOutput(Output):
 
         if "upscale" in kwargs:
             raise ValueError("ParaView grid targets do not support upscale")
+        kwargs.setdefault("format", "vtr")
         return cls(target="grid", grid=grid, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -890,6 +905,9 @@ class VtkOutput(Output):
         Raises:
             ValueError: If grid-target output is missing a grid.
         """
+
+        if self._inferred_target() == "grid" and self.format != "vtr":
+            raise ValueError("ParaView grid targets require format='vtr'")
 
         payload = {
             "_type": "ParaviewOutput",
@@ -1034,7 +1052,10 @@ class VtkOutput(Output):
 
     def _inferred_target(self) -> str:
         if self.target is not None:
-            return _choice(str(self.target), self._TARGETS, "VtkOutput.target")
+            target = (
+                self.target["kind"] if isinstance(self.target, Mapping) else self.target
+            )
+            return _choice(str(target), self._TARGETS, "VtkOutput.target")
         if self.grid_spec is not None:
             return "grid"
         if self.shell or self.surfaces or self.boundaries or self._planes:
@@ -1174,6 +1195,8 @@ class WavefieldOutput(Output):
         path: Output directory relative to the job result directory.
         fields: One or more solver fields to sample on the grid.
         field: Convenience spelling for a single sampled field.
+        properties: Realized material properties sampled on the wavefield grid
+            and stored once as static arrays in the packed wavefield product.
         device: Receiver device that defines named wavefield components.
         grid: Grid object, xarray object, or serialized grid mapping.
         dims: xarray-style dimension names when ``coords`` is provided directly.
@@ -1193,6 +1216,7 @@ class WavefieldOutput(Output):
     name: str = "wavefield"
     path: Union[str, Path] = "wavefields"
     fields: Optional[List[str]] = None
+    properties: Optional[List[str]] = None
     device: Optional[ReceiverDevice] = None
     grid: Optional[Dict[str, Any]] = None
     sources: Optional[List[int]] = None
@@ -1203,6 +1227,7 @@ class WavefieldOutput(Output):
         path: Union[str, Path] = "wavefields",
         fields: Optional[Union[str, Iterable[str]]] = None,
         field: Optional[str] = None,
+        properties: Optional[Iterable[str]] = None,
         device: Optional[Union[ReceiverDevice, Mapping[str, Any]]] = None,
         grid: Optional[
             Union[CartesianGrid, xr.DataArray, xr.Dataset, Mapping[str, Any]]
@@ -1235,6 +1260,7 @@ class WavefieldOutput(Output):
             self.fields = (
                 canonical_fields(_as_list(field_value)) if field_value else None
             )
+        self.properties = [str(prop) for prop in _as_list(properties)] or None
         self.grid = _wavefield_grid_payload(
             grid=grid,
             dims=dims,
@@ -1318,6 +1344,8 @@ class WavefieldOutput(Output):
                 payload["fields"] = fields
         if self.sources is not None:
             payload["sources"] = self.sources
+        if self.properties is not None:
+            payload["properties"] = list(self.properties)
         return merge_extra(payload, self.extra, "WavefieldOutput")
 
     @classmethod
@@ -1342,6 +1370,7 @@ class WavefieldOutput(Output):
             path=data.pop("path", "wavefields"),
             field=field,
             fields=None if device is not None else fields,
+            properties=data.pop("properties", None),
             device=device,
             grid=grid,
             sources=data.pop("sources", None),
@@ -1897,6 +1926,7 @@ def wavefield(
     name: Optional[str] = None,
     path: Union[str, Path] = "wavefields",
     field: Optional[str] = None,
+    properties: Optional[Iterable[str]] = None,
     device: Optional[Union[ReceiverDevice, Mapping[str, Any]]] = None,
     grid: Optional[
         Union[CartesianGrid, xr.DataArray, xr.Dataset, Mapping[str, Any]]
@@ -1918,6 +1948,8 @@ def wavefield(
         path: Output directory relative to the job result directory.
         field: Keyword-only spelling for a single field. Mutually exclusive
             with ``fields``.
+        properties: Realized material properties sampled on the wavefield grid
+            and stored once as static arrays in the packed wavefield product.
         device: Receiver device or serialized device mapping describing named
             wavefield components.
         grid: Grid object, xarray object, or serialized xarray-style grid.
@@ -1946,6 +1978,7 @@ def wavefield(
             name=name,
             path=path,
             field=requested,
+            properties=properties,
             device=device,
             grid=grid,
             dims=dims,
@@ -1959,6 +1992,7 @@ def wavefield(
         name=name,
         path=path,
         fields=requested,
+        properties=properties,
         device=device,
         grid=grid,
         dims=dims,

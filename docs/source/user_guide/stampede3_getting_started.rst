@@ -65,7 +65,7 @@ the examples for the same release, clone its matching tag:
      https://github.com/FrequenSol/FrequenSolve.git
    python -m pip install jupyterlab
    python -m jupyter lab \
-     FrequenSolve/examples/tutorials/02_sites/02_hpc_sites.ipynb
+     FrequenSolve/tutorials/02_sites/02_hpc_sites.ipynb
 
 Configure Stampede3
 -------------------

@@ -210,6 +210,24 @@ def test_local_poll_reports_finished_futures_without_failed_count(monkeypatch):
     }
 
 
+def test_ensure_dask_retains_finished_futures_until_run_finalization(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    site.n_workers = 1
+    site.threads_per_worker = 2
+    site.memory_per_worker = 4096
+    site._dask_client = object()
+    site._active_n_workers = 1
+    site._active_threads_per_worker = 2
+    site._active_memory_per_worker = 4096
+    future = DummyFuture()
+    site._futures = [future]
+
+    site._ensure_dask_for_tasks(1)
+
+    assert site._futures == [future]
+    assert not future.released
+
+
 def test_local_wait_releases_futures_and_closes_by_default(monkeypatch, capsys):
     site, closed = make_site(monkeypatch)
     job = DummyJob()
@@ -303,7 +321,7 @@ def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
     )
 
 
-def test_run_task_init_does_not_request_map(monkeypatch, tmp_path):
+def test_run_task_local_preparation_skips_sizing(monkeypatch, tmp_path):
     captured = {}
 
     class FakeProcess:
@@ -333,7 +351,7 @@ def test_run_task_init_does_not_request_map(monkeypatch, tmp_path):
         "1",
         "--job",
         str(job_file),
-        "--init",
+        "--init-no-size",
     ]
 
 
@@ -425,6 +443,48 @@ def test_run_task_reports_solver_convergence_failure(monkeypatch, tmp_path):
     assert convergence["residual"] == 0.0022
 
 
+def test_run_task_returns_producer_authored_artifacts(monkeypatch, tmp_path):
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        local_module.subprocess,
+        "Popen",
+        lambda args, **kwargs: FakeProcess(),
+    )
+    job_file = tmp_path / "job.json"
+    job_file.write_text(
+        json.dumps(
+            {
+                "project_path": str(tmp_path),
+                "result_path": "results",
+            }
+        )
+    )
+    task_dir = tmp_path / "results/_fs_run/tasks/task_000001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "run_manifest.json").write_text(
+        json.dumps({"exit_status": {"code": 0, "status": "success"}})
+    )
+    artifacts = [
+        {
+            "path": "traces/shards/task_000001_generation_1.h5",
+            "kind": "traces",
+            "schema": "fs_trace_payload_shard_v1",
+            "task": 1,
+        }
+    ]
+    outputs = task_dir / "outputs.json"
+    outputs.write_text(json.dumps({"schema": "fs-outputs-1", "files": artifacts}))
+
+    result = run_task(str(job_file), 0, "/solver", {}, stdout_dir=None)
+
+    assert result["status"] == "success"
+    assert result["outputs_manifest"] == str(outputs)
+    assert result["artifacts"] == artifacts
+
+
 def test_submit_local_tasks_captures_init_log(monkeypatch, tmp_path):
     site, _closed = make_site(monkeypatch)
     site.executable = "/solver"
@@ -472,11 +532,13 @@ def test_submit_local_tasks_captures_init_log(monkeypatch, tmp_path):
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "init.log").write_text("stale init log")
     site._dask_client = FakeClient()
+    job = FakeJob()
 
-    submission = site._submit_local_tasks(FakeJob())
+    submission = site._submit_local_tasks(job)
 
     assert isinstance(submission, local_module.LocalTaskSubmission)
     assert submissions[0]["task_id"] == local_module.MESH_TASK_ID
+    assert submissions[0]["job_file"] == job._file
     assert submissions[0]["kwargs"]["n_threads"] == 2
     assert submissions[0]["kwargs"]["resources"] == {"CPU": 2}
     assert submissions[0]["kwargs"]["stdout_dir"] == str(tmp_path / "logs")
@@ -643,7 +705,8 @@ def test_submit_local_tasks_fresh_run_disables_reuse_and_passes_fresh(
 
     assert plan_calls == [{"reuse": False, "force": True}]
     assert [item["task_id"] for item in submissions] == [local_module.MESH_TASK_ID, 0]
-    assert all(item["kwargs"]["fresh"] is True for item in submissions)
+    assert submissions[0]["kwargs"]["fresh"] is True
+    assert submissions[1]["kwargs"]["fresh"] is True
 
 
 def test_auto_dask_sizing_refreshes_for_larger_later_job(monkeypatch):
@@ -950,6 +1013,93 @@ def test_local_wait_smooth_only_runs_imaging_postprocess(monkeypatch, tmp_path):
     assert job.states[-1][0] == "completed"
     assert job.states[-1][1]["smooth"]["status"] == "success"
     assert closed == [{"wait": True, "retire": True}]
+
+
+def test_local_submit_postprocess_only_never_plans_frequency_tasks(
+    monkeypatch, tmp_path
+):
+    site, _closed = make_site(monkeypatch)
+    submitted = []
+
+    class PostprocessJob(DummyJob):
+        name = "postprocess-only"
+        n_tasks = 1
+
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def is_run_current(self):
+            return False
+
+        def requires_postprocess(self):
+            return True
+
+        def postprocess_part_outputs_exist(self):
+            return True
+
+        def postprocess_output_exists(self):
+            return False
+
+        def needs_postprocess(self):
+            return True
+
+    monkeypatch.setattr(site, "check_solver_compatibility", lambda **_: None)
+    monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
+    monkeypatch.setattr(
+        site,
+        "_submit_local_tasks",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+
+    run = site.submit(
+        PostprocessJob(),
+        postprocess_only=True,
+        shutdown_on_completion=False,
+    )
+
+    assert submitted == []
+    assert run.backend["futures"] == []
+    assert run.backend["task_plan"]["pending_indices"] == []
+    assert run.backend["smooth_only"] is True
+
+
+def test_local_submit_force_runs_current_postprocess(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+
+    class PostprocessJob(DummyJob):
+        name = "postprocess-only"
+        n_tasks = 1
+
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def requires_postprocess(self):
+            return True
+
+        def postprocess_part_outputs_exist(self):
+            return True
+
+        def needs_postprocess(self):
+            return False
+
+    monkeypatch.setattr(site, "check_solver_compatibility", lambda **_: None)
+    monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
+
+    run = site.submit(
+        PostprocessJob(),
+        postprocess_only=True,
+        force_run=True,
+        shutdown_on_completion=False,
+    )
+
+    assert run.backend["smooth_only"] is True
+    assert run.backend["fresh"] is True
 
 
 def test_local_watch_reuses_terminal_smooth_only_result(monkeypatch, tmp_path):

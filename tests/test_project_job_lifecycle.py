@@ -3,6 +3,7 @@ import math
 import os
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -12,17 +13,23 @@ import sympy as sp
 import frequensolve as fs
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
-from frequensolve.orchestrator.sites.base import JobStatus, RunResult
+from frequensolve.orchestrator.sites.base import JobStatus, RunHandle, RunResult
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project.project import Project
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.jobs import (
     BaseJob,
     FrequencyDomainJob,
+    ImagingJob,
     JobLayout,
     TimeDomainJob,
 )
-from frequensolve.simulation.jobs.artifacts import RunMetadata
+from frequensolve.simulation.jobs.artifacts import (
+    OutputManifest,
+    RunMetadata,
+    TaskArtifactCatalog,
+    TraceManifest,
+)
 from frequensolve.simulation.solver import SolverConfig
 
 
@@ -111,6 +118,19 @@ def test_generic_load_infers_trace_store(tmp_path):
     assert isinstance(traces, TraceDataset)
     assert traces.manifest.groups == ["surface"]
     assert traces.manifest.frequencies == {1: 10.0}
+
+
+def test_successful_run_result_opens_images_through_its_site():
+    expected = object()
+    job = object.__new__(ImagingJob)
+    site = SimpleNamespace(fetch_image=lambda requested: expected)
+    result = RunResult(
+        job=job,
+        status=JobStatus(state="completed", return_code=0),
+        site=site,
+    )
+
+    assert result.images() is expected
 
 
 def test_project_save_serializes_solver_hp_sympy_policy(tmp_path):
@@ -490,6 +510,63 @@ def test_run_result_fetches_remote_output_files_when_matching_files_are_missing(
     assert site.filters == (None, ".vtu")
 
 
+def test_run_result_fetches_all_remote_output_files_without_filters(tmp_path):
+    result_path = tmp_path / "results"
+    expected = result_path / "ParaView" / "pv_00000.vtu"
+
+    class FetchingSite:
+        def fetch_output_files(self, job, *, kind=None, suffix=None):
+            expected.parent.mkdir(parents=True)
+            expected.write_text("<VTKFile></VTKFile>")
+            (result_path / "_fs_python_run.json").write_text("{}")
+            metadata = result_path / "_fs_run" / "run_manifest.json"
+            metadata.parent.mkdir()
+            metadata.write_text("{}")
+
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="completed", return_code=0),
+        site=FetchingSite(),
+        run_metadata=RunMetadata(result_path=result_path),
+    )
+
+    assert result.output_files(existing=True) == [expected]
+
+
+def test_run_metadata_rejects_symlinks_that_escape_result_path(tmp_path, monkeypatch):
+    result_path = tmp_path / "results"
+    paraview = result_path / "ParaView"
+    paraview.mkdir(parents=True)
+    expected = paraview / "expected.vtu"
+    expected.write_text("<VTKFile></VTKFile>")
+
+    outside_file = tmp_path / "outside.vtu"
+    outside_file.write_text("outside")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    escaped_child = outside_dir / "escaped.vtu"
+    escaped_child.write_text("outside")
+    linked_file = paraview / "linked.vtu"
+    linked_dir = result_path / "linked-dir"
+    try:
+        linked_file.symlink_to(outside_file)
+        linked_dir.symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"filesystem does not support symbolic links: {exc}")
+
+    discovered = [expected, linked_file, linked_dir / escaped_child.name]
+
+    def rglob_with_directory_symlink(self, pattern):
+        assert self == result_path
+        return iter(discovered)
+
+    monkeypatch.setattr(Path, "rglob", rglob_with_directory_symlink)
+    metadata = RunMetadata(result_path=result_path)
+
+    assert metadata.output_files(existing=True) == [expected]
+    assert metadata.output_files(suffix=".vtu", existing=True) == [expected]
+
+
 def test_run_result_can_skip_remote_output_file_fetch(tmp_path):
     class FetchingSite:
         def __init__(self):
@@ -508,6 +585,143 @@ def test_run_result_can_skip_remote_output_file_fetch(tmp_path):
 
     assert result.output_files(suffix=".vtu", fetch_missing=False) == []
     assert site.calls == 0
+
+
+def test_run_result_logs_reuses_fetched_local_logs(tmp_path):
+    logs_path = tmp_path / "logs"
+    logs_path.mkdir()
+    (logs_path / "task_1.log").write_text("completed\n")
+
+    class FetchingSite:
+        def fetch_logs(self, job, **kwargs):
+            raise AssertionError("existing local logs must not be fetched again")
+
+    result = RunResult(
+        job=object(),
+        status=JobStatus(state="completed", return_code=0),
+        site=FetchingSite(),
+        logs_path=logs_path,
+    )
+
+    assert result.logs() == logs_path
+
+
+def test_remote_run_result_refreshes_preexisting_logs_once(tmp_path):
+    stale_logs = tmp_path / "logs"
+    stale_logs.mkdir()
+    (stale_logs / "old.log").write_text("old run\n")
+    calls = []
+
+    class FetchingSite:
+        def fetch_logs(self, job, **kwargs):
+            calls.append((job, kwargs))
+            (stale_logs / "old.log").unlink()
+            (stale_logs / "current.log").write_text("current run\n")
+            return stale_logs
+
+    job = SimpleNamespace(_stdout_path=stale_logs, run_metadata=None)
+    site = FetchingSite()
+    result = RunHandle(site=site, job=job, mode="batch")._make_result(
+        JobStatus(state="completed", return_code=0)
+    )
+
+    assert result.logs_path is None
+    assert result.logs() == stale_logs
+    assert result.logs() == stale_logs
+    assert calls == [(job, {})]
+    assert [path.name for path in stale_logs.iterdir()] == ["current.log"]
+
+
+@pytest.mark.parametrize(
+    ("cache_state", "kwargs"),
+    [
+        ("missing", {}),
+        ("empty", {}),
+        ("populated", {"task": 1}),
+    ],
+)
+def test_run_result_logs_delegates_when_local_cache_cannot_answer(
+    tmp_path, cache_state, kwargs
+):
+    logs_path = tmp_path / "logs"
+    if cache_state != "missing":
+        logs_path.mkdir()
+    if cache_state == "populated":
+        (logs_path / "task_1.log").write_text("completed\n")
+
+    job = object()
+    fetched = tmp_path / "fetched-logs"
+    calls = []
+
+    class FetchingSite:
+        def fetch_logs(self, requested_job, **requested_kwargs):
+            calls.append((requested_job, requested_kwargs))
+            return fetched
+
+    result = RunResult(
+        job=job,
+        status=JobStatus(state="completed", return_code=0),
+        site=FetchingSite(),
+        logs_path=logs_path,
+    )
+
+    assert result.logs(**kwargs) == fetched
+    assert calls == [(job, kwargs)]
+
+
+def test_output_manifest_and_task_catalog_preserve_producer_records(tmp_path):
+    result_path = tmp_path / "results"
+    manifest_path = result_path / "_fs_run/tasks/task_000001/outputs.json"
+    manifest_path.parent.mkdir(parents=True)
+    record = {
+        "path": "traces/shards/task_000001_generation_3.h5",
+        "kind": "traces",
+        "schema": "fs_trace_payload_shard_v1",
+        "producer": "acquisition",
+        "task": 1,
+        "state": "present",
+    }
+    manifest_path.write_text(json.dumps({"schema": "fs-outputs-1", "files": [record]}))
+
+    manifest = OutputManifest.read(manifest_path, result_path=result_path)
+    catalog = TaskArtifactCatalog.read(result_path, tasks=[1])
+
+    assert manifest.valid
+    assert manifest.records == [record]
+    assert manifest.artifacts[0].path == result_path / record["path"]
+    assert catalog.artifacts_for_task(1) == tuple(manifest.artifacts)
+
+
+def test_trace_manifest_prefers_producer_reported_task_artifact(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    job.save()
+    reported = job.trace_outputs.path / "shards/task_000001_generation_3.h5"
+    reported.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(reported, "w") as h5:
+        h5.create_dataset("frequency", data=10.0)
+    task_outputs = job.task_run_manifest_path(1).parent / "outputs.json"
+    task_outputs.parent.mkdir(parents=True, exist_ok=True)
+    task_outputs.write_text(
+        json.dumps(
+            {
+                "schema": "fs-outputs-1",
+                "files": [
+                    {
+                        "path": str(reported.relative_to(job._result_path)),
+                        "kind": "traces",
+                        "schema": "fs_trace_payload_shard_v1",
+                        "task": 1,
+                    }
+                ],
+            }
+        )
+    )
+
+    manifest = TraceManifest.from_job(job)
+
+    assert manifest.files == [reported]
+    assert manifest.artifacts[0].path == reported
 
 
 def test_run_metadata_discovers_unregistered_vtu_files(tmp_path):
@@ -857,6 +1071,84 @@ def test_job_rejects_invalid_wavenumber_contract(tmp_path, kwargs, message):
         )
 
 
+def test_time_domain_job_supports_sparse_hermite_reconstruction(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = TimeDomainJob(
+        name="td_hermite",
+        simulation=sim,
+        f_min=1.0,
+        f_max=25.0,
+        df=1.0,
+        reconstruction="hermite",
+        sample_every=4,
+        high_frequency_taper=4.0,
+        interpolation_time_shift=0.35,
+    )
+
+    assert job.workflow == "forward_df"
+    assert job.phase_derivatives == 1
+    assert job.f_list == [1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 25.0]
+    assert len(job.f_list) < 0.3 * 25
+    assert job.time_reconstruction == {
+        "method": "hermite",
+        "target_df": 1.0,
+        "sample_every": 4,
+        "high_frequency_taper": 4.0,
+        "interpolation_time_shift": 0.35,
+    }
+
+    job_file = job.save()
+    payload = json.loads(job_file.read_text())
+    loaded = BaseJob.load(job_file)
+
+    assert payload["workflow"] == "forward_df"
+    assert payload["derivative_order"] == 1
+    assert payload["time_reconstruction"] == job.time_reconstruction
+    assert loaded.f_list == job.f_list
+    assert loaded.phase_derivatives == 1
+    assert loaded.time_reconstruction == job.time_reconstruction
+
+    legacy_payload = json.loads(job_file.read_text())
+    legacy_reconstruction = legacy_payload["time_reconstruction"]
+    legacy_reconstruction["frequency_reduction"] = legacy_reconstruction.pop(
+        "sample_every"
+    )
+    job_file.write_text(json.dumps(legacy_payload))
+    legacy_loaded = BaseJob.load(job_file)
+
+    assert legacy_loaded.sample_every == 4
+    assert legacy_loaded.time_reconstruction["sample_every"] == 4
+    assert "frequency_reduction" not in legacy_loaded.time_reconstruction
+
+
+def test_time_domain_job_hermite_frequencies_are_exact_fine_grid_subset(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    fine = TimeDomainJob(
+        name="td_fine",
+        simulation=sim,
+        f_min=0.0,
+        f_max=35.0,
+        T_max=3.0,
+    )
+    quarter = TimeDomainJob(
+        name="td_quarter",
+        simulation=sim,
+        f_min=0.0,
+        f_max=25.0,
+        T_max=3.0,
+        reconstruction="hermite",
+        sample_every=4,
+    )
+
+    fine_through_25 = [frequency for frequency in fine.f_list if frequency <= 25.0]
+    expected = fine_through_25[::4]
+    if expected[-1] != fine_through_25[-1]:
+        expected.append(fine_through_25[-1])
+
+    assert quarter.f_list == expected
+    assert all(frequency in fine.f_list for frequency in quarter.f_list)
+
+
 def test_local_submit_autosaves_job_and_simulation(monkeypatch, tmp_path):
     monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
     _, sim = _project_with_trace_simulation(tmp_path)
@@ -994,7 +1286,7 @@ def test_job_failed_tasks_reports_reasons(tmp_path):
     assert failures[0]["reason"] == "mesh generation failed"
     assert failures[1]["frequency"] == 2.0
     assert failures[1]["reason"] == (
-        "Solver residual 0.002 exceeded failure threshold 0.001 after " "24 iterations."
+        "Solver residual 0.002 exceeded failure threshold 0.001 after 24 iterations."
     )
     assert failures[1]["solver"]["convergence"]["residual"] == 0.002
 
@@ -1184,6 +1476,21 @@ def test_job_collects_task_run_manifests_into_job_manifest(tmp_path):
                 }
             )
         )
+        (task_manifest.parent / "outputs.json").write_text(
+            json.dumps(
+                {
+                    "schema": "fs-outputs-1",
+                    "files": [
+                        {
+                            "path": f"traces/shards/task_{task:06d}.h5",
+                            "kind": "traces",
+                            "schema": "fs_trace_payload_shard_v1",
+                            "task": task,
+                        }
+                    ],
+                }
+            )
+        )
 
     path = job.collect_task_run_manifests()
 
@@ -1202,8 +1509,60 @@ def test_job_collects_task_run_manifests_into_job_manifest(tmp_path):
     assert mirrored["tasks"][0]["returncode"] == 0
     assert mirrored["tasks"][1]["n_ranks"] == 2
     assert mirrored["tasks"][1]["threads_per_rank"] == 8
+    assert payload["tasks"][0]["artifacts"] == [
+        {
+            "path": "traces/shards/task_000001.h5",
+            "kind": "traces",
+            "schema": "fs_trace_payload_shard_v1",
+            "task": 1,
+        }
+    ]
     assert mirrored["solver"]["convergence"]["status"] == "failed"
     assert mirrored["solver"]["convergence"]["residual"] == 0.002
+
+
+def test_fetched_task_metadata_reports_success_without_local_outputs(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[12.0])
+    job.save()
+    task_manifest = job.task_run_manifest_path(1)
+    task_manifest.parent.mkdir(parents=True, exist_ok=True)
+    task_manifest.write_text(
+        json.dumps(
+            {
+                "exit_status": {"code": 0, "status": "success"},
+                "inputs": {
+                    "task": {
+                        "frequency": 12.0,
+                        "outputs_hash": job._task_outputs_hash(1),
+                    }
+                },
+            }
+        )
+    )
+    run_dir = job._result_path / "_fs_run"
+    (run_dir / "timings.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-timings-1",
+                "tasks": [{"task": 1, "elapsed_s": 1.25}],
+            }
+        )
+    )
+
+    job.collect_task_run_manifests()
+
+    row = job.frequency_status()[0]
+    assert row["status"] == "succeeded"
+    assert row["current"] is False
+    assert row["trace_exists"] is False
+    assert job.frequency_summary() == {
+        "total": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert job.task_timings()[0]["status"] == "succeeded"
 
 
 def test_job_collects_skipped_task_run_manifests_as_successful(tmp_path):
@@ -1323,6 +1682,27 @@ def test_job_plot_task_timings(tmp_path):
     assert ax.get_xlabel() == "Frequency (Hz)"
     assert ax.get_ylabel() == "Runtime (s)"
     assert len(ax.patches) == 2
+
+
+def test_job_task_timings_accepts_native_elapsed_s(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0, 10.0])
+    job.save()
+    run_dir = job._result_path / "_fs_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "timings.json").write_text(
+        json.dumps(
+            {
+                "schema": "fs-timings-1",
+                "tasks": [
+                    {"task": 1, "elapsed_s": 0.5},
+                    {"task": 2, "elapsed_s": 1.25},
+                ],
+            }
+        )
+    )
+
+    assert [row["duration_seconds"] for row in job.task_timings()] == [0.5, 1.25]
 
 
 def test_job_plot_task_timings_uses_sparse_ticks(tmp_path):
@@ -1552,6 +1932,27 @@ def test_job_task_plan_reruns_all_frequencies(tmp_path):
         "reused_tasks": [],
     }
     assert not any(file.exists() for file in job.expected_trace_files())
+
+
+def test_forced_rerun_removes_shards_outside_a_shrunk_frequency_list(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    original = FrequencyDomainJob(
+        name="freq",
+        simulation=sim,
+        f_list=[1.0, 2.0, 3.0],
+    )
+    original.save()
+    old_files = original.expected_trace_files()
+    for file in old_files:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(file.name)
+
+    shrunk = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    shrunk.save()
+    plan = shrunk.task_run_plan(force=True)
+
+    assert plan["pending_indices"] == [0]
+    assert not any(file.exists() for file in old_files)
 
 
 def test_job_task_plan_skips_current_packed_trace_product(tmp_path):
@@ -1801,6 +2202,29 @@ def test_frequency_named_trace_shard_counts_as_current_when_pack_is_stale(tmp_pa
         "not_run": 0,
     }
     assert job.task_run_plan()["pending_indices"] == []
+
+
+def test_trace_manifest_indexes_modern_frequency_shards_without_discovery(
+    tmp_path, monkeypatch
+):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0, 2.0, 3.0])
+    job.save()
+    shard_dir = job.trace_outputs.path / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    shards = [shard_dir / f"f_{frequency:.5f}_hz.h5" for frequency in job.f_list]
+    for shard in shards:
+        shard.touch()
+
+    manifest = job.trace_manifest
+    monkeypatch.setattr(
+        job,
+        "_matching_frequency_trace_file",
+        lambda *args, **kwargs: pytest.fail("modern shards must not be rediscovered"),
+    )
+
+    assert manifest.files == shards
+    assert job.trace_outputs_exist()
 
 
 def test_task_manifest_recovers_current_frequency_shard_when_state_is_stale(tmp_path):
