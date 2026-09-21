@@ -195,6 +195,7 @@ def test_phase_derivative_helmholtz_wavefields_are_exposed_as_groups(tmp_path):
         f_list=[10.0],
         phase_derivatives=4,
         outputs=[
+            WavefieldOutput(name="velocity", field="velocity", grid=_grid()),
             WavefieldOutput(name="p_velocity", field="p_velocity", grid=_grid()),
             WavefieldOutput(name="s_velocity", field="s_velocity", grid=_grid()),
         ],
@@ -205,10 +206,16 @@ def test_phase_derivative_helmholtz_wavefields_are_exposed_as_groups(tmp_path):
 
     assert report.ok
     assert [output["field"] for output in payload["Outputs"]["wavefields"]] == [
+        "velocity",
         "p_velocity",
         "s_velocity",
     ]
     assert job.wavefield_trace_outputs.groups == [
+        "velocity",
+        "velocity_df",
+        "velocity_d2f",
+        "velocity_d3f",
+        "velocity_d4f",
         "p_velocity",
         "p_velocity_df",
         "p_velocity_d2f",

@@ -200,6 +200,25 @@ the default projection. Component forms such as ``p_velocity_x`` and
 ``s_velocity_z`` are also accepted. Advanced projection settings can still be
 passed as the simulation's ``helmholtz_projection`` option.
 
+Request ``velocity``, ``p_velocity``, and ``s_velocity`` together to retain
+undecomposed velocity alongside both projections in one job. The same names
+work for receivers, wavefields, and ParaView. For example:
+
+.. code-block:: python
+
+   outputs = [
+       WavefieldOutput(name=field, field=field, grid=grid)
+       for field in ("velocity", "p_velocity", "s_velocity")
+   ]
+
+Use ``helmholtz_projection={"s_projection": "solenoidal"}`` for a dedicated
+S projection instead of the default complementary field (raw minus P).
+Both potentials share one auxiliary solve. Do not set the legacy ``part``
+option when retaining ordinary velocity: that option intentionally replaces it
+with the selected part. The undecomposed output is the auxiliary element-local
+L2 copy of physical velocity, not a P or S projection; derived Galerkin velocity
+is represented by its L2 approximation.
+
 VTK / ParaView Output
 ---------------------
 

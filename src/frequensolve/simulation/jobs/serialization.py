@@ -10,19 +10,36 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
 
 import blake3
 import numpy as np
 
+from frequensolve.simulation.artifact_contract import (
+    ARTIFACT_CONTRACT_VERSION,
+    COLLECTION_CONTRACT_VERSION,
+    OPERATION_CONTRACT_VERSION,
+)
 from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
+from frequensolve.simulation.task_index import TASK_INDEX_VERSION
+from frequensolve.util.atomic import atomic_write_json
 from frequensolve.util.class_registry import class_registry
 from frequensolve.util.mixins import ExportContext
 
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import BaseJob
+
+
+_ARTIFACT_METADATA_SCHEMA = "fs-job-artifact-metadata-1"
+_EXTERNAL_INPUT_SET_SCHEMA = "fs-external-input-set-1"
+_OUTPUT_REQUEST_FINGERPRINT_SCHEMA = "fs-output-request-fingerprint-1"
+_ARTIFACT_CONTRACT_VERSIONS = {
+    "task_result": ARTIFACT_CONTRACT_VERSION,
+    "operation_result": OPERATION_CONTRACT_VERSION,
+    "task_index": TASK_INDEX_VERSION,
+    "collection": COLLECTION_CONTRACT_VERSION,
+}
 
 
 class JobSerializationMixin:
@@ -72,7 +89,11 @@ class JobSerializationMixin:
 
         job = cls.from_fs(data, base_path=path.parent, project_path=project_path)
         job._file = path
+        job.preserve_task_outputs = data.get("preserve_task_outputs", False)
+        if not isinstance(job.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
         job._job_id = data.get("job_id")
+        job._restore_artifact_metadata(data.get("artifact_contract"))
         return job
 
     def load_saved(self) -> "BaseJob":
@@ -157,6 +178,13 @@ class JobSerializationMixin:
         payload.update(self._wavenumber_payload())
         if self._job_id is not None:
             payload["job_id"] = self._job_id
+        artifact_metadata = self._serialized_artifact_metadata()
+        if artifact_metadata is not None:
+            payload["artifact_contract"] = artifact_metadata
+        if not isinstance(self.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
+        if self.preserve_task_outputs:
+            payload["preserve_task_outputs"] = True
         return payload
 
     def fingerprint_payload(self) -> Dict[str, Any]:
@@ -180,7 +208,7 @@ class JobSerializationMixin:
             "job": job_payload,
             "simulation": {"hash": simulation_hash},
         }
-        inputs = self._input_fingerprint_payload()
+        inputs = self._external_input_fingerprint()
         if inputs:
             payload["inputs"] = inputs
         return payload
@@ -230,7 +258,7 @@ class JobSerializationMixin:
             payload["frequency"] = self._canonical_frequency_value(
                 self.f_list[task - 1]
             )
-        inputs = self._input_fingerprint_payload()
+        inputs = self._external_input_fingerprint()
         if inputs:
             payload["inputs"] = inputs
         return payload
@@ -417,21 +445,246 @@ class JobSerializationMixin:
         if path.is_file():
             return {"kind": "file", "sha256": cls._sha256_file(path)}
         if path.is_dir():
-            files = []
-            for file in sorted(item for item in path.rglob("*") if item.is_file()):
-                files.append(
-                    {
-                        "path": file.relative_to(path).as_posix(),
-                        "sha256": cls._sha256_file(file),
-                    }
-                )
-            return {"kind": "directory", "files": files}
+            digest = hashlib.sha256()
+            nfiles = 0
+            for root, directories, filenames in os.walk(path):
+                directories.sort()
+                for name in sorted(filenames):
+                    file = Path(root) / name
+                    relative = file.relative_to(path).as_posix()
+                    record = json.dumps(
+                        [relative, cls._sha256_file(file)],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    digest.update(record.encode("utf-8"))
+                    digest.update(b"\n")
+                    nfiles += 1
+            return {
+                "kind": "directory",
+                "sha256": f"sha256:{digest.hexdigest()}",
+                "files": nfiles,
+            }
         raise FileNotFoundError(f"Required job input does not exist: {path}")
 
     def _input_fingerprint_payload(self) -> Dict[str, Any]:
         """Return content hashes for subclass-owned external inputs."""
 
         return {}
+
+    @staticmethod
+    def _sha256_payload(payload: Any) -> str:
+        """Return a compact SHA-256 digest of one canonical JSON payload."""
+
+        encoded = json.dumps(
+            payload,
+            cls=CustomJSONEncoder,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def effective_output_request_payload_from_fs(
+        job_payload: Mapping[str, Any],
+        *,
+        simulation_payload: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Extract the complete Sauce output request from serialized inputs."""
+
+        request: Dict[str, Any] = {
+            "schema": "fs-effective-output-request-1",
+            "workflow": job_payload["workflow"],
+        }
+        outputs = job_payload.get("Outputs")
+        if outputs is None and simulation_payload is not None:
+            outputs = simulation_payload.get("Outputs")
+        if outputs is not None:
+            request["Outputs"] = outputs
+        for key in (
+            "Image",
+            "control_sensitivities",
+            "focus",
+            "k_list",
+            "k_weights",
+            "k_units",
+        ):
+            if key in job_payload:
+                request[key] = job_payload[key]
+        return request
+
+    def effective_output_request_payload(self) -> Dict[str, Any]:
+        """Return the live job's complete producer-facing output request."""
+
+        # The persisted contract fingerprints project-relative output requests.
+        # Keeping the live comparison in that same canonical namespace makes
+        # provenance independent of local/remote project relocation while still
+        # detecting every semantic output-request change.
+        job_payload = self.to_fs(
+            self.export_context(),
+            project_relative=True,
+        )
+        simulation_payload = None
+        simulation_file = getattr(self.simulation, "_file", None)
+        if "Outputs" not in job_payload and simulation_file is not None:
+            with Path(simulation_file).open("r", encoding="utf-8") as stream:
+                simulation_payload = json.load(stream)
+        return self.effective_output_request_payload_from_fs(
+            job_payload,
+            simulation_payload=simulation_payload,
+        )
+
+    def effective_output_request_fingerprint(self) -> str:
+        """Return the canonical SHA-256 of the live output request."""
+
+        return self._sha256_payload(self.effective_output_request_payload())
+
+    def _set_output_request_fingerprint(
+        self,
+        job_payload: Mapping[str, Any],
+        *,
+        simulation_payload: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Cache the digest persisted beside one final serialized job payload."""
+
+        request = self.effective_output_request_payload_from_fs(
+            job_payload,
+            simulation_payload=simulation_payload,
+        )
+        self._output_request_fingerprint_cache = {
+            "schema": _OUTPUT_REQUEST_FINGERPRINT_SCHEMA,
+            "digest": self._sha256_payload(request),
+        }
+
+    def _compute_external_input_fingerprint(self) -> Optional[Dict[str, str]]:
+        """Hash subclass-owned inputs into one compact, versioned record."""
+
+        inputs = self._input_fingerprint_payload()
+        if not inputs:
+            return None
+        return {
+            "schema": _EXTERNAL_INPUT_SET_SCHEMA,
+            "digest": self._sha256_payload(inputs),
+        }
+
+    def _refresh_external_input_fingerprint(
+        self,
+        *,
+        require_inputs: bool,
+    ) -> Optional[Dict[str, str]]:
+        """Refresh external-input provenance at a serialization boundary."""
+
+        try:
+            fingerprint = self._compute_external_input_fingerprint()
+        except FileNotFoundError:
+            if require_inputs:
+                raise
+            fingerprint = None
+        self._external_input_fingerprint_cache = fingerprint
+        return fingerprint
+
+    def _refresh_external_input_fingerprint_for_save(self) -> None:
+        """Refresh compact external-input provenance for one saved job."""
+
+        self._refresh_external_input_fingerprint(
+            require_inputs=False,
+        )
+
+    def _external_input_fingerprint(self) -> Optional[Dict[str, str]]:
+        """Return provenance cached by the normal job serialization path."""
+
+        cached = getattr(self, "_external_input_fingerprint_cache", None)
+        if cached is not None and getattr(self, "_file", None) is not None:
+            return dict(cached)
+        fingerprint = self._refresh_external_input_fingerprint(
+            require_inputs=True,
+        )
+        return None if fingerprint is None else dict(fingerprint)
+
+    def _serialized_artifact_metadata(self) -> Optional[Dict[str, Any]]:
+        """Return compact artifact-contract metadata for the saved job JSON."""
+
+        output_request = getattr(self, "_output_request_fingerprint_cache", None)
+        if output_request is None:
+            return None
+        metadata = {
+            "schema": _ARTIFACT_METADATA_SCHEMA,
+            "versions": dict(_ARTIFACT_CONTRACT_VERSIONS),
+            "output_request": dict(output_request),
+        }
+        external_inputs = getattr(self, "_external_input_fingerprint_cache", None)
+        if external_inputs is not None:
+            metadata["external_inputs"] = dict(external_inputs)
+        return metadata
+
+    def _restore_artifact_metadata(self, value: Any) -> None:
+        """Restore compact output and external-input provenance."""
+
+        self._output_request_fingerprint_cache = None
+        self._external_input_fingerprint_cache = None
+        if value is None:
+            return
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != _ARTIFACT_METADATA_SCHEMA
+        ):
+            raise ValueError(
+                "job artifact_contract must use "
+                f"schema {_ARTIFACT_METADATA_SCHEMA!r}"
+            )
+        if not set(value) <= {
+            "schema",
+            "versions",
+            "output_request",
+            "external_inputs",
+        }:
+            raise ValueError("job artifact_contract contains unsupported fields")
+        versions = value.get("versions")
+        if versions != _ARTIFACT_CONTRACT_VERSIONS:
+            raise ValueError(
+                "job artifact_contract versions must match the supported "
+                "Sauce artifact contract"
+            )
+        output_request = value.get("output_request")
+        self._validate_artifact_digest(
+            output_request,
+            name="output_request",
+            schema=_OUTPUT_REQUEST_FINGERPRINT_SCHEMA,
+        )
+        self._output_request_fingerprint_cache = dict(output_request)
+        inputs = value.get("external_inputs")
+        if inputs is None:
+            return
+        self._validate_artifact_digest(
+            inputs,
+            name="external_inputs",
+            schema=_EXTERNAL_INPUT_SET_SCHEMA,
+        )
+        self._external_input_fingerprint_cache = dict(inputs)
+
+    @staticmethod
+    def _validate_artifact_digest(value: Any, *, name: str, schema: str) -> None:
+        """Validate one compact artifact metadata digest."""
+
+        if not isinstance(value, dict) or value.get("schema") != schema:
+            raise ValueError(f"job artifact_contract {name} must use schema {schema!r}")
+        if set(value) != {"schema", "digest"}:
+            raise ValueError(
+                f"job artifact_contract {name} contains unsupported fields"
+            )
+        digest = value.get("digest")
+        if (
+            not isinstance(digest, str)
+            or not digest.startswith("sha256:")
+            or len(digest) != len("sha256:") + 64
+        ):
+            raise ValueError(f"job artifact_contract {name} digest must be SHA-256")
+        try:
+            int(digest.removeprefix("sha256:"), 16)
+        except ValueError as error:
+            raise ValueError(
+                f"job artifact_contract {name} digest must be SHA-256"
+            ) from error
 
     @staticmethod
     def _canonical_frequency_value(value: Any) -> Any:
@@ -454,19 +707,4 @@ class JobSerializationMixin:
 
     @staticmethod
     def _write_json_file(path: Path, payload: Dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                json.dump(payload, stream, cls=CustomJSONEncoder, indent=3)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
-        except BaseException:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-            raise
+        atomic_write_json(path, payload, cls=CustomJSONEncoder, indent=3)

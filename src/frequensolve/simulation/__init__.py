@@ -1,6 +1,12 @@
 """Simulation authoring APIs."""
 
 from frequensolve._exports import unique_exports
+from frequensolve.simulation.artifact_catalog import *  # noqa: F403
+from frequensolve.simulation.artifact_catalog import __all__ as _catalog_all
+from frequensolve.simulation.artifact_contract import *  # noqa: F403
+from frequensolve.simulation.artifact_contract import __all__ as _artifact_all
+from frequensolve.simulation.artifact_transfer import *  # noqa: F403
+from frequensolve.simulation.artifact_transfer import __all__ as _transfer_all
 from frequensolve.simulation.config import *  # noqa: F403
 from frequensolve.simulation.config import __all__ as _config_all
 from frequensolve.simulation.discretization import *  # noqa: F403
@@ -19,8 +25,13 @@ from frequensolve.simulation.solver import *  # noqa: F403
 from frequensolve.simulation.solver import __all__ as _solver_all
 from frequensolve.simulation.study import *  # noqa: F403
 from frequensolve.simulation.study import __all__ as _study_all
+from frequensolve.simulation.task_index import *  # noqa: F403
+from frequensolve.simulation.task_index import __all__ as _task_index_all
 
 __all__ = unique_exports(
+    _artifact_all,
+    _catalog_all,
+    _transfer_all,
     _config_all,
     _discretization_all,
     _jobs_all,
@@ -30,4 +41,5 @@ __all__ = unique_exports(
     _simulation_all,
     _solver_all,
     _study_all,
+    _task_index_all,
 )

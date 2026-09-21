@@ -87,8 +87,8 @@ echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $
 {% endif %}
 
 {% if pack_job %}
-echo "$executable -nthreads $n_threads --job $input_file $fresh_flag --pack"
-$executable -nthreads $n_threads --job $input_file $fresh_flag --pack >> $dir_out/pack.log 2>&1 || {
+echo "$executable -nthreads $n_threads --job $input_file --fresh --pack"
+$executable -nthreads $n_threads --job $input_file --fresh --pack >> $dir_out/pack.log 2>&1 || {
    rc=$?
    echo "Packing step failed with exit code $rc"
    exit $rc

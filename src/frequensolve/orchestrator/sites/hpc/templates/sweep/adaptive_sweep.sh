@@ -239,7 +239,7 @@ EOF
 
 {% if pack_job %}
 echo "Running packing step..."
-"$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --pack >> "$dir_out/pack.log" 2>&1
+"$executable" -nthreads "$n_threads" --job "$job_file" --fresh --pack >> "$dir_out/pack.log" 2>&1
 {% endif %}
 
 end_time=$(date +%s)

@@ -12,15 +12,38 @@ import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
 import numpy as np
 
+from frequensolve.simulation.artifact_catalog import load_artifact_catalog
+from frequensolve.simulation.artifact_contract import (
+    ARTIFACT_CONTRACT_VERSION,
+    ArtifactContractError,
+    ArtifactRecord,
+    ArtifactRequest,
+)
+from frequensolve.simulation.task_index import (
+    TaskIndex,
+    TaskIndexEntry,
+    load_task_catalog,
+)
+
+if TYPE_CHECKING:
+    from frequensolve.seismic.trace_pack import TracePackManifest
+
 __all__ = [
-    "OutputArtifact",
-    "OutputManifest",
     "RunMetadata",
-    "TaskArtifactCatalog",
     "TraceManifest",
     "TraceOutputHandle",
     "TraceOutputSpec",
@@ -29,373 +52,50 @@ __all__ = [
 
 
 @dataclass(frozen=True)
-class OutputArtifact:
-    """Structured record for one file produced by a solver run.
-
-    Args:
-        path: Absolute or result-relative output path.
-        relative_path: Optional path relative to the project or result root.
-        kind: Optional artifact kind such as ``"h5"``, ``"vtk"``, or
-            ``"json"``.
-        schema: Optional artifact schema identifier.
-        metadata: Additional solver-reported artifact fields.
-    """
-
-    path: Path
-    relative_path: Optional[str] = None
-    kind: Optional[str] = None
-    schema: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_fs(
-        cls, data: Mapping[str, Any], result_path: Optional[Union[str, Path]] = None
-    ) -> "OutputArtifact":
-        """Deserialize an artifact record relative to an optional result root.
-
-        Args:
-            data: Serialized artifact mapping.
-            result_path: Optional result directory used to resolve relative
-                artifact paths.
-
-        Returns:
-            ``OutputArtifact`` with path and metadata restored.
-        """
-
-        root = _as_path(result_path) if result_path is not None else None
-        raw_path = data.get("path") or data.get("relative_path")
-        path = _as_path(raw_path)
-        if not path.is_absolute() and root is not None:
-            path = root / path
-        metadata = {
-            key: value
-            for key, value in data.items()
-            if key not in {"path", "relative_path", "kind", "schema"}
-        }
-        return cls(
-            path=path,
-            relative_path=data.get("relative_path"),
-            kind=data.get("kind"),
-            schema=data.get("schema"),
-            metadata=metadata,
-        )
-
-    def to_fs(self, project_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
-        """Serialize the artifact record.
-
-        Args:
-            project_path: Optional base path used to emit ``relative_path``.
-
-        Returns:
-            JSON-compatible artifact payload.
-        """
-
-        base = _as_path(project_path) if project_path is not None else None
-        payload = {
-            "path": str(self.path),
-            "relative_path": self.relative_path or _relative_to(self.path, base),
-        }
-        if self.kind is not None:
-            payload["kind"] = self.kind
-        if self.schema is not None:
-            payload["schema"] = self.schema
-        payload.update(self.metadata)
-        return payload
-
-
-@dataclass(frozen=True)
-class OutputManifest:
-    """Producer-authored inventory for one solver task or job.
-
-    The payload remains available verbatim so orchestration can carry newly
-    added producer fields without first teaching FrequenSolve about them.  The
-    typed artifact view only resolves paths relative to the owning result
-    directory.
-
-    Args:
-        payload: Parsed ``fs-outputs-1`` mapping.
-        path: Optional path from which the manifest was read.
-        result_path: Result directory used to resolve relative artifacts.
-    """
-
-    payload: Dict[str, Any] = field(default_factory=dict)
-    path: Optional[Path] = None
-    result_path: Optional[Path] = None
-
-    @classmethod
-    def read(
-        cls,
-        path: Union[str, Path],
-        *,
-        result_path: Optional[Union[str, Path]] = None,
-    ) -> "OutputManifest":
-        """Read a solver output manifest without filesystem discovery."""
-
-        manifest_path = _as_path(path)
-        try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-        if not isinstance(payload, Mapping):
-            payload = {}
-        return cls(
-            payload=dict(payload),
-            path=manifest_path,
-            result_path=(_as_path(result_path) if result_path is not None else None),
-        )
-
-    @classmethod
-    def from_payload(
-        cls,
-        payload: Optional[Mapping[str, Any]],
-        *,
-        result_path: Optional[Union[str, Path]] = None,
-    ) -> "OutputManifest":
-        """Build a typed manifest view around an existing mapping."""
-
-        return cls(
-            payload=dict(payload or {}),
-            result_path=(_as_path(result_path) if result_path is not None else None),
-        )
-
-    @property
-    def valid(self) -> bool:
-        """Return whether the payload has the public v1 manifest shape."""
-
-        return self.payload.get("schema") == "fs-outputs-1" and isinstance(
-            self.payload.get("files"), list
-        )
-
-    @property
-    def records(self) -> List[Dict[str, Any]]:
-        """Return independent copies of producer-authored file records."""
-
-        files = self.payload.get("files", [])
-        if not isinstance(files, list):
-            return []
-        return [copy.deepcopy(dict(row)) for row in files if isinstance(row, Mapping)]
-
-    @property
-    def artifacts(self) -> List[OutputArtifact]:
-        """Return typed artifacts resolved relative to the result directory."""
-
-        return [
-            OutputArtifact.from_fs(row, result_path=self.result_path)
-            for row in self.records
-            if row.get("path") or row.get("relative_path")
-        ]
-
-
-@dataclass(frozen=True)
-class TaskArtifactCatalog:
-    """Cached producer-authored artifacts keyed by one-based solver task.
-
-    Python run-state records are preferred because they are already loaded at
-    job scope.  Missing entries are filled from each immutable task-local
-    ``outputs.json`` exactly once.  Job-level records provide a final fallback
-    after task manifests have been consolidated.
-    """
-
-    result_path: Path
-    by_task: Dict[int, tuple[OutputArtifact, ...]] = field(default_factory=dict)
-    manifest_paths: Dict[int, Path] = field(default_factory=dict)
-
-    @classmethod
-    def read(
-        cls,
-        result_path: Union[str, Path],
-        *,
-        tasks: Iterable[int],
-        state: Optional[Mapping[str, Any]] = None,
-        job_outputs: Optional[Mapping[str, Any]] = None,
-    ) -> "TaskArtifactCatalog":
-        """Build a linear-time task index from producer-authored records."""
-
-        root = _as_path(result_path)
-        expected = tuple(dict.fromkeys(int(task) for task in tasks))
-        rows: Dict[int, List[OutputArtifact]] = {task: [] for task in expected}
-        manifest_paths: Dict[int, Path] = {}
-
-        state_tasks = state.get("tasks", []) if isinstance(state, Mapping) else []
-        if isinstance(state_tasks, list):
-            for record in state_tasks:
-                if not isinstance(record, Mapping):
-                    continue
-                try:
-                    task_id = record.get("task_id")
-                    if task_id is None:
-                        continue
-                    task = int(task_id) + 1
-                except (TypeError, ValueError):
-                    continue
-                if task not in rows:
-                    continue
-                artifacts = record.get("artifacts", [])
-                if not isinstance(artifacts, list):
-                    continue
-                rows[task].extend(
-                    OutputArtifact.from_fs(item, result_path=root)
-                    for item in artifacts
-                    if isinstance(item, Mapping)
-                    and (item.get("path") or item.get("relative_path"))
-                )
-
-        for task in expected:
-            if rows[task]:
-                continue
-            path = root / "_fs_run" / "tasks" / f"task_{task:06d}" / "outputs.json"
-            manifest = OutputManifest.read(path, result_path=root)
-            if manifest.valid:
-                rows[task].extend(manifest.artifacts)
-                manifest_paths[task] = path
-
-        job_manifest = OutputManifest.from_payload(
-            job_outputs,
-            result_path=root,
-        )
-        job_rows: Dict[int, List[OutputArtifact]] = {}
-        for artifact in job_manifest.artifacts:
-            try:
-                task_value = artifact.metadata.get("task")
-                if task_value is None:
-                    continue
-                task = int(task_value)
-            except (TypeError, ValueError):
-                continue
-            if task in rows:
-                job_rows.setdefault(task, []).append(artifact)
-        for task, artifacts in job_rows.items():
-            if not rows[task]:
-                rows[task].extend(artifacts)
-
-        return cls(
-            result_path=root,
-            by_task={task: tuple(items) for task, items in rows.items()},
-            manifest_paths=manifest_paths,
-        )
-
-    def artifacts_for_task(self, task: int) -> tuple[OutputArtifact, ...]:
-        """Return the immutable artifact tuple for one one-based task."""
-
-        return self.by_task.get(int(task), ())
-
-
-@dataclass(frozen=True)
 class RunMetadata:
-    """Fast solver and Python run metadata collected beside a result directory.
+    """Logical task artifacts and Python orchestration state for one run."""
 
-    Args:
-        manifest: Parsed ``_fs_run/run_manifest.json`` payload.
-        outputs: Parsed ``_fs_run/outputs.json`` payload.
-        timings: Parsed ``_fs_run/timings.json`` payload.
-        error: Parsed ``_fs_run/error.json`` payload.
-        state: Parsed Python-side ``_fs_python_run.json`` payload.
-        result_path: Result directory these metadata files came from.
-    """
-
-    manifest: Dict[str, Any] = field(default_factory=dict)
-    outputs: Dict[str, Any] = field(default_factory=dict)
-    timings: Dict[str, Any] = field(default_factory=dict)
-    error: Dict[str, Any] = field(default_factory=dict)
     state: Dict[str, Any] = field(default_factory=dict)
     result_path: Optional[Path] = None
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    task_status: Dict[int, str] = field(default_factory=dict)
+    tasks: Mapping[int, TaskIndexEntry] = field(default_factory=dict)
 
     @classmethod
     def read(cls, result_path: Union[str, Path]) -> "RunMetadata":
-        """Read solver metadata JSON files beside a result directory.
-
-        Args:
-            result_path: Job result directory.
-
-        Returns:
-            ``RunMetadata`` with missing or invalid JSON files represented by
-            empty dictionaries.
-        """
+        """Read the fixed task index and Python state without discovery."""
 
         result_path = _as_path(result_path)
-        run_dir = result_path / "_fs_run"
-
-        def read_json(path: Path) -> Dict[str, Any]:
-            if not path.exists():
-                return {}
-            try:
-                return json.loads(path.read_text())
-            except json.JSONDecodeError:
-                return {}
-
+        state_path = result_path / "_fs_python_run.json"
+        try:
+            state = json.loads(state_path.read_text()) if state_path.is_file() else {}
+        except json.JSONDecodeError:
+            state = {}
+        if not isinstance(state, Mapping):
+            state = {}
+        index_path = result_path / "_fs_run" / "tasks.h5"
+        index = TaskIndex.read(result_path) if index_path.is_file() else None
         return cls(
-            manifest=read_json(run_dir / "run_manifest.json"),
-            outputs=read_json(run_dir / "outputs.json"),
-            timings=read_json(run_dir / "timings.json"),
-            error=read_json(run_dir / "error.json"),
-            state=read_json(result_path / "_fs_python_run.json"),
+            state=dict(state),
             result_path=result_path,
+            artifacts=() if index is None else index.artifacts,
+            task_status=(
+                {}
+                if index is None
+                else {task: entry.status for task, entry in index.tasks.items()}
+            ),
+            tasks={} if index is None else index.tasks,
         )
 
     @property
     def successful(self) -> bool:
-        """Return whether recorded solver or Python metadata indicate success.
+        """Return whether Python state or every indexed task is successful."""
 
-        Returns:
-            ``True`` when solver manifest status is ``"success"`` or the
-            Python-side state was completed/skipped.
-        """
-
-        if self.manifest:
-            status = self.manifest.get("exit_status")
-            if isinstance(status, Mapping):
-                status = status.get("status")
-            return status == "success"
         if self.state:
             return self.state.get("status") in {"completed", "skipped"}
-        return False
-
-    @property
-    def job_file_hash(self) -> Optional[str]:
-        """Return the SHA-256 hash of the job JSON, if recorded.
-
-        Returns:
-            Hash string from solver metadata, or ``None`` if unavailable.
-        """
-
-        if "job_file_sha256" in self.manifest:
-            return self.manifest.get("job_file_sha256")
-        inputs = self.manifest.get("inputs", {})
-        if isinstance(inputs, Mapping):
-            job_file = inputs.get("job_file", {})
-            if isinstance(job_file, Mapping):
-                return job_file.get("hash")
-        return None
-
-    @property
-    def simulation_file_hash(self) -> Optional[str]:
-        """Return the SHA-256 hash of the simulation JSON, if recorded.
-
-        Returns:
-            Hash string from solver metadata, or ``None`` if unavailable.
-        """
-
-        if "simulation_file_sha256" in self.manifest:
-            return self.manifest.get("simulation_file_sha256")
-        inputs = self.manifest.get("inputs", {})
-        if isinstance(inputs, Mapping):
-            simulation_file = inputs.get("simulation_file", {})
-            if isinstance(simulation_file, Mapping):
-                return simulation_file.get("hash")
-        return None
-
-    @property
-    def artifacts(self) -> List[OutputArtifact]:
-        """Return output files reported by the fast solver for this run.
-
-        Returns:
-            Artifact records resolved relative to ``result_path``.
-        """
-
-        return OutputManifest.from_payload(
-            self.outputs,
-            result_path=self.result_path,
-        ).artifacts
+        return bool(self.task_status) and all(
+            status in {"success", "skipped"} for status in self.task_status.values()
+        )
 
     def output_files(
         self,
@@ -438,13 +138,6 @@ class RunMetadata:
             if existing and not path.exists():
                 continue
             files.append(path)
-        files.extend(
-            self._discover_output_files(
-                kind=kind,
-                suffixes=suffixes,
-                base=normalized_base,
-            )
-        )
         deduped = []
         seen = set()
         for path in files:
@@ -454,41 +147,6 @@ class RunMetadata:
             seen.add(key)
             deduped.append(path)
         return deduped
-
-    def _discover_output_files(
-        self,
-        *,
-        kind: Optional[str],
-        suffixes: Optional[tuple[str, ...]],
-        base: Optional[str],
-    ) -> List[Path]:
-        if self.result_path is None or not self.result_path.exists():
-            return []
-
-        result_root = self.result_path.resolve(strict=False)
-        scan_suffixes = suffixes or _kind_suffixes(kind)
-        if scan_suffixes:
-            files = []
-            for suffix in scan_suffixes:
-                files.extend(self.result_path.rglob(f"*{suffix}"))
-        elif kind is None:
-            files = list(self.result_path.rglob("*"))
-        else:
-            return []
-
-        return [
-            path
-            for path in sorted(set(files))
-            if _is_discovered_output_file(path, result_root=result_root)
-            and "_fs_run" not in path.relative_to(self.result_path).parts
-            and path.name != "_fs_python_run.json"
-            and _artifact_matches_kind(
-                OutputArtifact(path=path, kind=path.suffix.lstrip(".")),
-                kind,
-            )
-            and (suffixes is None or path.name.endswith(suffixes))
-            and _path_matches_base(path, base)
-        ]
 
 
 @dataclass(frozen=True)
@@ -510,6 +168,7 @@ class TraceManifest:
         time_reconstruction: Optional frequency-to-time reconstruction settings.
         artifacts: Solver-reported artifacts associated with the run.
         run: Parsed run metadata associated with the result directory.
+        artifact_contract: Producer contract used to resolve trace payloads.
     """
 
     files: List[Path]
@@ -524,8 +183,11 @@ class TraceManifest:
     sources: List[str] = field(default_factory=list)
     wavefields: Dict[str, Any] = field(default_factory=dict)
     time_reconstruction: Dict[str, Any] = field(default_factory=dict)
-    artifacts: List[OutputArtifact] = field(default_factory=list)
+    artifacts: List[ArtifactRecord] = field(default_factory=list)
     run: RunMetadata = field(default_factory=RunMetadata)
+    artifact_contract: Optional[str] = None
+    pack: Optional[TracePackManifest] = None
+    wavefield_packs: tuple[TracePackManifest, ...] = ()
 
     @classmethod
     def from_job(
@@ -534,7 +196,6 @@ class TraceManifest:
         *,
         output: Optional["TraceOutputSpec"] = None,
         project_path: Optional[Union[str, Path]] = None,
-        resolve_legacy: bool = False,
     ) -> "TraceManifest":
         """Build the expected trace manifest for a job and output spec.
 
@@ -544,9 +205,6 @@ class TraceManifest:
                 traces for ``job``.
             project_path: Optional local project root used to remap paths from
                 a copied or fetched job.
-            resolve_legacy: Prefer existing legacy ``receivers_*`` files when
-                modern ``traces_*`` files are missing.
-
         Returns:
             Trace manifest with expected files, frequencies, groups, artifacts,
             and run metadata.
@@ -559,7 +217,8 @@ class TraceManifest:
             if project_path is not None
             else source_project
         )
-        output = job.trace_outputs if output is None else output
+        receiver_output = output is None
+        output = job.trace_outputs if receiver_output else output
         result_path = cls._map_project_path(
             job._result_path, source_project, local_project
         )
@@ -572,52 +231,54 @@ class TraceManifest:
             index: _laplace_frequency(freq)
             for index, freq in enumerate(output.frequencies, start=1)
         }
-        legacy_files = [
-            output_path / f"traces_{index}.h5"
-            for index in range(1, len(frequencies) + 1)
-        ]
         run = RunMetadata.read(result_path)
-        task_artifacts = TaskArtifactCatalog.read(
-            result_path,
-            tasks=frequencies,
-            state=run.state,
-            job_outputs=run.outputs,
-        )
-        shard_dir = output_path / "shards"
-        named_shards = (
-            {path.name: path for path in shard_dir.glob("f_*.h5")}
-            if shard_dir.is_dir()
-            else {}
-        )
-        shard_names = {
-            index: f"f_{frequency:.5f}_hz.h5"
-            for index, frequency in frequencies.items()
-        }
-        name_counts: Dict[str, int] = {}
-        for name in shard_names.values():
-            name_counts[name] = name_counts.get(name, 0) + 1
-        files = []
-        for index, legacy in enumerate(legacy_files, start=1):
-            reported = cls._reported_trace_artifacts(
-                task_artifacts.artifacts_for_task(index),
-                output_path,
+        fingerprint_reader = getattr(job, "_task_reuse_fingerprints", None)
+        fingerprints = fingerprint_reader() if callable(fingerprint_reader) else None
+        pack = (
+            cls._receiver_pack(
+                result_path,
+                output.frequencies,
+                fingerprints=fingerprints,
             )
-            if len(reported) == 1:
-                files.append(reported[0])
-            elif name_counts[shard_names[index]] == 1:
-                files.append(named_shards.get(shard_names[index], legacy))
-            else:
-                files.append(legacy)
-        if resolve_legacy:
-            files = [cls.resolve_trace_file(path) for path in files]
-
-        artifacts = list(run.artifacts)
-        artifacts.extend(
-            artifact
-            for task in frequencies
-            for artifact in task_artifacts.artifacts_for_task(task)
+            if receiver_output
+            else None
         )
-        artifacts = cls._deduplicate_artifacts(artifacts)
+        wavefield_packs = ()
+        if not receiver_output:
+            wavefield_packs = cls._sampled_wavefield_packs(
+                result_path, output.frequencies, fingerprints=fingerprints
+            )
+        if wavefield_packs:
+            files = list(
+                dict.fromkeys(
+                    segment.path
+                    for product in wavefield_packs
+                    for segment in product.segments
+                )
+            )
+            artifacts = [
+                segment.artifact
+                for product in wavefield_packs
+                for segment in product.segments
+            ]
+        elif pack is not None:
+            entries = pack.entries_for(output.frequencies)
+            segments = pack.selected_segments(entries)
+            files = [segment.path for segment in segments]
+            artifacts = [pack.artifact, *(segment.artifact for segment in segments)]
+        elif receiver_output:
+            files, artifacts = cls._receiver_trace_artifacts(
+                result_path,
+                output.frequencies,
+                fingerprints=fingerprints,
+            )
+        else:
+            files, artifacts = cls._wavefield_trace_artifacts(
+                result_path,
+                output.frequencies,
+                fingerprints=fingerprints,
+            )
+        artifact_contract = ARTIFACT_CONTRACT_VERSION
         simulation_path = cls._simulation_path(job, sim, source_project, local_project)
         return cls(
             files=files,
@@ -634,6 +295,9 @@ class TraceManifest:
             time_reconstruction=copy.deepcopy(getattr(job, "time_reconstruction", {})),
             artifacts=artifacts,
             run=run,
+            artifact_contract=artifact_contract,
+            pack=pack,
+            wavefield_packs=wavefield_packs,
         )
 
     @classmethod
@@ -706,11 +370,11 @@ class TraceManifest:
             state = dict(run.state)
             state["duplicate_frequencies"] = sorted(set(duplicates))
             run = RunMetadata(
-                manifest=run.manifest,
-                outputs=run.outputs,
-                timings=run.timings,
-                error=run.error,
                 state=state,
+                result_path=run.result_path,
+                artifacts=run.artifacts,
+                task_status=run.task_status,
+                tasks=run.tasks,
             )
         return cls(
             files=files,
@@ -727,27 +391,16 @@ class TraceManifest:
             time_reconstruction=copy.deepcopy(first.time_reconstruction),
             artifacts=artifacts,
             run=run,
+            artifact_contract=(
+                first.artifact_contract
+                if all(
+                    manifest.artifact_contract == first.artifact_contract
+                    for manifest in manifests
+                )
+                else None
+            ),
+            pack=None,
         )
-
-    @staticmethod
-    def resolve_trace_file(path: Union[str, Path]) -> Path:
-        """Resolve modern ``traces_*`` or legacy ``receivers_*`` files.
-
-        Args:
-            path: Preferred modern trace path.
-
-        Returns:
-            Existing modern path, existing legacy path, or the original modern
-            path when neither exists.
-        """
-
-        path = _as_path(path)
-        if path.exists():
-            return path
-        legacy = path.with_name(path.name.replace("traces_", "receivers_", 1))
-        if legacy.exists():
-            return legacy
-        return path
 
     @property
     def packed_file(self) -> Optional[Path]:
@@ -790,8 +443,11 @@ class TraceManifest:
         products = self._packed_products()
         if not products:
             return {}
-        path, frequencies, _laplace = products[0]
-        return frequencies or self._packed_file_frequency_map(path)
+        return {
+            key: value
+            for _path, frequencies, _laplace in products
+            for key, value in frequencies.items()
+        }
 
     @property
     def packed_laplace(self) -> Dict[int, float]:
@@ -803,7 +459,11 @@ class TraceManifest:
         """
 
         products = self._packed_products()
-        return {} if not products else products[0][2]
+        return {
+            key: value
+            for _path, _frequencies, laplace in products
+            for key, value in laplace.items()
+        }
 
     @property
     def missing_packed_frequencies(self) -> Dict[int, float]:
@@ -816,28 +476,19 @@ class TraceManifest:
         products = self._packed_products()
         if not products or any(not path.exists() for path, _freq, _laplace in products):
             return dict(self.frequencies)
-        product_frequencies = [
-            (
-                frequencies or self._packed_file_frequency_map(path),
-                laplace,
-            )
-            for path, frequencies, laplace in products
-        ]
+        product_frequencies = self.packed_frequencies
+        product_laplace = self.packed_laplace
         missing = {}
         for key, frequency in self.frequencies.items():
             expected_laplace = self.laplace.get(
                 key,
                 self.laplace.get(str(key)),
             )
-            if any(
-                not frequencies
-                or not _frequency_laplace_values_contain(
-                    frequencies,
-                    laplace,
-                    frequency,
-                    expected_laplace,
-                )
-                for frequencies, laplace in product_frequencies
+            if not _frequency_laplace_values_contain(
+                product_frequencies,
+                product_laplace,
+                frequency,
+                expected_laplace,
             ):
                 missing[int(key)] = _real_frequency(frequency)
         return missing
@@ -888,11 +539,7 @@ class TraceManifest:
         packed_files = self.packed_files
         if packed_files and self.packed_complete:
             return packed_files
-        return [
-            self.resolve_trace_file(file)
-            for file in self.files
-            if self.resolve_trace_file(file).exists()
-        ]
+        return [Path(file) for file in self.files if Path(file).exists()]
 
     @property
     def complete(self) -> bool:
@@ -905,9 +552,7 @@ class TraceManifest:
 
         if self._packed_products():
             return self.packed_complete
-        return bool(self.files) and all(
-            self.resolve_trace_file(file).exists() for file in self.files
-        )
+        return bool(self.files) and all(Path(file).exists() for file in self.files)
 
     def to_fs(self) -> Dict[str, Any]:
         """Serialize this manifest for diagnostics or artifact handoff.
@@ -916,7 +561,7 @@ class TraceManifest:
             JSON-compatible trace manifest payload.
         """
 
-        return {
+        payload = {
             "schema": "frequensolve-trace-manifest-1",
             "files": [str(file) for file in self.files],
             "frequencies": self.frequencies,
@@ -929,10 +574,11 @@ class TraceManifest:
             "sources": self.sources,
             "wavefields": copy.deepcopy(self.wavefields),
             "time_reconstruction": copy.deepcopy(self.time_reconstruction),
-            "artifacts": [
-                artifact.to_fs(self.project_path) for artifact in self.artifacts
-            ],
+            "artifacts": [artifact.to_fs() for artifact in self.artifacts],
         }
+        if self.artifact_contract is not None:
+            payload["artifact_contract"] = self.artifact_contract
+        return payload
 
     @staticmethod
     def _map_project_path(
@@ -992,161 +638,256 @@ class TraceManifest:
         return project_path / "simulations" / str(name) / f"{name}.json"
 
     @staticmethod
-    def _read_artifacts(result_path: Path) -> List[OutputArtifact]:
-        return RunMetadata.read(result_path).artifacts
+    def _receiver_pack(
+        result_path: Path,
+        expected_frequencies: Sequence[Union[float, complex]],
+        *,
+        fingerprints: Optional[Mapping[str, str]] = None,
+    ) -> Optional[TracePackManifest]:
+        """Resolve one complete receiver pack through the fixed operation result."""
 
-    @staticmethod
-    def _reported_trace_artifacts(
-        artifacts: Iterable[OutputArtifact],
-        output_path: Path,
-    ) -> List[Path]:
-        """Return trace payloads the producer assigned to one output root."""
+        from frequensolve.seismic.trace_pack import TracePackManifest
 
-        root = output_path.resolve(strict=False)
-        matches = []
-        for artifact in artifacts:
-            path = artifact.path.resolve(strict=False)
-            try:
-                path.relative_to(root)
-            except ValueError:
-                continue
-            schema = str(artifact.schema or "").lower()
-            kind = str(artifact.kind or "").lower()
-            if "metadata" in schema or path.name == "trace_metadata.h5":
-                continue
-            if (
-                kind in {"traces", "receiver", "wavefield", "wavefields"}
-                or "trace" in schema
-                or "wavefield" in schema
-                or (kind == "hdf5" and path.suffix.lower() == ".h5")
-            ):
-                matches.append(path)
-        return list(dict.fromkeys(matches))
-
-    @staticmethod
-    def _deduplicate_artifacts(
-        artifacts: Iterable[OutputArtifact],
-    ) -> List[OutputArtifact]:
-        """Deduplicate artifact records without probing their files."""
-
-        result = []
-        seen = set()
-        for artifact in artifacts:
-            key = (
-                str(artifact.path.resolve(strict=False)),
-                artifact.kind,
-                artifact.schema,
+        tasks = range(1, len(expected_frequencies) + 1)
+        catalog = load_artifact_catalog(
+            result_path,
+            tasks=tasks,
+            operations=("pack",),
+        )
+        task_pack = TracePackManifest.from_tasks(
+            catalog, expected_frequencies, fingerprints=fingerprints
+        )
+        if task_pack is not None:
+            return task_pack
+        if "pack" not in catalog.operations:
+            return None
+        operation_result = catalog.operations["pack"]
+        if fingerprints is not None and any(
+            operation_result.fingerprints.get(name) != digest
+            for name, digest in fingerprints.items()
+            if name != "compatibility"
+        ):
+            return None
+        request = ArtifactRequest(
+            id="traces",
+            role="simulated_traces",
+            representations=("packed_manifest",),
+            retention="durable",
+        )
+        records = catalog.select(request, operation="pack")
+        if not records:
+            return None
+        if len(records) != 1:
+            raise ArtifactContractError(
+                f"pack operation contains {len(records)} receiver trace manifests"
             )
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(artifact)
-        return result
+        pack = TracePackManifest.read(records[0], catalog=catalog)
+        entries = pack.entries_for(expected_frequencies)
+        if not entries:
+            return None
+        for entry in entries:
+            if not TraceManifest._task_fingerprints_match(
+                catalog.task_catalog, entry.task, fingerprints
+            ):
+                return None
+            if (
+                fingerprints is not None
+                and "compatibility" in fingerprints
+                and not any(
+                    record.id == "traces"
+                    and record.generation == entry.source_generation
+                    for record in catalog.artifacts_for_task(entry.task)
+                )
+            ):
+                return None
+        return pack
 
-    def _packed_products(self) -> List[tuple[Path, Dict[int, float], Dict[int, float]]]:
-        manifest_files = [self.output_path / "manifest.json"]
-        names = [*self.groups, *self.wavefields]
-        if names:
-            manifest_files.extend(
-                self.output_path / str(name) / "manifest.json" for name in names
+    @classmethod
+    def _receiver_trace_artifacts(
+        cls,
+        result_path: Path,
+        expected_frequencies: Sequence[Union[float, complex]],
+        *,
+        fingerprints: Optional[Mapping[str, str]] = None,
+    ) -> tuple[List[Path], List[ArtifactRecord]]:
+        """Resolve receiver shards exclusively from committed v2 task results."""
+
+        tasks = range(1, len(expected_frequencies) + 1)
+        catalog = load_task_catalog(result_path, tasks=tasks)
+        committed_tasks = (
+            catalog.tasks if isinstance(catalog, TaskIndex) else catalog.results
+        )
+        if not committed_tasks:
+            # An unstarted job has no committed products yet. Keep the
+            # manifest useful for configuration/currentness inspection without
+            # inventing physical filenames. Once any task commits, gaps are
+            # contract errors rather than inferred paths.
+            return [], []
+        request = ArtifactRequest(
+            id="traces",
+            role="simulated_traces",
+            representations=("hdf5_shard",),
+            retention="durable",
+        )
+        records: List[ArtifactRecord] = []
+        for task, expected in enumerate(expected_frequencies, start=1):
+            cls._require_task_frequency(catalog, task, expected)
+            if not cls._task_fingerprints_match(catalog, task, fingerprints):
+                return [], []
+            records.append(catalog.require_one(request, task=task))
+        return [record.path for record in records], records
+
+    @staticmethod
+    def _sampled_wavefield_packs(result_path, frequencies, *, fingerprints=None):
+        """Resolve every sampled wavefield family from explicit task/pack records."""
+        from frequensolve.seismic.trace_pack import TracePackManifest
+
+        catalog = load_artifact_catalog(
+            result_path, tasks=range(1, len(frequencies) + 1), operations=("pack",)
+        )
+        families = dict.fromkeys(
+            record.id
+            for record in catalog.artifacts_for_task(1)
+            if record.role == "sampled_wavefield"
+        )
+        products = []
+        for family in families:
+            product = TracePackManifest.from_tasks(
+                catalog, frequencies, family_id=family, fingerprints=fingerprints
+            )
+            if product is None:
+                matches = catalog.select(
+                    ArtifactRequest(
+                        id=family,
+                        role="sampled_wavefield",
+                        representations=("packed_manifest",),
+                        retention="durable",
+                    ),
+                    operation="pack",
+                )
+                if len(matches) != 1:
+                    return ()
+                product = TracePackManifest.read(matches[0], catalog=catalog)
+                entries = product.entries_for(frequencies)
+                if not entries:
+                    return ()
+                for entry in entries:
+                    if not TraceManifest._task_fingerprints_match(
+                        catalog.task_catalog, entry.task, fingerprints
+                    ):
+                        return ()
+                    if not any(
+                        record.id == family
+                        and record.generation == entry.source_generation
+                        for record in catalog.artifacts_for_task(entry.task)
+                    ):
+                        return ()
+            products.append(product)
+        return tuple(products)
+
+    @classmethod
+    def _wavefield_trace_artifacts(
+        cls,
+        result_path: Path,
+        expected_frequencies: Sequence[Union[float, complex]],
+        *,
+        fingerprints: Optional[Mapping[str, str]] = None,
+    ) -> tuple[List[Path], List[ArtifactRecord]]:
+        """Resolve retained wavefields from task-local logical records."""
+
+        tasks = range(1, len(expected_frequencies) + 1)
+        catalog = load_task_catalog(result_path, tasks=tasks)
+        committed_tasks = (
+            catalog.tasks if isinstance(catalog, TaskIndex) else catalog.results
+        )
+        if not committed_tasks:
+            return [], []
+        request = ArtifactRequest(
+            role="wavefield",
+            representations=("collection_manifest", "hdf5_container"),
+            retention="durable",
+        )
+        records: List[ArtifactRecord] = []
+        for task, expected in enumerate(expected_frequencies, start=1):
+            cls._require_task_frequency(catalog, task, expected)
+            if not cls._task_fingerprints_match(catalog, task, fingerprints):
+                return [], []
+            matches = catalog.select(
+                ArtifactRequest(
+                    role="sampled_wavefield",
+                    representations=("hdf5_shard",),
+                    retention="durable",
+                ),
+                task=task,
+            )
+            if not matches:
+                matches = catalog.select(request, task=task)
+            if not matches:
+                raise ArtifactContractError(
+                    f"task {task} has no retained wavefield artifact"
+                )
+            records.extend(matches)
+        return [record.path for record in records], records
+
+    @staticmethod
+    def _require_task_frequency(
+        catalog,
+        task: int,
+        expected: Union[float, complex],
+    ) -> None:
+        if isinstance(catalog, TaskIndex):
+            result_frequency = (
+                None if task not in catalog.tasks else catalog.tasks[task].frequency
             )
         else:
-            manifest_files.extend(sorted(self.output_path.glob("*/manifest.json")))
-
-        products: List[tuple[Path, Dict[int, float], Dict[int, float]]] = []
-        seen = set()
-        for manifest_file in manifest_files:
-            packed = self._packed_manifest_file(self.result_path, manifest_file)
-            if packed is None:
-                continue
-            key = str(packed[0].resolve(strict=False))
-            if key in seen:
-                continue
-            seen.add(key)
-            products.append(packed)
-        return products
+            result = catalog.results.get(task)
+            result_frequency = None if result is None else result.partition.frequency
+        if result_frequency is None:
+            raise ArtifactContractError(f"task {task} has no committed result")
+        if result_frequency != complex(expected):
+            raise ArtifactContractError(
+                f"task {task} result frequency {result_frequency!r} does not match "
+                f"expected frequency {complex(expected)!r}"
+            )
 
     @staticmethod
-    def _packed_manifest(
-        result_path: Path,
-        output_path: Path,
-    ) -> Optional[tuple[Path, Dict[int, float], Dict[int, float]]]:
-        return TraceManifest._packed_manifest_file(
-            result_path,
-            output_path / "manifest.json",
+    def _task_fingerprints_match(
+        catalog,
+        task: int,
+        expected: Optional[Mapping[str, str]],
+    ) -> bool:
+        if expected is None:
+            return True
+        if isinstance(catalog, TaskIndex):
+            entry = catalog.tasks.get(task)
+            actual = None if entry is None else entry.fingerprints
+        else:
+            result = catalog.results.get(task)
+            actual = None if result is None else result.fingerprints
+        return actual is not None and all(
+            actual.get(name) == digest for name, digest in expected.items()
         )
 
-    @staticmethod
-    def _packed_manifest_file(
-        result_path: Path,
-        manifest_file: Path,
-    ) -> Optional[tuple[Path, Dict[int, float], Dict[int, float]]]:
-        if not manifest_file.exists():
-            return None
-        try:
-            data = json.loads(manifest_file.read_text())
-        except json.JSONDecodeError:
-            return None
-
-        packed = data.get("packed", {}) if isinstance(data, Mapping) else {}
-        if not isinstance(packed, Mapping):
-            return None
-        raw_path = packed.get("path") or packed.get("relative_path")
-        if not raw_path:
-            return None
-
-        path = _as_path(raw_path)
-        if not path.is_absolute():
-            path = result_path / path
-
-        frequencies: Dict[int, float] = {}
-        laplace: Dict[int, float] = {}
-        rows = data.get("frequencies", [])
-        if isinstance(rows, list):
-            parsed = [
-                (index, int(row.get("task_id", index)), row)
-                for index, row in enumerate(rows, start=1)
-                if isinstance(row, Mapping) and "frequency" in row
-            ]
-            task_ids = [task_id for _index, task_id, _row in parsed]
-            if len(task_ids) == len(set(task_ids)):
-                keyed_rows = [
-                    (task_id, row)
-                    for _index, task_id, row in sorted(
-                        parsed,
-                        key=lambda item: item[1],
-                    )
-                ]
-            else:
-                entry_ids = [
-                    int(row.get("dataset_number", original_index))
-                    for original_index, _task_id, row in parsed
-                ]
-                if len(entry_ids) != len(set(entry_ids)):
-                    entry_ids = list(range(1, len(parsed) + 1))
-                keyed_rows = [
-                    (entry_id, row)
-                    for entry_id, (_index, _task_id, row) in zip(entry_ids, parsed)
-                ]
-
-            for entry_id, row in keyed_rows:
-                frequencies[entry_id] = _real_frequency(row["frequency"])
-                if "laplace" in row:
-                    laplace[entry_id] = _laplace_value(row["laplace"])
-        return path, frequencies, laplace
-
-    @staticmethod
-    def _packed_file_frequency_map(path: Path) -> Dict[int, float]:
-        try:
-            from frequensolve.seismic.trace_store import TraceStore
-
-            frequencies = TraceStore._read_trace_frequencies(path)
-        except (OSError, KeyError, ValueError):
-            return {}
-        return {
-            index: _real_frequency(frequency)
-            for index, frequency in enumerate(frequencies, start=1)
-        }
+    def _packed_products(self) -> List[tuple[Path, Dict[int, float], Dict[int, float]]]:
+        if self.pack is None:
+            return []
+        by_segment: Dict[str, List[Any]] = {}
+        for entry in self.pack.entries:
+            if entry.task in self.frequencies:
+                by_segment.setdefault(entry.segment_id, []).append(entry)
+        products = []
+        for segment in self.pack.segments:
+            entries = by_segment.get(segment.id, [])
+            if not entries:
+                continue
+            products.append(
+                (
+                    segment.path,
+                    {entry.task: float(entry.frequency.real) for entry in entries},
+                    {entry.task: float(entry.frequency.imag) for entry in entries},
+                )
+            )
+        return products
 
 
 @dataclass(frozen=True)
@@ -1226,7 +967,6 @@ class TraceOutputHandle:
         manifest = TraceManifest.from_job(
             self.job,
             project_path=project_path,
-            resolve_legacy=True,
         )
         return TraceDataset.from_manifest(manifest, upscale=upscale)
 
@@ -1310,7 +1050,6 @@ class WavefieldOutputHandle:
             self.job,
             output=self.job.wavefield_trace_outputs,
             project_path=project_path,
-            resolve_legacy=True,
         )
         if not manifest.groups:
             raise ValueError("Job has no wavefield outputs")
@@ -1369,8 +1108,6 @@ class JobArtifactMixin:
                 RuntimeWarning,
                 stacklevel=2,
             )
-        if manifest.complete:
-            return True
         return all(
             self._trace_output_path_for_task(task, manifest=manifest)[1]
             for task in range(1, self.n_tasks + 1)
@@ -1395,45 +1132,6 @@ class JobArtifactMixin:
                     path.unlink()
                 except FileNotFoundError:
                     pass
-
-    def remove_packed_trace_products(self) -> bool:
-        """Remove packed trace products so packing rebuilds from shards.
-
-        Returns:
-            ``True`` if any packed trace file or manifest was removed.
-        """
-
-        removed = False
-        manifests = [self.trace_manifest]
-        try:
-            wavefield_manifest = self.wavefield_manifest
-        except Exception:
-            wavefield_manifest = None
-        if wavefield_manifest is not None and wavefield_manifest.groups:
-            manifests.append(wavefield_manifest)
-
-        for manifest in manifests:
-            candidates = [
-                *manifest.packed_files,
-                manifest.output_path / "traces.h5",
-                manifest.output_path / "manifest.json",
-                *[
-                    manifest.output_path / str(name) / "manifest.json"
-                    for name in [*manifest.groups, *manifest.wavefields]
-                ],
-            ]
-            for path in candidates:
-                if path is None:
-                    continue
-                try:
-                    Path(path).unlink()
-                    removed = True
-                except FileNotFoundError:
-                    pass
-
-        if removed:
-            self.invalidate_trace_cache()
-        return removed
 
     @property
     def trace_manifest(self) -> TraceManifest:
@@ -1638,179 +1336,30 @@ class JobArtifactMixin:
                     wave_out[variant_name]["device"] = out.device.to_fs()
         return wave_out
 
-    @staticmethod
-    def _legacy_trace_file(path: Path) -> Path:
-        return path.with_name(path.name.replace("traces_", "receivers_", 1))
-
-    @classmethod
-    def _trace_file_exists(cls, path: Path) -> bool:
-        return path.exists() or cls._legacy_trace_file(path).exists()
-
-    def _packed_trace_has_current_task(
-        self,
-        task: int,
-        *,
-        manifest: Optional[TraceManifest] = None,
-    ) -> bool:
-        manifest = self.trace_manifest if manifest is None else manifest
-        if not manifest.packed_files:
-            return False
-        if task < 1 or task > self.n_tasks:
-            return False
-        packed_frequencies = manifest.packed_frequencies
-        if not packed_frequencies:
-            return False
-        expected_frequency = self._real_frequency_value(self.f_list[task - 1])
-        expected_laplace = _laplace_frequency(self.f_list[task - 1])
-        return _frequency_laplace_values_contain(
-            packed_frequencies,
-            manifest.packed_laplace,
-            expected_frequency,
-            expected_laplace,
-        )
-
-    def _candidate_frequency_trace_files(
-        self,
-        task: int,
-        *,
-        manifest: Optional[TraceManifest] = None,
-    ) -> List[Path]:
-        manifest = self.trace_manifest if manifest is None else manifest
-        files = list(manifest.files)
-        candidates: List[Path] = []
-        if 1 <= task <= len(files):
-            path = Path(files[task - 1])
-            candidates.extend([path, self._legacy_trace_file(path)])
-
-        def add_shard_dir(shard_dir: Path) -> None:
-            if not shard_dir.exists():
-                return
-            modern = sorted(shard_dir.glob("f_*.h5"))
-            files = modern
-            if not files:
-                files = [
-                    path
-                    for pattern in (
-                        "traces_*.h5",
-                        "receivers_*.h5",
-                        "trace_frequency_*.h5",
-                    )
-                    for path in sorted(shard_dir.glob(pattern))
-                ]
-            candidates.extend(files)
-
-        def add_root(root: Path) -> None:
-            for shard_dir in (
-                root / "shards",
-                root / "traces" / "shards",
-                root / "wavefields" / "shards",
-            ):
-                add_shard_dir(shard_dir)
-            if root.exists():
-                for pattern in (
-                    "f_*.h5",
-                    "traces_*.h5",
-                    "receivers_*.h5",
-                    "trace_frequency_*.h5",
-                ):
-                    candidates.extend(sorted(root.glob(pattern)))
-
-        roots = [manifest.output_path, manifest.result_path]
-        for root in roots:
-            add_root(root)
-        for group in [*manifest.groups, *manifest.wavefields]:
-            group_dir = manifest.output_path / str(group)
-            add_shard_dir(group_dir)
-
-        out: List[Path] = []
-        seen = set()
-        for path in candidates:
-            key = str(Path(path).resolve(strict=False))
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(Path(path))
-        return out
-
-    def _matching_frequency_trace_file(
-        self,
-        task: int,
-        *,
-        manifest: Optional[TraceManifest] = None,
-    ) -> Optional[Path]:
-        if task < 1 or task > self.n_tasks:
-            return None
-        expected_frequency = self._real_frequency_value(self.f_list[task - 1])
-        from frequensolve.seismic.trace_store import TraceStore
-
-        manifest = self.trace_manifest if manifest is None else manifest
-        shard_name = f"f_{expected_frequency:.5f}_hz.h5"
-        direct_candidates: List[Path] = []
-        for root in (manifest.output_path, manifest.result_path):
-            direct_candidates.extend(
-                (
-                    root / shard_name,
-                    root / "shards" / shard_name,
-                    root / "traces" / "shards" / shard_name,
-                    root / "wavefields" / "shards" / shard_name,
-                )
-            )
-        for group in [*manifest.groups, *manifest.wavefields]:
-            direct_candidates.append(manifest.output_path / str(group) / shard_name)
-
-        def candidate_paths() -> Iterable[Path]:
-            yield from direct_candidates
-            yield from self._candidate_frequency_trace_files(task, manifest=manifest)
-
-        seen: set[str] = set()
-        for path in candidate_paths():
-            key = str(path.resolve(strict=False))
-            if key in seen:
-                continue
-            seen.add(key)
-            if not path.exists():
-                continue
-            try:
-                if TraceStore._is_packed_trace_file(path):
-                    continue
-                frequencies = TraceStore._read_trace_frequencies(path)
-            except (OSError, KeyError, ValueError):
-                continue
-            if any(
-                np.isclose(
-                    float(frequency),
-                    expected_frequency,
-                    rtol=0.0,
-                    atol=1.0e-9,
-                )
-                for frequency in frequencies
-            ):
-                return path
-        return None
-
     def _trace_output_path_for_task(
         self,
         task: int,
         *,
         manifest: Optional[TraceManifest] = None,
     ) -> tuple[Path, bool]:
-        manifest = self.trace_manifest if manifest is None else manifest
-        files = list(manifest.files)
-        path = Path(files[task - 1])
-        existing = path if path.exists() else self._legacy_trace_file(path)
-        if existing.exists():
-            return existing, True
-        shard = self._matching_frequency_trace_file(task, manifest=manifest)
-        if shard is not None:
-            return shard, True
-        if manifest.packed_complete and self._packed_trace_has_current_task(
-            task,
-            manifest=manifest,
-        ):
-            packed_files = manifest.packed_files
-            if packed_files:
-                return packed_files[0], True
-        return path, False
+        del manifest
+        result = self._committed_task_result(task)
+        if result is None:
+            return self.trace_outputs.path, False
+        catalog = load_task_catalog(self._result_path, tasks=(task,))
+        try:
+            record = catalog.require_one(
+                ArtifactRequest(
+                    id="traces",
+                    role="simulated_traces",
+                    representations=("hdf5_shard",),
+                    retention="durable",
+                ),
+                task=task,
+            )
+        except ArtifactContractError:
+            return self.trace_outputs.path, False
+        return record.path, record.path.is_file()
 
     def _stored_trace_path(self, path: Path) -> str:
         try:
@@ -1824,7 +1373,6 @@ class JobArtifactMixin:
         path = Path(str(value))
         if not path.is_absolute():
             path = self.project_path / path
-        path = self._legacy_trace_file(path) if not path.exists() else path
         return path
 
 
@@ -2028,22 +1576,12 @@ def _path_identity_key(path: Path) -> tuple[Any, ...]:
     return ("stat", stat.st_dev, stat.st_ino)
 
 
-def _is_discovered_output_file(path: Path, *, result_root: Path) -> bool:
-    """Return whether a discovered regular file stays within the result tree."""
-
-    if path.is_symlink() or not path.is_file():
-        return False
-    try:
-        path.resolve(strict=True).relative_to(result_root)
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return True
-
-
-def _artifact_matches_kind(artifact: "OutputArtifact", kind: Optional[str]) -> bool:
+def _artifact_matches_kind(artifact: ArtifactRecord, kind: Optional[str]) -> bool:
     normalized = _normalize_kind(kind)
     if normalized is None:
         return True
-    if artifact.kind is not None and str(artifact.kind).strip().lower() == normalized:
+    if artifact.representation.strip().lower() == normalized:
+        return True
+    if artifact.role.strip().lower() == normalized:
         return True
     return _path_matches_kind(artifact.path, normalized)

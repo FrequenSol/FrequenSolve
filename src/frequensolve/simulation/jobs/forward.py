@@ -69,6 +69,8 @@ class FrequencyDomainJob(BaseJob):
         k_weights: Optional[Iterable[float]] = None,
         k_units: Optional[str] = None,
         phase_derivatives: int = 0,
+        *,
+        preserve_task_outputs: bool = False,
     ):
         phase_derivatives = _phase_derivative_order(phase_derivatives)
 
@@ -85,6 +87,7 @@ class FrequencyDomainJob(BaseJob):
             k_list=k_list,
             k_weights=k_weights,
             k_units=k_units,
+            preserve_task_outputs=preserve_task_outputs,
         )
         self.phase_derivatives: int = phase_derivatives
 
@@ -139,6 +142,9 @@ class FrequencyDomainJob(BaseJob):
             k_units=d.get("k_units"),
             phase_derivatives=phase_derivatives,
         )
+        job.preserve_task_outputs = d.get("preserve_task_outputs", False)
+        if not isinstance(job.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
         job._job_id = d.get("job_id")
         return job
 
@@ -207,6 +213,8 @@ class TimeDomainJob(BaseJob):
         high_frequency_taper: Union[bool, float] = False,
         interpolation_time_shift: float = 0.0,
         phase_derivatives: int = 0,
+        *,
+        preserve_task_outputs: bool = False,
     ):
         if damping_factor is not None and laplace is not None:
             raise ValueError("Specify only one of damping_factor or laplace")
@@ -401,5 +409,8 @@ class TimeDomainJob(BaseJob):
             ),
         )
         job.f_list = f_list.tolist()
+        job.preserve_task_outputs = d.get("preserve_task_outputs", False)
+        if not isinstance(job.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
         job._job_id = d.get("job_id")
         return job

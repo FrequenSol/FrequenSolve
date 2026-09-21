@@ -547,6 +547,9 @@ class BornControlSensitivityJob(BaseJob):
             spatial_window=config.get("spatial_window"),
             outputs=JobOutputs.from_fs(data.get("Outputs")),
         )
+        job.preserve_task_outputs = data.get("preserve_task_outputs", False)
+        if not isinstance(job.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
         job._job_id = data.get("job_id")
         return job
 
@@ -947,6 +950,9 @@ class RTMControlSensitivityJob(BaseJob):
             ),
             outputs=JobOutputs.from_fs(data.get("Outputs")),
         )
+        job.preserve_task_outputs = data.get("preserve_task_outputs", False)
+        if not isinstance(job.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
         job._job_id = data.get("job_id")
         return job
 
@@ -1109,5 +1115,8 @@ class TimeReversalFocusJob(RTMControlSensitivityJob):
             raw_gradient=common.raw_gradient,
             outputs=common.outputs,
         )
+        job.preserve_task_outputs = data.get("preserve_task_outputs", False)
+        if not isinstance(job.preserve_task_outputs, bool):
+            raise TypeError("preserve_task_outputs must be a boolean")
         job._job_id = data.get("job_id")
         return job

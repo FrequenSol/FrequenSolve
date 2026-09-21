@@ -46,10 +46,16 @@ from frequensolve.orchestrator.sites.local.dask_logging import (
 from frequensolve.orchestrator.utils.environment import (
     NUMERIC_RUNTIME_DEFAULTS,
     build_subprocess_environment,
+    solver_environment,
     validate_environment,
 )
 from frequensolve.seismic.traces import TraceDataset
-from frequensolve.simulation.jobs import BaseJob, OutputManifest, SkipPolicy
+from frequensolve.simulation.artifact_contract import (
+    ArtifactContractError,
+    TaskResult,
+    task_result_path,
+)
+from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 from frequensolve.solver import (
     SolverCompatibility,
@@ -98,61 +104,91 @@ def _job_result_path(job_file: Union[str, Path]) -> Optional[Path]:
     return job_file.parent / path
 
 
-def _task_run_manifest_path(job_file: Union[str, Path], task_id: int) -> Optional[Path]:
+def _task_result_path(job_file: Union[str, Path], task_id: int) -> Optional[Path]:
     if task_id < 0:
         return None
     result_path = _job_result_path(job_file)
     if result_path is None:
         return None
-    return (
-        result_path
-        / "_fs_run"
-        / "tasks"
-        / f"task_{task_id + 1:06d}"
-        / "run_manifest.json"
-    )
+    return result_path / "_fs_run" / "tasks" / f"task_{task_id + 1:06d}" / "result.json"
 
 
 def _read_task_solver_convergence(
     job_file: Union[str, Path], task_id: int
 ) -> tuple[Optional[Path], Optional[Dict[str, object]]]:
-    manifest_path = _task_run_manifest_path(job_file, task_id)
-    if manifest_path is None or not manifest_path.exists():
-        return manifest_path, None
+    result_path = _task_result_path(job_file, task_id)
+    if result_path is None or not result_path.exists():
+        return result_path, None
     try:
-        manifest = json.loads(manifest_path.read_text())
+        result = json.loads(result_path.read_text())
     except json.JSONDecodeError:
-        return manifest_path, None
-    return manifest_path, BaseJob.solver_convergence_summary(manifest)
+        return result_path, None
+    return result_path, BaseJob.solver_convergence_summary(result)
 
 
-def _read_task_output_manifest(
-    job_file: Union[str, Path], task_id: int
-) -> OutputManifest:
-    """Read the producer-authored output inventory for one solver task."""
+def _job_task_frequency(job_file: Union[str, Path], task_id: int) -> Optional[complex]:
+    """Return the exact frequency encoded for a zero-based local task."""
 
-    manifest_path = _task_run_manifest_path(job_file, task_id)
+    try:
+        data = json.loads(Path(job_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    frequencies = data.get("f_list")
+    if frequencies is None:
+        return None
+    if not isinstance(frequencies, list) or task_id >= len(frequencies):
+        raise ArtifactContractError(
+            f"job f_list does not define local task {task_id + 1}"
+        )
+    value = frequencies[task_id]
+    try:
+        if isinstance(value, list) and len(value) == 2:
+            return complex(float(value[0]), float(value[1]))
+        return complex(float(value), 0.0)
+    except (TypeError, ValueError) as exc:
+        raise ArtifactContractError(
+            f"job f_list contains an invalid frequency for task {task_id + 1}"
+        ) from exc
+
+
+def _read_task_result(job_file: Union[str, Path], task_id: int) -> Optional[TaskResult]:
+    """Read the fixed-path committed result for one local frequency task."""
+
+    if task_id < 0:
+        return None
     result_path = _job_result_path(job_file)
-    if manifest_path is None:
-        return OutputManifest(result_path=result_path)
-    return OutputManifest.read(
-        manifest_path.parent / "outputs.json",
-        result_path=result_path,
-    )
+    if result_path is None:
+        return None
+    path = task_result_path(result_path, task_id + 1)
+    task_result = TaskResult.read(path, result_path=result_path)
+    if task_result.partition.task != task_id + 1:
+        raise ArtifactContractError(
+            f"task result {path} reports task {task_result.partition.task}, "
+            f"expected {task_id + 1}"
+        )
+    expected_frequency = _job_task_frequency(job_file, task_id)
+    if (
+        expected_frequency is not None
+        and task_result.partition.frequency != expected_frequency
+    ):
+        raise ArtifactContractError(
+            f"task result {path} reports frequency "
+            f"{task_result.partition.frequency!r}, expected {expected_frequency!r}"
+        )
+    return task_result
 
 
-def _attach_task_artifacts(
+def _attach_task_result(
     result: Dict[str, Any],
-    job_file: Union[str, Path],
-    task_id: int,
+    task_result: Optional[TaskResult],
 ) -> None:
-    """Attach exact Sauce artifact records to a serializable task result."""
+    """Attach compact producer-authored task and artifact metadata."""
 
-    outputs = _read_task_output_manifest(job_file, task_id)
-    if not outputs.valid:
+    if task_result is None:
         return
-    result["outputs_manifest"] = str(outputs.path)
-    result["artifacts"] = outputs.records
+    result["task_result"] = str(task_result.path)
+    result["partition"] = task_result.partition.to_fs()
+    result["artifacts"] = [artifact.to_fs() for artifact in task_result.artifacts]
 
 
 def _fallback_task_summary(records: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
@@ -415,6 +451,8 @@ def run_task(
     started = time.perf_counter()
     manifest_path: Optional[Path] = None
     solver_convergence: Optional[Dict[str, object]] = None
+    task_result: Optional[TaskResult] = None
+    return_code: Optional[int] = None
     try:
         stdout_path = stdout_file if stdout_file else os.devnull
         with open(stdout_path, "w") as stdout:
@@ -425,15 +463,19 @@ def run_task(
                 args, stdout=stdout, stderr=stdout, env=env, text=True
             )
             return_code = proc.wait()
-            if return_code != 0:
-                raise subprocess.CalledProcessError(return_code, args)
 
-        manifest_path, solver_convergence = _read_task_solver_convergence(
-            job_file, task_id
-        )
-        solver_failed = bool(
-            solver_convergence is not None and solver_convergence.get("failed")
-        )
+        task_result = _read_task_result(job_file, task_id)
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, args)
+        if task_result is None:
+            manifest_path, solver_convergence = _read_task_solver_convergence(
+                job_file, task_id
+            )
+            solver_failed = bool(
+                solver_convergence is not None and solver_convergence.get("failed")
+            )
+        else:
+            solver_failed = not task_result.successful
 
         result: Dict[str, Any] = {
             "task_id": task_id,
@@ -452,26 +494,40 @@ def run_task(
         }
         if manifest_path is not None:
             result["run_manifest"] = str(manifest_path)
-        if solver_convergence is not None:
+        if task_result is not None and task_result.solver:
+            result["solver"] = dict(task_result.solver)
+        elif solver_convergence is not None:
             result["solver"] = {"convergence": solver_convergence}
-        _attach_task_artifacts(result, job_file, task_id)
+        _attach_task_result(result, task_result)
         if solver_failed:
-            assert solver_convergence is not None
-            residual = solver_convergence.get(
-                "residual", solver_convergence.get("final_residual")
-            )
-            result["error"] = "Solver convergence failed" + (
-                f"; residual {residual}" if residual is not None else ""
-            )
+            if task_result is not None:
+                result["error"] = (
+                    f"Sauce task reported {task_result.state} status "
+                    f"with code {task_result.code}"
+                )
+            else:
+                assert solver_convergence is not None
+                residual = solver_convergence.get(
+                    "residual", solver_convergence.get("final_residual")
+                )
+                result["error"] = "Solver convergence failed" + (
+                    f"; residual {residual}" if residual is not None else ""
+                )
         return result
     except Exception as e:
-        manifest_path, solver_convergence = _read_task_solver_convergence(
-            job_file, task_id
-        )
+        if task_result is None:
+            try:
+                task_result = _read_task_result(job_file, task_id)
+            except (ArtifactContractError, OSError):
+                task_result = None
+        if task_result is None and task_id < 0:
+            manifest_path, solver_convergence = _read_task_solver_convergence(
+                job_file, task_id
+            )
         result = {
             "task_id": task_id,
             "status": "error",
-            "complete": False,
+            "complete": task_result is not None,
             "error": str(e),
             "duration_seconds": time.perf_counter() - started,
             "n_ranks": n_ranks,
@@ -483,11 +539,15 @@ def run_task(
                 else None
             ),
         }
+        if return_code is not None:
+            result["returncode"] = return_code
         if manifest_path is not None:
             result["run_manifest"] = str(manifest_path)
-        if solver_convergence is not None:
+        if task_result is not None and task_result.solver:
+            result["solver"] = dict(task_result.solver)
+        elif solver_convergence is not None:
             result["solver"] = {"convergence": solver_convergence}
-        _attach_task_artifacts(result, job_file, task_id)
+        _attach_task_result(result, task_result)
         return result
 
 
@@ -556,10 +616,13 @@ class LocalSite(BaseSite):
     def __post_init__(self) -> None:
         self.config = LocalSiteConfig()
         self.executable = self._get_solver_path()
-        explicit_environment = {
-            **self.env,
-            **validate_environment(self.environment),
-        }
+        explicit_environment = solver_environment(
+            self.executable,
+            {
+                **self.env,
+                **validate_environment(self.environment),
+            },
+        )
         self.env = build_subprocess_environment(
             overrides={
                 **NUMERIC_RUNTIME_DEFAULTS,
@@ -1078,8 +1141,6 @@ class LocalSite(BaseSite):
             if run.backend.get("pack_after_tasks", False):
                 if self._dask_client is None:
                     raise RuntimeError("Cannot run solver packing task without Dask")
-                if hasattr(run.job, "remove_packed_trace_products"):
-                    run.job.remove_packed_trace_products()
                 pack_future = self._dask_client.submit(
                     run_task,
                     run.job._file,
@@ -1089,7 +1150,10 @@ class LocalSite(BaseSite):
                     n_ranks=1,
                     n_threads=self._current_threads_per_worker(),
                     stdout_dir=str(run.job._stdout_path),
-                    fresh=bool(run.backend.get("fresh", False)),
+                    # Pack inputs are the newly committed task generations.
+                    # Always execute the immutable incremental publisher after
+                    # frequency work instead of invalidating its prior catalog.
+                    fresh=True,
                     resources={"CPU": self._current_threads_per_worker()},
                 )
                 all_futures.append(pack_future)

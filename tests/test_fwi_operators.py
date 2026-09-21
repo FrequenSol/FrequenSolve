@@ -16,6 +16,7 @@ from frequensolve.seismic.receivers import (
     ReceiverNode,
 )
 from frequensolve.seismic.sources import SourceGeometry
+from frequensolve.simulation.artifact_contract import task_result_path
 from frequensolve.simulation.jobs import BaseJob, FrequencyDomainJob
 from frequensolve.simulation.jobs.fwi import DataSpace, ModelSpace
 from frequensolve.simulation.jobs.imaging import (
@@ -766,20 +767,75 @@ def test_imaging_job_current_requires_aggregate_image(tmp_path):
         grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0]),
     )
     job_file = job.save()
-    trace_file = job.expected_trace_files()[0]
+    trace_file = job._result_path / "opaque/trace.h5"
     trace_file.parent.mkdir(parents=True, exist_ok=True)
     trace_file.touch()
+    fingerprints = job._artifact_contract_fingerprints()
+    result = task_result_path(job._result_path, 1)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_text(
+        json.dumps(
+            {
+                "schema": "fs-task-result-2",
+                "partition": {
+                    "task": 1,
+                    "task_count": 1,
+                    "frequency": {"real": 5.0, "imag": 0.0},
+                },
+                "fingerprints": fingerprints,
+                "status": {"state": "success", "code": 0},
+                "artifacts": [
+                    {
+                        "id": "traces",
+                        "role": "simulated_traces",
+                        "representation": "hdf5_shard",
+                        "schema": "fs-trace-shard-2",
+                        "path": "opaque/trace.h5",
+                        "retention": "durable",
+                        "bytes": 0,
+                    }
+                ],
+            }
+        )
+    )
     job.write_run_state(status="completed")
 
     assert not job.is_run_current()
 
-    job.image_file(1).touch()
+    image = job._result_path / "opaque/task-image.h5"
+    image.touch()
+    payload = json.loads(result.read_text())
+    image_record = {
+        "id": "image:vp",
+        "role": "image",
+        "representation": "hdf5",
+        "schema": "fs-image-hdf5-1",
+        "path": "opaque/task-image.h5",
+        "retention": "durable",
+        "bytes": 0,
+    }
+    payload["artifacts"].append(image_record)
+    result.write_text(json.dumps(payload))
+    assert job.image_file(1) == image
     assert job.needs_image_smoothing()
-
-    with pytest.raises(FileNotFoundError, match="imaging --smooth postprocess"):
+    with pytest.raises(FileNotFoundError, match="committed image"):
         job.load_images()
-
-    job.image_file().touch()
+    aggregate = job._result_path / "opaque/aggregate.h5"
+    aggregate.touch()
+    image_record = {**image_record, "path": "opaque/aggregate.h5"}
+    operation = job._result_path / "_fs_run/operations/smooth/result.json"
+    operation.parent.mkdir(parents=True)
+    operation.write_text(
+        json.dumps(
+            {
+                "schema": "fs-operation-result-1",
+                "operation": {"name": "smooth", "generation": "g1"},
+                "fingerprints": fingerprints,
+                "status": {"state": "success", "code": 0},
+                "artifacts": [image_record],
+            }
+        )
+    )
     assert job.is_run_current()
     loaded = BaseJob.load(job_file)
     images = loaded.load_images()
@@ -872,6 +928,7 @@ def test_imaging_derivative_inputs_are_hashed_and_staged(
         before = loaded.fingerprint(), loaded.task_fingerprint(1)
         with h5py.File(path, "r+") as h5:
             h5["df"][0] += 1.0
+        loaded.save()  # Saving refreshes the compact staged-input provenance.
         after = loaded.fingerprint(), loaded.task_fingerprint(1)
         assert all(old != new for old, new in zip(before, after))
     assert loaded._input_fingerprint_payload() == job._input_fingerprint_payload()
@@ -904,6 +961,7 @@ def test_loaded_lsrtm_job_stages_and_fingerprints_direction_file(tmp_path, job_t
         loaded.task_policy_fingerprint(1, "compatible"),
     )
     direction.write_bytes(b"updated direction")
+    loaded.save()  # Refresh the saved external-input provenance.
     after = (
         loaded.fingerprint(),
         loaded.task_fingerprint(1),

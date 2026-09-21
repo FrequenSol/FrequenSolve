@@ -393,12 +393,14 @@ class ImageDatabase:
     path: Path
     parts: int
     shape: Tuple[int, ...]
+    artifact_files: Optional[dict] = None
+    frequencies: Optional[tuple] = None
 
     def __post_init__(self):
         """Normalize and validate the image output directory."""
 
         self.path = Path(self.path)
-        if not self.path.exists():
+        if self.artifact_files is None and not self.path.exists():
             raise FileNotFoundError(f"Image path {self.path} does not exist")
 
     @property
@@ -411,6 +413,8 @@ class ImageDatabase:
 
         import h5py
 
+        if self.frequencies is not None:
+            return np.asarray(self.frequencies)
         f_list = np.zeros(self.parts)
         for i in range(self.parts):
             file = self.image_file(i + 1)
@@ -429,6 +433,11 @@ class ImageDatabase:
             Path to the requested image file.
         """
 
+        if self.artifact_files is not None:
+            try:
+                return self.artifact_files[part]
+            except KeyError as exc:
+                raise FileNotFoundError(f"No committed image for task {part}") from exc
         if part is None:
             return self.path / "image.h5"
         else:
@@ -1192,6 +1201,7 @@ class ImagingJob(BaseJob):
         regularization: Optional[Union[VariationalSmoothing, Mapping[str, Any]]] = None,
         save_path: Optional[Union[str, Path]] = None,
         reassemble_adjoint: bool = False,
+        preserve_task_outputs: bool = False,
         outputs: Optional[Union[Output, Iterable[Output], JobOutputs]] = None,
         k_list: Optional[Iterable[float]] = None,
         k_weights: Optional[Iterable[float]] = None,
@@ -1215,6 +1225,7 @@ class ImagingJob(BaseJob):
             simulation=simulation,
             f_list=list(f_list),
             workflow="RTM",
+            preserve_task_outputs=preserve_task_outputs,
             outputs=JobOutputs(outputs),
             k_list=None if k_list is None else list(k_list),
             k_weights=None if k_weights is None else list(k_weights),
@@ -1344,9 +1355,26 @@ class ImagingJob(BaseJob):
     def image_file(self, part: Optional[int] = None) -> Path:
         """Return the local aggregate or per-frequency image file path."""
 
-        if part is None:
-            return self.save_path / "image.h5"
-        return self.save_path / f"image_{part}.h5"
+        from frequensolve.simulation.artifact_catalog import load_artifact_catalog
+        from frequensolve.simulation.artifact_contract import ArtifactRequest
+
+        catalog = load_artifact_catalog(
+            self._result_path,
+            tasks=() if part is None else (part,),
+            operations=("smooth",) if part is None else (),
+        )
+        request = ArtifactRequest(role="image", retention="durable")
+        records = catalog.select(
+            request, **({"operation": "smooth"} if part is None else {"task": part})
+        )
+        if len(records) != 1:
+            raise FileNotFoundError(
+                f"Expected one committed image for task {part}; found {len(records)}"
+            )
+        record = records[0]
+        if record.path.stat().st_size != record.bytes:
+            raise ValueError(f"Image size changed: {record.path}")
+        return record.path
 
     def requires_postprocess(self) -> bool:
         """Return true because images are stacked and smoothed after tasks."""
@@ -1371,10 +1399,18 @@ class ImagingJob(BaseJob):
             FileNotFoundError: If the aggregate ``image.h5`` is unavailable.
         """
 
+        files = {None: self.image_file()}
+        for task in range(1, self.n_tasks + 1):
+            try:
+                files[task] = self.image_file(task)
+            except FileNotFoundError:
+                pass
         images = ImageDatabase(
             path=self._local_image_path,
             parts=self.n_tasks,
             shape=self.grid.shape,
+            artifact_files=files,
+            frequencies=tuple(self.f_list),
         )
         images.require_aggregate()
         return images
@@ -1382,7 +1418,10 @@ class ImagingJob(BaseJob):
     def image_output_exists(self) -> bool:
         """Return whether the aggregate image product exists locally."""
 
-        return self.image_file().is_file()
+        try:
+            return self.image_file().is_file()
+        except (FileNotFoundError, ValueError):
+            return False
 
     def postprocess_output_exists(self) -> bool:
         """Return whether the final stacked image exists locally."""
@@ -1392,9 +1431,12 @@ class ImagingJob(BaseJob):
     def image_part_outputs_exist(self) -> bool:
         """Return whether every per-frequency image shard exists locally."""
 
-        return all(
-            self.image_file(part).is_file() for part in range(1, self.n_tasks + 1)
-        )
+        try:
+            return all(
+                self.image_file(part).is_file() for part in range(1, self.n_tasks + 1)
+            )
+        except (FileNotFoundError, ValueError):
+            return False
 
     def postprocess_part_outputs_exist(self) -> bool:
         """Return whether every per-frequency image shard exists locally."""
@@ -1613,6 +1655,7 @@ class ImagingJob(BaseJob):
             k_units=data.pop("k_units", None),
             **image_data,
         )
+        job.preserve_task_outputs = data.get("preserve_task_outputs", False)
         job.misfit = misfit
         return job
 

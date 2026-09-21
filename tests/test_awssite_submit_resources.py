@@ -57,6 +57,11 @@ class FakeJob:
         assert project == "project-a"
         return "local-job.json", "project-a/jobs/job.json"
 
+    def save_simulation_for_remote(self, site_name, project):
+        assert site_name == "AWSSite"
+        assert project == "project-a"
+        return "local-simulation.json", "project-a/simulations/simulation.json"
+
 
 def make_graphql_site():
     site = AWSSite.__new__(AWSSite)
@@ -168,6 +173,12 @@ def test_graphql_submit_stages_inputs_without_inventing_project_metadata():
         ),
         ("local-input.h5", "project-a/inputs/model.h5"),
         ("local-job.json", "project-a/jobs/job.json"),
+        # Saving the job finalizes artifact fingerprints; upload the matching
+        # simulation descriptor again before submitting that generation.
+        (
+            "staged-simulation.json",
+            "project-a/simulations/model/model.json",
+        ),
     ]
 
 
