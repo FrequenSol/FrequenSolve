@@ -62,3 +62,19 @@ test-hpc-hermetic:
 .PHONY: typecheck
 typecheck:
 	python scripts/check_mypy_baseline.py
+
+.PHONY: list-cloud-benchmarks
+list-cloud-benchmarks:
+	PYTHONPATH="$(CURDIR)/src:$(CURDIR)" python -m benchmarks.cloud list
+
+.PHONY: run-cloud-benchmarks
+run-cloud-benchmarks:
+	@test -n "$(PROFILE)" || (echo "PROFILE is required" >&2; exit 2)
+	@test -n "$(BACKEND)" || (echo "BACKEND is required (batch or slurm)" >&2; exit 2)
+	PYTHONPATH="$(CURDIR)/src:$(CURDIR)" python -m benchmarks.cloud run \
+		--profile "$(PROFILE)" \
+		--backend "$(BACKEND)"
+
+.PHONY: generate-cloud-benchmarks
+generate-cloud-benchmarks:
+	python scripts/generate_cloud_benchmark_workloads.py

@@ -6,6 +6,9 @@ import pytest
 pytest.importorskip("boto3")
 
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
+from frequensolve.orchestrator.sites.aws.execution_profile import (
+    ManagedExecutionProfile,
+)
 
 
 class FakeGraphQLClient:
@@ -66,16 +69,20 @@ class FakeJob:
 def make_graphql_site():
     site = AWSSite.__new__(AWSSite)
     site.graphql_client = FakeGraphQLClient()
+    site.execution_profile = ManagedExecutionProfile.from_mapping({})
     site.prepare_job = lambda job, sync_project=False, validate=True: None
     site.sync_s3 = lambda local, remote: remote
     site._emit = lambda message: None
     site._make_run_handle = (
-        lambda job, simulation_id, poll_interval, fetch, check=False: SimpleNamespace(
-            job=job,
-            simulation_id=simulation_id,
-            poll_interval=poll_interval,
-            fetch=fetch,
-            check=check,
+        lambda job, simulation_id, poll_interval, fetch, check=False, backend=None: (
+            SimpleNamespace(
+                job=job,
+                simulation_id=simulation_id,
+                poll_interval=poll_interval,
+                fetch=fetch,
+                check=check,
+                backend=backend,
+            )
         )
     )
     return site
@@ -123,6 +130,69 @@ def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
     assert site.graphql_client.submit_calls[0]["simulation_name"] == "model"
     assert site.graphql_client.submit_calls[0]["simulation_job_name"] == "demo-job"
     assert site.graphql_client.compute_stack_checks == 0
+    assert "execution_backend" not in site.graphql_client.submit_calls[0]
+
+
+def test_graphql_submit_uses_only_the_named_managed_slurm_shape():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {
+            "execution_backend": "slurm",
+            "slurm_partition": "cpu-efa",
+            "slurm_nodes": 2,
+            "slurm_ranks_per_node": 4,
+            "slurm_wall_time": "00-00:30:00",
+        }
+    )
+    job = FakeJob()
+
+    run = site.submit(job)
+
+    assert site.graphql_client.submit_calls[0] == {
+        "job_file_s3_key": "project-a/jobs/job.json",
+        "vcpu": None,
+        "memory": None,
+        "job_name": site.graphql_client.submit_calls[0]["job_name"],
+        "project_name": "project-a",
+        "project_display_name": "Project A",
+        "simulation_name": "model",
+        "simulation_job_name": "demo-job",
+        "send_simulation_status_email": None,
+        "fresh": False,
+        "execution_backend": "slurm",
+        "slurm_partition": "cpu-efa",
+        "slurm_nodes": 2,
+        "slurm_ranks_per_node": 4,
+        "slurm_wall_time_seconds": 1800,
+    }
+    assert run.backend["executionBackend"] == "slurm"
+
+
+def test_graphql_submit_supports_right_sized_single_node_profile():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {
+            "execution_backend": "slurm",
+            "slurm_partition": "cpu-single",
+            "slurm_nodes": 1,
+            "slurm_ranks_per_node": 1,
+            "slurm_wall_time": "00-00:30:00",
+        }
+    )
+
+    site.submit(FakeJob())
+
+    submitted = site.graphql_client.submit_calls[0]
+    assert submitted["slurm_partition"] == "cpu-single"
+    assert submitted["slurm_nodes"] == 1
+    assert submitted["slurm_ranks_per_node"] == 1
+
+
+def test_submit_rejects_managed_execution_overrides():
+    site = make_graphql_site()
+
+    with pytest.raises(ValueError, match="named site.toml profile"):
+        site.submit(FakeJob(), nodes=2)
 
 
 def test_graphql_submit_current_job_fetches_once_when_waited():
@@ -233,6 +303,25 @@ def test_poll_run_preserves_customer_safe_cloud_failure_message():
         "This simulation needs more SCUs. No solver work was charged."
     )
     assert status.raw["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
+
+
+@pytest.mark.parametrize(
+    "billing_status", ["CAPTURE_PENDING", "RECONCILIATION_REQUIRED", "CAPTURED"]
+)
+def test_poll_run_keeps_billing_separate_from_success(billing_status):
+    site = AWSSite.__new__(AWSSite)
+    billing = {
+        "creditSettlementMode": "END_OF_RUN_CAPTURE_V1",
+        "creditSettlementStatus": billing_status,
+        "creditSettlementOperationId": "synthetic-operation",
+        "creditSettlementAmount": "1.23",
+    }
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status_details=lambda _: {"status": "SUCCEEDED", **billing}
+    )
+    run = SimpleNamespace(id="simulation-1", backend={})
+    assert site._poll_run(run).state == "completed"
+    assert run.backend == billing
 
 
 @pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "CANCELED"])
