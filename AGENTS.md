@@ -10,8 +10,13 @@ changes should be made in the repository that owns the behavior.
 
 ## Branch Baseline
 
-Unless the user, issue, or pull request explicitly names a different base
-branch, create task branches from the repository default branch, `v2`.
+`next` is the integration branch for current development and pending pull
+requests, ahead of a future promotion to `main`. Unless the user, issue, or
+pull request explicitly names a different base branch, create task branches
+from `next` and target pull requests to `next`.
+
+Use descriptive branch names without the `codex/` prefix. Do not publish
+`codex/` branches to this public repository.
 
 The local `v2_sam` branch may be useful for ongoing local development, but do
 not assume it is the correct PR base unless the user says so or the issue is
