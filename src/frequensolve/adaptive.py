@@ -6,7 +6,10 @@ and sweep template remain the single implementation used by direct SSH jobs.
 
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
+
+if TYPE_CHECKING:
+    from importlib.abc import Traversable
 
 ENGINE_VERSION = "adaptive-scheduler.v1"
 
@@ -65,11 +68,19 @@ class AdaptivePool:
         return self.memory_mib_per_node / self.ranks_per_node / 1024
 
 
-def scheduler_source():
+def scheduler_source() -> "Traversable":
     """Return the exact packaged script transferred by direct SSH submission."""
-    return files("frequensolve").joinpath(
-        "orchestrator", "sites", "hpc", "templates", "sweep", "adaptive_scheduler.py"
-    )
+    source = files("frequensolve")
+    for part in (
+        "orchestrator",
+        "sites",
+        "hpc",
+        "templates",
+        "sweep",
+        "adaptive_scheduler.py",
+    ):
+        source = source.joinpath(part)
+    return source
 
 
 def render_sweep(*, scheduler_version: str, **context: Any) -> str:
@@ -78,13 +89,20 @@ def render_sweep(*, scheduler_version: str, **context: Any) -> str:
 
     if scheduler_version != ENGINE_VERSION:
         raise ValueError("Unsupported adaptive scheduler version")
-    template = files("frequensolve").joinpath(
-        "orchestrator", "sites", "hpc", "templates", "sweep", "adaptive_sweep.sh"
-    )
+    template = files("frequensolve")
+    for part in (
+        "orchestrator",
+        "sites",
+        "hpc",
+        "templates",
+        "sweep",
+        "adaptive_sweep.sh",
+    ):
+        template = template.joinpath(part)
     return Environment().from_string(template.read_text()).render(**context)
 
 
-def main():
+def main() -> None:
     # Run the same file rather than maintaining a second scheduler entrypoint.
     import runpy
     from importlib.resources import as_file
