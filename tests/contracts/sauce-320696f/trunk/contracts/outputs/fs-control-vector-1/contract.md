@@ -17,6 +17,18 @@ are valid for linearize/VJP; JVP and normal require a nonempty space. The saved
 baseline and registry identities must match exactly. Output filenames receive
 the normal frequency-task suffix.
 
+Covectors written by `linearize`, `vjp` and `normal` additionally carry one
+packed support bitmask per active block, `/support/<qualified block ID>` (uint8,
+8 DOFs per byte, LSB first, vector order), the float64 scalar
+`/support_min_support`, and with `controls/support_measure: true` the uint8
+`/support_measure/<qualified block ID>` quantized measure
+`round(255 s_i / max s_i)`. The measure is `s_i = sum_q w_q |dm/dc_i|` at the
+frozen baseline; DOFs below `controls/min_support` times the block's median
+nonzero measure are unsupported. Direction inputs need none of these datasets.
+The same groups appear in `fs-control-state-1` exports, where inactive blocks
+report full support. See
+[control support](../../../docs/imaging/controls.md#control-support).
+
 `normal` returns the fused joint Gauss-Newton action `J* J direction`, including
 cross terms between active blocks. It is equivalent to JVP followed by VJP under
 the saved derivative policy. It excludes residual second derivatives,

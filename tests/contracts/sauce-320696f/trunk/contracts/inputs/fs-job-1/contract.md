@@ -202,7 +202,16 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   coefficient covectors and scalar objectives, writes `raw_gradient` (or
   `gradient_raw.h5`), and writes the final `gradient`. Optional `Smoothing` applies a
   representation-owned Tikhonov, TV, or second-order TGV variational Riesz map
-  after aggregation.
+  after aggregation. The parts may be native `/controls/<block>` files or
+  `fwi_operator` covectors (`fs-control-vector-1`, qualified
+  `/controls/model.<block>` datasets); the reader accepts both layouts, ignores
+  blocks outside `active`, rejects an unsupported `/schema` or `/packing`, and
+  passes the state and registry fingerprints through without re-deriving them.
+  Optional `input` names one such vector explicitly: the postprocess then reads
+  that file instead of the `_<task>` parts, copies it to `raw_gradient`, and
+  writes the smoothed `gradient`; `weights` and `objective`/`focus` aggregation
+  are ignored. `f_list` remains required because wavelength-relative smoothing
+  scales use its largest frequency.
   `input_role: dual` is the default because a native VJP is already a weak
   coefficient-space load; `primal` mass-weights supplied nodal values before
   solving. `lambda` multiplies the conservative P inverse wavenumber
@@ -412,6 +421,16 @@ Unknown, repeated and unsupported blocks fail. `controls/state` optionally
 applies a complete canonical baseline before assembly; `controls/state_output`
 exports that baseline. `controls/manifest` exports the resolved registry and all
 MPI ownership descriptors. These exact output paths need a unique name per task.
+
+`state_output` and `covector` files also carry one packed support bitmask per
+block, `/support/<qualified block>`, from the frozen-baseline measure
+`s_i = sum_q w_q |dm/dc_i(x_q)|` over the volume quadrature Sauce visits during
+material interpolation. `controls/min_support` (default `0.01`) marks a DOF
+unsupported when `s_i` is below that fraction of the block's median nonzero
+measure; `controls/support_measure: true` adds `/support_measure/<block>`.
+Both keys apply to `fwi_operator` only; the native `control_sensitivities`
+workflow does not export support. See
+[Shared inversion controls](../../../docs/imaging/controls.md#control-support).
 
 Use `direction` for JVP/normal and `covector` for gradient/VJP/normal. The shared
 HDF5 coordinate and identity contract is documented in

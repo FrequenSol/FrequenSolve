@@ -10,7 +10,8 @@ Four job classes cover every Sauce imaging workflow:
 - :class:`ImageKernelJob` — Cartesian image kernels (``rtm`` / ``born`` /
   ``lsrtm_gradient`` with ``Imaging.grid``).
 - :class:`SmoothJob` — Sauce's ``--smooth`` postprocess run on its own over an
-  existing job's per-task gradient parts or one explicit vector.
+  existing job's per-task gradient parts or one explicit vector
+  (``control_sensitivities.input``).
 
 Path conventions: input files (directions, duals, baselines) resolve relative
 to the project root; output files resolve relative to the job result directory.
@@ -453,6 +454,19 @@ def _incremental_trace_outputs(
     return replace(
         baseline, groups=incremental_groups, components=incremental_components
     )
+
+
+def _min_support(value: Any) -> Optional[float]:
+    """Validate ``fwi_operator.controls.min_support`` (a non-negative number)."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError("min_support must be a number")
+    threshold = float(value)
+    if not np.isfinite(threshold) or threshold < 0.0:
+        raise ValueError("min_support must be a finite non-negative number")
+    return threshold
 
 
 def _postprocess_bool(value: Any, name: str) -> bool:
@@ -914,6 +928,11 @@ class FWIOperatorJob(_ImagingJobBase):
         control_state: ``fs-control-state-1`` baseline input.
         state_output: ``fs-control-state-1`` baseline output (exact name).
         manifest: ``fs-control-registry-1`` output (exact name).
+        min_support: Optional ``fwi_operator.controls.min_support`` relative
+            support threshold (Sauce default ``1e-2``) used for the
+            ``/support/<block>`` bitmasks of ``state_output`` and covectors.
+        support_measure: Also export the quantized ``/support_measure/<block>``
+            diagnostic (``fwi_operator.controls.support_measure``).
         model_gradient: Request the reduced background covector after ``solve``.
         cache_receiver_state: Allow the state to cache receiver values.
         source_controls: ``fwi_operator.source_controls`` mapping.
@@ -950,6 +969,8 @@ class FWIOperatorJob(_ImagingJobBase):
         control_state: Optional[Union[str, Path]] = None,
         state_output: Optional[Union[str, Path]] = None,
         manifest: Optional[Union[str, Path]] = None,
+        min_support: Optional[float] = None,
+        support_measure: bool = False,
         model_gradient: bool = False,
         cache_receiver_state: bool = True,
         source_controls: Optional[Mapping[str, Any]] = None,
@@ -1006,6 +1027,8 @@ class FWIOperatorJob(_ImagingJobBase):
         self.control_state = _input_path(control_state, simulation)
         self.state_output = _output_path(state_output, result_dir)
         self.manifest = _output_path(manifest, result_dir)
+        self.min_support = _min_support(min_support)
+        self.support_measure = _postprocess_bool(support_measure, "support_measure")
         self.model_gradient = _postprocess_bool(model_gradient, "model_gradient")
         self.cache_receiver_state = _postprocess_bool(
             cache_receiver_state, "cache_receiver_state"
@@ -1064,6 +1087,13 @@ class FWIOperatorJob(_ImagingJobBase):
         if has_extension and action not in _STATE_ACTIONS:
             raise ValueError(
                 "extension supports linearize, jvp, vjp, normal and solve only"
+            )
+        if (
+            self.min_support is not None or self.support_measure
+        ) and action not in _STATE_ACTIONS:
+            raise ValueError(
+                "min_support and support_measure apply to fwi_operator.controls "
+                "of linearize, jvp, vjp, normal and solve only"
             )
         if has_extension and self._uses_control_sensitivities():
             raise ValueError(
@@ -1409,6 +1439,10 @@ class FWIOperatorJob(_ImagingJobBase):
                 controls["state_output"] = _job_path(self.state_output, ctx, False)
             if self.manifest is not None:
                 controls["manifest"] = _job_path(self.manifest, ctx, False)
+            if self.min_support is not None:
+                controls["min_support"] = self.min_support
+            if self.support_measure:
+                controls["support_measure"] = True
             op["controls"] = controls
         if self.action == "wri":
             op["model_covector"] = _job_path(self.covector, ctx, False)
@@ -1549,6 +1583,8 @@ class FWIOperatorJob(_ImagingJobBase):
             control_state=resolve(controls.get("state")),
             state_output=resolve(controls.get("state_output")),
             manifest=resolve(controls.get("manifest")),
+            min_support=controls.get("min_support"),
+            support_measure=bool(controls.get("support_measure", False)),
             model_gradient=bool(op.get("model_gradient", False)),
             cache_receiver_state=bool(op.get("cache_receiver_state", True)),
             source_controls=op.get("source_controls"),
@@ -2516,21 +2552,24 @@ class SmoothJob(_ImagingJobBase):
     submission (``postprocess_only=True``): no frequency tasks are executed.
 
     ``input_vector`` smooths one explicit control vector instead of the source
-    job's parts: the vector is rewritten as a one-part native
-    ``<gradient>_1.h5`` file and ``f_list`` collapses to one frequency, the
-    workaround for the missing explicit-input ``smooth`` action.
+    job's parts through ``control_sensitivities.input``: Sauce copies that file
+    to ``raw_gradient``, writes the smoothed ``gradient`` and ignores
+    ``weights`` and the scalar objective parts. ``f_list`` stays the source
+    job's list because Sauce scales wavelength-relative smoothing by its
+    largest frequency. A :class:`ControlVectorFile` is written once in native
+    layout to ``<gradient>_input.h5``; a path is used in place (native
+    ``/controls/<id>`` or joint ``/controls/model.<id>`` layouts). Blocks
+    outside ``model.*`` are left out of ``active`` and ignored by Sauce.
 
     Args:
         source_job: :class:`FWIOperatorJob`, :class:`ControlGradientJob` or
             :class:`ImageKernelJob` whose parts are smoothed.
         smoothing: :class:`SmoothingConfig` or Sauce smoothing mapping.
-        weights: Optional per-frequency weights.
+        weights: Optional per-frequency weights (parts aggregation only).
         input_vector: Optional ``fs-control-vector-1`` (or native) file or
             :class:`ControlVectorFile` to smooth on its own.
         gradient: Output path for the smoothed vector when ``input_vector`` is
             given (default ``<results>/smoothed.h5``).
-        frequency: Reference frequency for the one-part smooth (default: the
-            largest real frequency of the source job).
         name: Job name (default ``<source name>_smooth``).
     """
 
@@ -2545,7 +2584,6 @@ class SmoothJob(_ImagingJobBase):
         weights: Optional[Sequence[float]] = None,
         input_vector: Optional[Union[str, Path, ControlVectorFile]] = None,
         gradient: Optional[Union[str, Path]] = None,
-        frequency: Optional[Union[float, complex]] = None,
         name: Optional[str] = None,
     ) -> None:
         if isinstance(source_job, ImageKernelJob):
@@ -2569,21 +2607,15 @@ class SmoothJob(_ImagingJobBase):
                 )
         if input_vector is not None and mode != "control":
             raise ValueError("input_vector smoothing applies to control vectors only")
-        if input_vector is not None:
-            reference = frequency
-            if reference is None:
-                reals = [abs(float(np.real(f))) for f in source_job.f_list]
-                reference = source_job.f_list[int(np.argmax(reals))]
-            f_list = [reference]
-        else:
-            if frequency is not None:
-                raise ValueError("frequency is only used with input_vector")
-            f_list = list(source_job.f_list)
+        if input_vector is not None and weights is not None:
+            raise ValueError(
+                "weights are ignored when input_vector is given; omit them"
+            )
         super().__init__(
             name or f"{source_job.name}_smooth",
             source_job.simulation,
             source_job.workflow,
-            _normalized_frequencies(f_list),
+            _normalized_frequencies(list(source_job.f_list)),
             source_job.outputs,
             k_list=source_job.k_list,
             k_weights=source_job.k_weights,
@@ -2612,25 +2644,34 @@ class SmoothJob(_ImagingJobBase):
             raise ValueError("gradient is only used with input_vector")
 
     def _stage_input_vector(self, vector: Union[str, Path, ControlVectorFile]) -> Path:
-        """Write ``<gradient>_1.h5`` in native layout and return the source path."""
+        """Return the ``control_sensitivities.input`` path, writing it if needed.
 
+        A :class:`ControlVectorFile` is written once, in native layout, to
+        ``<gradient>_input.h5`` under the result directory. A path is read to
+        derive ``active`` and otherwise used as-is.
+        """
+
+        assert self.gradient is not None
         if isinstance(vector, ControlVectorFile):
             source = vector
-            source_path = self.gradient_file(1)
+            source_path = self.gradient.with_name(
+                f"{self.gradient.stem}_input{self.gradient.suffix}"
+            )
         else:
             source_path = Path(vector)
             if not source_path.is_absolute():
                 source_path = _input_path(source_path, self.simulation)
             source = ControlVectorFile.read(source_path)
-        native = ControlVectorFile(
-            {
-                unqualified_block_name(name): values
-                for name, values in source.blocks.items()
-            },
-            native=True,
-        )
-        self.control_active = list(native.names)
-        native.write(self.gradient_file(1))
+        model_blocks = {
+            unqualified_block_name(name): values
+            for name, values in source.blocks.items()
+            if source.native or name.startswith("model.")
+        }
+        if not model_blocks:
+            raise ValueError("input_vector has no model.* control blocks to smooth")
+        self.control_active = list(model_blocks)
+        if isinstance(vector, ControlVectorFile):
+            ControlVectorFile(model_blocks, native=True).write(source_path)
         return source_path
 
     # -- output paths ---------------------------------------------------------
@@ -2640,11 +2681,9 @@ class SmoothJob(_ImagingJobBase):
 
         if self.gradient is not None:
             stem = self.gradient
-            if raw:
-                if task is not None:
-                    raise ValueError("raw aggregate gradients do not have task parts")
-                return _raw_path(stem)
-            return _task_path(stem, task)
+            if task is not None:
+                raise ValueError("an explicit input vector has no task parts")
+            return _raw_path(stem) if raw else stem
         source = self.source_job
         if isinstance(source, FWIOperatorJob):
             return source.covector_file(task, raw=raw)
@@ -2660,10 +2699,12 @@ class SmoothJob(_ImagingJobBase):
         return True
 
     def postprocess_file(self, part: Optional[int] = None) -> Path:
-        """Return the aggregate or one task-local input part."""
+        """Return the aggregate, one task-local input part, or the explicit input."""
 
         if self.mode == "image":
             return self.source_job.postprocess_file(part)
+        if part is not None and self.input_vector is not None:
+            return self.input_vector
         return self.gradient_file(part)
 
     def postprocess_fetch_files(self) -> List[Path]:
@@ -2681,10 +2722,12 @@ class SmoothJob(_ImagingJobBase):
         return self.gradient_file().is_file()
 
     def postprocess_part_outputs_exist(self) -> bool:
-        """Return whether every input part exists locally."""
+        """Return whether the explicit input or every input part exists locally."""
 
         if self.mode == "image":
             return self.source_job.postprocess_part_outputs_exist()
+        if self.input_vector is not None:
+            return self.input_vector.is_file()
         return all(
             self.gradient_file(part).is_file() for part in range(1, self.n_tasks + 1)
         )
@@ -2725,12 +2768,11 @@ class SmoothJob(_ImagingJobBase):
             if self.weights is not None:
                 sensitivities["weights"] = list(self.weights)
             if self.gradient is not None:
+                sensitivities["input"] = _job_path(self.input_vector, ctx, False)
                 sensitivities["gradient"] = _job_path(self.gradient, ctx, False)
                 sensitivities.pop("raw_gradient", None)
+                sensitivities.pop("weights", None)
                 sensitivities["active"] = list(self.control_active or [])
-                payload["smooth_input_vector"] = _job_path(
-                    self.input_vector, ctx, False
-                )
             elif "gradient" not in sensitivities:
                 sensitivities["gradient"] = _job_path(self.gradient_file(), ctx, False)
         return payload
@@ -2773,8 +2815,8 @@ class SmoothJob(_ImagingJobBase):
         else:
             sensitivities = data.get("control_sensitivities") or {}
             smoothing = sensitivities.get("Smoothing")
-            weights = sensitivities.get("weights")
-            input_vector = data.get("smooth_input_vector")
+            input_vector = sensitivities.get("input")
+            weights = None if input_vector is not None else sensitivities.get("weights")
             gradient = (
                 sensitivities.get("gradient") if input_vector is not None else None
             )
@@ -2789,14 +2831,12 @@ class SmoothJob(_ImagingJobBase):
                 source_project=source_project,
             )
 
-        frequencies = cls._decode_frequencies(data["f_list"])
         job = cls(
             source,
             smoothing=smoothing,
             weights=weights,
             input_vector=resolve(input_vector),
             gradient=resolve(gradient),
-            frequency=frequencies[0] if input_vector is not None else None,
             name=data["name"],
         )
         cls._finish_load(job, data)

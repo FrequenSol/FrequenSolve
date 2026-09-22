@@ -808,7 +808,7 @@ from frequensolve.model.parameterization import (  # noqa: E402
 from frequensolve.units import Q_  # noqa: E402
 
 _CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-83c7f06" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-320696f" / "trunk" / "contracts"
 )
 _MATERIAL_SCHEMA = _CONTRACT_ROOT / "inputs" / "fs-material-model-1" / "schema.json"
 

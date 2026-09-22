@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import h5py
 import numpy as np
@@ -196,6 +196,102 @@ def unpack_support_mask(packed: Any, size: int) -> np.ndarray:
     return np.unpackbits(data, bitorder="little")[:size].astype(bool)
 
 
+def _normalize_support(
+    blocks: Mapping[str, np.ndarray],
+    support: Mapping[str, Any],
+    measure: Mapping[str, Any],
+    key_of: Callable[[str], str],
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """Validate per-block support masks and quantized measures against ``blocks``."""
+
+    masks: Dict[str, np.ndarray] = {}
+    for name, mask in dict(support).items():
+        key = key_of(name)
+        if key not in blocks:
+            raise ValueError(f"support mask names unknown block {key!r}")
+        flags = np.asarray(mask).reshape(-1).astype(bool)
+        if flags.size != blocks[key].size:
+            raise ValueError(f"support mask for {key!r} must have one flag per DOF")
+        masks[key] = flags
+    measures: Dict[str, np.ndarray] = {}
+    for name, values in dict(measure).items():
+        key = key_of(name)
+        if key not in blocks:
+            raise ValueError(f"support measure names unknown block {key!r}")
+        quantized = np.asarray(values)
+        if quantized.dtype != np.uint8:
+            if np.any(quantized < 0) or np.any(quantized > 255):
+                raise ValueError("support measures must fit in uint8")
+            quantized = quantized.astype(np.uint8)
+        quantized = quantized.reshape(-1)
+        if quantized.size != blocks[key].size:
+            raise ValueError(f"support measure for {key!r} must have one byte per DOF")
+        measures[key] = quantized
+    return masks, measures
+
+
+def _normalize_min_support(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    threshold = float(value)
+    if not np.isfinite(threshold) or threshold < 0.0:
+        raise ValueError("support_min_support must be a finite non-negative number")
+    return threshold
+
+
+def _write_support_datasets(
+    h5: h5py.File,
+    support: Mapping[str, np.ndarray],
+    measure: Mapping[str, np.ndarray],
+    min_support: Optional[float],
+) -> None:
+    """Write ``/support``, ``/support_measure`` and ``/support_min_support``."""
+
+    if support:
+        group = h5.create_group("support")
+        for name, mask in support.items():
+            group.create_dataset(name, data=pack_support_mask(mask), dtype=np.uint8)
+    if measure:
+        group = h5.create_group("support_measure")
+        for name, values in measure.items():
+            group.create_dataset(name, data=values, dtype=np.uint8)
+    if min_support is not None:
+        h5.create_dataset(
+            "support_min_support", data=float(min_support), dtype=np.float64
+        )
+
+
+def _read_support_datasets(
+    h5: h5py.File, blocks: Mapping[str, np.ndarray], path: Union[str, Path]
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Optional[float]]:
+    """Decode the optional support datasets written next to ``/controls``."""
+
+    support: Dict[str, np.ndarray] = {}
+    if "support" in h5:
+        for name in h5["support"]:
+            key = str(name)
+            if key not in blocks:
+                raise ValueError(f"{path}: /support/{key} has no /controls block")
+            support[key] = unpack_support_mask(
+                h5["support"][name][()], blocks[key].size
+            )
+    measure: Dict[str, np.ndarray] = {}
+    if "support_measure" in h5:
+        for name in h5["support_measure"]:
+            key = str(name)
+            if key not in blocks:
+                raise ValueError(
+                    f"{path}: /support_measure/{key} has no /controls block"
+                )
+            measure[key] = np.asarray(
+                h5["support_measure"][name][()], dtype=np.uint8
+            ).reshape(-1)
+    min_support = None
+    if "support_min_support" in h5:
+        min_support = float(np.asarray(h5["support_min_support"][()]).reshape(-1)[0])
+    return support, measure, min_support
+
+
 # ---------------------------------------------------------------------------
 # Control vectors and states
 # ---------------------------------------------------------------------------
@@ -215,25 +311,40 @@ class ControlVectorFile:
             registry. Required unless ``native`` is true.
         native: When true, write the legacy ``control_sensitivities`` layout:
             unqualified ``/controls/<id>`` datasets and no identity strings.
+        support: Optional ``block -> bool mask`` of supported DOFs, as written
+            by ``linearize``/``vjp``/``normal`` covectors to ``/support/<block>``
+            (LSB-first packed bits, eight DOFs per byte). Missing blocks are
+            treated as fully supported.
+        support_measure: Optional ``block -> uint8`` quantized derivative
+            measure (``/support_measure/<block>``).
+        support_min_support: Optional relative support threshold the writer
+            used (``/support_min_support``).
     """
 
     blocks: Dict[str, np.ndarray]
     state_fingerprint: Optional[str] = None
     control_registry_fingerprint: Optional[str] = None
     native: bool = False
+    support: Dict[str, np.ndarray] = field(default_factory=dict)
+    support_measure: Dict[str, np.ndarray] = field(default_factory=dict)
+    support_min_support: Optional[float] = None
+
+    def _block_key(self, name: str) -> str:
+        key = _validate_block_name(name)
+        return unqualified_block_name(key) if self.native else qualified_block_name(key)
 
     def __post_init__(self) -> None:
         ordered: Dict[str, np.ndarray] = {}
         for name, values in dict(self.blocks).items():
-            key = _validate_block_name(name)
-            if self.native:
-                key = unqualified_block_name(key)
-            else:
-                key = qualified_block_name(key)
+            key = self._block_key(name)
             if key in ordered:
                 raise ValueError(f"duplicate control block {key!r}")
             ordered[key] = _real_vector(_interleave(values), f"block {key!r}")
         self.blocks = ordered
+        self.support, self.support_measure = _normalize_support(
+            self.blocks, self.support, self.support_measure, self._block_key
+        )
+        self.support_min_support = _normalize_min_support(self.support_min_support)
         if not self.native:
             for label in ("state_fingerprint", "control_registry_fingerprint"):
                 value = getattr(self, label)
@@ -269,6 +380,14 @@ class ControlVectorFile:
             if candidate in self.blocks:
                 return self.blocks[candidate]
         raise KeyError(name)
+
+    def support_mask(self, name: str) -> np.ndarray:
+        """Return the boolean support mask for ``name`` (all true when absent)."""
+
+        key = self._block_key(name)
+        if key in self.support:
+            return self.support[key]
+        return np.ones(self[name].size, dtype=bool)
 
     def pack(self, order: Optional[Sequence[str]] = None) -> np.ndarray:
         """Concatenate blocks in ``order`` (default: stored order)."""
@@ -340,6 +459,9 @@ class ControlVectorFile:
                     "control_registry_fingerprint",
                     str(self.control_registry_fingerprint),
                 )
+            _write_support_datasets(
+                h5, self.support, self.support_measure, self.support_min_support
+            )
         return path
 
     @classmethod
@@ -369,6 +491,7 @@ class ControlVectorFile:
                     f"{path} carries schema {schema!r}; not a native vector"
                 )
             blocks = _read_control_blocks(h5, path)
+            support, measure, min_support = _read_support_datasets(h5, blocks, path)
             return cls(
                 blocks,
                 state_fingerprint=(
@@ -378,6 +501,9 @@ class ControlVectorFile:
                     None if native else _read_string(h5, "control_registry_fingerprint")
                 ),
                 native=native,
+                support=support,
+                support_measure=measure,
+                support_min_support=min_support,
             )
 
 
@@ -407,11 +533,14 @@ class ControlStateFile:
             byte); missing blocks are treated as fully supported.
         support_measure: Optional ``block -> uint8`` quantized derivative
             measure written to ``/support_measure/<block>``.
+        support_min_support: Optional relative support threshold the writer
+            used (``/support_min_support``).
     """
 
     blocks: Dict[str, np.ndarray]
     support: Dict[str, np.ndarray] = field(default_factory=dict)
     support_measure: Dict[str, np.ndarray] = field(default_factory=dict)
+    support_min_support: Optional[float] = None
 
     def __post_init__(self) -> None:
         ordered: Dict[str, np.ndarray] = {}
@@ -421,33 +550,10 @@ class ControlStateFile:
                 raise ValueError(f"duplicate control block {key!r}")
             ordered[key] = _real_vector(_interleave(values), f"block {key!r}")
         self.blocks = ordered
-        support: Dict[str, np.ndarray] = {}
-        for name, mask in dict(self.support).items():
-            key = qualified_block_name(name)
-            if key not in self.blocks:
-                raise ValueError(f"support mask names unknown block {key!r}")
-            flags = np.asarray(mask).reshape(-1).astype(bool)
-            if flags.size != self.blocks[key].size:
-                raise ValueError(f"support mask for {key!r} must have one flag per DOF")
-            support[key] = flags
-        self.support = support
-        measure: Dict[str, np.ndarray] = {}
-        for name, values in dict(self.support_measure).items():
-            key = qualified_block_name(name)
-            if key not in self.blocks:
-                raise ValueError(f"support measure names unknown block {key!r}")
-            quantized = np.asarray(values)
-            if quantized.dtype != np.uint8:
-                if np.any(quantized < 0) or np.any(quantized > 255):
-                    raise ValueError("support measures must fit in uint8")
-                quantized = quantized.astype(np.uint8)
-            quantized = quantized.reshape(-1)
-            if quantized.size != self.blocks[key].size:
-                raise ValueError(
-                    f"support measure for {key!r} must have one byte per DOF"
-                )
-            measure[key] = quantized
-        self.support_measure = measure
+        self.support, self.support_measure = _normalize_support(
+            self.blocks, self.support, self.support_measure, qualified_block_name
+        )
+        self.support_min_support = _normalize_min_support(self.support_min_support)
 
     @property
     def names(self) -> Tuple[str, ...]:
@@ -473,10 +579,21 @@ class ControlStateFile:
         return np.ones(self.blocks[key].size, dtype=bool)
 
     def restrict(self, names: Sequence[str]) -> ControlVectorFile:
-        """Return the active-subspace slice as an (unbound) control vector."""
+        """Return the active-subspace slice as an (unbound) control vector.
 
+        Support masks and measures of the selected blocks travel with it.
+        """
+
+        keys = [qualified_block_name(name) for name in names]
         return ControlVectorFile(
-            {qualified_block_name(name): self[name] for name in names}
+            {key: self[key] for key in keys},
+            support={key: self.support[key] for key in keys if key in self.support},
+            support_measure={
+                key: self.support_measure[key]
+                for key in keys
+                if key in self.support_measure
+            },
+            support_min_support=self.support_min_support,
         )
 
     def with_update(self, vector: ControlVectorFile) -> "ControlStateFile":
@@ -494,6 +611,7 @@ class ControlStateFile:
             blocks,
             support=dict(self.support),
             support_measure=dict(self.support_measure),
+            support_min_support=self.support_min_support,
         )
 
     def write(self, path: Union[str, Path]) -> Path:
@@ -507,16 +625,9 @@ class ControlStateFile:
             controls = h5.create_group("controls")
             for name, values in self.blocks.items():
                 controls.create_dataset(name, data=values, dtype=np.float64)
-            if self.support:
-                group = h5.create_group("support")
-                for name, mask in self.support.items():
-                    group.create_dataset(
-                        name, data=pack_support_mask(mask), dtype=np.uint8
-                    )
-            if self.support_measure:
-                group = h5.create_group("support_measure")
-                for name, values in self.support_measure.items():
-                    group.create_dataset(name, data=values, dtype=np.uint8)
+            _write_support_datasets(
+                h5, self.support, self.support_measure, self.support_min_support
+            )
         return path
 
     @classmethod
@@ -533,29 +644,13 @@ class ControlStateFile:
             if packing != REAL_INTERLEAVED:
                 raise ValueError(f"{path} has unsupported packing {packing!r}")
             blocks = _read_control_blocks(h5, path)
-            support: Dict[str, np.ndarray] = {}
-            if "support" in h5:
-                for name in h5["support"]:
-                    key = str(name)
-                    if key not in blocks:
-                        raise ValueError(
-                            f"{path}: /support/{key} has no /controls block"
-                        )
-                    support[key] = unpack_support_mask(
-                        h5["support"][name][()], blocks[key].size
-                    )
-            measure: Dict[str, np.ndarray] = {}
-            if "support_measure" in h5:
-                for name in h5["support_measure"]:
-                    key = str(name)
-                    if key not in blocks:
-                        raise ValueError(
-                            f"{path}: /support_measure/{key} has no /controls block"
-                        )
-                    measure[key] = np.asarray(
-                        h5["support_measure"][name][()], dtype=np.uint8
-                    ).reshape(-1)
-        return cls(blocks, support=support, support_measure=measure)
+            support, measure, min_support = _read_support_datasets(h5, blocks, path)
+        return cls(
+            blocks,
+            support=support,
+            support_measure=measure,
+            support_min_support=min_support,
+        )
 
 
 # ---------------------------------------------------------------------------

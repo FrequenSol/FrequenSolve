@@ -27,7 +27,7 @@ from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.simulation import SeismicSimulation
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-83c7f06" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-320696f" / "trunk" / "contracts"
 )
 OBJECTIVE_VECTOR_SCHEMA = (
     CONTRACT_ROOT / "outputs" / "fs-objective-vector-3" / "schema.json"

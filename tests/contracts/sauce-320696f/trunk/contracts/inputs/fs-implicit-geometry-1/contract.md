@@ -16,6 +16,10 @@ then bind signed surface ids into pure evaluators for curves and rectangles.
 - `surfaces` is an ordered list. Runtime ids are 1-based list indices. A
   nonempty `name` gives a stable reference that is preferred in new input.
 - Each surface object must have `_type`.
+- Inside a `LayeredModel`, implicit surfaces share `Model/surfaces` with the
+  graph horizons. Ids remain list positions (a fracture takes two), while
+  horizon numbering skips entries that carry no `depth`; see the
+  `fs-material-model-1` layered surface contract.
 - When a GMP mesh is supplied, its declared `Plane` and `Cylinder` surface
   records are appended after the JSON `surfaces` list in active surface order.
 - Signed numeric references use the integer id sign: positive means the stored

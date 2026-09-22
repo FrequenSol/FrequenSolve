@@ -284,6 +284,10 @@
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
           "description": "HDF5 destination for the frequency-aggregated control gradient produced after the RTM VJP tasks. Task i writes a sibling path with suffix _i."
         },
+        "input": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Optional explicit control vector for the smooth postprocess: a native /controls/<block> file or an fs-control-vector-1 joint covector with qualified /controls/model.<block> datasets. When present, the postprocess smooths this vector instead of aggregating the per-task gradient parts; weights and scalar objective aggregation are ignored. Blocks outside active are ignored."
+        },
         "objective": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
           "description": "Optional HDF5 destination for the scalar objective evaluated by the same RTM forward/adjoint task. Task i writes a sibling path with suffix _i and postprocessing applies the control-sensitivity frequency weights."
@@ -626,6 +630,17 @@
             "state_output": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
               "description": "Complete fs-control-state-1 HDF5 output baseline; exact ResultPath-relative filename without task suffix."
+            },
+            "min_support": {
+              "type": "number",
+              "minimum": 0,
+              "default": 0.01,
+              "description": "Relative support threshold: a DOF whose baseline measure sum_q w_q |dm/dc_i| is below min_support times the block's median nonzero measure is unsupported in /support/<block> of state_output and covector files."
+            },
+            "support_measure": {
+              "type": "boolean",
+              "default": false,
+              "description": "Also write /support_measure/<block>: uint8 round(255 s_i / max_i s_i) per DOF for diagnostics."
             }
           },
           "additionalProperties": false,

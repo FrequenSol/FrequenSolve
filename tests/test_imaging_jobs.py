@@ -24,7 +24,7 @@ from frequensolve.simulation.jobs import BaseJob
 from frequensolve.simulation.simulation import SeismicSimulation
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-83c7f06" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-320696f" / "trunk" / "contracts"
 )
 JOB_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-job-1" / "schema.json"
 JOB_EXAMPLES = CONTRACT_ROOT / "inputs" / "fs-job-1" / "examples"
@@ -618,6 +618,85 @@ def test_fwi_smoothing_binds_the_smooth_postprocess_to_covector_parts(tmp_path):
             state="s.json",
             covector="c.h5",
             smoothing={"type": "tv"},
+        )
+
+
+def test_fwi_support_keys_are_emitted_under_controls_only_when_set(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    plain = FWIOperatorJob(
+        "lin", sim, [2.0], action="linearize", active=["model.vp"], state="s.json"
+    )
+    plain_payload = _assert_valid(plain.to_fs())
+    assert "min_support" not in plain_payload["fwi_operator"]["controls"]
+    assert "support_measure" not in plain_payload["fwi_operator"]["controls"]
+
+    job = FWIOperatorJob(
+        "lin",
+        sim,
+        [2.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="c.h5",
+        state_output="state.h5",
+        min_support=0.05,
+        support_measure=True,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["controls"] == {
+        "active": ["model.vp"],
+        "state_output": str(job.state_output),
+        "min_support": 0.05,
+        "support_measure": True,
+    }
+    assert job._input_fingerprint_payload() == plain._input_fingerprint_payload()
+    loaded = _round_trip(job)
+    assert loaded.min_support == 0.05
+    assert loaded.support_measure is True
+
+    threshold_only = FWIOperatorJob(
+        "vjp",
+        sim,
+        [2.0],
+        action="vjp",
+        active=["model.vp"],
+        state="s.json",
+        covector="c.h5",
+        objective_vector="dual.h5",
+        min_support=0.0,
+    )
+    controls = _assert_valid(threshold_only.to_fs())["fwi_operator"]["controls"]
+    assert controls["min_support"] == 0.0
+    assert "support_measure" not in controls
+
+    with pytest.raises(ValueError, match="non-negative"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [2.0],
+            action="linearize",
+            active=[],
+            state="s.json",
+            min_support=-1.0,
+        )
+    with pytest.raises(TypeError, match="must be a number"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [2.0],
+            action="linearize",
+            active=[],
+            state="s.json",
+            min_support=True,
+        )
+    with pytest.raises(ValueError, match="fwi_operator.controls"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [2.0],
+            action="calibrate",
+            balance="b.json",
+            support_measure=True,
         )
 
 
@@ -1863,19 +1942,21 @@ def test_smooth_job_wraps_cartesian_images(tmp_path):
         SmoothJob(source, smoothing={"type": "tv"}, input_vector=tmp_path / "v.h5")
 
 
-def test_smooth_job_input_vector_writes_one_native_part(tmp_path):
+def test_smooth_job_input_vector_uses_control_sensitivities_input(tmp_path):
     sim = _saved_simulation(tmp_path)
     source = FWIOperatorJob(
         "lin",
         sim,
         [2.0, 6.0 - 0.5j],
         action="linearize",
-        active=["model.vp", "model.rho"],
+        active=["model.vp", "model.rho", "source.1.position"],
         state="s.json",
         covector="gradient.h5",
     )
+    # A joint covector path is used in place; non-model blocks are left out
+    # of ``active`` and ignored by Sauce.
     vector = ControlVectorFile(
-        {"model.vp": [1.0, 2.0], "model.rho": [3.0]},
+        {"model.vp": [1.0, 2.0], "model.rho": [3.0], "source.1.position": [4.0, 5.0]},
         state_fingerprint="s",
         control_registry_fingerprint="r",
     ).write(tmp_path / "covector.h5")
@@ -1885,42 +1966,79 @@ def test_smooth_job_input_vector_writes_one_native_part(tmp_path):
         input_vector=vector,
         gradient="smoothed.h5",
     )
-    assert smooth.f_list == [6.0 - 0.5j]
+    assert smooth.f_list == source.f_list
+    assert smooth.input_vector == vector
     assert smooth.gradient == smooth._result_path / "smoothed.h5"
-    part = smooth.gradient_file(1)
-    assert part == smooth._result_path / "smoothed_1.h5"
-    native = ControlVectorFile.read(part)
-    assert native.native is True
-    assert native.names == ("rho", "vp")
-    np.testing.assert_array_equal(native["vp"], [1.0, 2.0])
+    assert smooth.control_active == ["rho", "vp"]
+    assert not (smooth._result_path / "smoothed_1.h5").exists()
+    assert smooth.gradient_file() == smooth.gradient
+    assert smooth.gradient_file(raw=True) == smooth._result_path / "smoothed_raw.h5"
+    with pytest.raises(ValueError, match="no task parts"):
+        smooth.gradient_file(1)
+    assert smooth.postprocess_file() == smooth.gradient
+    assert smooth.postprocess_file(1) == vector
+    assert smooth.postprocess_file(2) == vector
     assert smooth.postprocess_part_outputs_exist()
     assert smooth.needs_postprocess()
+    assert smooth.postprocess_fetch_files() == [
+        smooth.gradient_file(raw=True),
+        smooth.gradient,
+    ]
 
     payload = _assert_valid(smooth.to_fs())
-    assert payload["f_list"] == [[6.0, -0.5]]
-    assert payload["control_sensitivities"]["gradient"] == str(smooth.gradient)
-    assert payload["control_sensitivities"]["active"] == ["rho", "vp"]
-    assert payload["smooth_input_vector"] == str(vector)
+    assert payload["f_list"] == [[2.0, 0.0], [6.0, -0.5]]
+    assert payload["fwi_operator"]["controls"]["active"] == [
+        "model.vp",
+        "model.rho",
+        "source.1.position",
+    ]
+    assert payload["control_sensitivities"] == {
+        "input": str(vector),
+        "gradient": str(smooth.gradient),
+        "active": ["rho", "vp"],
+        "Smoothing": SmoothingConfig(kind="tv").to_control_fs(),
+    }
+    assert "smooth_input_vector" not in payload
     assert smooth._input_fingerprint_payload()["input_vector"]["kind"] == "file"
 
     loaded = _round_trip(smooth)
     assert loaded.input_vector == vector
     assert loaded.gradient == smooth.gradient
-    assert loaded.f_list == [6.0 - 0.5j]
+    assert loaded.f_list == source.f_list
+    assert loaded.weights is None
 
+    # An in-memory vector is written once, natively, next to the gradient.
     explicit = SmoothJob(
         source,
         smoothing={"type": "tv"},
-        frequency=2.0,
         name="custom",
-        input_vector=ControlVectorFile({"vp": [1.0, 2.0]}, native=True),
+        input_vector=ControlVectorFile(
+            {"model.vp": [1.0, 2.0]},
+            state_fingerprint="s",
+            control_registry_fingerprint="r",
+        ),
     )
-    assert explicit.f_list == [2.0]
     assert explicit.name == "custom"
-    assert explicit.gradient_file(1).name == "smoothed_1.h5"
+    assert explicit.gradient == explicit._result_path / "smoothed.h5"
+    assert explicit.input_vector == explicit._result_path / "smoothed_input.h5"
+    native = ControlVectorFile.read(explicit.input_vector)
+    assert native.native is True
+    assert native.names == ("vp",)
+    np.testing.assert_array_equal(native["vp"], [1.0, 2.0])
+    explicit_payload = _assert_valid(explicit.to_fs())
+    assert explicit_payload["control_sensitivities"]["input"] == str(
+        explicit.input_vector
+    )
+    assert explicit_payload["control_sensitivities"]["active"] == ["vp"]
+    assert explicit.postprocess_part_outputs_exist()
+
+    with pytest.raises(ValueError, match="ignored when input_vector"):
+        SmoothJob(
+            source, smoothing={"type": "tv"}, input_vector=vector, weights=[1.0, 1.0]
+        )
     with pytest.raises(ValueError, match="only used with input_vector"):
-        SmoothJob(source, smoothing={"type": "tv"}, frequency=2.0)
-    with pytest.raises(ValueError, match="no unqualified"):
+        SmoothJob(source, smoothing={"type": "tv"}, gradient="g.h5")
+    with pytest.raises(ValueError, match="no model"):
         SmoothJob(
             source,
             smoothing={"type": "tv"},

@@ -2343,7 +2343,7 @@
     },
     "surfaces": {
       "type": "array",
-      "description": "Named implicit surfaces for geometry queries or ordered graph surfaces for layered generation. Fractures expand to top and bottom graph surfaces wherever gap is positive.",
+      "description": "Named implicit surfaces for geometry queries and/or ordered graph surfaces for layered generation; a LayeredModel may mix both, and implicit entries without depth are not horizons. Fractures expand to top and bottom graph surfaces wherever gap is positive.",
       "items": {
         "oneOf": [
           {

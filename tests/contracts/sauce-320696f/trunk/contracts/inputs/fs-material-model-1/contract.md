@@ -75,6 +75,18 @@ reserved for the fracture interval and is not consumed by the ordinary formation
 layer sequence. If `mesh_block_id` is omitted, the opened fracture interval is
 assigned by ordinary layered formation order for compatibility.
 
+A `LayeredModel` surfaces list may also carry implicit-only entries from
+`fs-implicit-geometry-1` (`rbf`, `rbf_level_set`, `plane`, `sphere`, Boolean
+expressions, ...). An entry without `depth` whose `_type` is not `elevation` or
+`fracture` is not a horizon: formation order, `surface_N` aliases, `interface`,
+layer assignment, PML handling, and guided-adaptivity surface ids count graph
+surfaces only. The implicit registry still numbers every entry by list position,
+so blends, `regions`, and coordinate systems resolve the entry by `name` or
+signed id, and an `rbf_level_set` `control` publishes `model.<id>` inside the
+layered model. See [layered rbf control](examples/layered-rbf-control.json).
+The 3D layered generator requires implicit-only entries to follow every graph
+surface.
+
 ## Multi-region Geometry Contract
 
 `Model/regions` is the opt-in material-volume arrangement used by geometry
@@ -93,8 +105,9 @@ region are exterior. Region expressions used for bounded-domain workflows must
 be bounded.
 
 For this opt-in path, `Model/surfaces` may contain named primitives and
-Boolean expressions from `fs-implicit-geometry-1`. The existing graph-surface
-form remains the `LayeredMeshGenerator` compatibility contract.
+Boolean expressions from `fs-implicit-geometry-1`. The graph-surface form
+remains the `LayeredMeshGenerator` contract; a layered model may mix both kinds
+in one list as described above.
 
 Fracture surfaces may override global Krauklis controls with
 `adapt/krauklis`. The compact normal fields are `normal/h0`,
@@ -842,6 +855,8 @@ creates a jump to the reference property outside the box. Grid geometry and
 coordinate transforms must stay fixed during material differentiation.
 
 Control identities include axis order, knot geometry and resolved coordinate
-frames. Tensor hat maps support identity regularization; native variational
-Tikhonov/TV/TGV smoothing is rejected. Supply coefficient-space priors through
-the inversion workflow until multidimensional variational smoothing is added.
+frames. Tensor hat maps support identity regularization and native variational
+Tikhonov/TV/TGV smoothing with `derivative_order: 1` through
+`control_sensitivities.Smoothing`, using the same lambda/alpha, epsilon,
+iterations and `input_role` semantics as 1D hat blocks; `derivative_order: 2`
+is rejected because the multilinear basis has no second derivative.

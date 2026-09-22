@@ -23,7 +23,7 @@ from frequensolve.imaging._artifacts import (
 )
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-83c7f06" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-320696f" / "trunk" / "contracts"
 )
 
 
@@ -127,6 +127,64 @@ def test_control_vector_file_requires_identity_unless_native(tmp_path):
         ControlVectorFile.read(tmp_path / "typed.h5", native=True)
 
 
+def test_control_vector_file_round_trips_covector_support_datasets(tmp_path):
+    covector = ControlVectorFile(
+        {"model.vp": np.arange(10.0), "source.1.position": [1.5, 2.5]},
+        state_fingerprint="s",
+        control_registry_fingerprint="r",
+        support={"vp": [1, 0, 1, 1, 0, 0, 0, 0, 1, 0]},
+        support_measure={"model.vp": np.linspace(0, 255, 10).astype(np.uint8)},
+        support_min_support=0.01,
+    )
+    path = covector.write(tmp_path / "covector.h5")
+
+    with h5py.File(path, "r") as h5:
+        assert h5["support/model.vp"].dtype == np.uint8
+        np.testing.assert_array_equal(
+            h5["support/model.vp"][()], [0b00001101, 0b00000001]
+        )
+        assert h5["support_measure/model.vp"].dtype == np.uint8
+        assert h5["support_min_support"].dtype == np.float64
+        assert h5["support_min_support"].shape == ()
+        assert h5["support_min_support"][()] == 0.01
+        assert "support/source.1.position" not in h5
+
+    loaded = ControlVectorFile.read(path)
+    assert loaded.native is False
+    assert loaded.support_min_support == 0.01
+    assert set(loaded.support) == {"model.vp"}
+    np.testing.assert_array_equal(
+        loaded.support_mask("vp"), [1, 0, 1, 1, 0, 0, 0, 0, 1, 0]
+    )
+    np.testing.assert_array_equal(
+        loaded.support_mask("source.1.position"), [True, True]
+    )
+    assert loaded.support_measure["model.vp"][-1] == 255
+    assert loaded.support_measure["model.vp"][0] == 0
+
+    # Direction inputs carry no support datasets.
+    direction = ControlVectorFile.read(
+        ControlVectorFile(
+            {"model.vp": [1.0]}, state_fingerprint="s", control_registry_fingerprint="r"
+        ).write(tmp_path / "direction.h5")
+    )
+    assert direction.support == {}
+    assert direction.support_measure == {}
+    assert direction.support_min_support is None
+    np.testing.assert_array_equal(direction.support_mask("model.vp"), [True])
+
+    with pytest.raises(ValueError, match="unknown block"):
+        ControlVectorFile({"model.vp": [1.0]}, support={"rho": [True]})
+    with pytest.raises(ValueError, match="one flag per DOF"):
+        ControlVectorFile({"model.vp": [1.0, 2.0]}, support={"vp": [True]})
+    with pytest.raises(ValueError, match="non-negative"):
+        ControlVectorFile({"model.vp": [1.0]}, support_min_support=-0.5)
+    with h5py.File(path, "a") as h5:
+        h5.create_dataset("support/model.rho", data=np.zeros(1, dtype=np.uint8))
+    with pytest.raises(ValueError, match="no /controls block"):
+        ControlVectorFile.read(path)
+
+
 def test_control_vector_from_packed_uses_ordered_sizes():
     vector = ControlVectorFile.from_packed(
         [1.0, 2.0, 3.0, 4.0, 5.0],
@@ -166,6 +224,7 @@ def test_control_state_file_round_trips_blocks_support_and_measure(tmp_path):
         {"vp": np.arange(10.0), "source.1.position": [1.5, 2.5]},
         support={"model.vp": [1, 0, 1, 1, 0, 0, 0, 0, 1, 0]},
         support_measure={"model.vp": np.linspace(0, 255, 10).astype(np.uint8)},
+        support_min_support=0.02,
     )
     path = state.write(tmp_path / "state.h5")
 
@@ -177,10 +236,12 @@ def test_control_state_file_round_trips_blocks_support_and_measure(tmp_path):
             h5["support/model.vp"][()], [0b00001101, 0b00000001]
         )
         assert h5["support_measure/model.vp"].dtype == np.uint8
+        assert h5["support_min_support"][()] == 0.02
         assert "support/source.1.position" not in h5
 
     loaded = ControlStateFile.read(path)
     assert loaded.names == ("model.vp", "source.1.position")
+    assert loaded.support_min_support == 0.02
     np.testing.assert_array_equal(
         loaded.support_mask("vp"), [1, 0, 1, 1, 0, 0, 0, 0, 1, 0]
     )
@@ -192,11 +253,17 @@ def test_control_state_file_round_trips_blocks_support_and_measure(tmp_path):
 
     restricted = loaded.restrict(["source.1.position"])
     assert restricted.names == ("source.1.position",)
+    assert restricted.support == {}
+    assert restricted.support_min_support == 0.02
+    active = loaded.restrict(["vp"])
+    np.testing.assert_array_equal(active.support_mask("vp"), loaded.support_mask("vp"))
+    assert active.support_measure["model.vp"][-1] == 255
     updated = loaded.with_update(
         ControlVectorFile({"model.vp": np.zeros(10)}, native=False)
     )
     assert np.all(updated["vp"] == 0.0)
     np.testing.assert_array_equal(updated.support_mask("vp"), loaded.support_mask("vp"))
+    assert updated.support_min_support == 0.02
     with pytest.raises(ValueError, match="wrong size"):
         loaded.with_update(ControlVectorFile({"model.vp": [1.0]}))
 

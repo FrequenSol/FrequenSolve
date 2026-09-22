@@ -19,7 +19,7 @@ from frequensolve.model.implicit_geometry import (
 )
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-83c7f06" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-320696f" / "trunk" / "contracts"
 )
 IMPLICIT_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-implicit-geometry-1" / "schema.json"
 MATERIAL_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-material-model-1" / "schema.json"
@@ -245,6 +245,62 @@ def test_layered_model_exports_implicit_surfaces_after_graph_surfaces():
                 + [{**payload["surfaces"][2], "_type": "spline"}],
             }
         )
+
+
+def test_layered_model_rbf_control_surface_matches_pinned_layered_example():
+    example = json.loads(
+        (
+            CONTRACT_ROOT
+            / "inputs"
+            / "fs-material-model-1"
+            / "examples"
+            / "layered-rbf-control.json"
+        ).read_text()
+    )
+    _validator(MATERIAL_SCHEMA).validate(example)
+    example_surface = next(
+        entry for entry in example["surfaces"] if entry.get("_type") == "rbf_level_set"
+    )
+
+    model = LayeredModel(name="salt_control", dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(0.0, name="top")
+    model.add_layer(
+        name="water", physics="acoustic", properties={"vp": 1.5, "rho": 1.0}
+    )
+    model.add_surface(0.05, name="seabed")
+    model.add_layer(
+        name="sediment", physics="acoustic", properties={"vp": 1.9, "rho": 2.0}
+    )
+    model.add_surface(0.5, name="bottom")
+    model += RBFSurface(
+        name="salt",
+        support_radius=0.3,
+        bias=0.1,
+        centers=[[0.45, 0.39], [0.58, 0.39]],
+        coefficients=[-0.4, -0.3],
+        control={
+            "id": "salt_rbf",
+            "maximum_displacement": 0.05,
+            "feasibility_band": 0.2,
+        },
+    )
+
+    payload = {"schema": "fs-material-model-1", **model.to_fs()}
+    _validator(MATERIAL_SCHEMA).validate(payload)
+
+    surface = next(
+        entry for entry in payload["surfaces"] if entry.get("_type") == "rbf_level_set"
+    )
+    # The emitter spells the defaulted ``kernel`` explicitly; every key of the
+    # pinned example is present with the same value.
+    assert set(surface) - set(example_surface) == {"kernel"}
+    assert surface["kernel"] == "wendland_c2"
+    assert {key: surface[key] for key in example_surface} == example_surface
+    graph_entries = [
+        entry for entry in payload["surfaces"] if entry.get("_type") is None
+    ]
+    assert [entry["name"] for entry in graph_entries] == ["top", "seabed", "bottom"]
+    assert all(set(entry) >= {"name", "depth"} for entry in graph_entries)
 
 
 def test_layered_model_round_trips_implicit_surfaces_and_layers():
