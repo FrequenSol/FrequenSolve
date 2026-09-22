@@ -39,6 +39,25 @@ the unsuffixed covector receives the frequency-weighted sum of the parts and
 identity).  Every direction and objective vector must carry the state and
 registry fingerprints of the state it is applied to, as Sauce requires.
 
+Three more job kinds run on the same surrogate:
+
+``ControlGradientJob(kind="focus")``
+    the focusing objective of task ``t`` is ``softening * 0.5 *
+    ||J[R] m - d[R]||^2`` with ``m`` read from ``current`` (native vector) or
+    the authored coefficients; ``gradient_<t>.h5`` (native) and
+    ``objective_<t>.h5`` (``/value``) are written per task, then the
+    weighted sums ``gradient.h5``, ``gradient_raw.h5`` and ``objective.h5``.
+``ImageKernelJob`` (``workflow="rtm"``)
+    every task writes ``image_<t>.h5`` under ``save_path`` holding
+    ``/frequency`` and ``/image/raw`` with one dataset per image filled by
+    :meth:`FakeImagingSite.image_values`; the aggregate ``image.h5`` is the
+    weighted sum of the parts.  Task and ``smooth`` operation results are
+    committed to the artifact catalog so :meth:`ImageKernelJob.load_images`
+    resolves them.
+``SmoothJob`` (``postprocess_only=True``, explicit ``input_vector``)
+    ``control_sensitivities.input`` is copied to ``gradient`` and
+    ``<gradient>_raw.h5`` (identity smoothing).
+
 Forward modelling (``FrequencyDomainJob``) is not executed; use
 :meth:`FakeImagingSite.forward` and :meth:`FakeImagingSite.observed` instead.
 """
@@ -52,23 +71,39 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+import h5py
 import numpy as np
 
+from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging._artifacts import (
     ControlStateFile,
     ControlVectorFile,
     qualified_block_name,
 )
 from frequensolve.imaging.data import DataSpace, DataVector
-from frequensolve.imaging.jobs import FWIOperatorJob
+from frequensolve.imaging.jobs import (
+    ControlGradientJob,
+    FWIOperatorJob,
+    ImageKernelJob,
+    SmoothJob,
+)
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
     RunHandle,
     RunResult,
 )
+from frequensolve.simulation.artifact_contract import (
+    ARTIFACT_CONTRACT_VERSION,
+    OPERATION_CONTRACT_VERSION,
+    operation_result_path,
+    task_result_path,
+)
 
 FAKE_STATE_SCHEMA = "fake-imaging-state-1"
+FAKE_IMAGE_SCHEMA = "fs-image-hdf5-1"
+_ZERO_DIGEST = "sha256:" + "0" * 64
+_FAKE_JOBS = (FWIOperatorJob, ControlGradientJob, ImageKernelJob, SmoothJob)
 
 
 def _sha256(payload: Any) -> str:
@@ -119,6 +154,17 @@ def _rows(space: DataSpace, frequency: Any) -> np.ndarray:
     )
 
 
+def _write_scalar(path: Path, value: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("value", data=float(value))
+
+
+def _read_scalar(path: Path) -> float:
+    with h5py.File(path, "r") as h5:
+        return float(h5["value"][()])
+
+
 class FakeImagingSite(BaseSite):
     """Execute ``fwi_operator`` jobs against a seeded linear surrogate.
 
@@ -132,6 +178,9 @@ class FakeImagingSite(BaseSite):
             ``/support/<block>`` of every state output and covector (blocks
             not listed are fully supported).  Emulates Sauce freezing DOFs.
         verbose: Print status messages like other sites.
+
+    ``submissions`` records one summary per submit and ``jobs`` the submitted
+    job objects in the same order.
     """
 
     def __init__(
@@ -155,6 +204,7 @@ class FakeImagingSite(BaseSite):
             for name, mask in dict(support_masks or {}).items()
         }
         self.submissions: List[Dict[str, Any]] = []
+        self.jobs: List[Any] = []
         self.linearizations: Dict[str, FakeLinearization] = {}
 
     def support_mask(self, name: str, size: int) -> np.ndarray:
@@ -270,12 +320,16 @@ class FakeImagingSite(BaseSite):
             {
                 "job": job.name,
                 "action": getattr(job, "action", None),
+                "workflow": getattr(job, "workflow", None),
                 "options": options,
+                "postprocess_only": postprocess_only,
             }
         )
-        if not isinstance(job, FWIOperatorJob):
+        self.jobs.append(job)
+        if not isinstance(job, _FAKE_JOBS):
             raise TypeError(
-                f"{type(self).__name__} executes FWIOperatorJob only; "
+                f"{type(self).__name__} executes "
+                f"{', '.join(cls.__name__ for cls in _FAKE_JOBS)} only; "
                 f"received {type(job).__name__}"
             )
         self.prepare_job(job, validate=validate)
@@ -297,11 +351,12 @@ class FakeImagingSite(BaseSite):
             )
             job.write_run_state(status="failed", error=str(exc))
         else:
+            label = getattr(job, "action", None) or job.workflow
             status = JobStatus(
                 state="completed",
                 return_code=0,
                 job_id=job._job_id,
-                message=f"fake {job.action} over {job.n_tasks} task(s)",
+                message=f"fake {label} over {job.n_tasks} task(s)",
                 start_time=started,
                 end_time=datetime.now(),
             )
@@ -324,7 +379,15 @@ class FakeImagingSite(BaseSite):
 
     # -- execution ------------------------------------------------------------
 
-    def _execute(self, job: FWIOperatorJob) -> None:
+    def _execute(self, job: Any) -> None:
+        if isinstance(job, SmoothJob):
+            raise ValueError("SmoothJob runs as a postprocess-only submission")
+        if isinstance(job, ControlGradientJob):
+            self._execute_focus(job)
+            return
+        if isinstance(job, ImageKernelJob):
+            self._execute_images(job)
+            return
         if job.action not in {"linearize", "jvp", "vjp", "normal"}:
             raise NotImplementedError(
                 f"{type(self).__name__} does not execute action {job.action!r}"
@@ -410,9 +473,18 @@ class FakeImagingSite(BaseSite):
                 residual = J @ lin.m - lin.d[rows]
                 self._write_report(job, task, lin, frequency, residual)
 
-    def _postprocess(self, job: FWIOperatorJob) -> None:
+    def _postprocess(self, job: Any) -> None:
         """Emulate ``--smooth``: weighted sum at the stem, ``_raw`` beside it."""
 
+        if isinstance(job, SmoothJob):
+            self._postprocess_smooth(job)
+            return
+        if isinstance(job, ControlGradientJob):
+            self._aggregate_focus(job)
+            return
+        if isinstance(job, ImageKernelJob):
+            self._aggregate_images(job)
+            return
         if not job.requires_postprocess():
             raise ValueError("postprocess requires a smoothing configuration")
         weights = (
@@ -442,6 +514,248 @@ class FakeImagingSite(BaseSite):
         )
         aggregate.write(job.covector_file(raw=True))
         aggregate.write(job.covector_file())
+
+    # -- focus ----------------------------------------------------------------
+
+    def _focus_coefficients(
+        self, job: ControlGradientJob
+    ) -> Tuple[List[str], Dict[str, int], np.ndarray]:
+        """Return the active blocks, their sizes and the packed ``m`` of a focus job."""
+
+        if job.current is not None:
+            current = ControlVectorFile.read(job.current)
+            names = list(job.active) if job.active is not None else list(current.names)
+            table = {qualified_block_name(n): int(current[n].size) for n in names}
+            return names, table, current.pack(names)
+        baselines = self._simulation_baselines(job.simulation)
+        for name, size in self.block_sizes.items():
+            baselines.setdefault(name, np.zeros(size))
+        names = (
+            list(job.active)
+            if job.active is not None
+            else [name for name in baselines if name.startswith("model.")]
+        )
+        missing = [n for n in names if qualified_block_name(n) not in baselines]
+        if missing:
+            raise ValueError(f"no authored coefficients for {', '.join(missing)}")
+        table = {
+            qualified_block_name(n): int(baselines[qualified_block_name(n)].size)
+            for n in names
+        }
+        m = np.concatenate([baselines[qualified_block_name(n)] for n in names])
+        return names, table, m
+
+    def _execute_focus(self, job: ControlGradientJob) -> None:
+        if job.kind != "focus":
+            raise NotImplementedError(
+                f"{type(self).__name__} executes focus control gradients only"
+            )
+        assert job.focus is not None
+        softening = float(job.focus["softening"])
+        names, sizes, m = self._focus_coefficients(job)
+        J, d, space = self.surrogate(job.simulation, names, sizes, job.f_list)
+        local = {qualified_block_name(n): sizes[qualified_block_name(n)] for n in names}
+        for task in range(1, job.n_tasks + 1):
+            rows = _rows(space, job.f_list[task - 1])
+            residual = J[rows] @ m - d[rows]
+            value = softening * 0.5 * float(np.vdot(residual, residual).real)
+            gradient = softening * np.real(J[rows].conj().T @ residual)
+            ControlVectorFile.from_packed(gradient, local, native=True).write(
+                job.gradient_file(task)
+            )
+            objective = job.objective_file(task)
+            assert objective is not None
+            _write_scalar(objective, value)
+        if job.requires_postprocess():
+            self._aggregate_focus(job)
+
+    def _aggregate_focus(self, job: ControlGradientJob) -> None:
+        """Weighted sums of the task gradients (native) and objectives."""
+
+        weights = (
+            np.ones(job.n_tasks) if job.weights is None else np.asarray(job.weights)
+        )
+        blocks: Dict[str, np.ndarray] = {}
+        total = 0.0
+        for task in range(1, job.n_tasks + 1):
+            path = job.gradient_file(task)
+            if not path.is_file():
+                raise FileNotFoundError(f"missing gradient part {path}")
+            part = ControlVectorFile.read(path, native=True)
+            for name, values in part.blocks.items():
+                blocks[name] = blocks.get(name, 0.0) + weights[task - 1] * values
+            objective = job.objective_file(task)
+            if objective is not None:
+                total += float(weights[task - 1]) * _read_scalar(objective)
+        aggregate = ControlVectorFile(blocks, native=True)
+        aggregate.write(job.gradient_file(raw=True))
+        aggregate.write(job.gradient_file())
+        objective = job.objective_file()
+        if objective is not None:
+            _write_scalar(objective, total)
+
+    # -- images ---------------------------------------------------------------
+
+    @staticmethod
+    def image_values(grid: CartesianGrid, index: int, frequency: Any) -> np.ndarray:
+        """Return the flat (first axis fastest) image ``index`` at ``frequency``.
+
+        ``(index + 1) * (1 + Re f) * prod_k cos(pi * s_k)`` with ``s_k`` the
+        normalized coordinate along axis ``k``; the flat order matches
+        Sauce's ``reshape(n_grid[::-1])`` convention read by ``ImageSet``.
+        """
+
+        axes = [
+            np.linspace(float(x0), float(x1), int(n))
+            for x0, x1, n in zip(grid.x0, grid.x1, grid.n)
+        ]
+        mesh = np.meshgrid(*axes, indexing="ij")
+        values = np.full(tuple(int(n) for n in grid.n), float(index + 1))
+        values *= 1.0 + float(complex(frequency).real)
+        for axis, coords in zip(mesh, axes):
+            span = coords[-1] - coords[0]
+            if span == 0.0:
+                continue
+            values = values * np.cos(np.pi * (axis - coords[0]) / span)
+        return np.asarray(values, dtype=np.float64).reshape(-1, order="F")
+
+    def _image_relative(self, job: ImageKernelJob, path: Path) -> str:
+        root = Path(job._result_path).resolve()
+        try:
+            return path.resolve().relative_to(root).as_posix()
+        except ValueError as exc:
+            raise NotImplementedError(
+                f"the fake site commits images under {root} only; got {path}"
+            ) from exc
+
+    def _fingerprints(self, job: Any) -> Dict[str, str]:
+        digests = job._artifact_contract_fingerprints()
+        if digests is None:
+            return {key: _ZERO_DIGEST for key in ("job", "simulation", "outputs")}
+        return {key: str(digests[key]) for key in ("job", "simulation", "outputs")}
+
+    def _image_record(self, job: ImageKernelJob, path: Path) -> Dict[str, Any]:
+        return {
+            "id": "image",
+            "role": "image",
+            "representation": "hdf5",
+            "schema": FAKE_IMAGE_SCHEMA,
+            "path": self._image_relative(job, path),
+            "retention": "durable",
+            "bytes": int(path.stat().st_size),
+        }
+
+    def _write_image(
+        self,
+        job: ImageKernelJob,
+        path: Path,
+        images: Mapping[str, np.ndarray],
+        frequency: Optional[Any],
+    ) -> None:
+        grid = job.grid
+        path.parent.mkdir(parents=True, exist_ok=True)
+        strings = h5py.string_dtype(encoding="utf-8")
+        with h5py.File(path, "w") as h5:
+            if frequency is not None:
+                h5.create_dataset("frequency", data=float(complex(frequency).real))
+            group = h5.create_group("image/raw")
+            group.create_dataset(
+                "properties", data=np.array(list(images), dtype=strings)
+            )
+            for name, values in images.items():
+                dataset = group.create_dataset(name, data=np.asarray(values))
+                dataset.attrs["x0"] = np.asarray(grid.x0, dtype=np.float64)
+                dataset.attrs["x1"] = np.asarray(grid.x1, dtype=np.float64)
+                dataset.attrs["n_grid"] = np.asarray(grid.n, dtype=np.int64)
+                dataset.attrs["dims"] = np.array(list(grid.dims), dtype=strings)
+
+    def _execute_images(self, job: ImageKernelJob) -> None:
+        if job.workflow != "rtm":
+            raise NotImplementedError(
+                f"{type(self).__name__} executes rtm image kernels only"
+            )
+        fingerprints = self._fingerprints(job)
+        for task in range(1, job.n_tasks + 1):
+            frequency = complex(job.f_list[task - 1])
+            path = job.save_path / f"image_{task}.h5"
+            self._write_image(
+                job,
+                path,
+                {
+                    name: self.image_values(job.grid, index, frequency)
+                    for index, name in enumerate(job.images)
+                },
+                frequency,
+            )
+            result = task_result_path(job._result_path, task)
+            result.parent.mkdir(parents=True, exist_ok=True)
+            result.write_text(
+                json.dumps(
+                    {
+                        "schema": ARTIFACT_CONTRACT_VERSION,
+                        "partition": {
+                            "task": task,
+                            "task_count": job.n_tasks,
+                            "frequency": {
+                                "real": frequency.real,
+                                "imag": frequency.imag,
+                            },
+                        },
+                        "fingerprints": fingerprints,
+                        "status": {"state": "success", "code": 0},
+                        "artifacts": [self._image_record(job, path)],
+                    },
+                    indent=2,
+                )
+            )
+        self._aggregate_images(job)
+
+    def _aggregate_images(self, job: ImageKernelJob) -> None:
+        """Stack the per-task images (weighted sum) and commit ``smooth``."""
+
+        weights = (
+            np.ones(job.n_tasks) if job.weights is None else np.asarray(job.weights)
+        )
+        stacked: Dict[str, np.ndarray] = {}
+        for task in range(1, job.n_tasks + 1):
+            path = job.save_path / f"image_{task}.h5"
+            if not path.is_file():
+                raise FileNotFoundError(f"missing image part {path}")
+            with h5py.File(path, "r") as h5:
+                group = h5["image/raw"]
+                for name in job.images:
+                    values = np.asarray(group[name][()], dtype=np.float64)
+                    stacked[name] = stacked.get(name, 0.0) + weights[task - 1] * values
+        aggregate = job.save_path / "image.h5"
+        self._write_image(job, aggregate, stacked, None)
+        result = operation_result_path(job._result_path, "smooth")
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_text(
+            json.dumps(
+                {
+                    "schema": OPERATION_CONTRACT_VERSION,
+                    "operation": {"name": "smooth", "generation": f"fake:{job.name}"},
+                    "fingerprints": self._fingerprints(job),
+                    "status": {"state": "success", "code": 0},
+                    "artifacts": [self._image_record(job, aggregate)],
+                },
+                indent=2,
+            )
+        )
+
+    # -- explicit-vector smoothing --------------------------------------------
+
+    def _postprocess_smooth(self, job: SmoothJob) -> None:
+        """Copy ``control_sensitivities.input`` to ``gradient`` (identity)."""
+
+        if job.input_vector is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} smooths explicit input vectors only"
+            )
+        source = ControlVectorFile.read(job.input_vector, native=True)
+        smoothed = ControlVectorFile(dict(source.blocks), native=True)
+        smoothed.write(job.gradient_file(raw=True))
+        smoothed.write(job.gradient_file())
 
     # -- inputs ---------------------------------------------------------------
 

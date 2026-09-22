@@ -608,3 +608,82 @@ def test_bound_penalty_requires_the_bound_space(space, frozen_space):
         bound.value(frozen_space.zeros())
     with pytest.raises(ValueError, match="real"):
         bound.value(np.ones(space.size, dtype=complex))
+
+
+# ---------------------------------------------------------------------------
+# cross-checks on the fake site (masked spaces, fake postprocess)
+# ---------------------------------------------------------------------------
+
+
+def test_penalty_and_diagonal_preconditioner_follow_sauce_support_masks(tmp_path):
+    fake = FakeImagingSite(seed=5, support_masks={"model.vp": [1, 0, 1, 1, 0]})
+    problem = _problem(tmp_path, fake)
+    lin = problem.linearize()
+    space = lin.space
+    assert space.size == 6 and space.support.frozen_count == 2
+
+    penalty = Tikhonov(3.0).bind(space)
+    # the vp differences straddling frozen nodes 1 and 4 are dropped: only
+    # (2, 3) survives; rho keeps its two differences
+    R = penalty.operator().matrix.toarray()
+    assert R.shape == (1 + 2, 6)
+    nodes = space.block("vp").control.coordinates
+    expected_row = np.zeros(6)
+    expected_row[1:3] = np.sqrt(3.0) * np.array([-1.0, 1.0]) / (nodes[3] - nodes[2])
+    np.testing.assert_allclose(R[0], expected_row)
+    np.testing.assert_allclose(penalty.curvature_diagonal(lin.point), np.sum(R * R, 0))
+    v = space.random(2)
+    np.testing.assert_allclose(penalty.value(v), 0.5 * np.sum((R @ v.values) ** 2))
+    np.testing.assert_allclose(
+        penalty.hessian_operator(v) @ v.values, R.T @ (R @ v.values)
+    )
+    with pytest.raises(ValueError, match="entries"):
+        penalty.value(np.ones(8))
+    with pytest.raises(ValueError, match="different control space"):
+        penalty.value(problem.full_space.without_support().zeros())
+
+    unit = Diagonal(probes="unit").bind(space)
+    unit.update(lin, penalty)
+    J = fake.linearizations[lin.state_fingerprint].J[:, [0, 2, 3, 5, 6, 7]]
+    np.testing.assert_allclose(unit.estimate.data, np.sum(np.abs(J) ** 2, axis=0))
+    np.testing.assert_allclose(unit.estimate.regularization, np.sum(R * R, 0))
+    assert unit.estimate.probe_count == 6 and unit.diagonal.shape == (6,)
+    applied = unit.apply(lin.gradient)
+    assert isinstance(applied, ControlVector) and applied.space is space
+    expected = DiagonalInverseHessian(
+        np.sum(np.abs(J) ** 2, axis=0) + np.sum(R * R, 0),
+        block_sizes=[3, 3],
+        relative_damping=1e-2,
+        maximum_inverse_ratio=1e3,
+    ).apply(lin.gradient.values)
+    np.testing.assert_allclose(applied.values, expected)
+    # a penalty bound to the unmasked full space is rejected
+    with pytest.raises(ValueError, match="different control space"):
+        unit.update(lin, Tikhonov(1.0).bind(problem.full_space.without_support()))
+
+
+def test_smooth_runs_on_the_fake_site_postprocess(tmp_path):
+    fake = FakeImagingSite(seed=2)
+    controls = ControlSpace(
+        vp=DepthProfile("vp", "sediment", count=5),
+        src=SourceParameters(signature=True),
+    )
+    problem = _problem(tmp_path, fake, controls=controls)
+    v = problem.space.random(1)
+
+    smoothed = smooth(v, Smoothing(kind="tv", wavelength_fraction=0.4), problem)
+
+    assert isinstance(smoothed, ControlVector) and smoothed.space is problem.space
+    np.testing.assert_allclose(
+        smoothed.values, v.values
+    )  # the fake smooths by identity
+    job = fake.jobs[-1]
+    assert isinstance(job, SmoothJob) and fake.submissions[-1]["postprocess_only"]
+    assert job.gradient_file().is_file() and job.gradient_file(raw=True).is_file()
+    written = ControlVectorFile.read(job.gradient_file())
+    assert written.native and list(written.names) == ["vp"]
+    np.testing.assert_allclose(written["vp"], v["vp"])
+    assert job.to_fs()["control_sensitivities"]["active"] == ["vp"]
+    # a smooth job submitted as a regular run is refused by the fake
+    with pytest.raises(Exception, match="postprocess-only"):
+        problem.backend.run(job)

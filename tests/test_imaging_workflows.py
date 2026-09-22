@@ -6,16 +6,17 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from frequensolve import imaging as im
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging import (
     ControlSpace,
     ControlVector,
     DepthProfile,
+    ImageSet,
     ImagingProblem,
     Misfit,
     SourceParameters,
 )
-from frequensolve.imaging.operators import ModelOperator
 from frequensolve.imaging.results import FWIResult, StageResult
 from frequensolve.imaging.workflows import (
     FWI,
@@ -29,6 +30,7 @@ from frequensolve.imaging.workflows import (
     curvature_scaling,
     rms_step_limit,
     rtm,
+    sensitivity_kernel,
     sensitivity_kernel_job,
 )
 from frequensolve.inversion import (
@@ -53,89 +55,23 @@ EXACT = dict(initial_forcing=1e-8, minimum_forcing=1e-8, maximum_forcing=1e-8)
 # ---------------------------------------------------------------------------
 
 
-class _ScaledIdentity(ModelOperator):
-    def __init__(self, space, alpha):
-        self.alpha = float(alpha)
-        super().__init__(space, space, dtype=np.float64)
+class _TrackedDiagonal(im.Diagonal):
+    """The real :class:`im.Diagonal` recording its bound instances and updates."""
 
-    def _matvec(self, x):
-        return self.alpha * np.asarray(x, dtype=np.float64)
-
-    _rmatvec = _matvec
-
-
-class QuadraticPenalty:
-    """``0.5 * alpha * ||v - reference||^2`` implementing the Penalty protocol."""
-
-    def __init__(self, alpha, reference=None):
-        self.alpha = float(alpha)
-        self.reference = reference
+    bound: list = []
 
     def bind(self, space):
-        return BoundQuadraticPenalty(self, space)
+        bound = super().bind(space)
+        bound.updates = []
+        update = bound.update
 
+        def tracked(linearization, penalty=None):
+            bound.updates.append(linearization)
+            update(linearization, penalty=penalty)
 
-class BoundQuadraticPenalty:
-    def __init__(self, penalty, space):
-        self.penalty = penalty
-        self.space = space
-        ref = penalty.reference
-        self.reference = np.zeros(space.size) if ref is None else np.asarray(ref, float)
-        self.updates = 0
-
-    def _diff(self, v):
-        return np.asarray(v, dtype=np.float64).reshape(-1) - self.reference
-
-    def value(self, v):
-        d = self._diff(v)
-        return 0.5 * self.penalty.alpha * float(np.dot(d, d))
-
-    def gradient(self, v):
-        return ControlVector(self.penalty.alpha * self._diff(v), self.space)
-
-    def hessian_operator(self, v):
-        return _ScaledIdentity(self.space, self.penalty.alpha)
-
-    def curvature_diagonal(self, v):
-        return np.full(self.space.size, self.penalty.alpha)
-
-    def operator(self):
-        return _ScaledIdentity(self.space, np.sqrt(self.penalty.alpha))
-
-
-class DiagonalPreconditioner:
-    """Preconditioner protocol double: inverse of the surrogate normal diagonal."""
-
-    def __init__(self):
-        self.bound = []
-
-    def bind(self, space):
-        bound = BoundDiagonalPreconditioner(space)
+        bound.update = tracked
         self.bound.append(bound)
         return bound
-
-
-class BoundDiagonalPreconditioner:
-    def __init__(self, space):
-        self.space = space
-        self.updates = []
-        self.diagonal = np.ones(space.size)
-
-    def update(self, linearization, penalty=None):
-        self.updates.append(linearization.fingerprint)
-        diagonal = np.empty(self.space.size)
-        for i in range(self.space.size):
-            unit = np.zeros(self.space.size)
-            unit[i] = 1.0
-            diagonal[i] = float(np.asarray(linearization.normal @ unit)[i])
-        if penalty is not None:
-            diagonal += penalty.curvature_diagonal(self.space.zeros())
-        self.diagonal = diagonal
-
-    def apply(self, g):
-        return ControlVector(np.asarray(g) / self.diagonal, self.space)
-
-    __call__ = apply
 
 
 def _space(limits=None):
@@ -147,9 +83,13 @@ def _space(limits=None):
 
 def _problem(tmp_path, fake, *, name="fwi", subdir="project", **kwargs):
     sim = layered_simulation(tmp_path / subdir)
+    observed = tmp_path / "observed.h5"
+    if not observed.exists():
+        # control-gradient jobs fingerprint their observed inputs
+        observed.write_bytes(b"observed")
     options = dict(
         controls=_space(),
-        observed={"surface": tmp_path / "observed.h5"},
+        observed={"surface": observed},
         frequencies=FREQUENCIES,
         site=fake,
         name=name,
@@ -168,11 +108,36 @@ def _surrogate(fake, problem, frequencies=None, active=None):
     return surrogate.J, surrogate.d
 
 
-def _least_squares(J, d, alpha=0.0):
-    """Real least-squares solution ``argmin 0.5||J m - d||^2 + 0.5 alpha ||m||^2``."""
+def _least_squares(J, d, alpha=0.0, *, R=None, weights=None):
+    """Regularized real least-squares solution of the surrogate.
 
-    normal = np.real(J.conj().T @ J) + alpha * np.eye(J.shape[1])
-    return np.linalg.solve(normal, np.real(J.conj().T @ d))
+    ``argmin 0.5 ||J m - d||_W^2 + 0.5 alpha ||m||^2 + 0.5 ||R m||^2`` via the
+    dense normal equations ``(Re(J^H W J) + alpha I + R^T R) m = Re(J^H W d)``.
+    ``weights`` is the per-row diagonal of ``W`` (default: unit).
+    """
+
+    W = np.ones(J.shape[0]) if weights is None else np.asarray(weights, float)
+    normal = np.real(J.conj().T @ (W[:, None] * J)) + alpha * np.eye(J.shape[1])
+    if R is not None:
+        normal = normal + R.T @ R
+    return np.linalg.solve(normal, np.real(J.conj().T @ (W * d)))
+
+
+def _penalty_matrix(penalty, space):
+    """Return the dense ``R`` of a quadratic penalty bound to ``space``."""
+
+    return penalty.bind(space).operator().matrix.toarray()
+
+
+def _row_weights(fake, problem, weights):
+    """Expand per-frequency ``weights`` to the surrogate's data rows."""
+
+    lin = problem.linearize(gradient=False)
+    surrogate = fake.linearizations[lin.state_fingerprint]
+    rows = np.ones(surrogate.J.shape[0])
+    for weight, frequency in zip(weights, FREQUENCIES):
+        rows[surrogate.rows(frequency)] = weight
+    return rows
 
 
 def _linearize_count(fake):
@@ -486,11 +451,12 @@ def test_fwi_records_penalty_terms_and_solves_the_damped_problem(problem, fake):
     J, d = _surrogate(fake, problem)
     alpha = 5.0
     damped = _least_squares(J, d, alpha)
+    ridge = im.Quadratic(np.eye(8), weight=alpha)
     fwi = FWI(
         problem,
         Stage(FREQUENCIES, 5),
         optimizer=NewtonCG(**EXACT),
-        penalty=QuadraticPenalty(alpha),
+        penalty=ridge,
     )
 
     result = fwi.run()
@@ -501,15 +467,113 @@ def test_fwi_records_penalty_terms_and_solves_the_damped_problem(problem, fake):
     assert final.data > 0.0 and final.total == final.data + final.regularization
     evaluations = result.history.evaluations
     assert all(r.loss.regularization >= 0.0 for r in evaluations)
-    assert evaluations[-1].metrics["penalty"] == "QuadraticPenalty"
+    assert evaluations[-1].metrics["penalty"] == "Quadratic"
     # a stage-level penalty overrides the workflow penalty
     override = FWI(
         problem,
-        Stage(FREQUENCIES, 5, penalty=QuadraticPenalty(0.0)),
+        Stage(FREQUENCIES, 5, penalty=im.Tikhonov(0.0)),
         optimizer=NewtonCG(**EXACT),
-        penalty=QuadraticPenalty(alpha),
+        penalty=ridge,
     ).run()
     np.testing.assert_allclose(override.state.values, _least_squares(J, d), atol=1e-6)
+    assert override.stages[0].final_loss.regularization == 0.0
+    assert override.history.evaluations[-1].metrics["penalty"] == "Tikhonov"
+
+
+@pytest.mark.parametrize(
+    "optimizer, atol",
+    [(NewtonCG(max_cg_iterations=30, **EXACT), 1e-6), (LBFGS(**TIGHT), 1e-3)],
+    ids=["newton_cg", "lbfgs"],
+)
+def test_fwi_tikhonov_with_diagonal_preconditioner_solves_the_regularized_problem(
+    problem, fake, optimizer, atol
+):
+    J, d = _surrogate(fake, problem)
+    # first differences are scaled by the node spacing (hundreds of metres),
+    # so alpha is sized for R^T R to weigh about as much as Re(J^H J)
+    alpha = 1.0e6
+    R = _penalty_matrix(im.Tikhonov(alpha), problem.space)
+    assert R.shape == (4 + 2, 8)  # first differences of a 5- and a 3-node profile
+    expected = _least_squares(J, d, R=R)
+    assert not np.allclose(expected, _least_squares(J, d), atol=1e-2)
+    stages = [Stage([4.0], 6, active=["vp"], name="low"), Stage(FREQUENCIES, 60)]
+    fwi = FWI(
+        problem,
+        stages,
+        optimizer=optimizer,
+        penalty=im.Tikhonov(alpha),
+        preconditioner=im.Diagonal(probe_count=4),
+    )
+
+    result = fwi.run()
+
+    assert len(result.stages) == 2 and result.success
+    np.testing.assert_allclose(result.state.values, expected, atol=atol)
+    final = result.stages[1].final_loss
+    assert final.regularization == pytest.approx(
+        0.5 * float(np.linalg.norm(R @ result.state.values) ** 2)
+    )
+    assert final.total == pytest.approx(
+        _least_squares_value(J, d, result.state.values) + final.regularization
+    )
+    assert result.history.evaluations[-1].metrics["penalty"] == "Tikhonov"
+    for index in (0, 1):
+        losses = _stage_losses(result.history, index)
+        assert len(losses) >= 2 and np.all(np.diff(losses) <= 1e-9)
+    # the Rademacher probes ran Sauce's normal action for both stages
+    normal = [s for s in fake.submissions if s["action"] == "normal"]
+    assert len(normal) >= 8
+
+
+@pytest.mark.parametrize(
+    "optimizer, atol",
+    [(NewtonCG(max_cg_iterations=30, **EXACT), 1e-6), (LBFGS(**TIGHT), 1e-4)],
+    ids=["newton_cg", "lbfgs"],
+)
+def test_fwi_curvature_scaling_leaves_the_minimizer_invariant(
+    problem, fake, optimizer, atol
+):
+    J, d = _surrogate(fake, problem)
+    solution = _least_squares(J, d)
+    before = len(fake.submissions)
+    result = FWI(problem, _stages(), optimizer=optimizer, scaling="curvature").run()
+
+    np.testing.assert_allclose(result.state.values, solution, atol=atol)
+    assert result.success and result.stages[1].active == ("model.vp", "model.rho")
+    # one Rademacher JVP per block at every stage start
+    jvp = [s for s in fake.submissions[before:] if s["action"] == "jvp"]
+    assert len(jvp) >= 3
+
+
+def test_stage_weights_scale_the_objective_and_its_minimizer(problem, fake):
+    weights = [1.0, 0.25]
+    J, d = _surrogate(fake, problem)
+    rows = _row_weights(fake, problem, weights)
+    lin = fake.linearizations[problem.linearize(gradient=False).state_fingerprint]
+    residual = J @ np.zeros(8) - d
+    per_frequency = [
+        0.5 * float(np.vdot(residual[lin.rows(f)], residual[lin.rows(f)]).real)
+        for f in FREQUENCIES
+    ]
+    weighted = _least_squares(J, d, weights=rows)
+    assert not np.allclose(weighted, _least_squares(J, d), atol=1e-3)
+
+    result = FWI(
+        problem,
+        Stage(FREQUENCIES, 6, weights=weights),
+        optimizer=NewtonCG(max_cg_iterations=30, **EXACT),
+    ).run()
+
+    stage = result.stages[0]
+    assert stage.initial_loss.data == pytest.approx(
+        sum(w * value for w, value in zip(weights, per_frequency))
+    )
+    assert stage.initial_loss.data < sum(per_frequency)
+    np.testing.assert_allclose(result.state.values, weighted, atol=1e-6)
+    final = J @ result.state.values - d
+    assert stage.final_loss.data == pytest.approx(
+        0.5 * float(np.real(np.vdot(final, rows * final)))
+    )
 
 
 def test_fwi_respects_bounds_and_clips_iterates(tmp_path, fake):
@@ -693,7 +757,8 @@ def test_fwi_resume_rejects_a_mismatched_checkpoint(tmp_path, fake):
 def test_fwi_transition_refreshes_state_and_support_masks(tmp_path):
     fake = FakeImagingSite(seed=5, support_masks={"model.vp": [1, 0, 1, 1, 0]})
     problem = _problem(tmp_path, fake, min_support=0.05)
-    preconditioner = DiagonalPreconditioner()
+    preconditioner = _TrackedDiagonal(probes="unit")
+    preconditioner.bound.clear()
     fwi = FWI(
         problem,
         [
@@ -726,7 +791,18 @@ def test_fwi_transition_refreshes_state_and_support_masks(tmp_path):
     # one bound preconditioner per stage, updated at the start and every 2 iterations
     assert len(preconditioner.bound) == 2
     assert len(preconditioner.bound[0].updates) == 2
+    assert preconditioner.bound[0].space.size == 3
     assert preconditioner.bound[1].space.size == 6
+    # the unit probes reproduced the exact Gauss-Newton diagonal of the
+    # masked stage-one space at the refresh point
+    first = preconditioner.bound[0]
+    refreshed = first.updates[-1]
+    assert refreshed.space.size == 3 and refreshed is not first.updates[0]
+    J_masked = fake.linearizations[refreshed.state_fingerprint].J[:, [0, 2, 3]]
+    np.testing.assert_allclose(
+        first.estimate.data, np.sum(np.abs(J_masked) ** 2, axis=0), rtol=1e-8
+    )
+    assert first.estimate.probe_count == 3 and first.diagonal.shape == (3,)
 
 
 def test_fwi_solve_stage_and_scaling_options(problem, fake):
@@ -780,12 +856,13 @@ def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
 
     # damping and a quadratic penalty (operator rows) agree between the two solvers
     damped = _least_squares(J, d, 2.0 + 3.0)
+    ridge = im.Quadratic(np.eye(8), weight=3.0)
     cg_image = LSRTM(
         problem,
         iterations=80,
         method="cg",
         damping=2.0,
-        penalty=QuadraticPenalty(3.0),
+        penalty=ridge,
         tolerance=1e-12,
     ).run()
     lsqr_image = LSRTM(
@@ -793,7 +870,7 @@ def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
         iterations=200,
         method="lsqr",
         damping=2.0,
-        penalty=QuadraticPenalty(3.0),
+        penalty=ridge,
         tolerance=1e-12,
     ).run()
     np.testing.assert_allclose(cg_image.values, damped, atol=1e-6)
@@ -807,11 +884,169 @@ def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
         LSRTM(problem, method="gmres")
 
 
+def test_lsrtm_with_tikhonov_matches_the_dense_regularized_solve(problem, fake):
+    J, d = _surrogate(fake, problem)
+    penalty = im.Tikhonov(2.0e10, order=2)  # second differences scale as 1/h^2
+    R = _penalty_matrix(penalty, problem.space)
+    assert R.shape == (3 + 1, 8)  # second differences of the two profiles
+    expected = _least_squares(J, d, R=R)
+    assert not np.allclose(expected, _least_squares(J, d), atol=1e-3)
+
+    cg = LSRTM(problem, iterations=80, method="cg", penalty=penalty, tolerance=1e-12)
+    image = cg.run()
+    np.testing.assert_allclose(image.values, expected, atol=1e-6)
+    assert cg.info["converged"]
+    lsqr = LSRTM(
+        problem, iterations=200, method="lsqr", penalty=penalty, tolerance=1e-12
+    )
+    np.testing.assert_allclose(lsqr.run().values, expected, atol=1e-6)
+
+    # a TV penalty has no operator rows: cg solves the lagged-diffusivity
+    # normal equations at the origin, lsqr refuses
+    tv = im.TV(1.0e5, epsilon=0.1)
+    hessian = tv.bind(problem.space).hessian_operator(problem.space.zeros())
+    dense = np.column_stack([np.asarray(hessian @ e).reshape(-1) for e in np.eye(8)])
+    assert np.linalg.norm(dense, 2) > 1.0
+    expected_tv = np.linalg.solve(
+        np.real(J.conj().T @ J) + dense, np.real(J.conj().T @ d)
+    )
+    assert not np.allclose(expected_tv, _least_squares(J, d), atol=1e-2)
+    tv_image = LSRTM(problem, iterations=80, method="cg", penalty=tv, tolerance=1e-12)
+    np.testing.assert_allclose(tv_image.run().values, expected_tv, atol=1e-6)
+    with pytest.raises(ValueError, match="operator"):
+        LSRTM(problem, method="lsqr", penalty=tv).run()
+
+
 def test_rtm_returns_the_misfit_gradient(problem):
     v = problem.space.random(4)
     image = rtm(problem, v)
     assert image is problem.gradient(v)
     assert image.space.equivalent(problem.space)
+
+
+# ---------------------------------------------------------------------------
+# smoothing through the fake postprocess
+# ---------------------------------------------------------------------------
+
+
+def test_smooth_runs_the_smooth_job_as_a_fake_postprocess(problem, fake):
+    v = problem.space.random(3)
+    before = len(fake.submissions)
+
+    smoothed = im.smooth(
+        v, im.Smoothing(kind="tikhonov", wavelength_fraction=0.5), problem
+    )
+
+    assert isinstance(smoothed, ControlVector) and smoothed.space is problem.space
+    np.testing.assert_allclose(smoothed.values, v.values)  # identity smoothing
+    submission = fake.submissions[before:]
+    assert len(submission) == 1 and submission[0]["postprocess_only"]
+    assert submission[0]["job"].startswith("fwi_smooth_")
+    job = fake.jobs[-1]
+    assert isinstance(job, im.SmoothJob) and job.gradient_file(raw=True).is_file()
+    payload = job.to_fs()["control_sensitivities"]
+    assert payload["active"] == ["vp", "rho"] and payload["Smoothing"]["lambda"] == 0.5
+    # the linearize gradient smooths the same way
+    lin = problem.linearize()
+    again = im.smooth(lin.gradient, im.Smoothing(kind="tv"), problem)
+    np.testing.assert_allclose(again.values, lin.gradient.values)
+
+
+# ---------------------------------------------------------------------------
+# sensitivity kernels and time-reversal focus
+# ---------------------------------------------------------------------------
+
+
+def test_sensitivity_kernel_runs_on_the_fake_and_returns_an_image_set(problem, fake):
+    grid = CartesianGrid(n=[4, 3], x0=[0.0, 0.0], x1=[4000.0, 1500.0])
+
+    images = sensitivity_kernel(
+        problem, grid, properties=["vp", "rho"], weights=[1.0, 0.5], keep="adjoint"
+    )
+
+    assert isinstance(images, ImageSet)
+    assert images.shape == (3, 4) == grid.shape and images.parts == 2
+    np.testing.assert_array_equal(images.f_list, FREQUENCIES)
+    raw = images.raw
+    assert list(raw.data_vars) == ["vp", "rho"]
+    assert raw["vp"].dims == ("z", "x") and raw["vp"].shape == (3, 4)
+    np.testing.assert_allclose(raw["vp"].coords["x"], np.linspace(0.0, 4000.0, 4))
+    np.testing.assert_allclose(raw["rho"].coords["z"], np.linspace(0.0, 1500.0, 3))
+    parts = [images.read_images("raw", part=task) for task in (1, 2)]
+    for index, name in enumerate(("vp", "rho")):
+        for part, frequency in zip(parts, FREQUENCIES):
+            np.testing.assert_allclose(
+                part[name].values,
+                FakeImagingSite.image_values(grid, index, frequency).reshape(3, 4),
+            )
+        # the aggregate is the weighted stack of the parts
+        np.testing.assert_allclose(
+            raw[name].values, parts[0][name].values + 0.5 * parts[1][name].values
+        )
+    assert raw["rho"].values[0, 0] == pytest.approx(2.0 * (5.0 + 0.5 * 7.0))
+    submission = fake.submissions[-1]
+    assert submission["workflow"] == "rtm" and not submission["postprocess_only"]
+    job = fake.jobs[-1]
+    assert isinstance(job, im.ImageKernelJob)
+    assert job.image_output_exists() and job.postprocess_part_outputs_exist()
+    assert job.image_file() == images.image_file() == job.save_path / "image.h5"
+    assert job.image_file(2) == job.save_path / "image_2.h5"
+
+    # a single-frequency kernel at a moved point images the installed state
+    single = sensitivity_kernel(
+        problem, grid, frequencies=[6.0], v=problem.space.ones(), condition="up_down"
+    )
+    assert single.parts == 1 and list(single.raw.data_vars) == ["vp"]
+    np.testing.assert_array_equal(single.f_list, [6.0])
+    np.testing.assert_allclose(
+        single.raw["vp"].values,
+        FakeImagingSite.image_values(grid, 0, 6.0).reshape(3, 4),
+    )
+
+
+def test_time_reversal_focus_objective_runs_on_the_fake(problem, fake):
+    softening = 12.5
+    weights = [1.0, 0.5]
+    focus = TimeReversalFocus(problem, softening, weights=weights)
+    sizes = {"model.vp": 5, "model.rho": 3}
+    J, d, space = fake.surrogate(problem.simulation, list(sizes), sizes, FREQUENCIES)
+
+    def expected(m):
+        value, gradient = 0.0, np.zeros(8)
+        for weight, frequency in zip(weights, FREQUENCIES):
+            rows = np.concatenate(
+                [layout.indices for layout in space.term_layouts(frequency=frequency)]
+            )
+            residual = J[rows] @ m - d[rows]
+            value += weight * softening * 0.5 * float(np.vdot(residual, residual).real)
+            gradient += weight * softening * np.real(J[rows].conj().T @ residual)
+        return value, gradient
+
+    before = len(fake.submissions)
+    value, gradient = focus.objective()
+
+    assert isinstance(value, float) and isinstance(gradient, ControlVector)
+    assert gradient.space is problem.space
+    authored_value, authored_gradient = expected(np.zeros(8))
+    assert value == pytest.approx(authored_value)
+    np.testing.assert_allclose(gradient.values, authored_gradient)
+    assert value > 0.0 and len(fake.submissions) == before + 1
+    assert fake.submissions[-1]["workflow"] == "focus"
+    job = focus.job()
+    assert job.objective_value == pytest.approx(value)
+    assert job.gradient_file(raw=True).is_file() and job.objective_file(2).is_file()
+    # results are cached per state; a moved point runs a job with ``current``
+    assert focus.objective() == (value, gradient)
+    assert len(fake.submissions) == before + 1
+    v = problem.space.ones()
+    moved_value, moved_gradient = expected(np.ones(8))
+    assert focus.value(v) == pytest.approx(moved_value)
+    np.testing.assert_allclose(focus.gradient(v).values, moved_gradient)
+    assert len(fake.submissions) == before + 2
+    assert focus.job(v).current is not None
+    # unit weights halve nothing: the 6 Hz task enters fully
+    plain = TimeReversalFocus(problem, softening).objective()[0]
+    assert plain > value
 
 
 # ---------------------------------------------------------------------------
