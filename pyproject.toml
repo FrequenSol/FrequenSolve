@@ -49,7 +49,7 @@ dependencies = [
 [project.scripts]
 frequensolve = "frequensolve.commands.cli:main"
 frequensolve-mcp = "frequensolve.mcp_server.cli:main"
-frequensolve-adaptive-scheduler = "frequensolve.orchestrator.sites.hpc.adaptive:main"
+frequensolve-adaptive-scheduler = "frequensolve.adaptive:main"
 
 [project.urls]
 Homepage = "https://frequensol.com"

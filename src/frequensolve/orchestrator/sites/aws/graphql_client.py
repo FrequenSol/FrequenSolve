@@ -317,7 +317,7 @@ class GraphQLClient:
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
         execution_site_id: str = "managed-slurm",
-        execution_resources: Optional[Dict[str, int]] = None,
+        execution_resources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Submit through the current managed execution-site contract."""
         if execution_site_id != "managed-slurm":

@@ -55,6 +55,11 @@ except ModuleNotFoundError as exc:
 
 from jinja2 import Environment, PackageLoader
 
+from frequensolve.adaptive import (
+    ENGINE_VERSION,
+    render_sweep,
+    scheduler_source,
+)
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -65,11 +70,6 @@ from frequensolve.orchestrator.sites.base import (
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
-from frequensolve.orchestrator.sites.hpc.adaptive import (
-    ENGINE_VERSION,
-    render_sweep,
-    scheduler_source,
-)
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.enterprise import (
     BUNDLE_MANIFEST_RELATIVE,
@@ -3601,6 +3601,8 @@ class SlurmSite(BaseSite):
 
         return render_sweep(
             scheduler_version=ENGINE_VERSION,
+            memory_mib_per_node=config.memory_per_node,
+            ranks_per_node=ranks_per_node,
             batch_job=True,
             name=name,
             dir_out=stdout,

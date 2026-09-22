@@ -11,6 +11,11 @@
 {% endif %}
 #SBATCH -N {{ n_nodes }}
 #SBATCH -n {{ n_procs }}
+{% if memory_mib_per_node %}
+#SBATCH --ntasks-per-node={{ ranks_per_node }}
+#SBATCH --cpus-per-task={{ n_threads }}
+#SBATCH --mem={{ memory_mib_per_node }}M
+{% endif %}
 #SBATCH -p {{ queue }}
 {% if account %}
 #SBATCH -A {{ account }}

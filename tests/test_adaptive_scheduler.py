@@ -262,7 +262,7 @@ def test_adaptive_scheduler_mpirun_uses_full_allocation_without_ibrun_flags(
 
 
 def test_supported_engine_envelope_keeps_site_limits_outside_generic_scheduler():
-    from frequensolve.orchestrator.sites.hpc.adaptive import AdaptivePool
+    from frequensolve.adaptive import AdaptivePool
 
     pool = AdaptivePool.from_mapping(
         dict(
@@ -300,7 +300,7 @@ def test_supported_engine_envelope_keeps_site_limits_outside_generic_scheduler()
 
 
 def test_supported_engine_refuses_unknown_version(tmp_path):
-    from frequensolve.orchestrator.sites.hpc.adaptive import render_sweep
+    from frequensolve.adaptive import render_sweep
 
     with pytest.raises(ValueError, match="Unsupported"):
         render_sweep(scheduler_version="adaptive-scheduler.v999")
@@ -312,3 +312,43 @@ def test_supported_engine_refuses_unknown_version(tmp_path):
             output=str(tmp_path),
             status=str(tmp_path / "status.json"),
         )
+
+
+def test_supported_scheduler_import_does_not_load_ssh_or_numerical_backends():
+    code = "import sys; import frequensolve.adaptive; assert not {'paramiko', 'numpy', 'pyvista'} & sys.modules.keys()"
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_render_allocation_uses_direct_template_defaults_and_explicit_pool(tmp_path):
+    import json
+    import shlex
+    import subprocess
+
+    from frequensolve.adaptive import AdaptivePool, render_allocation
+
+    pool = AdaptivePool(1, 4, 2, 15360, 900, "cpu-single")
+    script = render_allocation(
+        pool=pool,
+        job_file="example/job.json",
+        run_path=str(tmp_path),
+        output=str(tmp_path / "run-logs"),
+        executable="/native/fs2d",
+        mpi="/adapter/srun",
+        mpi_args=["--mpi=pmix"],
+        task_count=3,
+        imaging=True,
+    )
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+    config_line = script[
+        script.index("printf '%s") : script.index(' > "$scheduler_config"')
+    ]
+    config = json.loads(shlex.split(config_line)[2])
+    assert config["version"] == "adaptive-scheduler.v1"
+    assert config["total_ranks"] == 4
+    assert config["omp_threads"] == 2
+    assert config["mem_per_rank_gib"] == 3.75
+    assert config["failure_tolerance"] == 4
+    assert config["mem_cushion"] == 1.5
+    assert config["boost_max_factor"] == 8
+    assert config["task_indices"] == [1, 2, 3]
+    assert config["skip_sizing"] is False

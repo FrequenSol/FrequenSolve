@@ -151,3 +151,34 @@ def test_planner_memory_rejects_invalid_requests(memory):
                 }
             }
         )
+
+
+def test_adaptive_pool_profile_preserves_resources_and_rejects_planner_mix():
+    resources = {
+        "mode": "adaptive-allocation.v1",
+        "nodes": 1,
+        "mpi_ranks": 4,
+        "wall_time_seconds": 900,
+        "pool": {
+            "threads_per_rank": 2,
+            "memory_mib_per_node": 15360,
+            "partition": "cpu-single",
+        },
+    }
+    profile = ManagedExecutionProfile.from_mapping({"execution_resources": resources})
+    assert profile.graphql_arguments()["execution_resources"] == {
+        "mode": "adaptive-allocation.v1",
+        "nodes": 1,
+        "mpiRanks": 4,
+        "wallTimeSeconds": 900,
+        "pool": {
+            "threadsPerRank": 2,
+            "memoryMiBPerNode": 15360,
+            "partition": "cpu-single",
+        },
+    }
+    for changed in [{"planner_memory_mib": 8192}, {"mode": "auto"}, {"cpu": 8}]:
+        with pytest.raises(ManagedExecutionProfileError):
+            ManagedExecutionProfile.from_mapping(
+                {"execution_resources": {**resources, **changed}}
+            )
