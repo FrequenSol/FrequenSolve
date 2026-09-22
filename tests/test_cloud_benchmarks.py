@@ -32,7 +32,7 @@ def test_corpus_is_standalone_and_has_issue_linked_known_bugs():
     cases = list_cases()
 
     assert len(cases) == 24
-    assert sum(case["expectedSubmissions"] for case in cases) == 45
+    assert sum(case["expectedSubmissions"] for case in cases) == 64
     assert len({case["id"] for case in cases}) == len(cases)
     for case in cases:
         assert case["script"].endswith(".py")
