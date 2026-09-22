@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from dataclasses import replace
 from datetime import datetime, timezone
-from importlib.resources import as_file, files
+from importlib.resources import as_file
 from pathlib import Path
 from select import select
 from typing import (
@@ -65,6 +65,11 @@ from frequensolve.orchestrator.sites.base import (
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
+from frequensolve.orchestrator.sites.hpc.adaptive import (
+    ENGINE_VERSION,
+    render_sweep,
+    scheduler_source,
+)
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.enterprise import (
     BUNDLE_MANIFEST_RELATIVE,
@@ -3288,12 +3293,7 @@ class SlurmSite(BaseSite):
         self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
-        runner_resource = (
-            files("frequensolve.orchestrator.sites.hpc")
-            .joinpath("templates")
-            .joinpath("sweep")
-            .joinpath("adaptive_scheduler.py")
-        )
+        runner_resource = scheduler_source()
         with as_file(runner_resource) as local_runner:
             self.put(local_runner, remote_runner)
         self.run_login(
@@ -3577,6 +3577,7 @@ class SlurmSite(BaseSite):
                 ranks_per_node=ranks_per_node,
             )
         scheduler_config = {
+            "version": ENGINE_VERSION,
             "executable": str(self.executable),
             "mpi": str(self.mpi_cmd),
             "mpi_args": list(self.mpi_args),
@@ -3598,8 +3599,8 @@ class SlurmSite(BaseSite):
             "launch_delay_seconds": launch_delay_seconds,
         }
 
-        return self._render_template(
-            "sweep/adaptive_sweep.sh",
+        return render_sweep(
+            scheduler_version=ENGINE_VERSION,
             batch_job=True,
             name=name,
             dir_out=stdout,

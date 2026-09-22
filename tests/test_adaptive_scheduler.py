@@ -259,3 +259,56 @@ def test_adaptive_scheduler_mpirun_uses_full_allocation_without_ibrun_flags(
 
     with pytest.raises(SystemExit, match="requires exclusive use"):
         instance._launch_command(task_id=1, offset=1, ranks=3)
+
+
+def test_supported_engine_envelope_keeps_site_limits_outside_generic_scheduler():
+    from frequensolve.orchestrator.sites.hpc.adaptive import AdaptivePool
+
+    pool = AdaptivePool.from_mapping(
+        dict(
+            nodes=4,
+            ranks_per_node=16,
+            threads_per_rank=2,
+            memory_mib_per_node=65536,
+            wall_time_seconds=3610,
+            partition="science",
+        )
+    )
+    assert pool.memory_per_rank_gib == 4
+    assert pool.sbatch_arguments() == [
+        "--nodes",
+        "4",
+        "--ntasks-per-node",
+        "16",
+        "--cpus-per-task",
+        "2",
+        "--mem",
+        "65536M",
+        "--partition",
+        "science",
+        "--time",
+        "61",
+    ]
+    for update in [
+        {"nodes": True},
+        {"memory_mib_per_node": 0},
+        {"partition": "x\n#SBATCH --exclusive"},
+        {"unexpected": 1},
+    ]:
+        with pytest.raises(ValueError):
+            AdaptivePool.from_mapping({**pool.__dict__, **update})
+
+
+def test_supported_engine_refuses_unknown_version(tmp_path):
+    from frequensolve.orchestrator.sites.hpc.adaptive import render_sweep
+
+    with pytest.raises(ValueError, match="Unsupported"):
+        render_sweep(scheduler_version="adaptive-scheduler.v999")
+    scheduler = _load_scheduler_module()
+    with pytest.raises(ValueError, match="Unsupported"):
+        scheduler.AdaptiveScheduler(
+            {"version": "v999"},
+            job_file="job.json",
+            output=str(tmp_path),
+            status=str(tmp_path / "status.json"),
+        )
