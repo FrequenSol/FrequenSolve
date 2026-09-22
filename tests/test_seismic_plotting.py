@@ -1059,3 +1059,52 @@ def test_vtu_plot_supports_solver_tensor_component_fallbacks(tmp_path):
         plotted_mesh.point_data["velocity"][:, 2],
     )
     plotter.close()
+
+
+@pytest.mark.parametrize("cell_type", ["LINE", "QUADRATIC_EDGE", "QUAD"])
+def test_vtu_edge_overlay_handles_interface_and_surface_cells(cell_type):
+    pv = pytest.importorskip("pyvista")
+    points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    if cell_type == "LINE":
+        points = points[:2]
+    elif cell_type == "QUAD":
+        points = np.array(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+        )
+    mesh = pv.UnstructuredGrid(
+        np.r_[len(points), np.arange(len(points))],
+        np.array([getattr(pv.CellType, cell_type)], dtype=np.uint8),
+        points,
+    )
+    values = np.arange(mesh.n_points, dtype=float) + 1.0
+    mesh.point_data["vp"] = values
+    plotter = pv.Plotter(off_screen=True, window_size=(240, 180))
+    try:
+        _, plotted = plot_vtu(
+            mesh,
+            "vp",
+            show_edges=True,
+            scalar_bar=False,
+            plotter=plotter,
+            show=False,
+            return_mesh=True,
+        )
+        np.testing.assert_allclose(plotted.point_data["vp"], values)
+        assert plotted.n_cells == 1
+        assert len(plotter.renderer.actors) == (2 if cell_type == "QUAD" else 1)
+        pixels = plotter.screenshot(return_img=True)
+        assert pixels.shape[:2] == (180, 240)
+        assert np.ptp(pixels) > 0
+    finally:
+        plotter.close()
+
+
+def test_vtu_edge_overlay_does_not_allow_empty_input():
+    pv = pytest.importorskip("pyvista")
+    mesh = pv.UnstructuredGrid()
+    plotter = pv.Plotter(off_screen=True)
+    try:
+        with pytest.raises(ValueError):
+            plot_vtu(mesh, show_edges=True, plotter=plotter, show=False)
+    finally:
+        plotter.close()
