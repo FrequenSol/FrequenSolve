@@ -3,12 +3,19 @@
 import copy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Dict, Literal, Mapping, Optional, Union
 
 import xarray as xr
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.attenuation import AttenuationConfig
+from frequensolve.model.implicit_geometry import (
+    ImplicitSurface,
+    RBFSurface,
+    implicit_surface_from_fs,
+    split_surface_payloads,
+)
+from frequensolve.model.parameterization import MeshPropertySpace
 from frequensolve.model.property import Property, PropertyMap
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.mixins import (
@@ -271,6 +278,12 @@ class ModelBase(ExtraFieldsMixin):
             Bare values are interpreted as hertz; Pint quantities and
             unit-bearing mappings may use compatible frequency units.
         subdomains: Material subdomains belonging to this model.
+        property_spaces: Named :class:`MeshPropertySpace` declarations (or
+            their mappings) referenced by ``MeshControl`` parameterizations.
+            Serialized as ``Model/property_spaces``.
+        implicit_surfaces: Named implicit-geometry surfaces
+            (:class:`RBFSurface`, :class:`ImplicitSurface` or their payloads)
+            serialized into ``Model/surfaces`` after any graph surfaces.
         extra: Additional serialized fields preserved on round trip.
 
     Notes:
@@ -283,6 +296,8 @@ class ModelBase(ExtraFieldsMixin):
     attenuation_model: Optional[str] = None
     reference_frequency: Optional[Any] = None
     subdomains: NamedList = field(default_factory=NamedList)
+    property_spaces: Dict[str, MeshPropertySpace] = field(default_factory=dict)
+    implicit_surfaces: NamedList = field(default_factory=NamedList)
     extra: Dict[str, Any] = field(default_factory=dict)
     _attenuation_extra: Dict[str, Any] = field(
         default_factory=dict,
@@ -297,6 +312,44 @@ class ModelBase(ExtraFieldsMixin):
         if attenuation is not None:
             self.attenuation_model = attenuation.model
             self.reference_frequency = attenuation.reference_frequency
+        self.property_spaces = MeshPropertySpace.mapping_from_fs(self.property_spaces)
+        surfaces = list(self.implicit_surfaces or [])
+        self.implicit_surfaces = NamedList()
+        for surface in surfaces:
+            self.add_implicit_surface(surface)
+
+    def add_implicit_surface(
+        self,
+        surface: Union[RBFSurface, ImplicitSurface, Mapping[str, Any]],
+    ) -> Union[RBFSurface, ImplicitSurface]:
+        """Register a named implicit-geometry surface on the model.
+
+        Args:
+            surface: :class:`RBFSurface`, :class:`ImplicitSurface`, or a
+                serialized implicit surface payload.
+
+        Returns:
+            The registered surface object.
+
+        Raises:
+            TypeError: If ``surface`` is not an implicit surface.
+            ValueError: If another surface already uses the same name.
+        """
+
+        if isinstance(surface, Mapping):
+            surface = implicit_surface_from_fs(surface)
+        if not isinstance(surface, (RBFSurface, ImplicitSurface)):
+            raise TypeError("add_implicit_surface requires an implicit surface")
+        if surface.name in self._reserved_surface_names():
+            raise ValueError(f"Surface name '{surface.name}' is already used")
+        self.implicit_surfaces.append(surface)
+        return surface
+
+    def _reserved_surface_names(self) -> set:
+        return {surface.name for surface in self.implicit_surfaces}
+
+    def _property_spaces_to_fs(self) -> Dict[str, Dict[str, Any]]:
+        return {name: space.to_fs() for name, space in self.property_spaces.items()}
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize the model and its material subdomains.
@@ -336,6 +389,9 @@ class ModelBase(ExtraFieldsMixin):
 
         ctx = ctx or ExportContext()
         attenuation = self._attenuation_config()
+        extra = dict(self.extra)
+        surfaces = list(extra.pop("surfaces", None) or [])
+        surfaces.extend(surface.to_fs(ctx) for surface in self.implicit_surfaces)
         payload = {
             "_type": self.__class__.__name__,
             "name": self.name,
@@ -345,9 +401,15 @@ class ModelBase(ExtraFieldsMixin):
                 if attenuation is not None
                 else {}
             ),
+            **(
+                {"property_spaces": self._property_spaces_to_fs()}
+                if self.property_spaces
+                else {}
+            ),
             "subdomains": [subdomain.to_fs(ctx) for subdomain in self.subdomains],
+            **({"surfaces": surfaces} if surfaces else {}),
         }
-        return merge_extra(payload, self.extra, "Model")
+        return merge_extra(payload, extra, "Model")
 
     @classmethod
     def from_fs(cls, data: Dict) -> "ModelBase":
@@ -375,6 +437,11 @@ class ModelBase(ExtraFieldsMixin):
                 if attenuation_payload is not None
                 else None
             )
+            implicit_payloads, graph_payloads = split_surface_payloads(
+                data.pop("surfaces", None)
+            )
+            if graph_payloads:
+                data["surfaces"] = graph_payloads
             model = cls(
                 name=data.pop("name", "model"),
                 dimension=data.pop("dimension", 0),
@@ -384,6 +451,10 @@ class ModelBase(ExtraFieldsMixin):
                 ),
                 subdomains=NamedList(
                     [ModelSubdomain.from_fs(item) for item in subdomains]
+                ),
+                property_spaces=data.pop("property_spaces", None) or {},
+                implicit_surfaces=NamedList(
+                    [implicit_surface_from_fs(item) for item in implicit_payloads]
                 ),
             )
             if attenuation is not None:
@@ -406,8 +477,13 @@ class ModelBase(ExtraFieldsMixin):
             subdomain.name = f"unlabeled_{len(self.subdomains)}"
         self.subdomains.append(subdomain)
 
-    def __iadd__(self, other: ModelSubdomain) -> "ModelBase":
-        self.add_subdomain(other)
+    def __iadd__(
+        self, other: Union[ModelSubdomain, RBFSurface, ImplicitSurface]
+    ) -> "ModelBase":
+        if isinstance(other, (RBFSurface, ImplicitSurface)):
+            self.add_implicit_surface(other)
+        else:
+            self.add_subdomain(other)
         return self
 
     def _attenuation_config(self) -> Optional[AttenuationConfig]:

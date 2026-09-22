@@ -5,6 +5,8 @@ from frequensolve.model.attenuation import *  # noqa: F403
 from frequensolve.model.attenuation import __all__ as _attenuation_all
 from frequensolve.model.dispersion import *  # noqa: F403
 from frequensolve.model.dispersion import __all__ as _dispersion_all
+from frequensolve.model.implicit_geometry import *  # noqa: F403
+from frequensolve.model.implicit_geometry import __all__ as _implicit_geometry_all
 from frequensolve.model.layered import *  # noqa: F403
 from frequensolve.model.layered import __all__ as _layered_all
 from frequensolve.model.model import *  # noqa: F403
@@ -21,6 +23,7 @@ __all__ = unique_exports(
     _dispersion_all,
     _model_all,
     _layered_all,
+    _implicit_geometry_all,
     _parameterization_all,
     _property_all,
     _representation_all,

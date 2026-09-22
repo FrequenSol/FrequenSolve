@@ -26,6 +26,10 @@ import xarray as xr
 
 from frequensolve.mesh.mesh_generators import HexMeshGenerator, TetMeshGenerator
 from frequensolve.model.attenuation import AttenuationConfig
+from frequensolve.model.implicit_geometry import (
+    implicit_surface_from_fs,
+    split_surface_payloads,
+)
 from frequensolve.model.model import ModelBase, ModelSubdomain
 from frequensolve.model.property import (
     canonical_property_name,
@@ -427,9 +431,10 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         """
         data = copy.deepcopy(data)
         # Create copy and remove surfaces to pass rest to parent
-        surfs = data.pop("surfaces")
+        implicit_surfaces, surfs = split_surface_payloads(data.pop("surfaces"))
         subdomains = data.pop("subdomains")
         boreholes = data.pop("boreholes", [])
+        property_spaces = data.pop("property_spaces", None) or {}
         data.pop("fractures", None)
         if len(surfs) < 2:
             raise ValueError("LayeredModel requires at least two surfaces")
@@ -487,6 +492,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             reference_frequency=(
                 attenuation.reference_frequency if attenuation else None
             ),
+            property_spaces=property_spaces,
         )
         if attenuation is not None:
             model._attenuation_extra = attenuation.extra
@@ -537,6 +543,8 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
                 model += ModelSubdomain.from_fs(subdomain)
         for borehole in boreholes:
             model += Borehole.from_fs(borehole)
+        for surface_payload in implicit_surfaces:
+            model += implicit_surface_from_fs(surface_payload)
 
         return model
 
@@ -566,6 +574,9 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             if i == len(self.surfaces) - 1:
                 payload["interface"] = True
             surfaces.append(payload)
+        # Implicit surfaces follow the ordered graph surfaces so layer
+        # interval bookkeeping and 1-based graph surface ids are unchanged.
+        surfaces.extend(surface.to_fs(ctx) for surface in self.implicit_surfaces)
         base_dict.update(
             {
                 "_type": self.__class__.__name__,

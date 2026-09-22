@@ -17,6 +17,7 @@ import numpy as np
 import xarray as xr
 from numpy.typing import ArrayLike
 
+from frequensolve.model.implicit_geometry import ImplicitSurface, RBFSurface
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.util.named_list import NamedList
 
@@ -654,9 +655,19 @@ class LayeredAuthoringMixin:
             other._model = self
             self.boreholes.append(other)
             self._borehole_names.add(other.name)
+        elif isinstance(other, (RBFSurface, ImplicitSurface)):
+            # Implicit surfaces live beside the ordered graph surfaces; they
+            # never bound layers or count as interfaces.
+            self.add_implicit_surface(other)
         else:
             raise ValueError(f"Cannot add {type(other)} to LayeredModel")
         return self
+
+    def _reserved_surface_names(self) -> set:
+        names = super()._reserved_surface_names()
+        names.update(surface.name for surface in self.surfaces)
+        names.update(self._surface_names)
+        return names
 
     def _truncate_inplace(
         self,
