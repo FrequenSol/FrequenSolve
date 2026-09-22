@@ -52,6 +52,7 @@ class ManagedExecutionProfile:
             "wall_time_seconds": (60, 7200),
             "cpu": (1, 128),
             "memory_mib": (1, 262144),
+            "planner_memory_mib": (1, 124518),
         }
         if not required <= resources.keys() or resources.keys() - limits.keys():
             raise ManagedExecutionProfileError(
@@ -74,6 +75,7 @@ class ManagedExecutionProfile:
             "mpi_ranks": "mpiRanks",
             "wall_time_seconds": "wallTimeSeconds",
             "memory_mib": "memoryMiB",
+            "planner_memory_mib": "plannerMemoryMiB",
         }
         return {
             "execution_site_id": self.execution_site_id,

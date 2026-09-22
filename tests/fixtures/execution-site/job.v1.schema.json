@@ -119,6 +119,11 @@
         "allowCpuSharing": {
           "type": "boolean",
           "default": false
+        },
+        "plannerMemoryMiB": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 124518
         }
       },
       "allOf": [

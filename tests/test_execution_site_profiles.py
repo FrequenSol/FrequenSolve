@@ -115,3 +115,39 @@ def test_status_uses_current_identity_without_historical_provider_fallbacks():
     }
     client.execute.return_value["getSimulation"]["providerJobId"] = None
     assert client.get_simulation_status_details("test")["providerJobId"] is None
+
+
+def test_planner_memory_is_independent_and_preserved_in_graphql():
+    profile = ManagedExecutionProfile.from_mapping(
+        {
+            "execution_resources": {
+                "nodes": 1,
+                "mpi_ranks": 1,
+                "wall_time_seconds": 900,
+                "memory_mib": 1024,
+                "planner_memory_mib": 8192,
+            }
+        }
+    )
+    assert profile.graphql_arguments()["execution_resources"] == {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 900,
+        "memoryMiB": 1024,
+        "plannerMemoryMiB": 8192,
+    }
+
+
+@pytest.mark.parametrize("memory", [True, 0, -1, 1.5, "8192", 124519])
+def test_planner_memory_rejects_invalid_requests(memory):
+    with pytest.raises(ManagedExecutionProfileError):
+        ManagedExecutionProfile.from_mapping(
+            {
+                "execution_resources": {
+                    "nodes": 1,
+                    "mpi_ranks": 1,
+                    "wall_time_seconds": 900,
+                    "planner_memory_mib": memory,
+                }
+            }
+        )
