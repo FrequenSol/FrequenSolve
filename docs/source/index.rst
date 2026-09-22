@@ -29,7 +29,7 @@ If you're new to FrequenSolve, follow this path:
   and validate the fixed starter, then monitor your Cloud run through
   self-scoped read-only tools
 - :download:`Acoustic modeling
-  <../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>` for the
+  <../../tutorials/01_modeling_basics/01_acoustic.ipynb>` for the
   first full runnable notebook
 - :doc:`tutorials/index` when you want the notebook learning path by topic
 - :doc:`user_guide/index` when you need conceptual reference tables or a

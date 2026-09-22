@@ -33,7 +33,7 @@
     {
       "code": "unused-ignore",
       "count": 1,
-      "file": "src/frequensolve/frequensolver.py"
+      "file": "src/frequensolve/solver.py"
     },
     {
       "code": "call-arg",

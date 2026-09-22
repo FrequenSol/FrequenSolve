@@ -35,7 +35,7 @@ def test_offsets_use_encoded_source_field_reference():
     acquisition = _acquisition(
         [[0.0, 100.0], [10.0, 100.0]],
         [[5.0, 0.0], [8.0, 200.0]],
-        encoding=SourceEncoding.dense([[1.0], [-1.0]], names=["dipole"]),
+        encoding=SourceEncoding.dense([[1.0, -1.0]], names=["dipole"]),
     )
     np.testing.assert_array_equal(acquisition.source_coords(1), [5.0, 100.0])
     np.testing.assert_array_equal(acquisition.offsets(1, "receivers"), [0.0, 3.0])

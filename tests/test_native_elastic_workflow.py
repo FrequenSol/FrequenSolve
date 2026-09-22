@@ -12,10 +12,6 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
 import frequensolve as fs
-from frequensolve.frequensolver import (
-    FrequenSolverCompatibilityWarning,
-    query_local_frequensolver_identity,
-)
 from frequensolve.mesh import BoundaryCondition
 from frequensolve.mesh.mesh_generators import LayeredMeshGenerator
 from frequensolve.model.layered import LayeredModel
@@ -25,6 +21,10 @@ from frequensolve.seismic.receivers import ReceiverNode
 from frequensolve.simulation.discretization import Discretization
 from frequensolve.simulation.jobs import BaseJob, FrequencyDomainJob
 from frequensolve.simulation.solver import SolverConfig
+from frequensolve.solver import (
+    SolverCompatibilityWarning,
+    query_local_solver_identity,
+)
 
 
 def _author_elastic_job(root):
@@ -109,7 +109,7 @@ def test_native_elastic_velocity_reciprocity(tmp_path):
         pytest.fail("LOCAL_SOLVER_EXECUTABLE is required for native elastic acceptance")
     solver = Path(raw_solver).expanduser().resolve()
     assert solver.is_file() and os.access(solver, os.X_OK)
-    identity = query_local_frequensolver_identity(solver)
+    identity = query_local_solver_identity(solver)
     assert identity.identity is not None, identity.error
     job = _author_elastic_job((tmp_path / "project").resolve())
     assert job.validate().issues == []
@@ -119,13 +119,13 @@ def test_native_elastic_velocity_reciprocity(tmp_path):
         threads_per_worker=1,
         memory_per_worker=512,
         shutdown_on_completion=True,
-        frequensolver_policy="warn",
+        solver_policy="warn",
     )
     # Keep the production compatibility policy enabled. An unreleased checkout
     # may declare no immutable pair; retain that warning in the receipt, while
     # unknown identities and mismatched declared releases still fail this test.
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", FrequenSolverCompatibilityWarning)
+        warnings.simplefilter("always", SolverCompatibilityWarning)
         result = site.run(job, force=True, timeout=300, check=True)
     compatibility_warnings = [str(w.message) for w in caught]
     assert all(

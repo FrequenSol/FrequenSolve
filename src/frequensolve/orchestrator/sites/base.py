@@ -415,7 +415,7 @@ class SubmitPlan:
             if self.n_accepted_failed_tasks:
                 categories.append(f"{self.n_accepted_failed_tasks} accepted failed")
             category_text = ", ".join(categories) if categories else "0 current"
-            message += f"; {self.n_tasks_to_skip} would skip " f"({category_text})"
+            message += f"; {self.n_tasks_to_skip} would skip ({category_text})"
         if self.pending_tasks:
             message += f"\nPending tasks: {self._task_ranges(self.pending_tasks)}"
         if self.skipped_tasks:
@@ -561,6 +561,16 @@ class RunResult:
             return site.fetch_image(self.job)
         return self.job.load_images()
 
+    def eikonal(self) -> Any:
+        """Open authoritative Eikonal first-arrival results for this run."""
+
+        self.raise_for_status()
+        if getattr(self.job, "workflow", None) != "eikonal":
+            raise TypeError("eikonal() requires an EikonalJob")
+        if self.site is not None and hasattr(self.site, "fetch_outputs"):
+            self.site.fetch_outputs(self.job)
+        return self.job.results
+
     def output_files(
         self,
         *,
@@ -605,7 +615,8 @@ class RunResult:
             return files
 
         fetch_output_files(self.job, kind=kind, suffix=suffix)
-        metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
+        metadata = getattr(self.job, "run_metadata", None) or self.run_metadata
+        self.run_metadata = metadata
         if metadata is None:
             result_path = getattr(self.job, "_result_path", None)
             if result_path is None:
@@ -995,6 +1006,14 @@ class RunHandle:
         self.fetch()
         return self.site.fetch_wavefields(self.job, upscale=upscale)
 
+    def eikonal(self) -> Any:
+        """Fetch if needed and open authoritative Eikonal results."""
+
+        if getattr(self.job, "workflow", None) != "eikonal":
+            raise TypeError("eikonal() requires an EikonalJob")
+        self.fetch()
+        return self.job.results
+
     def logs(self, **kwargs: Any) -> Any:
         """Return or fetch logs for this run.
 
@@ -1073,7 +1092,6 @@ class BaseSite:
             sync_project: Whether to synchronize the owning project after the
                 job is saved.
             validate: Whether to run job validation before submission.
-
         Returns:
             The same job object, for fluent site implementations.
         """

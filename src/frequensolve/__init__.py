@@ -22,8 +22,9 @@ from frequensolve._version import get_versions
 
 _PUBLIC_MODULE_ORDER = (
     "_loading",
-    "frequensolver",
+    "solver",
     "geometry",
+    "inversion",
     "knowledge",
     "mesh",
     "model",
@@ -40,8 +41,9 @@ _PUBLIC_EXPORT_ORDER = (
     "project",
     "units",
     "geometry",
+    "inversion",
     "knowledge",
-    "frequensolver",
+    "solver",
     "model",
     "mesh",
     "seismic",

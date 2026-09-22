@@ -24,6 +24,8 @@ from typing import (
 
 from frequensolve.model.property import rsf_binary_path
 from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
+from frequensolve.util.mixins import ExportContext
+from frequensolve.util.store import compact_hdf5_file
 
 if TYPE_CHECKING:
     from frequensolve.simulation.jobs.base import JobLayout
@@ -40,6 +42,8 @@ _PROJECT_FILE_REFERENCE_KEYS = frozenset(
         "srf_file",
     }
 )
+
+_STAGED_PROVENANCE_SCHEMA = "fs-staged-provenance-1"
 
 
 @runtime_checkable
@@ -71,10 +75,25 @@ class JobRemoteMixin:
         @property
         def project_path(self) -> Path: ...
 
-        def to_fs(self, *, project_relative: bool = False) -> Dict[str, Any]: ...
+        preserve_task_outputs: bool
+
+        def to_fs(
+            self, ctx: Optional[ExportContext] = None, *, project_relative: bool = False
+        ) -> Dict[str, Any]: ...
+        def _refresh_external_input_fingerprint_for_save(self) -> None: ...
+        def _set_output_request_fingerprint(self, data: Dict[str, Any]) -> None: ...
+        def _serialized_artifact_metadata(self) -> Optional[Dict[str, Any]]: ...
+        @staticmethod
+        def _sha256_file(path: Path) -> str: ...
+        @staticmethod
+        def _compatibility_hash_payloads(
+            job_data: Dict[str, Any], simulation_data: Dict[str, Any]
+        ) -> str: ...
 
         @staticmethod
         def _write_json_file(path: Path, payload: Dict[str, Any]) -> None: ...
+
+        def export_context(self) -> ExportContext: ...
 
     def save(self) -> Path:
         """Save the simulation and project-relative job JSON to disk.
@@ -93,11 +112,19 @@ class JobRemoteMixin:
         if not isinstance(self.simulation, _SaveableSimulation):
             raise TypeError("Job simulation must support saving before staging")
         self.simulation.save()
+        self._refresh_external_input_fingerprint_for_save()
         file = self._local_path / f"{self.name}.json"
         self._file = file
-        data = self.to_fs(project_relative=True)
+        ctx = self.export_context()
+        data = self.to_fs(ctx, project_relative=True)
         data["result_path"] = str(self._result_path.relative_to(self.project_path))
+        self._set_output_request_fingerprint(data)
+        data["artifact_contract"] = self._serialized_artifact_metadata()
         self._write_json_file(file, data)
+        assert ctx.store is not None
+        ctx.store.prune_unreferenced(data)
+        if ctx.store.path.exists():
+            compact_hdf5_file(ctx.store.path)
         return file
 
     def save_for_remote(
@@ -142,6 +169,14 @@ class JobRemoteMixin:
         stage_dir = self._result_path / "_fs_run" / "remote" / site
         staged_file = stage_dir / Path(local_file).name
         self._write_json_file(staged_file, data)
+        self._write_staged_provenance(
+            site,
+            {
+                "job": {
+                    "digest": self._sha256_file(staged_file),
+                }
+            },
+        )
         return staged_file, remote_layout.job_file
 
     def save_simulation_for_remote(
@@ -190,7 +225,117 @@ class JobRemoteMixin:
 
         staged_file = self._result_path / "_fs_run" / "remote" / site / staged_relpath
         self._write_json_file(staged_file, data)
+        provenance = self._read_staged_provenance(site)
+        provenance["simulation"] = {"digest": self._sha256_file(staged_file)}
+        staged_job = (
+            self._result_path / "_fs_run" / "remote" / site / local_layout.job_file.name
+        )
+        if self.preserve_task_outputs and staged_job.is_file():
+            provenance["compatibility"] = self._compatibility_hash_payloads(
+                json.loads(staged_job.read_text()), data
+            )
+        self._write_staged_provenance(site, provenance)
         return staged_file, remote_layout.simulation_file
+
+    def staged_artifact_fingerprints(self, site: str) -> Optional[Dict[str, str]]:
+        """Return exact staged JSON fingerprints for remote task currentness."""
+
+        provenance = self._read_staged_provenance(site)
+        job = provenance.get("job")
+        simulation = provenance.get("simulation")
+        if not isinstance(job, Mapping) or not isinstance(simulation, Mapping):
+            return None
+        job_digest = job.get("digest")
+        simulation_digest = simulation.get("digest")
+        if not self._valid_sha256_digest(job_digest) or not self._valid_sha256_digest(
+            simulation_digest
+        ):
+            return None
+        output_request = getattr(self, "_output_request_fingerprint_cache", None)
+        output_digest = (
+            output_request.get("digest")
+            if isinstance(output_request, Mapping)
+            else None
+        )
+        if not self._valid_sha256_digest(output_digest):
+            return None
+        return {
+            "job": str(job_digest),
+            "simulation": str(simulation_digest),
+            "outputs": str(output_digest),
+        }
+
+    def staged_task_fingerprints(self, site: str) -> Optional[Dict[str, str]]:
+        """Validate retained tasks against the actual staged retry identity."""
+        if self.preserve_task_outputs:
+            digest = self._read_staged_provenance(site).get("compatibility")
+            if not self._valid_sha256_digest(digest):
+                return None
+            return {"compatibility": str(digest)}
+        return self.staged_artifact_fingerprints(site)
+
+    @staticmethod
+    def _valid_sha256_digest(value: object) -> bool:
+        if not isinstance(value, str) or len(value) != len("sha256:") + 64:
+            return False
+        if not value.startswith("sha256:"):
+            return False
+        try:
+            int(value.removeprefix("sha256:"), 16)
+        except ValueError:
+            return False
+        return True
+
+    def _staged_provenance_path(self, site: str) -> Path:
+        """Return the job-scoped compact provenance sidecar path."""
+
+        if (
+            not isinstance(site, str)
+            or not site
+            or site in {".", ".."}
+            or Path(site).name != site
+            or "\\" in site
+        ):
+            raise ValueError("Remote site staging name must be one path component")
+        return self._result_path / "_fs_run" / "remote" / site / "provenance.json"
+
+    def _read_staged_provenance(self, site: str) -> Dict[str, Any]:
+        frozen = getattr(self, "_frozen_staged_provenance", None)
+        if isinstance(frozen, Mapping) and site in frozen:
+            return dict(frozen[site])
+        path = self._staged_provenance_path(site)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"schema": _STAGED_PROVENANCE_SCHEMA}
+        if not isinstance(payload, dict):
+            return {"schema": _STAGED_PROVENANCE_SCHEMA}
+        if payload.get("schema") != _STAGED_PROVENANCE_SCHEMA:
+            return {"schema": _STAGED_PROVENANCE_SCHEMA}
+        return {
+            key: value
+            for key, value in payload.items()
+            if key in {"schema", "job", "simulation", "compatibility"}
+        }
+
+    def _write_staged_provenance(
+        self,
+        site: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Atomically replace compact provenance for the current staging."""
+
+        data = {
+            "schema": _STAGED_PROVENANCE_SCHEMA,
+            **{
+                key: dict(value)
+                for key, value in payload.items()
+                if key in {"job", "simulation"} and isinstance(value, Mapping)
+            },
+        }
+        if self._valid_sha256_digest(payload.get("compatibility")):
+            data["compatibility"] = payload["compatibility"]
+        self._write_json_file(self._staged_provenance_path(site), data)
 
     def remote_input_files(
         self, remote_project: Union[Path, str]
@@ -484,6 +629,21 @@ class JobRemoteMixin:
     @staticmethod
     def _iter_file_references(value: Any) -> Iterable[str]:
         if isinstance(value, Mapping):
+            for section, keys in (
+                ("control_sensitivities", ("direction", "current")),
+                ("Image", ("direction",)),
+            ):
+                config = value.get(section)
+                if isinstance(config, Mapping):
+                    for key in keys:
+                        path = config.get(key)
+                        if isinstance(path, (str, Path)):
+                            yield JobRemoteMixin._strip_file_locator(path)
+            derivatives = value.get("observed_derivatives")
+            if isinstance(derivatives, Mapping):
+                df = derivatives.get("df")
+                if isinstance(df, (str, Path)):
+                    yield JobRemoteMixin._strip_file_locator(df)
             for key, item in value.items():
                 if key in _PROJECT_FILE_REFERENCE_KEYS and isinstance(
                     item, (str, Path)

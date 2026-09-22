@@ -1,152 +1,63 @@
-# Fast Solver Trace Finalization Contract
+# Trace finalization and successful-task retention
 
-This note describes the solver-side trace-output changes expected by the
-FrequenSolve Python API. The goal is to keep parallel frequency solves simple while giving
-users one convenient trace product by default.
+FrequenSolve and Sauce now use matching v2 artifact contracts. Each frequency task
+publishes `_fs_run/tasks/task_NNNNNN/result.json`; packing and smoothing publish
+`_fs_run/operations/pack/result.json` and `operations/smooth/result.json`.
+The records contain the authoritative artifact paths, full producer input hashes,
+convergence, timing, resource and provenance information. Readers follow these
+records rather than constructing filenames or listing output directories.
 
-## Default Behavior
+## Defaults
 
-Frequency tasks may continue writing independent HDF5 shard files while they run
-in parallel. After all tasks finish, the fast solver should run a
-cleanup/finalization step that writes a packed consolidated trace file and
-aggregates task metadata.
+Completed task shards are packed into immutable HDF5 segments. A manifest maps
+exact task/frequency identities to segment paths and dataset numbers. Task records
+are updated before raw shards and duplicate survey metadata are removed. Repeated
+packing with no changes creates no additional segments or manifests. Replacement
+packing removes previous segments only when no current task or pack references them.
+An unsuccessful replacement leaves the previously committed pack intact.
 
-Default final layout:
+Jobs with fewer than 32 tasks read their task JSON directly. Larger jobs also use
+`_fs_run/tasks.h5`, a derived index rebuilt after packing and invalidated when a
+task is replaced. Detailed task JSON remains available for provenance.
 
-```text
-results/
-  traces/
-    traces.h5
-    manifest.json
-    shards/              # optional transient working files
-  logs/
-    task_1.log
-    task_2.log
-  _fs_run/
-    run_manifest.json
-    outputs.json
-    timings.json
-```
-
-The public Python API should usually read `results/traces/traces.h5`, not individual
-frequency shards.
-
-## Packed Trace File
-
-`traces.h5` should be self-contained by default. It should include:
-
-- a frequency axis and sorted physical frequency values;
-- one dataset per trace group;
-- receiver ids as datasets;
-- source ids as datasets;
-- component names as datasets;
-- physical receiver coordinates in the global frame;
-- physical source coordinates in the global frame;
-- coordinate units and component units where available;
-- task ids, source job metadata, and enough provenance to combine adjacent
-  frequency-band jobs without task-number conflicts.
-
-The cleanup step should validate that every completed shard matches the expected
-group names, shapes, dtypes, and trace layout before packing.
-
-## Separate Storage Mode
-
-The FrequenSolve Python API may expose an opt-in mode such as `store_separate=True` for users who
-want to keep per-frequency trace files instead of a packed file. In that mode,
-each frequency file should be self-contained and should include the trace
-metadata listed above, because there may be no consolidated metadata authority.
-
-This mode is expected to be a niche workflow. The default should be packed
-storage.
-
-## Preliminary Metadata
-
-Before launching independent frequency tasks, the fast solver already runs
-preliminary meshing/sizing work. That step should produce the
-receiver/source/component metadata needed by the finalizer. The frequency tasks
-can then write only their frequency-specific trace arrays and minimal task
-metadata.
-
-Recommended preliminary metadata includes:
-
-- receiver table with ids and global physical coordinates;
-- source table with ids and global physical coordinates;
-- component table with names, directions, and units;
-- sparse survey trace table when sparse survey mode is active;
-- expected trace group names, shapes, dtypes, and axis order.
-
-## Outputs Manifest
-
-`_fs_run/outputs.json` should report the finalized trace file:
-
-```json
-{
-  "schema": "fs-outputs-1",
-  "files": [
-    {
-      "kind": "traces",
-      "format": "hdf5",
-      "schema": "fs-traces-packed-1",
-      "relative_path": "traces/traces.h5"
-    },
-    {
-      "kind": "trace_manifest",
-      "format": "json",
-      "relative_path": "traces/manifest.json"
-    }
-  ]
-}
-```
-
-When `store_separate=True`, `outputs.json` should list the separate shard files
-or a manifest that lists them.
-
-## Logs And Task Statistics
-
-The cleanup step should aggregate task statistics into stable machine-readable
-metadata. At minimum:
-
-- task id;
-- physical frequency;
-- task status;
-- trace output path;
-- wall-clock runtime;
-- MPI ranks, threads per rank, or core count;
-- log path.
-
-The FrequenSolve Python API uses these fields for job summaries, timing plots,
-core-hour plots, and targeted log retrieval.
-
-Raw logs may remain as `logs/task_<task>.log`. Task numbers are one-based in the
-FrequenSolve Python API.
-
-## Frequency-Safe File Names
-
-If shard or finalization paths include physical frequencies, solver path
-handling must not treat decimal points in names like `10.00000` as file
-extensions.
-
-For example, all of these should be valid path stems:
-
-```text
-f_10.00000_hz.h5
-trace_10.00000.h5
-```
-
-The solver pathlib module should only treat the last suffix (`.h5`, `.json`,
-`.vtu`, etc.) as the extension and should preserve decimal points in the stem.
-
-## FrequenSolve Python API Expectations
-
-The FrequenSolve Python API will treat packed storage as the normal result.
-Fetching traces should download or locate `traces/traces.h5` and its manifest.
-Fetching logs should support:
+## Retrying unconverged tasks
 
 ```python
-site.fetch_logs(job)
-site.fetch_logs(job, task=12)
-site.fetch_logs(job, frequency=20.0)
+job.preserve_task_outputs = True
+job.save()
 ```
 
-The solver should keep task/frequency metadata stable enough that these calls
-work after partial reruns and after cleanup finalization.
+The setting defaults to `False`. Enabling it both retains raw task files after
+packing and permits successful tasks to be reused after numerical solver settings
+change. Failed tasks are retried. Forward and imaging job constructors also accept
+`preserve_task_outputs=True`.
+
+Physical simulation, acquisition, output request, frequency partition, mesh, and
+structural solver changes invalidate reuse. Full original hashes remain attached
+to each task; a separate compatibility fingerprint authorizes solver-setting reuse.
+`--fresh` forces a new solve under either policy. Save/stage again after changing
+referenced external input files so their fingerprints are refreshed. The staging
+record uses the actual rewritten remote payloads for remote task validation.
+
+Use `job.traces.open()`, `job.wavefields.open()`, and `job.load_images()` to resolve
+products. Packed dataset numbers need not equal task numbers. Sampled wavefields
+may span multiple logical families and immutable segments.
+
+## Compatibility and limits
+
+This migration requires matching Sauce and FrequenSolve artifact readers; the old
+v1 run manifests are not dual-written. Managed shared image and retained-field
+containers also use generation paths. Smoothing resolves committed task artifacts.
+Trace/image publication closes
+and synchronizes payloads before atomically replacing result records. Producers
+and packers coordinate through a local publication lock. A cached lazy reader
+must reopen its catalog after concurrent replacement; this is not an indefinite
+lease on old generations.
+
+Explicit FWI checkpoint stems and caller-selected export files retain their own
+lifetime policy. External image save paths and fixed visualization/export payloads do not become immutable just
+because their result metadata is atomic. Crash-orphan cleanup is separate from
+normal replacement cleanup. The task-local `preprocess.json` holds current-attempt
+auxiliary provenance rather than an immutable attempt history. Local tests cover 2D double forward, RTM, spectral
+imaging, sampled wavefields, and two-rank sparse FWI; live cloud/HPC publication,
+3D and GPU execution were not newly qualified by this change.

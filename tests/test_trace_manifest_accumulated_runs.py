@@ -1,5 +1,3 @@
-import json
-import warnings
 from pathlib import Path
 
 import h5py
@@ -86,7 +84,7 @@ def _write_accumulated_packed_product(path: Path) -> None:
 def _trace_manifest(tmp_path: Path) -> TraceManifest:
     trace_dir = tmp_path / "results" / "traces"
     return TraceManifest(
-        files=[trace_dir / f"traces_{task}.h5" for task in range(1, 5)],
+        files=[trace_dir / "traces.h5"],
         frequencies={1: 0.1, 2: 0.2, 3: 0.3, 4: 0.4},
         laplace={1: -0.1, 2: -0.1, 3: -0.1, 4: -0.1},
         groups=["surface"],
@@ -95,91 +93,6 @@ def _trace_manifest(tmp_path: Path) -> TraceManifest:
         output_path=trace_dir,
         project_path=tmp_path,
     )
-
-
-def test_accumulated_packed_runs_preserve_current_frequency_laplace_rows(tmp_path):
-    trace_dir = tmp_path / "results" / "traces"
-    trace_dir.mkdir(parents=True)
-    packed = trace_dir / "traces.h5"
-    _write_accumulated_packed_product(packed)
-
-    current_rows = [
-        {
-            "dataset_number": task + 2,
-            "task_id": task,
-            "frequency": task / 10,
-            "laplace": -0.1,
-            "status": "packed",
-        }
-        for task in range(1, 5)
-    ]
-    stale_rows = [
-        {
-            "dataset_number": task,
-            "task_id": task,
-            "frequency": task / 5,
-            "laplace": -0.2,
-            "status": "packed",
-        }
-        for task in range(1, 3)
-    ]
-    (trace_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema": "fs-trace-manifest-1",
-                "packed": {
-                    "format": "hdf5",
-                    "schema": "fs-traces-packed-1",
-                    "relative_path": "traces/traces.h5",
-                },
-                "frequencies": [*current_rows, *stale_rows],
-            }
-        )
-    )
-    manifest = _trace_manifest(tmp_path)
-
-    assert manifest.missing_packed_frequencies == {}
-    assert manifest.packed_complete
-    assert len(manifest.packed_frequencies) == 6
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        traces = TraceDataset.from_manifest(manifest)
-        frequency_data = traces.fd("surface", "p", source=7)
-
-    assert not caught
-    assert traces.manifest.frequencies == manifest.frequencies
-    assert frequency_data.frequency.values.tolist() == [0.1, 0.2, 0.3, 0.4]
-    assert frequency_data.values.real[:, 0].tolist() == [1.0, 2.0, 3.0, 4.0]
-
-
-def test_stale_laplace_row_does_not_cover_current_frequency(tmp_path):
-    trace_dir = tmp_path / "results" / "traces"
-    trace_dir.mkdir(parents=True)
-    (trace_dir / "traces.h5").touch()
-    (trace_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "packed": {"relative_path": "traces/traces.h5"},
-                "frequencies": [
-                    {
-                        "task_id": 1,
-                        "frequency": 0.1,
-                        "laplace": -0.2,
-                    }
-                ],
-            }
-        )
-    )
-    manifest = _trace_manifest(tmp_path)
-
-    assert manifest.missing_packed_frequencies == {
-        1: 0.1,
-        2: 0.2,
-        3: 0.3,
-        4: 0.4,
-    }
-    assert not manifest.packed_complete
 
 
 def _wavenumber_dataset(tmp_path, coordinates):
