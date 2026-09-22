@@ -722,7 +722,7 @@
     },
     {
       "code": "assignment",
-      "count": 3,
+      "count": 4,
       "file": "src/frequensolve/seismic/trace_store.py"
     },
     {
@@ -1067,7 +1067,7 @@
     },
     {
       "code": "assignment",
-      "count": 9,
+      "count": 10,
       "file": "src/frequensolve/simulation/outputs.py"
     },
     {
