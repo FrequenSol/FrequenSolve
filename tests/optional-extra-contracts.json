@@ -126,10 +126,10 @@
         "pylops"
       ],
       "selectors": [
-        "tests/test_fwi_optional.py"
+        "tests/test_imaging_operators.py"
       ],
       "coverage_prefixes": [
-        "frequensolve/simulation/jobs/fwi.py"
+        "frequensolve/imaging/operators.py"
       ],
       "coverage_floor": 22.0
     },
