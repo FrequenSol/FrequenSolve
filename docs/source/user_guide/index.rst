@@ -19,6 +19,7 @@ unfamiliar, check the :doc:`../glossary`.
    frequensolve_directory
    physics_materials_boundaries
    control_sensitivities
+   imaging
    api_to_contracts
    velocity_models_coordinates
    mesh_generation_adaptivity
