@@ -490,7 +490,7 @@ class Backend:
             payload["action"] = job.action
             payload["active"] = list(job.active or [])
             outputs: Dict[str, Any] = {}
-            for label in ("state", "covector", "objective_vector", "objective"):
+            for label in ("state", "covector", "objective_vector"):
                 value = getattr(job, label)
                 if value is None:
                     continue
@@ -502,6 +502,12 @@ class Backend:
                 outputs[label] = [
                     str(stem.with_name(f"{stem.stem}_{task}{stem.suffix}"))
                     for task in _tasks(job)
+                ]
+            if job.objective is not None or (
+                job.action == "linearize" and job.state is not None
+            ):
+                outputs["objective"] = [
+                    str(job.report_file(task)) for task in _tasks(job)
                 ]
             if job.requires_postprocess() and job.covector is not None:
                 outputs["smoothed_covector"] = str(job.covector_file())

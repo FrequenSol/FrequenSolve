@@ -395,6 +395,22 @@ def _is_job(value: Any) -> bool:
     return hasattr(value, "trace_path") and hasattr(value, "f_list")
 
 
+def _job_trace_stem(job: Any) -> Path:
+    """Return a finished job's packed trace product, else its trace root.
+
+    Sauce resolves an observed stem to ``<root>/traces.h5`` or a packed
+    ``.h5`` file; local runs publish their packed product under
+    ``traces/generations/<run>/segment.h5``, which the job's trace manifest
+    names.  Jobs that have not run yet fall back to the trace root.
+    """
+
+    try:
+        packed = job.trace_manifest.packed_file
+    except Exception:
+        packed = None
+    return Path(packed) if packed else Path(job.trace_path)
+
+
 def _sorted_f_map(metadata: Mapping[str, Any]) -> List[Any]:
     return [
         freq
@@ -472,7 +488,7 @@ def _normalize_source(value: Any, *, label: str) -> _ObservedSource:
         )
         return _ObservedSource(
             kind="job",
-            stem=Path(value.trace_path),
+            stem=_job_trace_stem(value),
             known_groups=groups or None,
             frequencies=tuple(value.f_list),
         )
@@ -530,8 +546,9 @@ class ObservedData:
 
     Accepted ``source`` forms:
 
-    * a FrequenSolve forward job: its trace output directory is the observed
-      path stem and its ``f_list`` gives the frequencies;
+    * a FrequenSolve forward job: its packed trace product (or, before it has
+      run, its trace output directory) is the observed path stem and its
+      ``f_list`` gives the frequencies;
     * a path stem (directory or packed trace root) shared by every receiver
       group;
     * a mapping from receiver group name to a path stem, ``.h5`` file,

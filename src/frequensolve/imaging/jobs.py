@@ -1314,8 +1314,18 @@ class FWIOperatorJob(_ImagingJobBase):
         return _task_path(self.objective_vector, task)
 
     def report_file(self, task: Optional[int] = None) -> Path:
-        """Return the scalar objective report stem or one task's report."""
+        """Return the ``fs-objective-report-1`` stem or one task's report.
 
+        State actions (``linearize``, ``jvp``, ``vjp``, ``normal``, ``solve``)
+        receive their report beside the objective state shard as
+        ``<state stem>_<task>_report.json``; Sauce does not read
+        ``fwi_operator.objective`` for them.  ``calibrate`` and ``wri`` use the
+        ``objective`` path.
+        """
+
+        if self.action in _STATE_ACTIONS and self.state is not None:
+            stem = _task_path(self.state, task)
+            return stem.with_name(f"{stem.stem}_report.json")
         if self.objective is None:
             raise ValueError("this job has no objective report path")
         return _task_path(self.objective, task)

@@ -234,7 +234,9 @@ def test_fwi_vjp_normal_and_calibrate_payloads(tmp_path):
     assert Path(op["controls"]["state"]) == tmp_path / "baseline.h5"
     assert Path(op["controls"]["state_output"]).name == "resolved.h5"
     assert Path(op["objective_vector"]) == tmp_path / "dual.json"
-    assert vjp.report_file(2).name == "report_2.json"
+    # Sauce writes fs-objective-report-1 beside the state shard, not at objective
+    assert vjp.report_file(2).name == "state_2_report.json"
+    assert vjp.report_file().name == "state_report.json"
     assert vjp.state_output_file().name == "resolved.h5"
     _round_trip(vjp)
 

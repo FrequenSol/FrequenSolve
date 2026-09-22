@@ -128,6 +128,9 @@ class FakeImagingSite(BaseSite):
             file's sizes are used and checked against this table.
         seed: Seed of the surrogate.
         n_ranks: Rank count recorded in objective-vector manifests.
+        support_masks: Optional ``qualified block -> bool mask`` written to
+            ``/support/<block>`` of every state output and covector (blocks
+            not listed are fully supported).  Emulates Sauce freezing DOFs.
         verbose: Print status messages like other sites.
     """
 
@@ -137,6 +140,7 @@ class FakeImagingSite(BaseSite):
         *,
         seed: int = 0,
         n_ranks: int = 1,
+        support_masks: Optional[Mapping[str, Any]] = None,
         verbose: bool = False,
     ) -> None:
         super().__init__(verbose=verbose)
@@ -146,8 +150,22 @@ class FakeImagingSite(BaseSite):
         }
         self.seed = int(seed)
         self.n_ranks = int(n_ranks)
+        self.support_masks: Dict[str, np.ndarray] = {
+            qualified_block_name(name): np.asarray(mask, dtype=bool).reshape(-1)
+            for name, mask in dict(support_masks or {}).items()
+        }
         self.submissions: List[Dict[str, Any]] = []
         self.linearizations: Dict[str, FakeLinearization] = {}
+
+    def support_mask(self, name: str, size: int) -> np.ndarray:
+        """Return the configured support mask of ``name`` (all true by default)."""
+
+        mask = self.support_masks.get(qualified_block_name(name))
+        if mask is None:
+            return np.ones(int(size), dtype=bool)
+        if mask.size != int(size):
+            raise ValueError(f"support mask for {name!r} needs {size} flags")
+        return np.array(mask, copy=True)
 
     # -- surrogate ------------------------------------------------------------
 
@@ -357,7 +375,7 @@ class FakeImagingSite(BaseSite):
         if job.state_output is not None:
             ControlStateFile(
                 dict(baseline.blocks),
-                support={name: np.ones(sizes[name], dtype=bool) for name in active},
+                support={name: self.support_mask(name, sizes[name]) for name in active},
                 support_min_support=job.min_support,
             ).write(job.state_output_file())
         if job.manifest is not None:
@@ -418,7 +436,9 @@ class FakeImagingSite(BaseSite):
             blocks,
             state_fingerprint=total.state_fingerprint,
             control_registry_fingerprint=total.control_registry_fingerprint,
-            support={name: np.ones(v.size, dtype=bool) for name, v in blocks.items()},
+            support={
+                name: self.support_mask(name, v.size) for name, v in blocks.items()
+            },
         )
         aggregate.write(job.covector_file(raw=True))
         aggregate.write(job.covector_file())
@@ -487,16 +507,45 @@ class FakeImagingSite(BaseSite):
                         f"DOFs; the fake site expects {expected}"
                     )
             return state
-        names = list(self.block_sizes)
+        baselines = self._simulation_baselines(job.simulation)
+        for name, size in self.block_sizes.items():
+            baselines.setdefault(name, np.zeros(size))
         for name in active:
-            if name not in self.block_sizes:
+            if name not in baselines:
                 raise ValueError(
                     f"no controls.state and no block size for {name!r}; pass "
                     "block_sizes to FakeImagingSite"
                 )
-        return ControlStateFile(
-            {name: np.zeros(self.block_sizes[name]) for name in names}
-        )
+        return ControlStateFile(baselines)
+
+    @staticmethod
+    def _simulation_baselines(simulation: Any) -> Dict[str, np.ndarray]:
+        """Return ``model.<id> -> authored coefficients`` of the installed controls.
+
+        Mirrors Sauce, whose registry baseline covers every parameterized
+        property and controlled rbf surface of the simulation.
+        """
+
+        from frequensolve.model.parameterization import ParameterizedProperty
+
+        baselines: Dict[str, np.ndarray] = {}
+        model = getattr(simulation, "model", None)
+        for subdomain in getattr(model, "subdomains", None) or []:
+            for prop in subdomain.properties.values():
+                if isinstance(prop, ParameterizedProperty):
+                    coefficients = prop.control.coefficients
+                    baselines[f"model.{prop.id}"] = (
+                        np.zeros(prop.control.size)
+                        if coefficients is None
+                        else np.asarray(coefficients, dtype=np.float64).reshape(-1)
+                    )
+        for surface in getattr(model, "implicit_surfaces", None) or []:
+            control = getattr(surface, "control", None)
+            if control is not None:
+                baselines[f"model.{control.id}"] = np.asarray(
+                    surface.coefficients, dtype=np.float64
+                ).reshape(-1)
+        return baselines
 
     def _direction(self, job: FWIOperatorJob, lin: FakeLinearization) -> np.ndarray:
         if job.direction is None:
@@ -566,7 +615,11 @@ class FakeImagingSite(BaseSite):
     def _load_state(
         self, job: FWIOperatorJob, task: int
     ) -> Tuple[FakeLinearization, complex]:
+        # Sauce reads a derivative action's ``fwi_operator.state`` exactly as
+        # given; the stem + task convention is kept for the file-layer tests.
         path = job.state_file(task)
+        if not path.is_file() and job.state is not None and Path(job.state).is_file():
+            path = Path(job.state)
         if not path.is_file():
             raise FileNotFoundError(f"missing objective state {path}")
         data = json.loads(path.read_text())
@@ -638,8 +691,9 @@ class FakeImagingSite(BaseSite):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
-    @staticmethod
-    def _write_covector(path: Path, lin: FakeLinearization, packed: np.ndarray) -> None:
+    def _write_covector(
+        self, path: Path, lin: FakeLinearization, packed: np.ndarray
+    ) -> None:
         vector = ControlVectorFile.from_packed(
             packed,
             lin.sizes,
@@ -647,7 +701,7 @@ class FakeImagingSite(BaseSite):
             control_registry_fingerprint=lin.control_registry_fingerprint,
         )
         vector.support = {
-            name: np.ones(size, dtype=bool) for name, size in lin.sizes.items()
+            name: self.support_mask(name, size) for name, size in lin.sizes.items()
         }
         vector.write(path)
 
@@ -699,3 +753,76 @@ class FakeImagingSite(BaseSite):
         path = job.manifest_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# shared simulation fixture
+# ---------------------------------------------------------------------------
+
+
+def layered_simulation(
+    project_path: Path,
+    *,
+    name: str = "shelf",
+    sources: int = 2,
+    receivers: int = 3,
+    groups: Sequence[str] = ("surface",),
+    save: bool = True,
+) -> Any:
+    """Return a saved 2D acoustic layered ``SeismicSimulation`` for imaging tests.
+
+    The model has a ``water`` layer over a ``sediment`` layer (named
+    subdomains for :class:`~frequensolve.imaging.controls.DepthProfile`), an
+    rbf ``salt_top`` surface, ``sources`` scalar point sources and one
+    hydrophone receiver group per name in ``groups``.
+    """
+
+    from frequensolve.model import LayeredModel
+    from frequensolve.model.implicit_geometry import RBFSurface
+    from frequensolve.seismic.acquisition import Acquisition
+    from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+    from frequensolve.seismic.sources import SourceGeometry
+    from frequensolve.simulation.simulation import SeismicSimulation
+
+    model = LayeredModel(name=name, dimension=2, x_limits=[0.0, 4000.0])
+    model.add_surface(0.0, name="top")
+    model.add_layer(
+        name="water", physics="acoustic", properties={"vp": 1500.0, "rho": 1000.0}
+    )
+    model.add_surface(200.0, name="seabed")
+    model.add_layer(
+        name="sediment", physics="acoustic", properties={"vp": 1900.0, "rho": 2000.0}
+    )
+    model.add_surface(1500.0, name="bottom")
+    model += RBFSurface(
+        name="salt_top",
+        support_radius=800.0,
+        centers=[[1000.0, 900.0], [2000.0, 900.0], [3000.0, 900.0]],
+        coefficients=[-100.0, -200.0, -100.0],
+        bias=50.0,
+    )
+    coords = [[1000.0 * (i + 1), 10.0] for i in range(sources)]
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=coords)
+    )
+    for group in groups:
+        device = ReceiverNode(
+            name=f"{group}_hydrophone",
+            components=[ReceiverComponent(name="p", field="pressure")],
+        )
+        acquisition.add_receiver_group(
+            name=group,
+            device=device,
+            coords=np.array([[x, 20.0] for x in np.linspace(500.0, 3500.0, receivers)]),
+        )
+    simulation = SeismicSimulation(
+        name=name,
+        physics="acoustic",
+        dimension=2,
+        project_path=project_path,
+        model=model,
+        acquisition=acquisition,
+    )
+    if save:
+        simulation.save()
+    return simulation
