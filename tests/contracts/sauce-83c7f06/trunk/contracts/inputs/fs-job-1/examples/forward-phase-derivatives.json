@@ -1,0 +1,12 @@
+{
+  "schema": "fs-job-1",
+  "name": "elastic_phase_derivatives",
+  "project_path": "project",
+  "workflow": "forward_df",
+  "derivative_order": 4,
+  "simulation": "sim.json",
+  "result_path": "results/elastic_phase_derivatives",
+  "f_list": [
+    20.0
+  ]
+}

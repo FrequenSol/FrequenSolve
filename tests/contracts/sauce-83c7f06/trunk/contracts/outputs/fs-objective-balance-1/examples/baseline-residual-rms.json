@@ -1,0 +1,26 @@
+{
+  "schema": "fs-objective-balance-1",
+  "frequency_hz": 3.0,
+  "laplace_damping_hz": 1.0,
+  "terms": [
+    {
+      "id": "waveform",
+      "receiver_group": "hydrophones",
+      "compatibility_fingerprint": "9f1fdadf3ba772f9e0f38ef7f529e14e57e5ce2d73c5ee73578a535648a85e3a",
+      "components": ["pressure"],
+      "dimensions": ["pressure"],
+      "units": ["Pa"],
+      "scale": [1250.0],
+      "effective_weight_mass": 2048.0,
+      "active_samples": 2048
+    }
+  ],
+  "fingerprints": {
+    "reference_model": "sha256:model",
+    "observations": "sha256:data",
+    "acquisition": "sha256:acquisition",
+    "source_signature": "none",
+    "preprocessing": "sha256:preprocess",
+    "comparisons": "sha256:comparisons"
+  }
+}

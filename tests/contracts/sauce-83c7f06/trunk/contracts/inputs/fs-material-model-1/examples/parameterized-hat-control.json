@@ -1,0 +1,37 @@
+{
+  "schema": "fs-material-model-1",
+  "units": "km",
+  "subdomains": [
+    {
+      "name": "sediment",
+      "mesh_block_id": 1,
+      "physics": "acoustic",
+      "properties": {
+        "Sp": {
+          "parameterized": {
+            "id": "sediment_sp",
+            "reference": {
+              "value": 0.5
+            },
+            "transform": "log",
+            "control": {
+              "kind": "hat",
+              "coordinate_system": "global",
+              "axis": "z",
+              "origin": 0.0,
+              "spacing": 0.25,
+              "coefficients": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          }
+        },
+        "rho": 2.0
+      }
+    }
+  ]
+}

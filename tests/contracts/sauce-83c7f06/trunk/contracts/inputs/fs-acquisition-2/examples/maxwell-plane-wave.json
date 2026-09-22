@@ -1,0 +1,31 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "scalar",
+    "domain": 99,
+    "sources": [
+      {
+        "name": "plane_wave_launch",
+        "coordinates": [0.0, 0.0]
+      }
+    ]
+  },
+  "impedance_sources": {
+    "_type": "MaxwellPlaneWave",
+    "waves": [
+      {
+        "rhs": 1,
+        "origin": {
+          "value": [0.0, 0.0],
+          "units": "m"
+        },
+        "direction": [1.0, 0.0, 0.0],
+        "electric": [0.0, 0.0, 1.0],
+        "amplitude": 1.0,
+        "phase": 0.0
+      }
+    ]
+  },
+  "receiver_groups": []
+}

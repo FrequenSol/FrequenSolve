@@ -1,0 +1,33 @@
+{
+  "schema": "fs-eikonal-1",
+  "physics": "acoustic",
+  "sources": {
+    "kind": "acquisition",
+    "names": ["source_0"],
+    "incidence_slot": 1
+  },
+  "receivers": {
+    "enabled": true,
+    "kind": "acquisition",
+    "groups": ["surface"]
+  },
+  "solver": {
+    "abs_tolerance": {"value": 1e-10, "units": "s"},
+    "rel_tolerance": 1e-9,
+    "tie_tolerance": 1e-11,
+    "max_waves": 100000,
+    "max_updates": 100000000,
+    "minimum_full_stencil_quality": 0.0
+  },
+  "products": {
+    "field": true,
+    "characteristics": true,
+    "max_points_per_characteristic": 10000,
+    "max_characteristic_points": 1000000
+  },
+  "output": {
+    "directory": "eikonal",
+    "hdf5_file": "first_arrivals.h5",
+    "overwrite": true
+  }
+}

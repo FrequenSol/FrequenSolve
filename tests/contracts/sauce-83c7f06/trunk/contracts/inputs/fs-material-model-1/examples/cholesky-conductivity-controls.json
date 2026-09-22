@@ -1,0 +1,391 @@
+{
+  "schema": "fs-material-model-1",
+  "units": "km",
+  "subdomains": [
+    {
+      "name": "earth",
+      "mesh_block_id": 1,
+      "physics": "em:geophysics",
+      "properties": {
+        "conductivity_xx": {
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "value": 0.03
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "field": "l11"
+                  },
+                  {
+                    "field": "l11"
+                  }
+                ]
+              }
+            ]
+          },
+          "units": "S/m"
+        },
+        "conductivity_yy": {
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "value": 0.03
+              },
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "field": "l21"
+                      },
+                      {
+                        "field": "l21"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "field": "l22"
+                      },
+                      {
+                        "field": "l22"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "units": "S/m"
+        },
+        "conductivity_zz": {
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "value": 0.03
+              },
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "field": "l31"
+                          },
+                          {
+                            "field": "l31"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "field": "l32"
+                          },
+                          {
+                            "field": "l32"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "field": "l33"
+                      },
+                      {
+                        "field": "l33"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "units": "S/m"
+        },
+        "conductivity_xy": {
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "value": 0.03
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "field": "l11"
+                  },
+                  {
+                    "field": "l21"
+                  }
+                ]
+              }
+            ]
+          },
+          "units": "S/m"
+        },
+        "conductivity_xz": {
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "value": 0.03
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "field": "l11"
+                  },
+                  {
+                    "field": "l31"
+                  }
+                ]
+              }
+            ]
+          },
+          "units": "S/m"
+        },
+        "conductivity_yz": {
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "value": 0.03
+              },
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "field": "l21"
+                      },
+                      {
+                        "field": "l31"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "field": "l22"
+                      },
+                      {
+                        "field": "l32"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "units": "S/m"
+        },
+        "chargeability": {
+          "parameterized": {
+            "id": "m",
+            "reference": {
+              "value": 0.2
+            },
+            "transform": "logit",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "z",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                1,
+                1
+              ],
+              "coefficients": [
+                0.1,
+                -0.2
+              ]
+            }
+          }
+        },
+        "ip_time_constant": {
+          "value": 0.5,
+          "units": "s"
+        },
+        "ip_exponent": 0.7
+      },
+      "fields": {
+        "l11": {
+          "parameterized": {
+            "id": "l11",
+            "reference": {
+              "value": 1.0
+            },
+            "transform": "log",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "x",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                1,
+                1
+              ],
+              "coefficients": [
+                0.1,
+                0.2
+              ]
+            }
+          }
+        },
+        "l22": {
+          "parameterized": {
+            "id": "l22",
+            "reference": {
+              "value": 1.0
+            },
+            "transform": "log",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "z",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                1,
+                1
+              ],
+              "coefficients": [
+                0.11,
+                0.18000000000000002
+              ]
+            }
+          }
+        },
+        "l33": {
+          "parameterized": {
+            "id": "l33",
+            "reference": {
+              "value": 1.0
+            },
+            "transform": "log",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "x",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                1,
+                1
+              ],
+              "coefficients": [
+                0.12000000000000001,
+                0.16
+              ]
+            }
+          }
+        },
+        "l21": {
+          "parameterized": {
+            "id": "l21",
+            "reference": {
+              "value": 0.1
+            },
+            "transform": "identity",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "z",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                1,
+                1
+              ],
+              "coefficients": [
+                0.13,
+                0.14
+              ]
+            }
+          }
+        },
+        "l31": {
+          "parameterized": {
+            "id": "l31",
+            "reference": {
+              "value": 0.1
+            },
+            "transform": "identity",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "x",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                1,
+                1
+              ],
+              "coefficients": [
+                0.14,
+                0.12000000000000001
+              ]
+            }
+          }
+        },
+        "l32": {
+          "parameterized": {
+            "id": "l32",
+            "reference": {
+              "value": 0.1
+            },
+            "transform": "identity",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "z",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                1,
+                1
+              ],
+              "coefficients": [
+                0.15000000000000002,
+                0.1
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

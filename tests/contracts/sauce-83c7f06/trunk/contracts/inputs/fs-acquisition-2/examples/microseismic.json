@@ -1,0 +1,47 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "tensor",
+    "defaults": {
+      "mechanism": {
+        "type": "double_couple",
+        "strike": 35,
+        "dip": 70,
+        "rake": -95,
+        "angle_units": "deg",
+        "system": "global"
+      }
+    },
+    "sources": [
+      {
+        "name": "event_001",
+        "coordinates": {
+          "value": [
+            100,
+            200,
+            1500
+          ],
+          "units": "m"
+        },
+        "amplitude": {
+          "value": 1000000000.0,
+          "units": "N*m"
+        }
+      },
+      {
+        "name": "event_002",
+        "coordinates": {
+          "value": [
+            120,
+            210,
+            1520
+          ],
+          "units": "m"
+        },
+        "moment_magnitude": 0.5
+      }
+    ]
+  },
+  "receiver_groups": []
+}

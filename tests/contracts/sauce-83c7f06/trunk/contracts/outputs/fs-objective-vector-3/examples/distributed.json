@@ -1,0 +1,27 @@
+{
+  "manifest_fingerprint": "sha256:9591950d56811d352087273ffbeed9bbda804f585b3262c647c96585d3462466",
+  "partition": {
+    "compatibility": "same_mesh_partition",
+    "n_ranks": 1
+  },
+  "schema": "fs-objective-vector-3",
+  "shards": [
+    {
+      "file": "/results/fs-objective-vector-3_rank_0.h5",
+      "sha256": "sha256:ec1d235bb62a9a360692801fac2cac99c654cd26fcca8276bd78a77f8aa00a82"
+    }
+  ],
+  "state_fingerprint": "sha256:5974f910fe35126f4335c7fb037bb3c4f04f86048eb94689da5ead4e47b0be27",
+  "terms": [
+    {
+      "id": "primary",
+      "layout_fingerprint": "sha256:1c77de4201431c16723393963953face648056daa31416a04a065b897060d6d7",
+      "n_global_rows": 404
+    },
+    {
+      "id": "secondary",
+      "layout_fingerprint": "sha256:1c77de4201431c16723393963953face648056daa31416a04a065b897060d6d7",
+      "n_global_rows": 404
+    }
+  ]
+}

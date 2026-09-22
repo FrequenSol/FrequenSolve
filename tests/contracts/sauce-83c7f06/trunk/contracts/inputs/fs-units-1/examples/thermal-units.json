@@ -1,0 +1,10 @@
+{
+  "schema": "fs-units-1",
+  "Outputs": {
+    "Units": {
+      "dimensions": {
+        "temperature": "degC"
+      }
+    }
+  }
+}

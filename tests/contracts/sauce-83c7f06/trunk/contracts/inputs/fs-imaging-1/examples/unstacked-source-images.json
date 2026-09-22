@@ -1,0 +1,17 @@
+{
+  "schema": "fs-imaging-1",
+  "name": "sensitivity",
+  "data_path": "data/observed.h5",
+  "keep_unstacked": true,
+  "image_storage": "node_sharded_hdf5",
+  "grid": {
+    "system": "global", "dims": ["x", "z"],
+    "x0": [0, 0], "x1": [1, 0.5], "n": [101, 51], "units": "km"
+  },
+  "misfit": {"receiver_groups": [{"name": "receivers", "observed": "data/observed.h5"}]},
+  "images": [
+    {"name": "Vp", "IC": "FWI", "property": "Vp"},
+    {"name": "Vs", "IC": "FWI", "property": "Vs"},
+    {"name": "Rho", "IC": "FWI", "property": "Rho"}
+  ]
+}

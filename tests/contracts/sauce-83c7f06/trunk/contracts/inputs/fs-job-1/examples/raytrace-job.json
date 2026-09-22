@@ -1,0 +1,98 @@
+{
+  "schema": "fs-job-1",
+  "name": "layered_acoustic_rays",
+  "workflow": "raytrace",
+  "simulation": "sim.json",
+  "result_path": "results/layered_acoustic_rays",
+  "RayTracing": {
+    "schema": "fs-ray-tracing-1",
+    "physics": "acoustic",
+    "sources": {
+      "kind": "acquisition",
+      "names": [
+        "shot_001"
+      ]
+    },
+    "launch": {
+      "kind": "fan2d",
+      "count": 181,
+      "angle_min": -90.0,
+      "angle_max": 90.0,
+      "angle_units": "deg",
+      "include_endpoints": true
+    },
+    "integrator": {
+      "method": "dopri5",
+      "parameter": "travel_time",
+      "rel_tol": 1e-8,
+      "abs_tol": 1e-10,
+      "max_reject": 16,
+      "max_steps": 100000,
+      "tau_max": {
+        "value": 5.0,
+        "units": "s"
+      }
+    },
+    "branching": {
+      "mode": "transmit",
+      "max_interactions_per_ray": 16,
+      "max_total_rays": 100000
+    },
+    "weights": {
+      "angular": {
+        "kind": "generated",
+        "normalize": true
+      },
+      "interface": "energy",
+      "q_attenuation": false,
+      "store_q_integral": false
+    },
+    "receivers": {
+      "enabled": true,
+      "kind": "acquisition",
+      "groups": [
+        "receivers"
+      ],
+      "capture_radius": {
+        "value": 5.0,
+        "units": "m"
+      }
+    },
+    "boundaries": {
+      "default": "terminate",
+      "rules": [
+        {
+          "boundary": "free_surface",
+          "policy": "pressure_release"
+        }
+      ]
+    },
+    "path_storage": {
+      "mode": "adaptive",
+      "max_points_per_ray": 20000,
+      "max_storage_bytes": 1073741824,
+      "store": [
+        "p",
+        "root_id",
+        "region_id"
+      ]
+    },
+    "output": {
+      "directory": "rays",
+      "hdf5_file": "rays.h5",
+      "write_vtp": true,
+      "vtp_file": "rays.vtp",
+      "overwrite": false
+    },
+    "failure_policy": {
+      "invalid_source": "error",
+      "invalid_material": "error",
+      "geometry_failure": "error",
+      "step_failure": "terminate_ray",
+      "branch_budget": "truncate",
+      "path_budget": "truncate",
+      "max_failed_rays": 100,
+      "max_failed_fraction": 0.05
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "schema": "fs-job-1",
+  "name": "transient_acoustic",
+  "project_path": "project",
+  "workflow": "transient",
+  "simulation": "sim.json",
+  "result_path": "results/transient_acoustic",
+  "Time": {
+    "schema": "fs-time-domain-1",
+    "method": "newmark",
+    "start": 0.0,
+    "end": 1.0,
+    "time_step": 0.001,
+    "source": {"kind": "ricker", "frequency": 20.0, "delay": 0.05},
+    "output": {"stride": 10},
+    "checkpoint": {"stride": 100, "path": "checkpoints"}
+  }
+}

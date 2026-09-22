@@ -1,0 +1,2040 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-job-1/schema.json",
+  "title": "FS Job v1",
+  "description": "FrequenSolve job file contract.",
+  "x-fs-contract": "fs-job-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "type": "object",
+  "required": [
+    "name",
+    "workflow",
+    "simulation",
+    "result_path"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-job-1",
+      "description": "Versioned job contract identifier."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Task family name."
+    },
+    "project_path": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+      "description": "Project root for this job. When present, this value overrides the simulation document project_path for backend path resolution."
+    },
+    "workflow": {
+      "enum": [
+        "forward",
+        "forward_df",
+        "forward_ds",
+        "adjoint",
+        "smooth",
+        "rtm",
+        "focus",
+        "born",
+        "lsrtm_gradient",
+        "fwi_operator",
+        "modal",
+        "size",
+        "raytrace",
+        "eikonal",
+        "transient"
+      ],
+      "description": "Workflow selected for this job."
+    },
+    "simulation": {
+      "description": "Simulation source: legacy path, file reference, or inline simulation object.",
+      "oneOf": [
+        {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        {
+          "$ref": "../fs-file-ref-1/schema.json"
+        },
+        {
+          "$ref": "../fs-simulation-1/schema.json"
+        }
+      ]
+    },
+    "result_path": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+      "description": "Job output directory. The only command-line override is --result-dir."
+    },
+    "f_list": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/complexNumber"
+      },
+      "description": "Frequency/task list required by frequency workflows and prohibited for raytrace and transient workflows."
+    },
+    "derivative_order": {
+      "enum": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "default": 1,
+      "description": "Highest raw physical-frequency derivative computed by forward_df or forward_ds. The solver writes every derivative dataset from first order through the requested order."
+    },
+    "kernel_derivative": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Complete raw spectral derivative of the acoustic Vp sensitivity kernel. Source weights, receiver weights and the data residual selected by residual are frozen. This does not differentiate the ordinary FWI objective gradient.",
+      "properties": {
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "default": 1
+        },
+        "axis": {
+          "enum": [
+            "fourier",
+            "laplace"
+          ],
+          "default": "fourier",
+          "description": "Real (fourier) or imaginary (laplace) physical frequency component, in Hz; matches forward_df or forward_ds."
+        },
+        "residual": {
+          "enum": [
+            "base",
+            "derivative",
+            "window",
+            "jet"
+          ],
+          "default": "base",
+          "description": "Data dual driving the adjoint hierarchy. base freezes the ordinary base-frequency residual. derivative compares the raw order-n simulated and observed traces, i.e. a t^n time weighting. window compares the time-polynomial combination given by window with one common residual. jet sums one l2 misfit per derivative order, weighted by order_weights, through the triangular transpose of the derivative recurrence. Every mode returns the exact gradient of its objective for the frozen discretization quantities."
+        },
+        "window": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "type": "number"
+          },
+          "description": "Real coefficients a_k of the time window p(t) = sum_k a_k t^k, t in seconds, applied to the damped traces; required by and only used with residual window. The polynomial degree sets the derivative order and the last coefficient must be nonzero."
+        },
+        "order_weights": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "type": "number",
+            "minimum": 0
+          },
+          "description": "Non-negative weights of the order-0 through order-n misfits of a jet residual; defaults to ones. The highest-order weight must be positive. Each order's receiver covector is folded into its adjoint plane, so the cost stays 2*(order+1) solves."
+        },
+        "source_derivative": {
+          "enum": [
+            "frozen",
+            "total"
+          ],
+          "default": "frozen",
+          "description": "frozen holds the source spectrum at the base frequency in the forward hierarchy. total includes the point-source frequency derivative, matching forward_df and time moments of recorded data; the kernel remains exact because every forward plane is then a total derivative."
+        }
+      }
+    },
+    "k_list": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "number"
+      },
+      "description": "Signed physical Fourier wavenumbers for dimension = 2.5 jobs."
+    },
+    "k_weights": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "number"
+      },
+      "description": "Optional quadrature weights paired with k_list. If omitted, readers use trapezoid weights."
+    },
+    "k_units": {
+      "type": "string",
+      "default": "1/m",
+      "description": "Units for k_list and k_weights."
+    },
+    "Imaging": {
+      "type": "object",
+      "description": "Imaging and smoothing configuration read by imaging workflows.",
+      "additionalProperties": true
+    },
+    "Modal": {
+      "type": "object",
+      "description": "Contour eigensolver configuration. Frequencies and contour radii use the same physical cyclic-frequency units as f_list.",
+      "properties": {
+        "center": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/complexNumber",
+          "description": "Center of the elliptic contour. Defaults to and, when supplied, must match the active f_list entry so initialization and contour solves share one reference discretization."
+        },
+        "real_radius": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Contour semi-axis along the real-frequency direction. Defaults to max(1, 0.1*abs(center))."
+        },
+        "imag_radius": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Contour semi-axis along the imaginary-frequency direction. Defaults to real_radius."
+        },
+        "first_probe": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "One-based first physical source-encoding field used as a contour probe."
+        },
+        "probe_count": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Number of physical source probes. Zero selects up to 32 available probes independently of rhs_batch_size."
+        },
+        "rhs_batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 32,
+          "description": "Maximum number of contour probe systems solved simultaneously."
+        },
+        "quadrature_order": {
+          "type": "integer",
+          "minimum": 4,
+          "default": 16,
+          "description": "Initial number of midpoint trapezoidal contour nodes. Verified extraction doubles this order adaptively."
+        },
+        "rank_tolerance": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 1e-10,
+          "description": "Relative singular-value threshold for the zeroth contour moment."
+        },
+        "max_modes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Maximum retained eigenpair count. Zero retains every extracted eigenpair inside the contour."
+        },
+        "max_refinements": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2,
+          "description": "Maximum number of quadrature doublings used to stabilize the pole set."
+        },
+        "verification_tolerance": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.0001,
+          "description": "Maximum relative pole displacement accepted between successive contour orders."
+        },
+        "residual_tolerance": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.0001,
+          "description": "Maximum accepted invariant and, when available, direct operator residual."
+        },
+        "require_operator_residual": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require an exact nonlinear residual callback before the pole set can pass policy. The field-only seismic adapter does not currently provide one."
+        }
+      },
+      "additionalProperties": false
+    },
+    "control_sensitivities": {
+      "type": "object",
+      "description": "Native material-control JVP/VJP configuration for Born, RTM, and time-reversal focus workflows.",
+      "properties": {
+        "gram_derivative": {
+          "type": "string",
+          "enum": [
+            "frozen",
+            "total"
+          ],
+          "default": "frozen",
+          "description": "DPG material derivative mode; frozen is the default approximation. Total differentiates Gram and trial-to-test maps for supported full-dimensional Cartesian acoustic, classic elastic and Maxwell Born/RTM and fwi_operator linearize/jvp/vjp/normal actions, and supported WRI objective gradients. Requires Solver/relaxed_assembly=false. WRI normals require frozen Gram. Ordinary Maxwell includes fixed-stretch PML constitutive pullbacks wherever authored controls have support; seismic and WRI gradients exclude PML. Total excludes focus, phase objectives, geometry controls, source tapers, spatial windows and modal formulations. Receiver and incident-source restrictions remain physics-specific."
+        },
+        "active": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Optional ordered list of active model-parameter block names. Omitted selects every registered model parameter."
+        },
+        "current": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Optional HDF5 file containing the current nonlinear control coefficients."
+        },
+        "direction": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "HDF5 control direction required by the Born JVP workflow."
+        },
+        "gradient": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "HDF5 destination for the frequency-aggregated control gradient produced after the RTM VJP tasks. Task i writes a sibling path with suffix _i."
+        },
+        "objective": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Optional HDF5 destination for the scalar objective evaluated by the same RTM forward/adjoint task. Task i writes a sibling path with suffix _i and postprocessing applies the control-sensitivity frequency weights."
+        },
+        "source_taper": {
+          "type": "object",
+          "required": [
+            "d0",
+            "d1"
+          ],
+          "properties": {
+            "d0": {
+              "type": "number",
+              "minimum": 0
+            },
+            "d1": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "units": {
+              "type": "string",
+              "minLength": 1,
+              "default": "m"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Optional radial raised-cosine source-proximity sensitivity taper. Sensitivities are zero through d0, transition to one at d1, and remain one beyond d1."
+        },
+        "spatial_window": {
+          "type": "object",
+          "required": [
+            "axis",
+            "minimum",
+            "maximum"
+          ],
+          "properties": {
+            "axis": {
+              "enum": [
+                "x",
+                "y",
+                "z"
+              ]
+            },
+            "minimum": {
+              "type": "number"
+            },
+            "maximum": {
+              "type": "number"
+            },
+            "taper": {
+              "type": "number",
+              "minimum": 0,
+              "default": 0
+            },
+            "units": {
+              "type": "string",
+              "minLength": 1,
+              "default": "m"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Optional axis-aligned physical window applied symmetrically to native JVP and VJP quadrature contractions. The weight is zero outside [minimum, maximum], one in the interior, and raised-cosine tapered over the requested distance at each edge."
+        },
+        "raw_gradient": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Optional HDF5 destination for the exact frequency-aggregated VJP before a Riesz or smoothing map. Defaults to the gradient stem with suffix _raw."
+        },
+        "weights": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "minimum": 0
+          },
+          "description": "Optional nonnegative frequency weights in f_list order. Omitted weights are one, so RTM covectors are summed rather than averaged."
+        },
+        "Smoothing": {
+          "type": "object",
+          "description": "Optional representation-owned variational Riesz map applied after frequency aggregation.",
+          "properties": {
+            "type": {
+              "enum": [
+                "none",
+                "tikhonov",
+                "l2",
+                "tv",
+                "tgv"
+              ],
+              "default": "tikhonov"
+            },
+            "lambda": {
+              "type": "number",
+              "minimum": 0,
+              "default": 1,
+              "description": "Fraction of the owning material layer's conservative P wavelength used as the smoothing length."
+            },
+            "alpha": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Optional direct Tikhonov/TV variational coefficient. Overrides wavelength-relative scaling and is not valid for TGV."
+            },
+            "alpha1": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Optional direct first-order TGV weight. Must be supplied with alpha2."
+            },
+            "alpha2": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Optional direct second-order TGV weight. Must be supplied with alpha1."
+            },
+            "tgv_ratio": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1,
+              "description": "Dimensionless second-order TGV balance; wavelength scaling gives alpha1=length and alpha2=tgv_ratio*length^2."
+            },
+            "reference_wavelength": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Optional reference wavelength used with lambda instead of deriving one from the material model and f_list."
+            },
+            "derivative_order": {
+              "enum": [
+                1,
+                2
+              ],
+              "default": 1
+            },
+            "epsilon": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 0.001
+            },
+            "iterations": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 5
+            },
+            "input_role": {
+              "enum": [
+                "dual",
+                "primal"
+              ],
+              "default": "dual"
+            }
+          },
+          "dependentRequired": {
+            "alpha1": [
+              "alpha2"
+            ],
+            "alpha2": [
+              "alpha1"
+            ]
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "focus": {
+      "type": "object",
+      "description": "Unnormalized negative spectral energy from observed-data backpropagation. Frequencies are evaluated independently.",
+      "required": [
+        "objective",
+        "softening"
+      ],
+      "properties": {
+        "objective": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "HDF5 destination for the frequency-aggregated scalar objective. Task i writes a sibling path with suffix _i."
+        },
+        "softening": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Positive length in km: Gaussian standard deviation for trfwi, or aperture half-width in each coordinate for weft. The mesh and quadrature must resolve this length."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "trfwi",
+            "weft"
+          ],
+          "default": "trfwi",
+          "description": "trfwi focuses acoustic pressure energy with a Gaussian aperture; weft focuses acoustic volumetric strain or elastic strain energy with a compact cosine aperture."
+        }
+      },
+      "additionalProperties": false
+    },
+    "fwi_operator": {
+      "type": "object",
+      "description": "Task-local matrix-free objective operator request. Cross-frequency source fitting and Schur projection remain orchestrator responsibilities.",
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "calibrate",
+            "linearize",
+            "jvp",
+            "vjp",
+            "normal",
+            "wri",
+            "solve"
+          ]
+        },
+        "state": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Required output fs-objective-linearization-3 path for linearize, or saved state input for jvp, vjp and normal. Reuse requires the same realized mesh partition."
+        },
+        "objective_vector": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Output objective-space vector for jvp, or input objective-space dual for vjp."
+        },
+        "model_direction": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "WRI-only native material direction."
+        },
+        "model_covector": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "WRI-only native material covector."
+        },
+        "objective": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Optional scalar objective output for linearize."
+        },
+        "balance": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Output fs-objective-balance-1 path for calibrate."
+        },
+        "model_gradient": {
+          "type": "boolean",
+          "default": false,
+          "description": "For extension solve, request the background covector of the converged observed-data inner objective. Ordinary linearize computes its requested covector through the selected derivative policy."
+        },
+        "cache_receiver_state": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the state artifact to cache simulated base and spectral-derivative receiver values."
+        },
+        "wri": {
+          "type": "object",
+          "description": "DPG wavefield-reconstruction subproblem. Sauce solves the data-assimilated wavefield and optionally returns the reduced model covector; outer alternating updates remain orchestrator responsibilities.",
+          "required": [
+            "penalty"
+          ],
+          "properties": {
+            "penalty": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Positive dimensionless weight multiplying the receiver data penalty relative to the DPG PDE-residual norm."
+            },
+            "data_scale": {
+              "oneOf": [
+                {
+                  "const": "auto"
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ],
+              "default": "auto",
+              "description": "Auto, including omission, uses one solver unit per component expressed in its receiver coordinate units. This avoids an implicit 1 Pa or 1 mm/s default and is independent of source amplitudes and observed values. A positive number explicitly applies that scale in each component's coordinate units. The resolved component scales are written to the WRI objective artifact; the penalty still controls data/PDE balance."
+            },
+            "receiver_group": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Select one imaging receiver group. Mutually exclusive with receiver_groups. Omitting both selects all imaging misfit groups."
+            },
+            "receiver_groups": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Select imaging receiver groups whose observation penalties are summed. Supports dense or sparse point receivers, identity or up_down projection, and fixed point-local linear simulated preprocessing with nonnegative residual weights. Source-dependent operators are reconstructed separately."
+            },
+            "curvature": {
+              "type": "string",
+              "enum": [
+                "fixed_wavefield",
+                "joint_schur"
+              ],
+              "description": "Return a frozen-Gram model normal in model_covector. fixed_wavefield holds the reconstruction fixed; joint_schur eliminates the wavefield increment from joint Gauss-Newton using one additional reconstruction solve per batch. Requires model_direction, Solver/relaxed_assembly=false, and unwindowed material controls. Omit to return the reduced gradient."
+            }
+          },
+          "not": {
+            "required": [
+              "receiver_group",
+              "receiver_groups"
+            ]
+          },
+          "additionalProperties": false
+        },
+        "source_controls": {
+          "type": "object",
+          "description": "Fixed-baseline source location and mechanism controls; FrequenSolve owns parameter updates and optimization. Requires waveform linearize/jvp/vjp. Location/mechanism controls currently require one MPI rank; OpenMP is supported.",
+          "properties": {
+            "location_method": {
+              "enum": ["analytic", "local_fd4"],
+              "default": "analytic",
+              "description": "Analytic basis and coefficient product rule. Unsupported derivatives fail. local_fd4 is a deprecated alias for analytic; it does not enable finite differences."
+            },
+            "reference_step": {
+              "description": "Deprecated compatibility input; analytic location derivatives do not use a step size.",
+              "deprecated": true,
+              "type": "number",
+              "minimum": 1e-06,
+              "maximum": 0.01,
+              "default": 0.0001
+            }
+          },
+          "additionalProperties": false
+        },
+        "controls": {
+          "type": "object",
+          "description": "Authoritative ordered joint subspace and baseline state transport.",
+          "properties": {
+            "active": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Ordered qualified IDs: model.<material control ID>, source.<global source ID>.position, .mechanism, .signature or .signature_df. Empty freezes every block."
+            },
+            "manifest": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Optional task-local resolved fs-control-registry-1 JSON output; relative to ResultPath. Contains registry fingerprint and baseline optimizer coordinates."
+            },
+            "state": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Complete fs-control-state-1 HDF5 input baseline applied before solver setup."
+            },
+            "state_output": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Complete fs-control-state-1 HDF5 output baseline; exact ResultPath-relative filename without task suffix."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "active"
+          ]
+        },
+        "direction": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Input fs-control-vector-1 tangent in the ordered active subspace, bound to the frozen baseline and registry."
+        },
+        "covector": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Output fs-control-vector-1 covector from linearize, vjp, or joint Gauss-Newton normal."
+        },
+        "extension": {
+          "type": "object",
+          "description": "Auxiliary physical-property extension over material control bases. Auxiliary actions hold the background fixed; active physical model controls select the optional reduced background gradient after solve. Volume scattering excludes PML and boundary terms; the DPG test metric is held fixed.",
+          "required": [
+            "fields"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "fields": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "control"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "control": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unqualified parameterized material-property ID. Borrows its spatial basis; tap amplitudes use the property catalog units, without its nonlinear control transform."
+                  },
+                  "lags": {
+                    "type": "object",
+                    "required": [
+                      "count",
+                      "origin",
+                      "spacing",
+                      "units"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "count": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "origin": {
+                        "type": "number"
+                      },
+                      "spacing": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      },
+                      "units": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Explicit time unit, such as s or ms."
+                      }
+                    }
+                  },
+                  "offsets": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "half_offsets",
+                      "units"
+                    ],
+                    "description": "Spatial extension with incident sample at x-h and test sample at x+h around the material control midpoint. Coordinates are physical half-offsets.",
+                    "properties": {
+                      "half_offsets": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "array",
+                          "minItems": 2,
+                          "maxItems": 3,
+                          "items": {
+                            "type": "number"
+                          }
+                        }
+                      },
+                      "units": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "packet_mb": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "default": 16
+                      },
+                      "artifact": {
+                        "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+                        "description": "Optional mesh-control halo artifact override. Normally inferred from the named property space."
+                      }
+                    }
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "lags"
+                    ],
+                    "not": {
+                      "required": [
+                        "offsets"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "offsets"
+                    ],
+                    "not": {
+                      "required": [
+                        "lags"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "direction": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Input fs-extension-vector-1 tangent; required for extension JVP and normal."
+            },
+            "covector": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Output fs-extension-vector-1 auxiliary covector; required for VJP and normal, optional for linearize."
+            },
+            "manifest": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Optional fs-model-extension-1 JSON output with global spatial counts, physical lag coordinates and vector-space/baseline identities."
+            },
+            "solver": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "damping",
+                "solution",
+                "report"
+              ],
+              "description": "Owner-distributed inner solve across source batches of this frequency task. L2 and explicit objective-vector targets use a frozen quadratic; observed-data Huber/Student-t use damped GN/IRLS with line search and true regularized gradient convergence.",
+              "properties": {
+                "damping": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Positive damping amplitude in scaled auxiliary coordinates; contributes damping squared to the normal."
+                },
+                "lag_penalty": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "lag_scale": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "value",
+                    "units"
+                  ],
+                  "properties": {
+                    "value": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "units": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "field_scales": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "description": "One physical property amplitude per extension field. Krylov coordinates z satisfy taps = field_scale * z."
+                },
+                "relative_tolerance": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 1e-05
+                },
+                "absolute_tolerance": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "max_iterations": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 50
+                },
+                "cache_mb": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 512,
+                  "description": "Per-rank resident incident-field budget in MiB. Excess batches use rank-local temporary storage."
+                },
+                "require_convergence": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "solution": {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+                },
+                "report": {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+                },
+                "workspace_mb": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 512,
+                  "description": "Per-rank byte limit in MiB for the retained reduced-gradient wavefield session, separate from incident checkpoint storage."
+                },
+                "offset_penalty": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "offset_scale": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "value",
+                    "units"
+                  ],
+                  "properties": {
+                    "value": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "units": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "max_outer_iterations": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 25,
+                  "description": "Maximum observed-data robust inner iterations."
+                },
+                "max_line_search": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 16,
+                  "description": "Maximum backtracking trials per robust inner iteration."
+                },
+                "gradient_relative_tolerance": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 1e-05,
+                  "description": "Relative tolerance on the true regularized robust objective gradient."
+                },
+                "gradient_absolute_tolerance": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "Absolute tolerance on the true regularized robust objective gradient."
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "required": [
+                      "lag_penalty"
+                    ],
+                    "properties": {
+                      "lag_penalty": {
+                        "exclusiveMinimum": 0
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "lag_scale"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "offset_penalty"
+                    ],
+                    "properties": {
+                      "offset_penalty": {
+                        "exclusiveMinimum": 0
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "offset_scale"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "reflectivity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "parameterization",
+            "fields"
+          ],
+          "description": "Independent real zero-lag coordinate perturbations sharing the authoritative joint control state. Predicts total incident plus singly scattered fields through native waveform acquisition and objective operators.",
+          "properties": {
+            "parameterization": {
+              "enum": [
+                "vp_ip",
+                "vp_vs_ip",
+                "ip_is_rho"
+              ],
+              "description": "Acoustic (Vp,Ip), elastic (Vp,Vs,Ip), or elastic (Ip,Is,rho). Impedances use real reference-axis velocities. Values are absolute perturbations in native solver units, holding other chart coordinates and anisotropy/attenuation fixed."
+            },
+            "workspace_mb": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 512,
+              "description": "Per-rank retained joint field workspace budget in MiB, excluding solver factors and acquisition-owned buffers."
+            },
+            "fields": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "layer",
+                  "axis"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+                    "description": "Registered as reflectivity.<name>."
+                  },
+                  "layer": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "One-based material layer to which the volume contrast applies."
+                  },
+                  "axis": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3,
+                    "description": "One-based axis in the selected coordinate chart; vp_ip has only two axes."
+                  },
+                  "basis": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Borrow this direct material control map, independently of its property values, transforms, or active selection. Initial reflectivity is zero; controls/state can replace it."
+                  },
+                  "control": {
+                    "oneOf": [
+                      {
+                        "$ref": "../fs-material-model-1/schema.json#/$defs/bsplineControlMap"
+                      },
+                      {
+                        "$ref": "../fs-material-model-1/schema.json#/$defs/hatControlMap"
+                      }
+                    ],
+                    "description": "Independent spatial basis; coefficients initialize signed absolute reflectivity in native units."
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "basis"
+                    ],
+                    "not": {
+                      "required": [
+                        "control"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "control"
+                    ],
+                    "not": {
+                      "required": [
+                        "basis"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "parameterization": {
+                    "const": "vp_ip"
+                  }
+                },
+                "required": [
+                  "parameterization"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "fields": {
+                    "items": {
+                      "properties": {
+                        "axis": {
+                          "maximum": 2
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "reduced_normal": {
+          "type": "object",
+          "description": "After a converged observed-data extension solve, apply the Gauss-Newton Schur complement to the physical direction and write the physical covector. Supports lag and offset axes with fixed regularization and frozen positive objective curvature. This is not the exact reduced Hessian. The response solve must converge; omitted tolerances use the extension solver values.",
+          "properties": {
+            "relative_tolerance": {
+              "type": "number",
+              "minimum": 0
+            },
+            "absolute_tolerance": {
+              "type": "number",
+              "minimum": 0
+            },
+            "max_iterations": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "linearize",
+                  "jvp",
+                  "vjp",
+                  "normal",
+                  "solve"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "state",
+              "controls"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "model_direction"
+                  ]
+                },
+                {
+                  "required": [
+                    "model_covector"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "jvp"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "objective_vector"
+            ],
+            "if": {
+              "required": [
+                "extension"
+              ]
+            },
+            "then": {
+              "properties": {
+                "extension": {
+                  "required": [
+                    "direction"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "required": [
+                "direction"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "vjp"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "objective_vector"
+            ],
+            "if": {
+              "required": [
+                "extension"
+              ]
+            },
+            "then": {
+              "properties": {
+                "extension": {
+                  "required": [
+                    "covector"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "required": [
+                "covector"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "normal"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "if": {
+              "required": [
+                "extension"
+              ]
+            },
+            "then": {
+              "properties": {
+                "extension": {
+                  "required": [
+                    "direction",
+                    "covector"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "required": [
+                "direction",
+                "covector"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "calibrate"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "balance"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "wri"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "wri"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "wri": {
+                      "required": [
+                        "curvature"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "model_direction",
+                    "model_covector"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "direction"
+            ]
+          },
+          "then": {
+            "if": {
+              "required": [
+                "reduced_normal"
+              ]
+            },
+            "then": {
+              "properties": {
+                "action": {
+                  "const": "solve"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "jvp",
+                    "normal"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "covector"
+            ]
+          },
+          "then": {
+            "if": {
+              "required": [
+                "extension"
+              ]
+            },
+            "then": {
+              "properties": {
+                "action": {
+                  "const": "solve"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "linearize",
+                    "vjp",
+                    "normal"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "source_controls"
+            ]
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "linearize",
+                  "jvp",
+                  "vjp",
+                  "normal"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "model_direction"
+            ]
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "wri"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "model_covector"
+            ]
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "wri"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "extension"
+            ]
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "linearize",
+                  "jvp",
+                  "vjp",
+                  "normal",
+                  "solve"
+                ]
+              },
+              "controls": {
+                "required": [
+                  "active"
+                ]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "not": {
+                    "required": [
+                      "reduced_normal"
+                    ]
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "direction"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "solve"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "extension",
+              "state",
+              "controls"
+            ],
+            "properties": {
+              "extension": {
+                "required": [
+                  "solver"
+                ],
+                "not": {
+                  "required": [
+                    "covector"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "extension": {
+                "required": [
+                  "solver"
+                ]
+              }
+            },
+            "required": [
+              "extension"
+            ]
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "const": "solve"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "extension",
+              "model_gradient"
+            ],
+            "properties": {
+              "model_gradient": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "covector"
+            ],
+            "properties": {
+              "action": {
+                "const": "solve"
+              },
+              "controls": {
+                "properties": {
+                  "active": {
+                    "minItems": 1
+                  }
+                }
+              }
+            },
+            "not": {
+              "required": [
+                "objective_vector"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "extension",
+              "covector"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "model_gradient"
+                ],
+                "properties": {
+                  "model_gradient": {
+                    "const": true
+                  }
+                }
+              },
+              {
+                "required": [
+                  "reduced_normal"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "reflectivity"
+            ]
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "linearize",
+                  "jvp",
+                  "vjp",
+                  "normal"
+                ]
+              }
+            },
+            "not": {
+              "required": [
+                "extension"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "reduced_normal"
+            ]
+          },
+          "then": {
+            "required": [
+              "extension",
+              "direction",
+              "covector",
+              "controls"
+            ],
+            "properties": {
+              "action": {
+                "const": "solve"
+              },
+              "controls": {
+                "required": [
+                  "active"
+                ],
+                "properties": {
+                  "active": {
+                    "minItems": 1
+                  }
+                }
+              }
+            },
+            "allOf": [
+              {
+                "not": {
+                  "required": [
+                    "objective_vector"
+                  ]
+                }
+              },
+              {
+                "not": {
+                  "required": [
+                    "model_gradient"
+                  ],
+                  "properties": {
+                    "model_gradient": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "RayTracing": {
+      "$ref": "../fs-ray-tracing-1/schema.json",
+      "description": "Frequency-independent ray-tracing configuration required by the raytrace workflow."
+    },
+    "Eikonal": {
+      "$ref": "../fs-eikonal-1/schema.json",
+      "description": "Frequency-independent acoustic first-arrival configuration required by the eikonal workflow."
+    },
+    "Time": {
+      "$ref": "../fs-time-domain-1/schema.json",
+      "description": "Implicit time-domain controls required by the transient workflow."
+    },
+    "preserve_task_outputs": {
+      "type": "boolean",
+      "default": false,
+      "description": "Retain raw task files after packing and allow successful tasks to be reused after numerical solver-setting changes. Physical inputs, mesh-defining Solver fields and requested outputs must still match. Original producer fingerprints remain unchanged."
+    }
+  },
+  "allOf": [
+    {
+      "not": {
+        "required": [
+          "f_adapt"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "enum": [
+              "forward_df",
+              "forward_ds"
+            ]
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "derivative_order"
+          ]
+        }
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "frequency_tangents"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "recompute_trial_to_test"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "enum": [
+              "raytrace",
+              "eikonal",
+              "transient"
+            ]
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "f_list"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "f_list"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "raytrace"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "required": [
+          "RayTracing"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "eikonal"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "required": [
+          "Eikonal"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "Eikonal"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "transient"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "required": [
+          "Time"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "Time"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "control_sensitivities"
+        ]
+      },
+      "then": {
+        "properties": {
+          "workflow": {
+            "enum": [
+              "forward",
+              "born",
+              "rtm",
+              "focus",
+              "fwi_operator"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "fwi_operator"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "required": [
+          "fwi_operator",
+          "Imaging"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "forward"
+          }
+        },
+        "required": [
+          "workflow",
+          "control_sensitivities"
+        ]
+      },
+      "then": {
+        "properties": {
+          "control_sensitivities": {
+            "required": [
+              "current"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "born"
+          }
+        },
+        "required": [
+          "workflow",
+          "control_sensitivities"
+        ]
+      },
+      "then": {
+        "properties": {
+          "control_sensitivities": {
+            "required": [
+              "direction"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "rtm"
+          }
+        },
+        "required": [
+          "workflow",
+          "control_sensitivities"
+        ]
+      },
+      "then": {
+        "properties": {
+          "control_sensitivities": {
+            "required": [
+              "gradient"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "focus"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "required": [
+          "control_sensitivities",
+          "focus",
+          "Imaging"
+        ],
+        "properties": {
+          "control_sensitivities": {
+            "required": [
+              "gradient"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "modal"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "required": [
+          "Modal"
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kernel_derivative"
+        ]
+      },
+      "then": {
+        "required": [
+          "workflow",
+          "Image"
+        ],
+        "properties": {
+          "workflow": {
+            "enum": [
+              "rtm",
+              "fwi_operator"
+            ]
+          }
+        },
+        "not": {
+          "required": [
+            "derivative_order"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kernel_derivative",
+          "fwi_operator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "kernel_derivative": {
+            "required": [
+              "residual"
+            ],
+            "properties": {
+              "residual": {
+                "enum": [
+                  "derivative",
+                  "window"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kernel_derivative",
+          "control_sensitivities"
+        ]
+      },
+      "then": {
+        "properties": {
+          "kernel_derivative": {
+            "required": [
+              "residual"
+            ],
+            "properties": {
+              "residual": {
+                "enum": [
+                  "derivative",
+                  "window",
+                  "jet"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "fwi_operator"
+        ],
+        "properties": {
+          "fwi_operator": {
+            "required": [
+              "extension"
+            ]
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "control_sensitivities"
+          ]
+        }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

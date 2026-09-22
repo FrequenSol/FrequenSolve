@@ -1,0 +1,852 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-imaging-1/schema.json",
+  "title": "FS Imaging v1",
+  "description": "Imaging, misfit, and image-condition configuration for imaging workflows.",
+  "x-fs-contract": "fs-imaging-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "pathStem": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+    },
+    "observedSourceBasis": {
+      "enum": [
+        "source_encoding",
+        "source_geometry"
+      ],
+      "default": "source_encoding",
+      "description": "Basis used by observed data source ids. source_encoding means observed traces are already RHS-field gathers; source_geometry means observed traces are physical SourcePoint gathers and are encoded during misfit reads."
+    },
+    "observedData": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/pathStem"
+        },
+        {
+          "type": "object",
+          "required": [
+            "_type",
+            "file"
+          ],
+          "properties": {
+            "_type": {
+              "enum": [
+                "SeismicStore",
+                "HDF5TraceStore"
+              ]
+            },
+            "file": {
+              "$ref": "#/$defs/pathStem"
+            },
+            "dataset": {
+              "type": "string"
+            },
+            "missing": {
+              "enum": [
+                "error",
+                "zero",
+                "zeros",
+                "warn",
+                "warning"
+              ],
+              "default": "error"
+            },
+            "source_basis": {
+              "$ref": "#/$defs/observedSourceBasis"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "misfitObjective": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "l2",
+            "none",
+            "huber",
+            "hybrid",
+            "studentst",
+            "student_t",
+            "student-t"
+          ],
+          "default": "l2",
+          "description": "Radial loss applied to each complex metric-weighted residual sample. Matching is case-insensitive at runtime."
+        },
+        "delta": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.5,
+          "description": "Positive Huber transition amplitude in data-metric coordinates."
+        },
+        "c2": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.0,
+          "description": "Positive Student-t squared scale in data-metric coordinates."
+        },
+        "nu": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 2.0,
+          "description": "Positive Student-t degrees-of-freedom parameter."
+        }
+      },
+      "additionalProperties": false
+    },
+    "misfitComparison": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "waveform",
+            "phase_derivative"
+          ],
+          "default": "waveform",
+          "description": "Attribute compared before the radial objective is applied."
+        },
+        "derivative_axis": {
+          "const": "frequency",
+          "default": "frequency",
+          "description": "Physical-frequency derivative axis; derivatives are with respect to Hz at fixed Laplace damping."
+        },
+        "source_derivative": {
+          "enum": [
+            "frozen",
+            "total"
+          ],
+          "default": "frozen",
+          "description": "Whether authored source-signature and instrument spectra are held fixed or differentiated."
+        },
+        "relative_amplitude_floor": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.01,
+          "description": "Stabilization floor relative to the preprocessed observed RMS amplitude for each RHS/component."
+        }
+      },
+      "additionalProperties": false
+    },
+    "receiverImpedance": {
+      "description": "Positive scalar impedance, one inline value per receiver, or a rank-one HDF5Dense receiver array.",
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        {
+          "type": "object",
+          "required": ["_type", "file", "dataset"],
+          "properties": {
+            "_type": {
+              "const": "HDF5Dense"
+            },
+            "file": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+            },
+            "dataset": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "receiverProjection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "identity",
+              "default": "identity"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "impedance"],
+          "properties": {
+            "kind": {
+              "enum": ["up_down", "acoustic_upgoing"],
+              "description": "Canonical up_down projection, or the deprecated acoustic_upgoing compatibility spelling."
+            },
+            "physics": {
+              "enum": ["acoustic", "elastic"],
+              "description": "Optional explicit reconstruction physics. Omit to infer acoustic from pressure/normal-velocity channels or elastic from complete velocity/vertical-traction channels plus shear_impedance."
+            },
+            "pressure_component": {
+              "type": "string",
+              "minLength": 1,
+              "default": "pressure"
+            },
+            "normal_velocity_component": {
+              "type": "string",
+              "minLength": 1,
+              "default": "velocity_z"
+            },
+            "vertical_velocity_component": {
+              "type": "string",
+              "minLength": 1,
+              "deprecated": true,
+              "description": "Deprecated alias of normal_velocity_component."
+            },
+            "normal_traction_component": {
+              "type": "string",
+              "minLength": 1,
+              "default": "stress_zz"
+            },
+            "tangential_velocity_components": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Elastic tangential velocities; exactly NDIMEN-1 names are required."
+            },
+            "tangential_traction_components": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Elastic vertical-plane shear tractions paired with tangential velocities; exactly NDIMEN-1 names are required."
+            },
+            "impedance": {
+              "$ref": "#/$defs/receiverImpedance",
+              "description": "Acoustic or elastic P impedance used by the normal characteristic."
+            },
+            "shear_impedance": {
+              "$ref": "#/$defs/receiverImpedance",
+              "description": "Elastic S impedance used by tangential characteristics; required for elastic reconstruction."
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "acoustic_upgoing"
+                  }
+                },
+                "required": ["kind"]
+              },
+              "then": {
+                "properties": {
+                  "physics": {
+                    "const": "acoustic"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "physics": {
+                    "const": "elastic"
+                  }
+                },
+                "required": ["physics"]
+              },
+              "then": {
+                "required": ["shear_impedance"]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "misfitReceiverGroup": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Receiver group name to bind against the acquisition receiver group."
+        },
+        "observed": {
+          "$ref": "#/$defs/observedData",
+          "description": "Observed data path stem or trace-store descriptor."
+        },
+        "observed_derivatives": {
+          "type": "object",
+          "properties": {
+            "df": {
+              "$ref": "#/$defs/observedData",
+              "description": "Observed derivative with respect to physical frequency in Hz."
+            }
+          },
+          "additionalProperties": false
+        },
+        "observed_source_basis": {
+          "$ref": "#/$defs/observedSourceBasis"
+        },
+        "simulated": {
+          "$ref": "#/$defs/pathStem",
+          "description": "Simulated data path stem; omitted uses the receiver group's output file."
+        },
+        "projection": {
+          "$ref": "#/$defs/receiverProjection",
+          "description": "Receiver-space projection applied before comparison and pulled back exactly into adjoint receiver loads."
+        },
+        "preprocess": {
+          "$ref": "#/$defs/preprocessConfig",
+          "description": "Receiver-group-specific preprocessing hooks."
+        }
+      },
+      "additionalProperties": true
+    },
+    "preprocessHook": {
+      "type": "object",
+      "required": [
+        "schema",
+        "kind",
+        "stage"
+      ],
+      "properties": {
+        "schema": {
+          "const": "fs-preprocess-hook-1"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Built-ins include offset_power, offset_taper, source_scalar_fit, source_spectrum_correction, component_scale, trace_normalize, frequency_weight, trace_mask, trace_weight, receiver_ar1_whiten, scholte_notch, slow_velocity_mute, amplitude_clip, and wavefield_source_taper."
+        },
+        "stage": {
+          "enum": [
+            "trace_pair",
+            "observed",
+            "simulated",
+            "residual",
+            "forward_wavefield",
+            "adjoint_wavefield"
+          ]
+        },
+        "params": {
+          "type": "object",
+          "description": "Hook-specific deterministic parameters. trace_weight accepts finite nonnegative weights and an explicit receiver, component_receiver, source_component_receiver, or sparse_trace layout; production arrays use an HDF5Dense reference while compact inline arrays remain supported. receiver_ar1_whiten accepts a finite correlation with absolute value below one and applies the exact stationary AR(1) inverse covariance factor along an ordered dense receiver axis. source_scalar_fit accepts norm (default inherit), max_iterations, relative_tolerance, and matching robust-loss parameters; n_irls is a deprecated max_iterations alias. source_spectrum_correction requires simulated stage plus complex scale and frequency_derivative arrays, each containing one broadcast value or global per-RHS values; complex entries are [real, imaginary] pairs and the derivative is with respect to physical Hz. scholte_notch accepts exactly one of phase_velocity or angular wavenumber plus relative_half_width, relative_taper_width, spacing_tolerance, and total or frozen spectral_derivative. slow_velocity_mute accepts stop_velocity, pass_velocity, reject_slow or keep_slow mode, spacing_tolerance, and the same spectral_derivative policy. Receiver-wavenumber hooks require a regularly sampled dense cable and use trace_pair stage. For taper hooks, absolute d0/d1 values may carry physical units via a shared units field or per-value {value, units} objects; domain_fraction d0/d1 values are dimensionless fractions of the largest domain extent. Acquisition-spacing scales are unsupported.",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "preprocessConfig": {
+      "description": "Preprocessing hook list or object. An explicit empty array disables default legacy preprocessing at that scope.",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/preprocessHook"
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "include_defaults": {
+              "type": "boolean",
+              "default": false
+            },
+            "hooks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/preprocessHook"
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "objectiveScaleValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "object",
+          "required": ["value", "units"],
+          "properties": {
+            "value": {"type": "number", "exclusiveMinimum": 0},
+            "units": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "objectiveNormalization": {
+      "type": "object",
+      "required": ["scale"],
+      "properties": {
+        "scale": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind"],
+              "properties": {
+                "kind": {"const": "explicit"},
+                "value": {"$ref": "#/$defs/objectiveScaleValue"},
+                "components": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": {"$ref": "#/$defs/objectiveScaleValue"}
+                }
+              },
+              "additionalProperties": false,
+              "oneOf": [
+                {"required": ["value"], "not": {"required": ["components"]}},
+                {"required": ["components"], "not": {"required": ["value"]}}
+              ]
+            },
+            {
+              "type": "object",
+              "required": ["kind"],
+              "properties": {
+                "kind": {"const": "observed_rms"},
+                "minimum": {"$ref": "#/$defs/objectiveScaleValue"}
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "file"],
+              "properties": {
+                "kind": {"const": "balance_artifact"},
+                "file": {"$ref": "#/$defs/pathStem"}
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "reduction": {
+          "enum": ["weighted_mean", "sum"],
+          "default": "weighted_mean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "objectiveTerm": {
+      "type": "object",
+      "required": ["id", "receiver_group", "normalization"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
+        },
+        "receiver_group": {"type": "string", "minLength": 1},
+        "objective": {"$ref": "#/$defs/misfitObjective"},
+        "comparison": {"$ref": "#/$defs/misfitComparison"},
+        "weight": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.0,
+          "description": "Positive dimensionless scientific tradeoff weight."
+        },
+        "normalization": {"$ref": "#/$defs/objectiveNormalization"},
+        "preprocess": {"$ref": "#/$defs/preprocessConfig"}
+      },
+      "additionalProperties": false
+    },
+    "misfit": {
+      "type": "object",
+      "required": [
+        "receiver_groups"
+      ],
+      "properties": {
+        "norm": {
+          "type": "string",
+          "deprecated": true,
+          "description": "Deprecated legacy field. Use objective.kind; absent objective configuration preserves the legacy L2 objective."
+        },
+        "delta": {
+          "type": "number",
+          "deprecated": true,
+          "description": "Deprecated legacy field. Use objective.delta."
+        },
+        "c2": {
+          "type": "number",
+          "deprecated": true,
+          "description": "Deprecated legacy field. Use objective.c2."
+        },
+        "nu": {
+          "type": "number",
+          "deprecated": true,
+          "description": "Deprecated legacy field. Use objective.nu."
+        },
+        "objective": {
+          "$ref": "#/$defs/misfitObjective"
+        },
+        "comparison": {
+          "$ref": "#/$defs/misfitComparison"
+        },
+        "objective_terms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/objectiveTerm"},
+          "description": "Ordered task-local objective terms. Term ids must be unique and each receiver_group must name one configured receiver group."
+        },
+        "receiver_groups": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/misfitReceiverGroup"
+          }
+        },
+        "preprocess": {
+          "$ref": "#/$defs/preprocessConfig",
+          "description": "Default preprocessing hooks for all misfit receiver groups."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"required": ["objective_terms"]},
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["objective"]},
+                {"required": ["comparison"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "comparison": {
+                "required": ["kind"],
+                "properties": {
+                  "kind": {"const": "phase_derivative"}
+                }
+              }
+            },
+            "required": ["comparison"]
+          },
+          "then": {
+            "properties": {
+              "receiver_groups": {
+                "items": {
+                  "required": ["observed", "observed_derivatives"],
+                  "properties": {
+                    "observed_derivatives": {
+                      "required": ["df"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "imageCondition": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "default": "image"
+        },
+        "IC": {
+          "type": "string",
+          "default": "up_down",
+          "description": "Imaging-condition kind. Built-ins include pressure, velocity, up_down, energy, energy:acoustic, energy:elastic, fwi, fwi:acoustic, fwi:acoustic_up_down, and fwi:elastic; custom registry entries are allowed."
+        },
+        "property": {
+          "type": "string",
+          "description": "Material property targeted by property-sensitive imaging conditions such as FWI. Elastic rho derivatives hold the other coordinates of the material parameter space fixed and include both inertial and constitutive contributions where applicable."
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "Optional one-based encoded source/RHS ids included in this image."
+        },
+        "preprocess": {
+          "description": "Reserved for future image-stage preprocessing hook objects. Runtime v1 rejects non-empty image-local preprocess blocks.",
+          "type": [
+            "object",
+            "array"
+          ],
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "type": "object",
+  "required": [
+    "data_path",
+    "misfit",
+    "grid",
+    "images"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-imaging-1"
+    },
+    "name": {
+      "type": "string",
+      "default": "image",
+      "description": "Image manager name and output-file stem."
+    },
+    "data_path": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+      "description": "Base path for observed data used by misfit receiver groups."
+    },
+    "save_path": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+      "description": "Directory for imaging field and image products. Defaults to ResultPath/imaging."
+    },
+    "norm": {
+      "type": "string",
+      "deprecated": true,
+      "description": "Deprecated legacy field. Configure misfit.objective explicitly."
+    },
+    "reassemble_adjoint": {
+      "type": "boolean",
+      "default": false
+    },
+    "post_process": {
+      "type": "boolean",
+      "default": false,
+      "description": "Request a registered reconstruction kernel. Currently supported only when every active physics is acoustic or elastic DPG; otherwise initialization warns once and disables post-processing for the problem."
+    },
+    "keep_forward": {
+      "type": "boolean",
+      "default": false
+    },
+    "keep_adjoint": {
+      "type": "boolean",
+      "default": false
+    },
+    "field_retention": {
+      "type": "string",
+      "enum": ["none", "forward", "adjoint", "all"],
+      "description": "Explicit durable wavefield policy. When present, overrides the legacy keep_forward and keep_adjoint flags. Disposable fields are stored in a separate transient container and removed as a whole."
+    },
+    "field_scratch_path": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+      "description": "Optional shared-filesystem directory for disposable fields<task>.transient.h5 containers. Relative paths are resolved below ProjectPath; the imaging save path is the default."
+    },
+    "max_task_field_storage_gib": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0,
+      "description": "Per-task upper bound in GiB for newly allocated durable plus transient image-grid field chunks. Zero disables the bound."
+    },
+    "field_storage_limit_action": {
+      "type": "string",
+      "enum": ["error", "warn"],
+      "default": "error",
+      "description": "Whether a field-storage estimate above max_task_field_storage_gib fails initialization or emits a warning."
+    },
+    "keep_unstacked": {
+      "type": "boolean",
+      "default": false,
+      "description": "Expand images without an explicit sources selector into one image per encoded RHS, named source_01_<name>, source_02_<name>, etc. Explicit sources selections are unchanged. Frequency stacking and smoothing retain these independent image names."
+    },
+    "born_traces_only": {
+      "type": "boolean",
+      "default": false,
+      "description": "For a Born workflow, stop after writing incremental receiver traces instead of storing incremental wavefields, solving the incremental adjoint, and writing an incremental image."
+    },
+    "direction": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+      "description": "Read-only HDF5 Cartesian direction file consumed by incremental imaging workflows. The file contains image/<image-name> datasets in the same solver image/value-frame format as an aggregate image file."
+    },
+    "zero_direction": {
+      "type": "boolean",
+      "default": false,
+      "description": "Explicitly use a zero Cartesian direction. For lsrtm_gradient exactly one of direction or zero_direction=true is required."
+    },
+    "gauss_newton": {
+      "type": "boolean",
+      "default": false,
+      "description": "For a Born workflow, drive the incremental adjoint directly from the linearized receiver residual. The explicit lsrtm_gradient workflow enables this behavior automatically and includes the background and observed traces in that residual."
+    },
+    "sync_local_shards": {
+      "type": "boolean",
+      "default": true,
+      "description": "Drain closed rank-local transient wavefield shards before the next solver stage and discard clean forward-shard cache pages."
+    },
+    "grid": {
+      "$ref": "../fs-material-model-1/schema.json#/$defs/grid",
+      "description": "Regular image/output grid consumed by read_grid."
+    },
+    "misfit": {
+      "$ref": "#/$defs/misfit"
+    },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/imageCondition"
+      }
+    },
+    "preprocess": {
+      "$ref": "#/$defs/preprocessConfig",
+      "description": "Workflow-level preprocessing hooks applied to compatible imaging owners and stages."
+    },
+    "Smoothing": {
+      "type": "object",
+      "description": "Optional FEM smoothing applied while stacking Cartesian image shards.",
+      "properties": {
+        "operation": {
+          "enum": ["riesz", "proximal"],
+          "default": "riesz",
+          "description": "riesz preserves the legacy smoothing map; proximal evaluates a bounded diagonal-metric TV/TGV proximal operator."
+        },
+        "type": {
+          "enum": ["tikhonov", "l2", "tv", "tgv", "tgv2"],
+          "default": "tv"
+        },
+        "lambda": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1,
+          "description": "Fraction of the local P wavelength used as the smoothing length."
+        },
+        "alpha": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional direct Tikhonov/TV H1 coefficient; invalid for TGV."
+        },
+        "beta": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional direct TV shrinkage weight; invalid for TGV."
+        },
+        "alpha1": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional direct first-order TGV weight. Must be supplied with alpha2."
+        },
+        "alpha2": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional direct symmetric-gradient TGV weight. Must be supplied with alpha1."
+        },
+        "tgv_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1,
+          "description": "Dimensionless TGV balance used by alpha2=tgv_ratio*alpha1^2."
+        },
+        "derivative_order": {
+          "const": 1,
+          "description": "Image smoothing uses mixed first-order H1 fields and never differentiates the primary image twice."
+        },
+        "epsilon": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1
+        },
+        "iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 5
+        },
+        "tau": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Proximal step multiplying the TV or TGV regularizer."
+        },
+        "fidelity": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {
+              "type": "object",
+              "required": ["file", "dataset"],
+              "properties": {
+                "file": {"$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"},
+                "dataset": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            }
+          ],
+          "default": 1,
+          "description": "Positive scalar or positive Cartesian grid-diagonal proximal fidelity D."
+        },
+        "active_mask": {
+          "type": "object",
+          "required": ["file", "dataset"],
+          "properties": {
+            "file": {"$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"},
+            "dataset": {"type": "string", "minLength": 1},
+            "inactive_value": {"type": "number", "default": 0}
+          },
+          "additionalProperties": false
+        },
+        "lower_bound": {"type": "number"},
+        "upper_bound": {"type": "number"},
+        "absolute_tolerance": {"type": "number", "exclusiveMinimum": 0, "default": 1e-6},
+        "relative_tolerance": {"type": "number", "exclusiveMinimum": 0, "default": 1e-4},
+        "nonconvergence_policy": {"enum": ["fail", "return_best"], "default": "fail"},
+        "result": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Optional fs-proximal-result-1 JSON destination."
+        },
+        "normalize_illumination": {
+          "type": "boolean",
+          "default": true,
+          "description": "Legacy alias: true selects cross illumination normalization and false selects none. Ignored when illumination_normalization is present."
+        },
+        "illumination_normalization": {
+          "type": "string",
+          "enum": ["none", "source", "linear", "cross", "nonlinear"],
+          "description": "Illumination policy applied before smoothing. source (alias linear) divides by the baseline forward-illumination diagonal and is linear in the adjoint or Born data; cross (alias nonlinear) also uses adjoint illumination and is nonlinear."
+        }
+      },
+      "dependentRequired": {
+        "alpha1": ["alpha2"],
+        "alpha2": ["alpha1"]
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"operation": {"const": "proximal"}}, "required": ["operation"]},
+          "then": {
+            "required": ["tau"],
+            "properties": {"type": {"enum": ["tv", "tgv", "tgv2"]}}
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,66 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "electric_current",
+    "defaults": {
+      "amplitude": {
+        "value": 1.0,
+        "units": "A*m"
+      }
+    },
+    "sources": [
+      {
+        "name": "wire_000000",
+        "coordinates": {
+          "value": [
+            42.264973081037425,
+            0.0,
+            100.0
+          ],
+          "units": "m"
+        },
+        "direction": [
+          100.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "wire_000001",
+        "coordinates": {
+          "value": [
+            157.73502691896257,
+            0.0,
+            100.0
+          ],
+          "units": "m"
+        },
+        "direction": [
+          100.0,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  "source_encoding": {
+    "_type": "Named",
+    "fields": [
+      {
+        "name": "wire",
+        "terms": [
+          {
+            "source": "wire_000000",
+            "coefficient": 1.0
+          },
+          {
+            "source": "wire_000001",
+            "coefficient": 1.0
+          }
+        ]
+      }
+    ]
+  },
+  "receiver_groups": []
+}

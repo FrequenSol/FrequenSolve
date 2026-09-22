@@ -1,0 +1,15 @@
+{
+  "schema": "fs-material-model-1",
+  "subdomains": [
+    {
+      "name": "aquifer",
+      "mesh_block_id": 1,
+      "physics": "darcy",
+      "properties": {
+        "kappa": {"value": 1.0e-12, "units": "m^2"},
+        "viscosity": {"value": 0.001, "units": "Pa*s"},
+        "specific_storage": {"value": 1.0e-9, "units": "1/Pa"}
+      }
+    }
+  ]
+}

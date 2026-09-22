@@ -1,0 +1,16 @@
+{
+  "manifest_fingerprint": "sha256:5974f910fe35126f4335c7fb037bb3c4f04f86048eb94689da5ead4e47b0be27",
+  "partition": {
+    "compatibility": "same_mesh_partition",
+    "n_ranks": 1
+  },
+  "resolved_context": "sha256:95552a447cad2551f63208669cf187a491f6d76a93af95f023ed47e41643e255",
+  "schema": "fs-objective-linearization-3",
+  "shards": [
+    {
+      "file": "/results/fs-objective-linearization-3_rank_0.json",
+      "sha256": "sha256:b585b28a679619e8889f10851f23b055cdada78d76a4573602f223379713ab35"
+    }
+  ],
+  "state_fingerprint": "sha256:5974f910fe35126f4335c7fb037bb3c4f04f86048eb94689da5ead4e47b0be27"
+}

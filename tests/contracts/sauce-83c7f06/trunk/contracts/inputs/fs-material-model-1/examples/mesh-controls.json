@@ -1,0 +1,37 @@
+{
+  "schema": "fs-material-model-1",
+  "property_spaces": {
+    "materials": {
+      "frequency": 10.0,
+      "epw": 2.0,
+      "artifact": "material-controls.h5"
+    }
+  },
+  "subdomains": [
+    {
+      "name": "rock",
+      "mesh_block_id": 1,
+      "physics": "acoustic",
+      "properties": {
+        "Vp": {
+          "parameterized": {
+            "id": "rock_vp",
+            "reference": {
+              "value": 3.0,
+              "units": "km/s"
+            },
+            "transform": "log",
+            "control": {
+              "kind": "mesh",
+              "space": "materials"
+            }
+          }
+        },
+        "Rho": {
+          "value": 2.3,
+          "units": "g/cc"
+        }
+      }
+    }
+  ]
+}

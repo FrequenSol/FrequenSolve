@@ -1,0 +1,1067 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/fragments/fs-seismic-mechanism.schema.json",
+  "title": "Seismic source mechanisms",
+  "$defs": {
+    "mechanism": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "double_couple"
+            },
+            "system": {
+              "type": "string",
+              "default": "global"
+            },
+            "convention": {
+              "enum": [
+                "local",
+                "NED",
+                "END",
+                "ENU",
+                "ned",
+                "end",
+                "enu"
+              ]
+            },
+            "amplitude": {
+              "$ref": "#/$defs/positiveMoment"
+            },
+            "moment_magnitude": {
+              "type": "number"
+            },
+            "units": {
+              "type": "string"
+            },
+            "normalization": {
+              "const": "scalar_moment"
+            },
+            "strike": {
+              "$ref": "#/$defs/angle"
+            },
+            "dip": {
+              "$ref": "#/$defs/angle"
+            },
+            "rake": {
+              "$ref": "#/$defs/angle"
+            },
+            "angle_units": {
+              "enum": [
+                "deg",
+                "rad",
+                "degrees",
+                "radians"
+              ]
+            },
+            "fault_normal": {
+              "$ref": "#/$defs/direction"
+            },
+            "slip_vector": {
+              "$ref": "#/$defs/direction"
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "amplitude",
+                  "moment_magnitude"
+                ]
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "moment_magnitude"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "units"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "moment_magnitude"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "normalization": {
+                    "const": "scalar_moment"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "strike"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "convention"
+                  ]
+                }
+              }
+            }
+          ],
+          "oneOf": [
+            {
+              "required": [
+                "strike",
+                "dip",
+                "rake"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "fault_normal"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "slip_vector"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "axis"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "required": [
+                "fault_normal",
+                "slip_vector"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "strike"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dip"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "rake"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "axis"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "axis"
+          ],
+          "properties": {
+            "type": {
+              "const": "clvd"
+            },
+            "system": {
+              "type": "string",
+              "default": "global"
+            },
+            "convention": {
+              "enum": [
+                "local",
+                "NED",
+                "END",
+                "ENU",
+                "ned",
+                "end",
+                "enu"
+              ]
+            },
+            "amplitude": {
+              "$ref": "#/$defs/positiveMoment"
+            },
+            "moment_magnitude": {
+              "type": "number"
+            },
+            "units": {
+              "type": "string"
+            },
+            "normalization": {
+              "const": "scalar_moment"
+            },
+            "axis": {
+              "$ref": "#/$defs/clvdAxis"
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "amplitude",
+                  "moment_magnitude"
+                ]
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "moment_magnitude"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "units"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "moment_magnitude"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "normalization": {
+                    "const": "scalar_moment"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "axis"
+                ],
+                "properties": {
+                  "axis": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "strike"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "azimuth"
+                        ]
+                      }
+                    ],
+                    "type": "object"
+                  }
+                }
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "convention"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "tensor"
+          ],
+          "properties": {
+            "type": {
+              "const": "moment_tensor"
+            },
+            "system": {
+              "type": "string",
+              "default": "global"
+            },
+            "convention": {
+              "enum": [
+                "local",
+                "NED",
+                "END",
+                "ENU",
+                "ned",
+                "end",
+                "enu"
+              ]
+            },
+            "amplitude": {
+              "$ref": "#/$defs/positiveMoment"
+            },
+            "moment_magnitude": {
+              "type": "number"
+            },
+            "units": {
+              "type": "string"
+            },
+            "normalization": {
+              "const": "scalar_moment"
+            },
+            "tensor": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "$ref": "#/$defs/vector"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "amplitude",
+                  "moment_magnitude"
+                ]
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "moment_magnitude"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "units"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "moment_magnitude"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "normalization": {
+                    "const": "scalar_moment"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "microseismic"
+            },
+            "system": {
+              "type": "string",
+              "default": "global"
+            },
+            "convention": {
+              "enum": [
+                "local",
+                "NED",
+                "END",
+                "ENU",
+                "ned",
+                "end",
+                "enu"
+              ]
+            },
+            "amplitude": {
+              "$ref": "#/$defs/positiveMoment"
+            },
+            "moment_magnitude": {
+              "type": "number"
+            },
+            "units": {
+              "type": "string"
+            },
+            "normalization": {
+              "enum": [
+                "scalar_moment",
+                "legacy"
+              ],
+              "default": "scalar_moment"
+            },
+            "dc": {
+              "type": "object",
+              "properties": {
+                "system": {
+                  "type": "string",
+                  "default": "global"
+                },
+                "convention": {
+                  "enum": [
+                    "local",
+                    "NED",
+                    "END",
+                    "ENU",
+                    "ned",
+                    "end",
+                    "enu"
+                  ]
+                },
+                "weight": {
+                  "type": "number"
+                },
+                "strike": {
+                  "$ref": "#/$defs/angle"
+                },
+                "dip": {
+                  "$ref": "#/$defs/angle"
+                },
+                "rake": {
+                  "$ref": "#/$defs/angle"
+                },
+                "angle_units": {
+                  "enum": [
+                    "deg",
+                    "rad",
+                    "degrees",
+                    "radians"
+                  ]
+                },
+                "fault_normal": {
+                  "$ref": "#/$defs/direction"
+                },
+                "slip_vector": {
+                  "$ref": "#/$defs/direction"
+                },
+                "axis": {
+                  "$ref": "#/$defs/faultAngles"
+                }
+              },
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "required": [
+                    "weight"
+                  ],
+                  "properties": {
+                    "weight": {
+                      "const": 0
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "strike",
+                    "dip",
+                    "rake"
+                  ],
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "fault_normal"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "slip_vector"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "axis"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "required": [
+                    "fault_normal",
+                    "slip_vector"
+                  ],
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "strike"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "dip"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "rake"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "axis"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "required": [
+                    "axis"
+                  ],
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "strike"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "dip"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "rake"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "fault_normal"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "slip_vector"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "allOf": [
+                      {
+                        "not": {
+                          "required": [
+                            "weight"
+                          ],
+                          "properties": {
+                            "weight": {
+                              "const": 0
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "anyOf": [
+                          {
+                            "required": [
+                              "strike"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "axis"
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "then": {
+                    "not": {
+                      "required": [
+                        "convention"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "clvd": {
+              "type": "object",
+              "properties": {
+                "system": {
+                  "type": "string",
+                  "default": "global"
+                },
+                "convention": {
+                  "enum": [
+                    "local",
+                    "NED",
+                    "END",
+                    "ENU",
+                    "ned",
+                    "end",
+                    "enu"
+                  ]
+                },
+                "weight": {
+                  "type": "number"
+                },
+                "axis": {
+                  "$ref": "#/$defs/clvdAxis"
+                }
+              },
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "required": [
+                    "axis"
+                  ]
+                },
+                {
+                  "required": [
+                    "weight"
+                  ],
+                  "properties": {
+                    "weight": {
+                      "const": 0
+                    }
+                  }
+                }
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "allOf": [
+                      {
+                        "not": {
+                          "required": [
+                            "weight"
+                          ],
+                          "properties": {
+                            "weight": {
+                              "const": 0
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "required": [
+                          "axis"
+                        ],
+                        "properties": {
+                          "axis": {
+                            "anyOf": [
+                              {
+                                "required": [
+                                  "strike"
+                                ]
+                              },
+                              {
+                                "required": [
+                                  "azimuth"
+                                ]
+                              }
+                            ],
+                            "type": "object"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "then": {
+                    "not": {
+                      "required": [
+                        "convention"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "iso": {
+              "type": "object",
+              "properties": {
+                "weight": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "amplitude",
+                  "moment_magnitude"
+                ]
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "moment_magnitude"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "units"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "moment_magnitude"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "normalization": {
+                    "const": "scalar_moment"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "dc"
+                ],
+                "properties": {
+                  "dc": {
+                    "allOf": [
+                      {
+                        "not": {
+                          "required": [
+                            "weight"
+                          ],
+                          "properties": {
+                            "weight": {
+                              "const": 0
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "anyOf": [
+                          {
+                            "required": [
+                              "strike"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "axis"
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "convention"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "clvd"
+                ],
+                "properties": {
+                  "clvd": {
+                    "allOf": [
+                      {
+                        "not": {
+                          "required": [
+                            "weight"
+                          ],
+                          "properties": {
+                            "weight": {
+                              "const": 0
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "required": [
+                          "axis"
+                        ],
+                        "properties": {
+                          "axis": {
+                            "anyOf": [
+                              {
+                                "required": [
+                                  "strike"
+                                ]
+                              },
+                              {
+                                "required": [
+                                  "azimuth"
+                                ]
+                              }
+                            ],
+                            "type": "object"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "convention"
+                  ]
+                }
+              }
+            }
+          ],
+          "oneOf": [
+            {
+              "anyOf": [
+                {
+                  "required": [
+                    "dc"
+                  ]
+                },
+                {
+                  "required": [
+                    "clvd"
+                  ]
+                },
+                {
+                  "required": [
+                    "iso"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "angle": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value",
+            "units"
+          ],
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "units": {
+              "enum": [
+                "deg",
+                "rad",
+                "degrees",
+                "radians"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "vector": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "number"
+      }
+    },
+    "direction": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/vector"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/vector"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "positiveMoment": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "units": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "faultAngles": {
+      "type": "object",
+      "required": [
+        "strike",
+        "dip",
+        "rake"
+      ],
+      "properties": {
+        "strike": {
+          "$ref": "#/$defs/angle"
+        },
+        "dip": {
+          "$ref": "#/$defs/angle"
+        },
+        "rake": {
+          "$ref": "#/$defs/angle"
+        },
+        "angle_units": {
+          "enum": [
+            "deg",
+            "rad",
+            "degrees",
+            "radians"
+          ]
+        },
+        "units": {
+          "enum": [
+            "deg",
+            "rad",
+            "degrees",
+            "radians"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "clvdAxis": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/direction"
+        },
+        {
+          "type": "object",
+          "required": [
+            "azimuth",
+            "plunge"
+          ],
+          "properties": {
+            "azimuth": {
+              "$ref": "#/$defs/angle"
+            },
+            "plunge": {
+              "$ref": "#/$defs/angle"
+            },
+            "angle_units": {
+              "enum": [
+                "deg",
+                "rad",
+                "degrees",
+                "radians"
+              ]
+            },
+            "units": {
+              "enum": [
+                "deg",
+                "rad",
+                "degrees",
+                "radians"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "strike",
+            "dip"
+          ],
+          "properties": {
+            "strike": {
+              "$ref": "#/$defs/angle"
+            },
+            "dip": {
+              "$ref": "#/$defs/angle"
+            },
+            "rake": {
+              "$ref": "#/$defs/angle"
+            },
+            "angle_units": {
+              "enum": [
+                "deg",
+                "rad",
+                "degrees",
+                "radians"
+              ]
+            },
+            "units": {
+              "enum": [
+                "deg",
+                "rad",
+                "degrees",
+                "radians"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

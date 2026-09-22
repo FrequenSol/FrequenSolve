@@ -1,0 +1,28 @@
+{
+  "schema": "fs-job-1",
+  "name": "fwi_linearize",
+  "workflow": "fwi_operator",
+  "simulation": "simulation.json",
+  "result_path": "results/fwi_linearize",
+  "Imaging": {},
+  "f_list": [
+    4.0
+  ],
+  "fwi_operator": {
+    "action": "linearize",
+    "model_gradient": true,
+    "cache_receiver_state": true,
+    "controls": {
+      "active": [
+        "model.acoustic_vp"
+      ]
+    },
+    "covector": "gradient.h5",
+    "state": "state.json"
+  },
+  "control_sensitivities": {
+    "active": [
+      "vp"
+    ]
+  }
+}

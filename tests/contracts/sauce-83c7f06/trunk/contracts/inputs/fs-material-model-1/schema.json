@@ -1,0 +1,2380 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-material-model-1/schema.json",
+  "title": "FS Material Model v1",
+  "description": "Material subdomains and scalar, file-backed, or expression-backed properties.",
+  "x-fs-contract": "fs-material-model-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "grid": {
+      "type": "object",
+      "properties": {
+        "system": {
+          "type": "string",
+          "default": "global"
+        },
+        "dims": {
+          "description": "Grid axis names.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "x0": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+        },
+        "x1": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+        },
+        "n": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/intVector"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        }
+      },
+      "additionalProperties": true
+    },
+    "geometryExpression": {
+      "description": "A recursive closed-volume expression over implicit or registered BREP/provider geometry.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "surface"
+          ],
+          "properties": {
+            "_type": {
+              "const": "implicit"
+            },
+            "surface": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "not": {
+                    "const": 0
+                  }
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ]
+            },
+            "sign": {
+              "enum": [
+                -1,
+                1
+              ],
+              "default": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "_type"
+          ],
+          "properties": {
+            "_type": {
+              "enum": [
+                "brep",
+                "provider"
+              ]
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1,
+              "default": "gmp"
+            },
+            "entity": {
+              "type": "string",
+              "minLength": 1
+            },
+            "volume": {
+              "type": "string",
+              "minLength": 1
+            },
+            "shell": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "entity"
+              ]
+            },
+            {
+              "required": [
+                "volume"
+              ]
+            },
+            {
+              "required": [
+                "shell"
+              ]
+            }
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "_type",
+            "a",
+            "b"
+          ],
+          "properties": {
+            "_type": {
+              "enum": [
+                "union",
+                "intersection",
+                "difference"
+              ]
+            },
+            "a": {
+              "$ref": "#/$defs/geometryExpression"
+            },
+            "b": {
+              "$ref": "#/$defs/geometryExpression"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "geometryRegion": {
+      "type": "object",
+      "description": "One prioritized material volume used by topology-driven block generation.",
+      "required": [
+        "name",
+        "mesh_block_id",
+        "geometry"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mesh_block_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "priority": {
+          "type": "integer",
+          "default": 0
+        },
+        "geometry": {
+          "$ref": "#/$defs/geometryExpression"
+        }
+      },
+      "additionalProperties": false
+    },
+    "xarrayInterpolation": {
+      "type": "string",
+      "enum": [
+        "linear",
+        "bezier"
+      ],
+      "default": "linear",
+      "description": "Interpolation mode for xarray-backed properties."
+    },
+    "xarrayFillInvalid": {
+      "type": "string",
+      "enum": [
+        "nearest",
+        "none"
+      ],
+      "default": "nearest",
+      "description": "Repair mode for invalid samples in file-backed xarray properties. nearest fills invalid samples from the nearest valid grid value; none disables repair."
+    },
+    "xarrayValidRangeBound": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "A scalar valid-range bound. Unit-bearing objects use the same {value, units} scalar form as quantities."
+    },
+    "xarrayValidRange": {
+      "type": "object",
+      "description": "Optional valid sample range for xarray-backed properties. Values outside the range are treated as invalid by fill_invalid repair.",
+      "properties": {
+        "lower": {
+          "$ref": "#/$defs/xarrayValidRangeBound"
+        },
+        "upper": {
+          "$ref": "#/$defs/xarrayValidRangeBound"
+        },
+        "min": {
+          "$ref": "#/$defs/xarrayValidRangeBound",
+          "description": "Alias for lower."
+        },
+        "max": {
+          "$ref": "#/$defs/xarrayValidRangeBound",
+          "description": "Alias for upper."
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "lower"
+          ]
+        },
+        {
+          "required": [
+            "upper"
+          ]
+        },
+        {
+          "required": [
+            "min"
+          ]
+        },
+        {
+          "required": [
+            "max"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "property": {
+      "type": "object",
+      "description": "Explicit scalar, file-backed, expression-backed, or parameterized property object.",
+      "properties": {
+        "value": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+        },
+        "expr": {
+          "$ref": "#/$defs/expressionNode",
+          "description": "Lazy derived property expression evaluated in the same material subdomain. Native Maxwell control derivatives support value/ref/field, neg, add/sub/mul/div, exp/log and fixed unit conversions; other nodes remain forward-only when active controls are present."
+        },
+        "parameterized": {
+          "$ref": "#/$defs/parameterizedProperty"
+        },
+        "blend": {
+          "$ref": "#/$defs/blendMaterial"
+        },
+        "symbols": {
+          "type": "object",
+          "description": "Optional expression symbol bindings. Current runtime bindings define coordinate variables used by var expression nodes.",
+          "additionalProperties": {
+            "$ref": "#/$defs/expressionSymbolBinding"
+          }
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional tooling metadata listing expression dependencies; runtime dependencies are derived from ref nodes."
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units",
+          "description": "Units for scalar value objects or for nondimensionalizing the root expression result."
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Property file or RSF/DDS header. Legacy HDF5 object locators remain readable; new HDF5 references use dataset separately."
+        },
+        "format": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string",
+          "description": "Authoritative HDF5 dataset path when file names an HDF5 container."
+        },
+        "hash": {
+          "type": "string",
+          "description": "Optional reproducibility metadata ignored by current runtime readers."
+        },
+        "absolute": {
+          "type": "boolean",
+          "default": false
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0
+        },
+        "grid": {
+          "$ref": "#/$defs/grid"
+        },
+        "interpolation": {
+          "$ref": "#/$defs/xarrayInterpolation"
+        },
+        "fill_invalid": {
+          "$ref": "#/$defs/xarrayFillInvalid"
+        },
+        "valid_range": {
+          "$ref": "#/$defs/xarrayValidRange"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "required": [
+            "file"
+          ]
+        },
+        {
+          "required": [
+            "expr"
+          ]
+        },
+        {
+          "required": [
+            "parameterized"
+          ]
+        },
+        {
+          "required": [
+            "blend"
+          ]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "blendEndpoint": {
+      "type": "object",
+      "description": "Ordinary scalar, file-backed, or parameterized endpoint property.",
+      "properties": {
+        "value": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "parameterized": {
+          "$ref": "#/$defs/parameterizedProperty"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "required": [
+            "file"
+          ]
+        },
+        {
+          "required": [
+            "parameterized"
+          ]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "blendMaterial": {
+      "type": "object",
+      "description": "C1 material transition across one named implicit surface; negative phi selects inside.",
+      "required": [
+        "surface",
+        "width",
+        "inside",
+        "outside"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "minLength": 1
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "inside": {
+          "$ref": "#/$defs/blendEndpoint"
+        },
+        "outside": {
+          "$ref": "#/$defs/blendEndpoint"
+        }
+      },
+      "additionalProperties": false
+    },
+    "parameterizedProperty": {
+      "type": "object",
+      "description": "Parameterized control block decorating an ordinary scalar or file-backed reference property.",
+      "required": [
+        "id",
+        "reference",
+        "control"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Globally unique identifier for this whole coefficient block, used for vector ordering and its HDF5 dataset. Mesh coefficients additionally use stable integer identifiers within their frozen property space."
+        },
+        "reference": {
+          "type": "object",
+          "description": "Ordinary property reproduced exactly when all coefficients are zero.",
+          "oneOf": [
+            {
+              "required": [
+                "value"
+              ]
+            },
+            {
+              "required": [
+                "file"
+              ]
+            }
+          ],
+          "additionalProperties": true
+        },
+        "transform": {
+          "type": "string",
+          "enum": [
+            "identity",
+            "log",
+            "inverse",
+            "logit"
+          ],
+          "default": "identity",
+          "description": "Control composition: identity uses reference+update, log uses reference*exp(update), inverse uses 1/(1/reference+update), and dimensionless logit uses sigmoid(logit(reference)+update) with reference strictly between zero and one."
+        },
+        "control": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/bsplineControlMap"
+            },
+            {
+              "$ref": "#/$defs/hatControlMap"
+            },
+            {
+              "$ref": "#/$defs/meshControlMap"
+            },
+            {
+              "$ref": "#/$defs/tensorHatControlMap"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "meshControlMap": {
+      "type": "object",
+      "description": "First-order nodal controls on a named, frozen initial-mesh refinement hierarchy. Coefficients start at zero and are read through named control checkpoints.",
+      "required": [
+        "kind",
+        "space"
+      ],
+      "properties": {
+        "kind": {
+          "const": "mesh"
+        },
+        "space": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "meshPropertySpace": {
+      "type": "object",
+      "description": "Reusable material-control topology with sizing independent of solution adaptivity.",
+      "required": [
+        "artifact",
+        "frequency",
+        "epw"
+      ],
+      "properties": {
+        "artifact": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\.h5$"
+        },
+        "frequency": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Control sizing frequency in Hz."
+        },
+        "epw": {
+          "description": "Requested first-order elements per wavelength along the element's refinement axes.",
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 3,
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "bsplineControlMap": {
+      "type": "object",
+      "description": "Sparse coordinate-based one-dimensional B-spline map.",
+      "required": [
+        "axis",
+        "knots",
+        "coefficients"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "bspline",
+          "default": "bspline"
+        },
+        "coordinate_system": {
+          "type": "string",
+          "default": "global"
+        },
+        "axis": {
+          "type": "string",
+          "minLength": 1
+        },
+        "units": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional units for knots; defaults to the model coordinate units."
+        },
+        "degree": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3
+        },
+        "knots": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2
+        },
+        "coefficients": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "hatControlMap": {
+      "type": "object",
+      "description": "Uniform one-dimensional nodal grid with piecewise-linear hat basis functions. Coefficient i is the update at origin + (i-1) spacing.",
+      "required": [
+        "kind",
+        "axis",
+        "spacing",
+        "coefficients"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "hat"
+        },
+        "coordinate_system": {
+          "type": "string",
+          "default": "global"
+        },
+        "axis": {
+          "type": "string",
+          "minLength": 1
+        },
+        "units": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional units for origin and spacing; defaults to the model coordinate units."
+        },
+        "origin": {
+          "type": "number",
+          "default": 0.0
+        },
+        "spacing": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "coefficients": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "expressionSymbolBinding": {
+      "type": "object",
+      "description": "Expression symbol binding. Coordinate variables may use Cartesian, curvilinear, or resolved surface-relative coordinate systems.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "coordinate",
+          "default": "coordinate"
+        },
+        "system": {
+          "type": "string",
+          "description": "Coordinate system name. Use global for the active global coordinate system."
+        },
+        "axis": {
+          "type": "string",
+          "description": "Coordinate axis name. If omitted in a symbols binding, the symbol name is used."
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units",
+          "description": "Optional output units for the coordinate value before expression arithmetic."
+        }
+      },
+      "required": [
+        "system"
+      ],
+      "additionalProperties": true
+    },
+    "expressionNode": {
+      "type": "object",
+      "description": "Material property expression node. References are same-subdomain property names.",
+      "properties": {
+        "value": {
+          "type": "number",
+          "description": "Numeric literal. If units are supplied, the literal is nondimensionalized at parse time."
+        },
+        "ref": {
+          "type": "string",
+          "description": "Reference to another active property in the same subdomain."
+        },
+        "field": {
+          "type": "string",
+          "description": "Reference to an auxiliary non-canonical field in the same subdomain's fields object."
+        },
+        "var": {
+          "type": "string",
+          "description": "Reference to a top-level expression symbol binding."
+        },
+        "coord": {
+          "$ref": "#/$defs/expressionSymbolBinding",
+          "description": "Inline coordinate expression node."
+        },
+        "op": {
+          "enum": [
+            "neg",
+            "add",
+            "sub",
+            "mul",
+            "div",
+            "pow",
+            "exp",
+            "log",
+            "log10",
+            "sqrt",
+            "abs",
+            "min",
+            "max",
+            "clamp",
+            "sin",
+            "cos",
+            "tan",
+            "atan2",
+            "tanh",
+            "coord",
+            "coordinate",
+            "convert",
+            "magnitude",
+            "<",
+            "<=",
+            ">",
+            ">=",
+            "==",
+            "!=",
+            "and",
+            "or",
+            "not",
+            "case"
+          ]
+        },
+        "arg": {
+          "$ref": "#/$defs/expressionNode",
+          "description": "Unary argument for neg, exp, log, log10, sqrt, abs, sin, cos, tan, tanh, not, convert, and magnitude."
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/expressionNode"
+          },
+          "minItems": 2,
+          "maxItems": 3,
+          "description": "Binary arguments for add, sub, mul, div, pow, min, max, atan2, comparisons, and/or. Ternary arguments for clamp are [value, min, max]. atan2 arguments are [y, x]. Predicates return 1.0 for true and 0.0 for false."
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units",
+          "description": "Literal units, requested units for convert/magnitude, or output units for coord/coordinate."
+        },
+        "system": {
+          "type": "string",
+          "description": "Coordinate system name for coord/coordinate op nodes."
+        },
+        "axis": {
+          "type": "string",
+          "description": "Coordinate axis name for coord/coordinate op nodes."
+        },
+        "branches": {
+          "type": "array",
+          "description": "Ordered case branches. The first branch with a nonzero if expression is selected.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "if": {
+                "$ref": "#/$defs/expressionNode",
+                "description": "Condition expression. Nonzero is true."
+              },
+              "then": {
+                "$ref": "#/$defs/expressionNode",
+                "description": "Expression evaluated when the condition is true."
+              }
+            },
+            "required": [
+              "if",
+              "then"
+            ],
+            "additionalProperties": true
+          },
+          "minItems": 1
+        },
+        "else": {
+          "$ref": "#/$defs/expressionNode",
+          "description": "Fallback expression for a case op."
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "required": [
+            "ref"
+          ]
+        },
+        {
+          "required": [
+            "field"
+          ]
+        },
+        {
+          "required": [
+            "var"
+          ]
+        },
+        {
+          "required": [
+            "coord"
+          ]
+        },
+        {
+          "required": [
+            "op"
+          ]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "propertyValue": {
+      "description": "Property value accepted by current material readers: inline numeric/quantity or explicit property object.",
+      "anyOf": [
+        {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+        },
+        {
+          "$ref": "#/$defs/property"
+        }
+      ]
+    },
+    "auxiliaryField": {
+      "type": "object",
+      "description": "Non-canonical material field used as expression input. Auxiliary fields do not participate in physics inference.",
+      "properties": {
+        "value": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+        },
+        "parameterized": {
+          "$ref": "#/$defs/parameterizedProperty"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Field file, RSF/DDS header, or HDF5 object locator."
+        },
+        "format": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "absolute": {
+          "type": "boolean",
+          "default": false
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0
+        },
+        "grid": {
+          "$ref": "#/$defs/grid"
+        },
+        "interpolation": {
+          "$ref": "#/$defs/xarrayInterpolation"
+        },
+        "fill_invalid": {
+          "$ref": "#/$defs/xarrayFillInvalid"
+        },
+        "valid_range": {
+          "$ref": "#/$defs/xarrayValidRange"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "required": [
+            "file"
+          ]
+        },
+        {
+          "required": [
+            "parameterized"
+          ]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "auxiliaryFieldValue": {
+      "description": "Auxiliary field value accepted by material readers: inline numeric/quantity or explicit scalar/file-backed object.",
+      "anyOf": [
+        {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+        },
+        {
+          "$ref": "#/$defs/auxiliaryField"
+        }
+      ]
+    },
+    "lengthQuantity": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "Length scalar. Numeric values use the material model length scale unless units are supplied."
+    },
+    "stoneleyNearfield": {
+      "type": "object",
+      "description": "Optional SDF-distance nearfield envelope for Stoneley wall-normal mesh adaptivity.",
+      "properties": {
+        "h0": {
+          "$ref": "#/$defs/lengthQuantity",
+          "default": {
+            "value": 1.0,
+            "units": "m"
+          },
+          "description": "Wall-adjacent target normal mesh size. Numeric values use the material model length scale unless units are supplied. Defaults to 1 m. Zero disables the nearfield envelope."
+        },
+        "growth": {
+          "type": "number",
+          "exclusiveMinimum": 1,
+          "default": 2.0,
+          "description": "Continuous geometric growth factor for the target normal size away from the borehole wall."
+        }
+      },
+      "additionalProperties": true
+    },
+    "coordinateQuantity": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "Coordinate values for an inline one-dimensional borehole radius profile."
+    },
+    "inlineSurfaceCoordinate": {
+      "description": "Coordinate values for an inline xarray-style surface property.",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1
+        },
+        {
+          "type": "object",
+          "required": [
+            "data"
+          ],
+          "properties": {
+            "data": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 1
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "surfacePropertyFile": {
+      "type": "object",
+      "required": [
+        "file"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "File path, RSF/DDS header, or HDF5 object locator for the surface property."
+        },
+        "format": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "absolute": {
+          "type": "boolean",
+          "default": false
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0
+        },
+        "grid": {
+          "$ref": "#/$defs/grid"
+        },
+        "interpolation": {
+          "$ref": "#/$defs/xarrayInterpolation"
+        },
+        "fill_invalid": {
+          "$ref": "#/$defs/xarrayFillInvalid"
+        },
+        "valid_range": {
+          "$ref": "#/$defs/xarrayValidRange"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "system": {
+          "type": "string",
+          "default": "global"
+        },
+        "coord_system": {
+          "type": "string",
+          "default": "global"
+        }
+      },
+      "additionalProperties": true
+    },
+    "surfaceInlineXarray": {
+      "type": "object",
+      "required": [
+        "dims",
+        "coords",
+        "data"
+      ],
+      "properties": {
+        "dims": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Coordinate-axis names used by the inline property, such as x in 2D or x/y in 3D."
+        },
+        "coords": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/inlineSurfaceCoordinate"
+          }
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1,
+          "description": "Flattened xarray values in dimension order."
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0
+        },
+        "interpolation": {
+          "$ref": "#/$defs/xarrayInterpolation"
+        },
+        "system": {
+          "type": "string",
+          "default": "global"
+        },
+        "coord_system": {
+          "type": "string",
+          "default": "global"
+        }
+      },
+      "additionalProperties": true
+    },
+    "surfaceLengthProperty": {
+      "description": "Length-valued model surface property. Scalars use the model length scale unless units are supplied; xarray values may be file-backed or inline.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/lengthQuantity"
+        },
+        {
+          "$ref": "#/$defs/surfacePropertyFile"
+        },
+        {
+          "$ref": "#/$defs/surfaceInlineXarray"
+        }
+      ]
+    },
+    "surfaceGuidedAdapt": {
+      "type": "object",
+      "description": "Per-surface guided-wave adaptivity overrides applied after global Mesh/adapt defaults.",
+      "properties": {
+        "scholte": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/scholteWaveAdapt"
+        },
+        "krauklis": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/guidedWaveAdapt"
+        },
+        "gravity_surface": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/gravitySurfaceAdapt"
+        }
+      },
+      "additionalProperties": true
+    },
+    "legacyGuidedNormalH": {
+      "type": "number",
+      "minimum": 0,
+      "deprecated": true,
+      "description": "Compatibility alias for adapt/<wave>/normal/h0. New inputs should use the compact adapt object."
+    },
+    "legacyGuidedNormalThickness": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "deprecated": true,
+      "description": "Compatibility alias for adapt/<wave>/normal/thickness. New inputs should use the compact adapt object."
+    },
+    "legacyGuidedNormalGrading": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "deprecated": true,
+      "description": "Compatibility alias for adapt/<wave>/normal/grading. New inputs should use the compact adapt object."
+    },
+    "legacyGuidedTangentialThickness": {
+      "type": "number",
+      "minimum": 0,
+      "deprecated": true,
+      "description": "Compatibility alias for adapt/<wave>/tangential/thickness. New inputs should use the compact adapt object."
+    },
+    "legacyGuidedTangentialGrading": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "deprecated": true,
+      "description": "Compatibility alias for adapt/<wave>/tangential/grading. New inputs should use the compact adapt object."
+    },
+    "legacyGuidedTangentialEpw": {
+      "type": "number",
+      "minimum": 1,
+      "deprecated": true,
+      "description": "Compatibility alias for adapt/<wave>/tangential/factor. New inputs should use the compact adapt object."
+    },
+    "legacyScholteControls": {
+      "type": "object",
+      "deprecated": true,
+      "description": "Compatibility form of Scholte adaptivity controls. New inputs should use Mesh/adapt/scholte and surfaces[*]/adapt/scholte.",
+      "properties": {
+        "normal_h_over_delta": {
+          "$ref": "#/$defs/legacyGuidedNormalH"
+        },
+        "normal_thickness": {
+          "$ref": "#/$defs/legacyGuidedNormalThickness"
+        },
+        "normal_grading": {
+          "$ref": "#/$defs/legacyGuidedNormalGrading"
+        },
+        "tangential_thickness": {
+          "$ref": "#/$defs/legacyGuidedTangentialThickness"
+        },
+        "tangential_grading": {
+          "$ref": "#/$defs/legacyGuidedTangentialGrading"
+        },
+        "tangential_epw_mult": {
+          "$ref": "#/$defs/legacyGuidedTangentialEpw"
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "sample_spacing": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "boreholeGuidedAdapt": {
+      "type": "object",
+      "description": "Per-borehole or per-layer guided-wave adaptivity overrides applied after global Mesh/adapt defaults.",
+      "properties": {
+        "stoneley": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/guidedWaveAdapt"
+        }
+      },
+      "additionalProperties": true
+    },
+    "modelSurface": {
+      "type": "object",
+      "description": "Layered model graph surface. Fracture entries expand to top and bottom graph surfaces around the center depth.",
+      "required": [
+        "depth"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "_type"
+            ],
+            "properties": {
+              "_type": {
+                "enum": [
+                  "Fracture"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "gap"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "_type": {
+          "type": "string",
+          "description": "Optional surface type. Use fracture for aperture expansion."
+        },
+        "type": {
+          "type": "string",
+          "description": "Compatibility alias for _type."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Surface name. Fractures generate <name>_top and <name>_bottom unless explicit names are supplied."
+        },
+        "top_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional generated top-boundary name for a fracture."
+        },
+        "bottom_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional generated bottom-boundary name for a fracture."
+        },
+        "mesh_block_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional material subdomain assigned to the opened fracture interval. This is geometry-to-material binding; material properties remain defined in subdomains."
+        },
+        "interface": {
+          "type": "boolean",
+          "default": true
+        },
+        "depth": {
+          "$ref": "#/$defs/surfaceLengthProperty",
+          "description": "Center elevation/depth of the model surface."
+        },
+        "gap": {
+          "$ref": "#/$defs/surfaceLengthProperty",
+          "description": "Fracture aperture. Only positive values open the fracture; zero and negative values collapse it to the center depth."
+        },
+        "adapt": {
+          "$ref": "#/$defs/surfaceGuidedAdapt",
+          "description": "Guided-wave controls for this surface. These values override global Mesh/adapt settings."
+        },
+        "normal_h_over_delta": {
+          "$ref": "#/$defs/legacyGuidedNormalH"
+        },
+        "normal_thickness": {
+          "$ref": "#/$defs/legacyGuidedNormalThickness"
+        },
+        "normal_grading": {
+          "$ref": "#/$defs/legacyGuidedNormalGrading"
+        },
+        "tangential_thickness": {
+          "$ref": "#/$defs/legacyGuidedTangentialThickness"
+        },
+        "tangential_grading": {
+          "$ref": "#/$defs/legacyGuidedTangentialGrading"
+        },
+        "tangential_epw_mult": {
+          "$ref": "#/$defs/legacyGuidedTangentialEpw"
+        },
+        "scholte": {
+          "$ref": "#/$defs/legacyScholteControls"
+        },
+        "smooth_edges": {
+          "$ref": "#/$defs/lengthQuantity",
+          "description": "Optional smoothing length applied to the depth surface."
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units",
+          "description": "Default length units for depth, gap, and smooth_edges unless the nested property supplies units."
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Multiplier applied to surface depth and gap values."
+        }
+      },
+      "additionalProperties": true
+    },
+    "boreholeRadiusFile": {
+      "type": "object",
+      "required": [
+        "file"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "File path, RSF/DDS header, or HDF5 object locator for the radius property."
+        },
+        "format": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "absolute": {
+          "type": "boolean",
+          "default": false
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0
+        },
+        "grid": {
+          "$ref": "#/$defs/grid"
+        },
+        "interpolation": {
+          "$ref": "#/$defs/xarrayInterpolation"
+        },
+        "fill_invalid": {
+          "$ref": "#/$defs/xarrayFillInvalid"
+        },
+        "valid_range": {
+          "$ref": "#/$defs/xarrayValidRange"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "system": {
+          "type": "string",
+          "default": "global"
+        }
+      },
+      "additionalProperties": true
+    },
+    "boreholeRadiusProfile": {
+      "type": "object",
+      "required": [
+        "value",
+        "dims",
+        "coords"
+      ],
+      "properties": {
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number"
+          },
+          "description": "Radius values. They are the cumulative outer radius for this part."
+        },
+        "dims": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "enum": [
+              "z",
+              "depth"
+            ]
+          }
+        },
+        "coords": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/coordinateQuantity"
+          }
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0
+        },
+        "interpolation": {
+          "$ref": "#/$defs/xarrayInterpolation"
+        },
+        "system": {
+          "type": "string",
+          "default": "global"
+        }
+      },
+      "additionalProperties": true
+    },
+    "boreholeRadius": {
+      "description": "Cumulative borehole wall radius. The first material layer starts at r=0; additional ordered walls inside a layer split the mesh while keeping the same layer material.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/lengthQuantity"
+        },
+        {
+          "$ref": "#/$defs/boreholeRadiusFile"
+        },
+        {
+          "$ref": "#/$defs/boreholeRadiusProfile"
+        }
+      ]
+    },
+    "surfaceReference": {
+      "description": "Reference to a model surface by name, generated fracture boundary name, one-based expanded surface index, or the aliases `top`, `bottom`, and `surface_N`.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "object",
+          "required": [
+            "surface"
+          ],
+          "properties": {
+            "surface": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              ]
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "boreholeExtent": {
+      "type": "object",
+      "description": "Vertical borehole extent bounded by model surfaces. Current layered generation resolves `top` and `bottom` against Model/surfaces.",
+      "required": [
+        "top",
+        "bottom"
+      ],
+      "properties": {
+        "top": {
+          "$ref": "#/$defs/surfaceReference"
+        },
+        "bottom": {
+          "$ref": "#/$defs/surfaceReference"
+        }
+      },
+      "additionalProperties": true
+    },
+    "boreholeSurface": {
+      "type": "object",
+      "description": "One named radial borehole wall. The radius is cumulative outward from the borehole axis; intermediate walls inside a material layer split the mesh without changing material. In 3D, walls may be registered as implicit cylinders or Simple surfaces.",
+      "required": [
+        "name"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "r"
+          ]
+        },
+        {
+          "required": [
+            "function"
+          ]
+        }
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "role"
+            ]
+          },
+          {
+            "required": [
+              "cells"
+            ]
+          },
+          {
+            "required": [
+              "radius"
+            ]
+          },
+          {
+            "required": [
+              "inner_radius"
+            ]
+          },
+          {
+            "required": [
+              "outer_radius"
+            ]
+          }
+        ]
+      },
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Borehole-local wall name. Runtime surface lookups use the globally qualified form `<borehole>_<surface>` unless the name is already qualified."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "simple",
+            "cylinder"
+          ],
+          "description": "Optional 3D implicit wall kind. Scalar `r` defaults to `cylinder`; non-scalar `r` defaults to `simple`. 2D borehole meshing uses `r`."
+        },
+        "r": {
+          "$ref": "#/$defs/boreholeRadius"
+        },
+        "function": {
+          "$ref": "#/$defs/surfaceLengthProperty",
+          "description": "Optional Simple-surface function for 3D borehole walls. Use with `type: simple` and the Simple-surface axis/coordinate fields such as `axis`, `coord_system`, `periodic`, and `period`."
+        }
+      },
+      "additionalProperties": true
+    },
+    "boreholeLayer": {
+      "type": "object",
+      "description": "One concentric borehole material layer. The mesh block id references a material subdomain in this model.",
+      "required": [
+        "mesh_block_id"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "role"
+            ]
+          },
+          {
+            "required": [
+              "cells"
+            ]
+          },
+          {
+            "required": [
+              "r"
+            ]
+          },
+          {
+            "required": [
+              "radius"
+            ]
+          },
+          {
+            "required": [
+              "inner_radius"
+            ]
+          },
+          {
+            "required": [
+              "outer_radius"
+            ]
+          }
+        ]
+      },
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "mesh_block_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Reference to `subdomains[*].mesh_block_id` for the material used inside this layer."
+        },
+        "inner_surface": {
+          "type": "string",
+          "description": "Optional borehole surface name for the layer's inner wall. If omitted, the first layer starts at the axis and later layers use the previous layer's outer surface."
+        },
+        "outer_surface": {
+          "type": "string",
+          "description": "Optional borehole surface name for the layer's outer wall. If omitted, the layer uses the surface at the same array index; if it skips intermediate ordered surfaces, those intervals use this layer's mesh_block_id."
+        },
+        "adapt": {
+          "$ref": "#/$defs/boreholeGuidedAdapt",
+          "description": "Stoneley controls for this borehole layer. Layer-local values override borehole and global Mesh/adapt settings."
+        },
+        "normal_h_over_delta": {
+          "$ref": "#/$defs/legacyGuidedNormalH"
+        },
+        "normal_thickness": {
+          "$ref": "#/$defs/legacyGuidedNormalThickness"
+        },
+        "normal_grading": {
+          "$ref": "#/$defs/legacyGuidedNormalGrading"
+        },
+        "tangential_thickness": {
+          "$ref": "#/$defs/legacyGuidedTangentialThickness"
+        },
+        "tangential_grading": {
+          "$ref": "#/$defs/legacyGuidedTangentialGrading"
+        },
+        "tangential_epw_mult": {
+          "$ref": "#/$defs/legacyGuidedTangentialEpw"
+        }
+      },
+      "additionalProperties": true
+    },
+    "boreholePlug": {
+      "type": "object",
+      "description": "Local axial obstruction inside a borehole. The plug occupies the region from r=0 to its cumulative radius between top and bottom depths, and references a material subdomain by mesh_block_id.",
+      "required": [
+        "name",
+        "mesh_block_id",
+        "top",
+        "bottom",
+        "r"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mesh_block_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Reference to `subdomains[*].mesh_block_id` for the material used inside the obstruction."
+        },
+        "top": {
+          "$ref": "#/$defs/lengthQuantity",
+          "description": "Plug top depth. Numeric values use the material model length scale unless units are supplied."
+        },
+        "bottom": {
+          "$ref": "#/$defs/lengthQuantity",
+          "description": "Plug bottom depth. Numeric values use the material model length scale unless units are supplied."
+        },
+        "r": {
+          "$ref": "#/$defs/boreholeRadius",
+          "description": "Cumulative radial extent of the plug from the borehole axis."
+        }
+      },
+      "additionalProperties": true
+    },
+    "borehole": {
+      "type": "object",
+      "description": "Vertical layered borehole geometry. Layer domains supersede formation layer domains for generated cells inside the borehole extent; surfaces define ordered radial mesh walls and may outnumber material layers. Three-dimensional layered meshes also require `axis/y`.",
+      "required": [
+        "name",
+        "extent",
+        "layers",
+        "surfaces"
+      ],
+      "not": {
+        "required": [
+          "parts"
+        ]
+      },
+      "anyOf": [
+        {
+          "required": [
+            "axis"
+          ]
+        },
+        {
+          "required": [
+            "x"
+          ]
+        }
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "angular_split": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Number of forced angular h-refinement passes to apply to this borehole's hexahedral material-layer and annular-padding cells after 3D layered mesh generation and before wavefield adaptivity. The root borehole sketch remains four angular sectors; each split pass doubles the hexahedral angular segmentation."
+        },
+        "axis": {
+          "type": "object",
+          "required": [
+            "x"
+          ],
+          "properties": {
+            "x": {
+              "$ref": "#/$defs/lengthQuantity",
+              "description": "Horizontal x coordinate of the borehole axis."
+            },
+            "y": {
+              "$ref": "#/$defs/lengthQuantity",
+              "description": "Horizontal y coordinate of the borehole axis. Required by the current three-dimensional layered generator."
+            }
+          },
+          "additionalProperties": true
+        },
+        "x": {
+          "$ref": "#/$defs/lengthQuantity",
+          "description": "Compatibility shorthand for `axis/x`; new inputs should use `axis`."
+        },
+        "y": {
+          "$ref": "#/$defs/lengthQuantity",
+          "description": "Compatibility shorthand for `axis/y` in three-dimensional layered meshes; new inputs should use `axis`."
+        },
+        "extent": {
+          "$ref": "#/$defs/boreholeExtent"
+        },
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/boreholeLayer"
+          }
+        },
+        "surfaces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/boreholeSurface"
+          }
+        },
+        "plugs": {
+          "type": "array",
+          "description": "Optional local obstructions, such as downhole tools, that replace the borehole layer material over a bounded depth interval.",
+          "items": {
+            "$ref": "#/$defs/boreholePlug"
+          }
+        },
+        "nearfield": {
+          "$ref": "#/$defs/stoneleyNearfield"
+        },
+        "adapt": {
+          "$ref": "#/$defs/boreholeGuidedAdapt",
+          "description": "Stoneley controls for this borehole. Layer-local values override these values, and borehole-local values override global Mesh/adapt settings."
+        },
+        "normal_h_over_delta": {
+          "$ref": "#/$defs/legacyGuidedNormalH"
+        },
+        "normal_thickness": {
+          "$ref": "#/$defs/legacyGuidedNormalThickness"
+        },
+        "normal_grading": {
+          "$ref": "#/$defs/legacyGuidedNormalGrading"
+        },
+        "tangential_thickness": {
+          "$ref": "#/$defs/legacyGuidedTangentialThickness"
+        },
+        "tangential_grading": {
+          "$ref": "#/$defs/legacyGuidedTangentialGrading"
+        },
+        "tangential_epw_mult": {
+          "$ref": "#/$defs/legacyGuidedTangentialEpw"
+        }
+      },
+      "additionalProperties": true
+    },
+    "materialPropertyName": {
+      "type": "string",
+      "description": "Canonical seismic material property name, recognized legacy mixed-case seismic alias, or the recognized layer-property metadata key `grid`. Elastic TI/VTI and TTI accept the velocity-density, slowness-density, bulk-shear-density, pmod-shear-density and lambda-shear-density primary tuples with Thomsen parameters; alternate primary tuples cannot be mixed. Descriptive poroelastic aliases such as `drained_bulk_modulus`, `shear_modulus`, `solid_bulk_modulus`, `fluid_bulk_modulus`, `solid_density`, `fluid_density`, and `fluid_viscosity` are not accepted; use the canonical names documented by this contract. `permeability` is the EM magnetic permeability property, not a poroelastic alias for `kappa`.",
+      "anyOf": [
+        {
+          "enum": [
+            "grid",
+            "vp",
+            "vs",
+            "rho",
+            "qp",
+            "qs",
+            "Sp",
+            "Ss",
+            "K",
+            "Ks",
+            "Kp",
+            "lambda",
+            "mu",
+            "epsilon",
+            "gamma",
+            "delta",
+            "phi",
+            "theta",
+            "electron_density",
+            "mag_x",
+            "mag_y",
+            "mag_z",
+            "conductivity",
+            "resistivity",
+            "permittivity",
+            "permeability",
+            "k_dry",
+            "mu_dry",
+            "k_solid",
+            "k_fluid",
+            "rho_solid",
+            "rho_fluid",
+            "porosity",
+            "tortuosity",
+            "kappa",
+            "viscosity",
+            "bulk_viscosity",
+            "qk",
+            "qmu",
+            "viscous_length",
+            "biot_frequency",
+            "specific_storage",
+            "thermal_conductivity",
+            "heat_capacity",
+            "heat_source",
+            "vadapt",
+            "epw_mult",
+            "hmin",
+            "hmax",
+            "ion_mass",
+            "ion_charge",
+            "electron_collision",
+            "ion_collision",
+            "conductivity_xx",
+            "conductivity_yy",
+            "conductivity_zz",
+            "conductivity_xy",
+            "conductivity_xz",
+            "conductivity_yz",
+            "chargeability",
+            "ip_time_constant",
+            "ip_exponent"
+          ]
+        },
+        {
+          "pattern": "^(?:[vV][pP]|[vV][sS]|[rR][hH][oO]|[qQ][pP]|[qQ][sS]|[sS][pP]|[sS][sS]|[kK]|[kK][sS]|[kK][pP]|[lL][aA][mM][bB][dD][aA]|[mM][uU])$"
+        }
+      ]
+    },
+    "frequencyScalar": {
+      "description": "Positive scalar frequency. A bare number is interpreted in Hz.",
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units",
+              "default": "Hz"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "attenuationConfig": {
+      "type": "object",
+      "description": "Model-wide seismic Q-attenuation configuration. This does not disable poroelastic JKD hydraulic dispersion.",
+      "properties": {
+        "model": {
+          "type": "string",
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "kjartansson"
+              ]
+            },
+            {
+              "pattern": "^(?:[nN][oO][nN][eE]|[kK][jJ][aA][rR][tT][aA][nN][sS][sS][oO][nN])$"
+            }
+          ],
+          "default": "kjartansson",
+          "description": "Attenuation law applied to Qp, Qs, Qk, and Qmu. Runtime matching is case-insensitive."
+        },
+        "reference_frequency": {
+          "$ref": "#/$defs/frequencyScalar",
+          "default": 10.0,
+          "description": "Scalar physical reference frequency in Hz at which the real-valued material parameters are defined."
+        },
+        "f0": {
+          "$ref": "#/$defs/frequencyScalar",
+          "description": "Alias for reference_frequency."
+        },
+        "f_ref": {
+          "$ref": "#/$defs/frequencyScalar",
+          "description": "Alias for reference_frequency."
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "reference_frequency",
+              "f0"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "reference_frequency",
+              "f_ref"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "f0",
+              "f_ref"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "layer": {
+      "type": "object",
+      "description": "Material subdomain bound to one mesh block id.",
+      "required": [
+        "mesh_block_id",
+        "properties"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "mesh_block_id": {
+          "type": "integer"
+        },
+        "physics": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "object",
+          "description": "Auxiliary non-canonical fields available to expression properties through field reference nodes. These fields do not participate in material physics inference.",
+          "properties": {
+            "grid": {
+              "$ref": "#/$defs/grid",
+              "description": "Shared grid metadata for file-backed binary auxiliary fields in this subdomain."
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/auxiliaryFieldValue"
+          }
+        },
+        "properties": {
+          "type": "object",
+          "properties": {
+            "grid": {
+              "$ref": "#/$defs/grid",
+              "description": "Shared grid metadata for file-backed binary properties in this subdomain."
+            },
+            "Sp": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "P-wave slowness. Matching is case-insensitive."
+            },
+            "Ss": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "S-wave slowness. Matching is case-insensitive."
+            },
+            "K": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Acoustic or isotropic-elastic bulk modulus. Matching is case-insensitive."
+            },
+            "Ks": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Shear modulus paired with K or Kp. Matching is case-insensitive."
+            },
+            "Kp": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "P-wave modulus rho*vp^2. Matching is case-insensitive."
+            },
+            "lambda": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "First Lame parameter, paired with mu. Matching is case-insensitive."
+            },
+            "mu": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Second Lame parameter, paired with lambda. Matching is case-insensitive."
+            },
+            "permeability": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "EM magnetic permeability. Poroelastic hydraulic permeability uses `kappa`; `permeability` is not a poroelastic alias."
+            },
+            "k_dry": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic drained-frame bulk modulus."
+            },
+            "mu_dry": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic drained-frame shear modulus."
+            },
+            "k_solid": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic solid-grain bulk modulus."
+            },
+            "k_fluid": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic pore-fluid bulk modulus."
+            },
+            "rho_solid": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic solid-grain density."
+            },
+            "rho_fluid": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic pore-fluid density."
+            },
+            "phi": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Elastic or poroelastic orientation angle; default unit rad. Explicit deg is converted to radians."
+            },
+            "theta": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Elastic or poroelastic orientation angle; default unit rad. Explicit deg is converted to radians."
+            },
+            "ion_mass": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Dimensionless ion mass divided by proton mass."
+            },
+            "ion_charge": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Dimensionless ion charge divided by elementary charge."
+            },
+            "porosity": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Dimensionless pore-volume fraction, between zero and one."
+            },
+            "tortuosity": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Dimensionless inertial ratio, at least one."
+            },
+            "kappa": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic hydraulic permeability."
+            },
+            "viscosity": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Dynamic viscosity used by poroelastic, Darcy, and viscous-fluid formulations; default unit cP."
+            },
+            "bulk_viscosity": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Nonnegative bulk viscosity for elastic:viscous_fluid; default zero, unit cP."
+            },
+            "thermal_conductivity": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Positive finite isotropic thermal conductivity, default unit W/m/K."
+            },
+            "heat_capacity": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Positive finite volumetric heat capacity rho*c_p, default unit J/m^3/K."
+            },
+            "heat_source": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Signed finite volumetric heat generation, default zero in W/m^3. Multiplied by the transient source time function."
+            },
+            "specific_storage": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Darcy specific storage coefficient."
+            },
+            "qk": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic drained-frame bulk attenuation quality factor."
+            },
+            "qmu": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic drained-frame shear attenuation quality factor."
+            },
+            "viscous_length": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Poroelastic JKD viscous characteristic length."
+            },
+            "biot_frequency": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Optional poroelastic Biot transition frequency."
+            },
+            "epw_mult": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Seismic adaptivity EPW-target multiplier. Values below 1.0 are clamped to 1.0 by current refinement rules."
+            },
+            "hmin": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Seismic adaptivity local minimum element size. Numeric values use the material model length scale unless units are supplied."
+            },
+            "hmax": {
+              "$ref": "#/$defs/propertyValue",
+              "description": "Seismic adaptivity local maximum element size. Numeric values use the material model length scale unless units are supplied."
+            }
+          },
+          "propertyNames": {
+            "$ref": "#/$defs/materialPropertyName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/propertyValue"
+          }
+        },
+        "willis": {
+          "$ref": "#/$defs/willis"
+        }
+      },
+      "additionalProperties": true
+    },
+    "willisTensor": {
+      "type": "object",
+      "description": "Constant complex Cartesian constitutive tensor, supplied as row-major matrices. Imaginary entries default to zero.",
+      "required": [
+        "real"
+      ],
+      "properties": {
+        "real": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "imag": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "units": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "willis": {
+      "type": "object",
+      "description": "Optional frequency-domain elastic constitutive blocks for exp(+i omega t): stress=C strain+S velocity; momentum=R strain+rho velocity. Strain uses engineering shear components. Shapes are validated for the executable dimension.",
+      "minProperties": 1,
+      "properties": {
+        "density": {
+          "$ref": "#/$defs/willisTensor",
+          "description": "Full D by D inertia tensor, in kg/m^3 by default. Replaces scalar rho in the momentum law; scalar rho still parameterizes the ordinary elastic stiffness."
+        },
+        "stress_velocity": {
+          "$ref": "#/$defs/willisTensor",
+          "description": "S: DV by D stress/velocity coupling, in Pa*s/m by default."
+        },
+        "momentum_strain": {
+          "$ref": "#/$defs/willisTensor",
+          "description": "R: D by DV momentum/engineering-strain coupling, in Pa*s/m by default. No reciprocity relation is imposed."
+        }
+      },
+      "additionalProperties": false
+    },
+    "tensorHatControlMap": {
+      "type": "object",
+      "description": "Tensor product of two or three uniform nodal hat axes, independent of the simulation mesh. The first listed axis varies fastest in the flat coefficient array. Updates vanish outside the closed grid support; zero boundary coefficients give a continuous localized update. Native variational smoothing is unsupported.",
+      "required": [
+        "kind",
+        "axes",
+        "shape",
+        "origin",
+        "spacing",
+        "coefficients"
+      ],
+      "properties": {
+        "kind": {
+          "const": "tensor_hat"
+        },
+        "coordinate_system": {
+          "type": "string",
+          "default": "global"
+        },
+        "units": {
+          "type": "string",
+          "description": "Units shared by all axes; defaults to model coordinate units."
+        },
+        "axes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Distinct active axes in the selected coordinate system, in coefficient storage order."
+        },
+        "shape": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 2
+          }
+        },
+        "origin": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "number"
+          }
+        },
+        "spacing": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "coefficients": {
+          "type": "array",
+          "minItems": 4,
+          "items": {
+            "type": "number"
+          },
+          "description": "Flat coefficient array of length product(shape). Shape, axes, origin and spacing lengths must agree and cannot exceed the simulation dimension; runtime validates these relations."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-material-model-1"
+    },
+    "Model": {
+      "$ref": "#"
+    },
+    "units": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+    },
+    "x_limits": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
+    },
+    "y_limits": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
+    },
+    "z_limits": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
+    },
+    "property_spaces": {
+      "type": "object",
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "description": "Named material-control spaces shared by compatible parameterized properties.",
+      "additionalProperties": {
+        "$ref": "#/$defs/meshPropertySpace"
+      }
+    },
+    "subdomains": {
+      "type": "array",
+      "description": "Runnable v1 material subdomains consumed by the current Fortran reader.",
+      "items": {
+        "$ref": "#/$defs/layer"
+      }
+    },
+    "attenuation": {
+      "$ref": "#/$defs/attenuationConfig"
+    },
+    "gravity": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "description": "Gravitational acceleration. Numeric values use solver acceleration units; unit-bearing values are nondimensionalized. Defaults to standard gravity (9.80665 m/s^2)."
+    },
+    "boreholes": {
+      "type": "array",
+      "description": "Layered borehole geometry. Layers reference material subdomains by mesh_block_id; ordered radial surfaces define mesh intervals and may include same-material subdivisions.",
+      "items": {
+        "$ref": "#/$defs/borehole"
+      }
+    },
+    "surfaces": {
+      "type": "array",
+      "description": "Named implicit surfaces for geometry queries or ordered graph surfaces for layered generation. Fractures expand to top and bottom graph surfaces wherever gap is positive.",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/modelSurface"
+          },
+          {
+            "$ref": "../fs-implicit-geometry-1/schema.json#/$defs/surface"
+          }
+        ]
+      }
+    },
+    "regions": {
+      "type": "array",
+      "description": "Named prioritized material volumes. Highest priority owns an overlap; equal-priority interior overlap is invalid.",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/geometryRegion"
+      }
+    },
+    "scholte": {
+      "$ref": "#/$defs/legacyScholteControls",
+      "description": "Compatibility form of global Scholte controls. Mesh/adapt/scholte takes precedence when both forms are present."
+    },
+    "layers": {
+      "type": "array",
+      "deprecated": true,
+      "description": "Schema alias for staged tooling. Normalize to subdomains before handing the model to current Fortran readers.",
+      "items": {
+        "$ref": "#/$defs/layer"
+      }
+    }
+  },
+  "additionalProperties": true
+}

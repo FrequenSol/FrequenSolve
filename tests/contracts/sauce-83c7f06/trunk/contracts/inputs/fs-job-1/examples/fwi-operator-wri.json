@@ -1,0 +1,23 @@
+{
+  "schema": "fs-job-1",
+  "name": "wri_wavefield_update",
+  "workflow": "fwi_operator",
+  "simulation": "simulation.json",
+  "result_path": "results/wri_wavefield_update",
+  "Imaging": {},
+  "f_list": [4.0],
+  "fwi_operator": {
+    "action": "wri",
+    "model_covector": "wri_gradient.h5",
+    "objective": "wri_objective.h5",
+    "wri": {
+      "penalty": 10.0,
+      "data_scale": "auto",
+      "receiver_group": "surface"
+    }
+  },
+  "control_sensitivities": {
+    "gram_derivative": "total",
+    "active": ["vp"]
+  }
+}

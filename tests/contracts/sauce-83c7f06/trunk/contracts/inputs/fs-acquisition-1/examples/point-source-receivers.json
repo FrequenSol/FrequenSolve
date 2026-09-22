@@ -1,0 +1,57 @@
+{
+  "schema": "fs-acquisition-1",
+  "max_batch": 64,
+  "source_groups": [
+    {
+      "name": "shot_001",
+      "source": {
+        "_type": "PointSource",
+        "mechanism": {
+          "type": "isotropic"
+        },
+        "coordinates": {
+          "value": [
+            0.5,
+            0.2
+          ],
+          "units": "km"
+        },
+        "amplitude": {
+          "value": 1.0,
+          "units": "N*m"
+        }
+      }
+    }
+  ],
+  "receiver_groups": [
+    {
+      "name": "surface",
+      "domain": -1,
+      "coordinates": {
+        "_type": "CoordsArray",
+        "system": "global",
+        "value": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ]
+        ],
+        "units": "km"
+      },
+      "device": {
+        "_type": "ReceiverArray",
+        "components": [
+          {
+            "name": "pressure",
+            "field": "pressure",
+            "units": "Pa"
+          }
+        ]
+      }
+    }
+  ]
+}

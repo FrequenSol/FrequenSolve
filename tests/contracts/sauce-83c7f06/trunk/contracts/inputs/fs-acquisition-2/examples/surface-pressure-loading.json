@@ -1,0 +1,65 @@
+{
+  "schema": "fs-acquisition-2",
+  "boundary_loadings": [
+    {
+      "_type": "SurfacePressure",
+      "boundary_condition": "ocean_surface",
+      "fields": [
+        {
+          "source": "wind_sea",
+          "reference_coordinate": {
+            "system": "global",
+            "value": [500.0, 0.0],
+            "units": "m"
+          },
+          "rhs_normalization": 2500.0,
+          "domain": "frequency",
+          "frequencies": [0.05, 0.1],
+          "data": {
+            "file": "surface-pressure.h5",
+            "format": "HDF5",
+            "dataset": "pressure/wind_sea",
+            "units": "Pa",
+            "system": "global"
+          },
+          "derivative_df": {
+            "file": "surface-pressure.h5",
+            "format": "HDF5",
+            "dataset": "pressure/wind_sea_df",
+            "units": "Pa",
+            "system": "global"
+          },
+          "derivative_ds": {
+            "file": "surface-pressure.h5",
+            "format": "HDF5",
+            "dataset": "pressure/wind_sea_ds",
+            "units": "Pa",
+            "system": "global"
+          }
+        },
+        {
+          "source": "swell",
+          "reference_coordinate": {
+            "system": "global",
+            "value": [750.0, 0.0],
+            "units": "m"
+          },
+          "rhs_normalization": 1800.0,
+          "domain": "time",
+          "time_origin": 0.0,
+          "time_step": 0.5,
+          "window": "hann",
+          "detrend": "mean",
+          "data": {
+            "file": "surface-pressure.h5",
+            "format": "HDF5",
+            "dataset": "pressure/swell",
+            "units": "Pa",
+            "system": "global"
+          }
+        }
+      ]
+    }
+  ],
+  "receiver_groups": []
+}

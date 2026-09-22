@@ -1,0 +1,25 @@
+{
+  "schema": "fs-job-1",
+  "name": "transient_thermal",
+  "project_path": "project",
+  "workflow": "transient",
+  "simulation": "thermal-sim.json",
+  "result_path": "results/transient_thermal",
+  "Time": {
+    "schema": "fs-time-domain-1",
+    "method": "backward_euler",
+    "start": 0.0,
+    "end": 1.0,
+    "time_step": 0.01,
+    "source": {
+      "kind": "constant"
+    },
+    "output": {
+      "stride": 1
+    },
+    "checkpoint": {
+      "stride": 50,
+      "path": "checkpoints"
+    }
+  }
+}

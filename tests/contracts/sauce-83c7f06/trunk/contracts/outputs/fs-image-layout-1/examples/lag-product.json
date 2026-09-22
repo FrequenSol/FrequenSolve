@@ -1,0 +1,32 @@
+{
+  "schema": "fs-image-layout-1",
+  "packing": "channel_then_axes",
+  "width": 6,
+  "channel_count": 2,
+  "axis_count": 1,
+  "channels": [
+    {
+      "name": "correlation",
+      "unit": "m/s",
+      "role": 1,
+      "value_role": 1
+    },
+    {
+      "name": "quadrature",
+      "unit": "1",
+      "role": 4,
+      "value_role": 1
+    }
+  ],
+  "axes": [
+    {
+      "name": "lag",
+      "unit": "s",
+      "coordinates": [
+        -0.1,
+        0,
+        0.1
+      ]
+    }
+  ]
+}

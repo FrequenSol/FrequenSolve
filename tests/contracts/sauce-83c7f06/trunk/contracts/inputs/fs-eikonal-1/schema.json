@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-eikonal-1/schema.json",
+  "title": "FS Acoustic Eikonal Workflow v1",
+  "description": "Forward-only deterministic native-mesh isotropic acoustic first-arrival configuration.",
+  "x-fs-contract": "fs-eikonal-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "positiveTime": {
+      "oneOf": [
+        {"type": "number", "exclusiveMinimum": 0},
+        {
+          "type": "object",
+          "required": ["value", "units"],
+          "properties": {
+            "value": {"type": "number", "exclusiveMinimum": 0},
+            "units": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "point": {
+      "type": "object",
+      "required": ["name", "coordinates"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "coordinates": {"$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"}
+      },
+      "additionalProperties": false
+    },
+    "sourceSelection": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["acquisition", "explicit"]},
+        "names": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/point"}
+        },
+        "incidence_slot": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Optional one-based mapped incidence restricting source seeding to one physical side. Omit to seed all incident non-PML elements."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "explicit"}}, "required": ["kind"]},
+          "then": {"required": ["points"], "not": {"required": ["names"]}},
+          "else": {"not": {"required": ["points"]}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "receiverSelection": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "kind": {"enum": ["acquisition", "explicit"]},
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/point"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"enabled": {"const": true}}, "required": ["enabled"]},
+          "then": {
+            "required": ["kind"],
+            "oneOf": [
+              {
+                "properties": {"kind": {"const": "acquisition"}},
+                "required": ["groups"],
+                "not": {"required": ["points"]}
+              },
+              {
+                "properties": {"kind": {"const": "explicit"}},
+                "required": ["points"],
+                "not": {"required": ["groups"]}
+              }
+            ]
+          },
+          "else": {"not": {"anyOf": [{"required": ["kind"]}, {"required": ["groups"]}, {"required": ["points"]}]}}
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["schema", "physics", "sources", "receivers", "solver", "products", "output"],
+  "properties": {
+    "schema": {"const": "fs-eikonal-1"},
+    "physics": {"const": "acoustic"},
+    "sources": {"$ref": "#/$defs/sourceSelection"},
+    "receivers": {"$ref": "#/$defs/receiverSelection"},
+    "solver": {
+      "type": "object",
+      "properties": {
+        "abs_tolerance": {"$ref": "#/$defs/positiveTime"},
+        "rel_tolerance": {"type": "number", "exclusiveMinimum": 0},
+        "tie_tolerance": {"type": "number", "exclusiveMinimum": 0},
+        "max_waves": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 100000},
+        "max_updates": {"type": "integer", "minimum": 1, "maximum": 2147483647, "default": 100000000},
+        "minimum_full_stencil_quality": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "additionalProperties": false
+    },
+    "products": {
+      "type": "object",
+      "required": ["field", "characteristics"],
+      "properties": {
+        "field": {"type": "boolean"},
+        "characteristics": {"type": "boolean"},
+        "max_points_per_characteristic": {"type": "integer", "minimum": 2, "maximum": 2147483647},
+        "max_characteristic_points": {"type": "integer", "minimum": 2, "maximum": 2147483647, "default": 1000000}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"characteristics": {"const": true}}, "required": ["characteristics"]},
+          "then": {"required": ["max_points_per_characteristic"]}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "required": ["directory", "hdf5_file"],
+      "properties": {
+        "directory": {
+          "type": "string",
+          "pattern": "^(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$",
+          "description": "Normalized directory relative to result_path."
+        },
+        "hdf5_file": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+\\.(h5|hdf5)$",
+          "description": "Leaf HDF5 filename created inside output.directory."
+        },
+        "overwrite": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"receivers": {"properties": {"enabled": {"const": false}}, "required": ["enabled"]}}},
+      "then": {"properties": {"products": {"properties": {"field": {"const": true}, "characteristics": {"const": false}}}}}
+    }
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "fs-job-1",
+  "workflow": "fwi_operator",
+  "simulation": "project/simulation.json",
+  "f_list": [
+    [
+      3.0,
+      0.0
+    ]
+  ],
+  "fwi_operator": {
+    "action": "linearize",
+    "state": "extension_state.json",
+    "controls": {
+      "active": []
+    },
+    "extension": {
+      "fields": [
+        {
+          "control": "acoustic_vp",
+          "lags": {
+            "count": 3,
+            "origin": -10.0,
+            "spacing": 10.0,
+            "units": "ms"
+          }
+        }
+      ],
+      "manifest": "extension_space.json"
+    }
+  },
+  "name": "lag_extension",
+  "result_path": "results/lag_extension",
+  "Imaging": {}
+}

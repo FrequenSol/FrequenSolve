@@ -1,0 +1,2089 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-acquisition-2/schema.json",
+  "title": "FS Acquisition v2",
+  "description": "Source geometry, source encoding, and receiver acquisition configuration.",
+  "x-fs-contract": "fs-acquisition-2",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "sourceKind": {
+      "enum": [
+        "scalar",
+        "vector",
+        "tensor",
+        "monopole",
+        "gradient",
+        "dipole",
+        "electric_current",
+        "magnetic_current",
+        "magnetic_dipole"
+      ]
+    },
+    "complexCoefficient": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "items": false
+        }
+      ],
+      "description": "A dimensionless real coefficient or [real, imag] pair."
+    },
+    "sourceBasis": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "direction": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/direction",
+          "description": "Source basis vector in the selected coordinate system. For Maxwell current sources, the physical moment vector is amplitude times direction; use a unit direction when amplitude specifies moment magnitude."
+        },
+        "amplitude": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity",
+          "description": "Optional source-strength multiplier. A number is dimensionless. An object with `value` is an exact physical source strength; omitted units default to `N` for vector sources and `N*m` for scalar, tensor, monopole, gradient, and dipole sources. Cartesian Maxwell electric_current strengths default to A*m in 3D and A per unit invariant length in 2D; magnetic_current uses V*m and V respectively. These are impressed current moments, not loop magnetic dipole moments. magnetic_dipole is a loop or coil moment (current times area, times turns) in A*m^2 in 3D and A*m per unit invariant length in 2D; its load is the equivalent magnetic current i*omega*mu0*m, so it is the one Maxwell point source with a frequency derivative."
+        },
+        "mechanism": {
+          "oneOf": [
+            {
+              "$ref": "../../fragments/fs-seismic-mechanism.schema.json#/$defs/mechanism"
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "enum": [
+                    "isotropic",
+                    "force"
+                  ]
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
+        "moment_magnitude": {
+          "type": "number",
+          "description": "GCMT moment magnitude Mw. For a normalized seismic mechanism, M0 = 10^(1.5 Mw + 9.1) N m. Mutually exclusive with amplitude."
+        }
+      },
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "amplitude",
+              "moment_magnitude"
+            ]
+          }
+        }
+      ]
+    },
+    "sourceAtom": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/sourceBasis"
+        },
+        {
+          "type": "object",
+          "required": [
+            "coordinates"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "coordinates": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+            },
+            "footprint": {
+              "$ref": "#/$defs/forceFootprint"
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "footprint"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "vector"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "inlineSourceGeometry": {
+      "type": "object",
+      "required": [
+        "_type",
+        "kind",
+        "sources"
+      ],
+      "properties": {
+        "_type": {
+          "const": "Inline"
+        },
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "defaults": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/sourceBasis"
+            },
+            {
+              "not": {
+                "required": [
+                  "footprint"
+                ]
+              }
+            }
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sourceAtom"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "hdf5SourceGeometry": {
+      "type": "object",
+      "required": [
+        "_type",
+        "kind",
+        "file",
+        "dataset"
+      ],
+      "properties": {
+        "_type": {
+          "const": "HDF5"
+        },
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "names_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional UTF-8 source-name dataset in the same HDF5 file."
+        },
+        "hash": {
+          "type": "string",
+          "description": "Optional content hash used for provenance and rerun invalidation."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "system": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "defaults": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/sourceBasis"
+            },
+            {
+              "not": {
+                "required": [
+                  "footprint"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "spsSourceGeometry": {
+      "type": "object",
+      "required": [
+        "_type",
+        "kind",
+        "source_file"
+      ],
+      "properties": {
+        "_type": {
+          "const": "SPSFiles"
+        },
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "kind": {
+          "$ref": "#/$defs/sourceKind"
+        },
+        "source_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "sps_revision": {
+          "enum": ["auto", "1.0", "2.1"],
+          "default": "auto"
+        },
+        "system": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "defaults": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/sourceBasis"
+            },
+            {
+              "not": {
+                "required": [
+                  "footprint"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceGeometry": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/inlineSourceGeometry"
+        },
+        {
+          "$ref": "#/$defs/hdf5SourceGeometry"
+        },
+        {
+          "$ref": "#/$defs/spsSourceGeometry"
+        },
+        {
+          "$ref": "#/$defs/quadratureSourceGeometry"
+        }
+      ]
+    },
+    "namedEncodingTerm": {
+      "type": "object",
+      "required": [
+        "source",
+        "coefficient"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coefficient": {
+          "$ref": "#/$defs/complexCoefficient"
+        }
+      },
+      "additionalProperties": false
+    },
+    "namedEncodingField": {
+      "type": "object",
+      "required": [
+        "terms"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "terms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/namedEncodingTerm"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "namedSourceEncoding": {
+      "type": "object",
+      "required": [
+        "_type",
+        "fields"
+      ],
+      "properties": {
+        "_type": {
+          "const": "Named"
+        },
+        "name": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/namedEncodingField"
+          }
+        },
+        "conjugate_coefficients": {
+          "type": "boolean",
+          "default": false,
+          "description": "Conjugate all source coefficients in the runtime without rewriting authored storage."
+        }
+      },
+      "additionalProperties": false
+    },
+    "denseEncodingField": {
+      "type": "object",
+      "required": [
+        "coefficients"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coefficients": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/complexCoefficient"
+          }
+        },
+        "reference_coordinates": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "deprecated": true,
+          "description": "Deprecated legacy field reference. Physical source geometry and the simulation coordinate system are authoritative."
+        }
+      },
+      "additionalProperties": false
+    },
+    "jsonDenseSourceEncoding": {
+      "type": "object",
+      "description": "Compact inline dense encoding for small examples and compatibility. Saved production inputs should use HDF5Dense.",
+      "required": [
+        "_type",
+        "fields"
+      ],
+      "properties": {
+        "_type": {
+          "const": "JsonDense"
+        },
+        "name": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/denseEncodingField"
+          }
+        },
+        "conjugate_coefficients": {
+          "type": "boolean",
+          "default": false,
+          "description": "Conjugate all source coefficients in the runtime without rewriting authored storage."
+        }
+      },
+      "additionalProperties": false
+    },
+    "hdf5DenseSourceEncoding": {
+      "type": "object",
+      "description": "Bulk dense complex encoding stored with h5py shape (field, source, complex=2), or frequency-dependent shape (frequency, field, source, complex=2). Small field labels use a separate dataset; production source-axis values are not copied into metadata.",
+      "required": [
+        "_type",
+        "file",
+        "dataset"
+      ],
+      "properties": {
+        "_type": {
+          "const": "HDF5Dense"
+        },
+        "name": {
+          "type": "string"
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "description": "Optional content hash used for provenance and rerun invalidation."
+        },
+        "conjugate_coefficients": {
+          "type": "boolean",
+          "default": false,
+          "description": "Conjugate all source coefficients in the runtime without rewriting the HDF5 dataset."
+        },
+        "field_names_dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "frequencies_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required for a rank-4 coefficient tensor; contains the physical frequency in Hz for each tensor slice."
+        },
+        "frequency_derivative_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional coefficient derivative dE/df in inverse physical Hz, with the same shape and ordering as dataset. When absent, authored coefficients are frozen and E_f is zero."
+        },
+        "spectral_derivative": {
+          "enum": [
+            "frozen",
+            "total"
+          ],
+          "default": "frozen",
+          "description": "Derivative policy for authored encoding coefficients. total requires frequency_derivative_dataset; frozen sets E_f to zero."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "spectral_derivative": {
+                "const": "total"
+              }
+            },
+            "required": [
+              "spectral_derivative"
+            ]
+          },
+          "then": {
+            "required": [
+              "frequency_derivative_dataset"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "physicalSourceSignature": {
+      "type": "object",
+      "description": "Production physical-source spectra, applied to stable physical SourcePoints before source encoding.",
+      "required": [
+        "file",
+        "dataset",
+        "frequencies_dataset",
+        "source_ids_dataset"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Complex q dataset with h5py shape (frequency, source, complex=2), or (laplace_damping, frequency, source, complex=2)."
+        },
+        "frequency_derivative_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional complex physical-Hz derivative q_f with the same shape as dataset. Required when spectral_derivative is total."
+        },
+        "frequencies_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One-dimensional physical Fourier-frequency coordinate in Hz. Task selection is exact within the solver comparison tolerance; extrapolation is forbidden."
+        },
+        "laplace_damping_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required for rank-4 q storage. One-dimensional nonnegative physical Laplace-damping coordinate in Hz."
+        },
+        "source_ids_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One-dimensional stable physical-source identifier coordinate matching source_geometry order."
+        },
+        "spectral_derivative": {
+          "enum": [
+            "frozen",
+            "total"
+          ],
+          "default": "frozen",
+          "description": "total uses q_f in physical Hz; frozen sets q_f to zero even when a derivative dataset is present."
+        },
+        "hash": {
+          "type": "string",
+          "description": "Optional content hash used for provenance and stale-linearization rejection."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "spectral_derivative": {
+                "const": "total"
+              }
+            },
+            "required": [
+              "spectral_derivative"
+            ]
+          },
+          "then": {
+            "required": [
+              "frequency_derivative_dataset"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "sourceEncoding": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/namedSourceEncoding"
+        },
+        {
+          "$ref": "#/$defs/jsonDenseSourceEncoding"
+        },
+        {
+          "$ref": "#/$defs/hdf5DenseSourceEncoding"
+        }
+      ]
+    },
+    "sampledPressureData": {
+      "type": "object",
+      "required": [
+        "file",
+        "dataset"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "format": {
+          "const": "HDF5"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "system": {
+          "type": "string",
+          "default": "global"
+        }
+      },
+      "additionalProperties": true,
+      "description": "Component-packed HDF5 xarray field. Its dataset metadata defines only the spatial interpolation dimensions; frequency or time samples occupy the trailing component axis."
+    },
+    "surfacePressureFrequencyField": {
+      "type": "object",
+      "required": [
+        "source",
+        "reference_coordinate",
+        "rhs_normalization",
+        "domain",
+        "frequencies",
+        "data"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_coordinate": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+        },
+        "rhs_normalization": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Positive source scale in the pressure units declared by data. Authoring libraries derive it from the maximum field magnitude."
+        },
+        "domain": {
+          "const": "frequency"
+        },
+        "frequencies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "minimum": 0.0
+          },
+          "description": "Strictly increasing physical frequencies in Hz. The HDF5 component axis stores [real, imag] for each frequency in this order."
+        },
+        "data": {
+          "$ref": "#/$defs/sampledPressureData"
+        },
+        "derivative_df": {
+          "$ref": "#/$defs/sampledPressureData",
+          "description": "Optional explicit derivative of the complex pressure phasor with respect to physical Fourier frequency f in Hz. Required at runtime by forward_df. Components use the same frequency packing as data and numerical values are pressure per Hz."
+        },
+        "derivative_ds": {
+          "$ref": "#/$defs/sampledPressureData",
+          "description": "Optional explicit derivative of the complex pressure phasor with respect to physical Laplace frequency s in Hz. Required at runtime by forward_ds. Components use the same frequency packing as data and numerical values are pressure per Hz."
+        },
+        "derivative_d2f": {
+          "$ref": "#/$defs/sampledPressureData",
+          "description": "Optional explicit second derivative of the complex pressure phasor with respect to physical Fourier frequency f in Hz. Required at runtime when forward_df requests derivative_order 2. Numerical values are pressure per Hz squared."
+        },
+        "derivative_d2s": {
+          "$ref": "#/$defs/sampledPressureData",
+          "description": "Optional explicit second derivative of the complex pressure phasor with respect to physical Laplace frequency s in Hz. Required at runtime when forward_ds requests derivative_order 2. Numerical values are pressure per Hz squared."
+        }
+      },
+      "additionalProperties": false
+    },
+    "surfacePressureTimeField": {
+      "type": "object",
+      "required": [
+        "source",
+        "reference_coordinate",
+        "rhs_normalization",
+        "domain",
+        "time_origin",
+        "time_step",
+        "data"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_coordinate": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+        },
+        "rhs_normalization": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Positive source scale in the pressure units declared by data. Authoring libraries derive it from the maximum absolute time sample."
+        },
+        "domain": {
+          "const": "time"
+        },
+        "time_origin": {
+          "type": "number",
+          "description": "Physical time of the first sample in seconds."
+        },
+        "time_step": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Uniform physical sample interval in seconds."
+        },
+        "window": {
+          "enum": [
+            "none",
+            "hann"
+          ],
+          "default": "none"
+        },
+        "detrend": {
+          "enum": [
+            "none",
+            "mean"
+          ],
+          "default": "none"
+        },
+        "data": {
+          "$ref": "#/$defs/sampledPressureData"
+        }
+      },
+      "additionalProperties": false
+    },
+    "surfacePressureLoading": {
+      "type": "object",
+      "required": [
+        "_type",
+        "boundary_condition",
+        "fields"
+      ],
+      "properties": {
+        "_type": {
+          "const": "SurfacePressure"
+        },
+        "boundary_condition": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable name of a boundary-condition assignment containing gravity_surface."
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/surfacePressureFrequencyField"
+              },
+              {
+                "$ref": "#/$defs/surfacePressureTimeField"
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceCovarianceFactorization": {
+      "type": "object",
+      "required": [
+        "method"
+      ],
+      "properties": {
+        "method": {
+          "enum": [
+            "provided",
+            "cholesky",
+            "eigendecomposition",
+            "svd"
+          ]
+        },
+        "source_covariance_hash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "relative_tolerance": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "retained_variance": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "surfacePressureCovarianceStatistics": {
+      "type": "object",
+      "required": [
+        "quantity",
+        "spectral_measure",
+        "sidedness",
+        "covariance_convention"
+      ],
+      "properties": {
+        "quantity": {
+          "const": "pressure_cross_spectral_density"
+        },
+        "spectral_measure": {
+          "const": "per_hz"
+        },
+        "sidedness": {
+          "enum": [
+            "one_sided",
+            "two_sided"
+          ]
+        },
+        "covariance_convention": {
+          "const": "E[s s^H]"
+        },
+        "factorization": {
+          "$ref": "#/$defs/sourceCovarianceFactorization"
+        }
+      },
+      "additionalProperties": false
+    },
+    "surfacePressureCovarianceFactor": {
+      "type": "object",
+      "required": [
+        "_type",
+        "boundary_condition",
+        "factor_set",
+        "source_prefix",
+        "reference_coordinate",
+        "rank",
+        "rhs_normalizations",
+        "domain",
+        "frequencies",
+        "statistics",
+        "data"
+      ],
+      "properties": {
+        "_type": {
+          "const": "SurfacePressureCovarianceFactor"
+        },
+        "boundary_condition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "factor_set": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_prefix": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Prefix used to generate one distinct logical RHS name per factor column."
+        },
+        "reference_coordinate": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rank_per_frequency": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": "Numerical rank at each frequency before fixed-axis zero padding. Runtime validation requires one entry per frequency and no entry greater than rank."
+        },
+        "rhs_normalizations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0.0
+          },
+          "description": "One positive pressure-coordinate scale per factor. Runtime validation requires exactly rank entries."
+        },
+        "domain": {
+          "const": "frequency"
+        },
+        "frequencies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "minimum": 0.0
+          },
+          "description": "Strictly increasing physical frequencies in Hz. Runtime validation enforces ordering."
+        },
+        "statistics": {
+          "$ref": "#/$defs/surfacePressureCovarianceStatistics"
+        },
+        "data": {
+          "$ref": "#/$defs/sampledPressureData",
+          "description": "Packed frequency-major factor fields. Pressure units describe numerical load coordinates; per-Hz measure is carried by statistics."
+        }
+      },
+      "additionalProperties": false
+    },
+    "positiveLength": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number",
+              "exclusiveMinimum": 0.0
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "A positive scalar length, optionally with units."
+    },
+    "signedLength": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "A signed scalar length, optionally with units."
+    },
+    "gaussianBeamSource": {
+      "type": "object",
+      "required": [
+        "origin",
+        "width"
+      ],
+      "properties": {
+        "origin": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "description": "Gaussian-beam waist center in the simulation coordinate system."
+        },
+        "theta": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Global beam propagation angle in degrees. In two dimensions, zero propagates along the positive first simulation-coordinate axis; the angle is independent of boundary orientation."
+        },
+        "phi": {
+          "type": "number",
+          "default": 90.0,
+          "description": "Three-dimensional beam azimuth in degrees."
+        },
+        "polarization": {
+          "type": "number",
+          "default": 45.0,
+          "description": "Electric-field polarization angle in degrees for Maxwell excitation."
+        },
+        "width": {
+          "$ref": "#/$defs/positiveLength",
+          "description": "Positive Gaussian waist radius."
+        },
+        "amplitude": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Incident-field amplitude."
+        },
+        "n0": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0,
+          "description": "Reference slowness used by the analytic beam."
+        }
+      },
+      "additionalProperties": false
+    },
+    "gaussianImpedanceBeam": {
+      "type": "object",
+      "required": [
+        "rhs",
+        "source"
+      ],
+      "properties": {
+        "rhs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "One-based RHS field within the active acquisition batch. Multiple beams assigned to the same RHS are summed."
+        },
+        "source": {
+          "$ref": "#/$defs/gaussianBeamSource"
+        }
+      },
+      "additionalProperties": false
+    },
+    "gaussianBeamImpedanceSources": {
+      "type": "object",
+      "required": [
+        "_type",
+        "beams"
+      ],
+      "properties": {
+        "_type": {
+          "const": "GaussianBeam"
+        },
+        "beams": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/gaussianImpedanceBeam"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Analytic incident fields applied as nonhomogeneous impedance data. All referenced RHS fields must fit in one acquisition batch."
+    },
+    "pointImpedanceField": {
+      "type": "object",
+      "required": [
+        "rhs",
+        "source"
+      ],
+      "properties": {
+        "rhs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "One-based RHS field receiving the outgoing point Green field."
+        },
+        "source": {
+          "$ref": "#/$defs/pointEqvSource"
+        }
+      },
+      "additionalProperties": false
+    },
+    "pointSourceImpedanceSources": {
+      "type": "object",
+      "required": [
+        "_type",
+        "points"
+      ],
+      "properties": {
+        "_type": {
+          "const": "PointSource"
+        },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/pointImpedanceField"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Outgoing point Green fields applied as nonhomogeneous data on impedance boundaries."
+    },
+    "maxwellPlaneWaveField": {
+      "type": "object",
+      "required": [
+        "rhs",
+        "direction",
+        "electric"
+      ],
+      "properties": {
+        "rhs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "One-based RHS field receiving this plane eigenmode."
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional stable source name for this RHS. When omitted, the runtime generates maxwell_plane_wave_<rhs>."
+        },
+        "rhs_normalization": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0,
+          "description": "Positive normalization attached to this logical boundary-source RHS."
+        },
+        "origin": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "description": "Optional zero-phase point in simulation coordinates."
+        },
+        "direction": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "number"
+          },
+          "description": "Nonzero three-component propagation direction in global simulation coordinates."
+        },
+        "electric": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "number"
+          },
+          "description": "Real part of a reference electric polarization used to select and phase-align the local eigenmode."
+        },
+        "electric_imag": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "number"
+          },
+          "description": "Optional imaginary part of the reference electric polarization."
+        },
+        "amplitude": {
+          "type": "number",
+          "default": 1.0
+        },
+        "phase": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Additional complex field phase in degrees."
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "plane",
+            "cylindrical_bessel"
+          ],
+          "default": "plane",
+          "description": "plane supplies local impedance driving data. cylindrical_bessel supplies the exact vacuum mode E_Z=J_|n|(omega R/c), with simulation toroidal_mode; direction, electric, and origin do not change that verification profile."
+        }
+      },
+      "additionalProperties": false
+    },
+    "maxwellPlaneWaveImpedanceSources": {
+      "type": "object",
+      "required": [
+        "_type",
+        "waves"
+      ],
+      "properties": {
+        "_type": {
+          "const": "MaxwellPlaneWave"
+        },
+        "waves": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/maxwellPlaneWaveField"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Exact plane eigenmodes of the local homogeneous Maxwell tensors applied through impedance boundaries."
+    },
+    "gaussianEqvSourceSurface": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "boundary"
+          ],
+          "properties": {
+            "kind": {
+              "const": "pml_interface"
+            },
+            "boundary": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Name of the original geometric boundary from which the PML was extruded. The source sheet is assembled on the physical side of this interface."
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "point",
+            "normal"
+          ],
+          "properties": {
+            "kind": {
+              "const": "internal_plane"
+            },
+            "point": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+              "description": "A point on a plane that must coincide with root-element sides."
+            },
+            "normal": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector",
+              "description": "Plane normal pointing toward the positive emission half-space."
+            },
+            "emission_side": {
+              "enum": [
+                "positive",
+                "negative"
+              ],
+              "default": "positive",
+              "description": "Half-space in which the prescribed incident field is retained and whose element sides support the load."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "positiveLengthVector": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0.0
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 3,
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              }
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "pointEqvSourceSurface": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "half_width"
+          ],
+          "properties": {
+            "kind": {
+              "const": "adaptive_box"
+            },
+            "half_width": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/positiveLength"
+                },
+                {
+                  "$ref": "#/$defs/positiveLengthVector"
+                }
+              ],
+              "description": "Scalar or per-axis half-width of an axis-aligned closed Huygens box. Its faces must coincide with adaptive leaf-element sides; the exterior leaves carry the load."
+            },
+            "enrichment_order": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Optional polynomial order applied to every adaptive leaf element whose closed bounding box intersects the Huygens box."
+            },
+            "loading": {
+              "enum": [
+                "huygens",
+                "monopole",
+                "dipole"
+              ],
+              "default": "huygens",
+              "description": "Surface loading: paired pressure and normal-velocity Cauchy data for interior cancellation, or one analytic monopole or dipole sheet."
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "inner_radius",
+            "outer_radius"
+          ],
+          "properties": {
+            "kind": {
+              "const": "volume_shell"
+            },
+            "inner_radius": {
+              "$ref": "#/$defs/positiveLength",
+              "description": "Radius inside which the analytic point field is removed."
+            },
+            "outer_radius": {
+              "$ref": "#/$defs/positiveLength",
+              "description": "Radius outside which the analytic point field is fully retained. It must exceed inner_radius."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "gaussianEquivalentIncidentField": {
+      "type": "object",
+      "required": [
+        "kind",
+        "beams"
+      ],
+      "properties": {
+        "kind": {
+          "const": "gaussian_beam"
+        },
+        "beams": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/gaussianImpedanceBeam"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "pointEqvSource": {
+      "type": "object",
+      "required": [
+        "origin"
+      ],
+      "properties": {
+        "origin": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "description": "Center of the outgoing acoustic Green field."
+        },
+        "amplitude": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Green-field amplitude."
+        },
+        "phase": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Complex source phase in degrees. Positive values multiply the incident Green field by exp(+i phase)."
+        },
+        "n0": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0,
+          "description": "Reference slowness of the homogeneous medium surrounding the source."
+        }
+      },
+      "additionalProperties": false
+    },
+    "pointEquivalentIncidentField": {
+      "type": "object",
+      "required": [
+        "kind",
+        "source"
+      ],
+      "properties": {
+        "kind": {
+          "const": "point_source"
+        },
+        "rhs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "One-based RHS field receiving the point Green field."
+        },
+        "source": {
+          "$ref": "#/$defs/pointEqvSource"
+        }
+      },
+      "additionalProperties": false
+    },
+    "scholteEqvSourceSurface": {
+      "type": "object",
+      "required": [
+        "kind",
+        "point",
+        "normal"
+      ],
+      "properties": {
+        "kind": {
+          "const": "internal_plane"
+        },
+        "point": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "description": "A point on the internal source plane, which must coincide with root-element sides."
+        },
+        "normal": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector",
+          "description": "Plane normal pointing into the emitted half-space."
+        },
+        "emission_side": {
+          "enum": [
+            "positive",
+            "negative"
+          ],
+          "default": "positive"
+        },
+        "tangential_window": {
+          "type": "object",
+          "required": [
+            "minimum",
+            "maximum",
+            "taper_width"
+          ],
+          "properties": {
+            "minimum": {
+              "$ref": "#/$defs/signedLength",
+              "description": "Window start measured along the Scholte tangent from the incident-field origin."
+            },
+            "maximum": {
+              "$ref": "#/$defs/signedLength",
+              "description": "Window end measured along the Scholte tangent from the incident-field origin."
+            },
+            "taper_width": {
+              "$ref": "#/$defs/positiveLength",
+              "description": "C2 quintic taper width applied inward from both tangential window endpoints."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "scholteEquivalentMedium": {
+      "type": "object",
+      "required": [
+        "speed",
+        "density"
+      ],
+      "properties": {
+        "speed": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Wave speed in active solver units."
+        },
+        "density": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Density in active solver units."
+        }
+      },
+      "additionalProperties": false
+    },
+    "scholteEquivalentSolid": {
+      "type": "object",
+      "required": [
+        "vp",
+        "vs",
+        "density"
+      ],
+      "properties": {
+        "vp": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Compressional speed in active solver units."
+        },
+        "vs": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Shear speed in active solver units."
+        },
+        "density": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Density in active solver units."
+        }
+      },
+      "additionalProperties": false
+    },
+    "scholteEquivalentIncidentField": {
+      "type": "object",
+      "required": [
+        "kind",
+        "origin",
+        "tangent",
+        "normal",
+        "fluid",
+        "solid"
+      ],
+      "properties": {
+        "kind": {
+          "const": "scholte_wave"
+        },
+        "rhs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        },
+        "origin": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue",
+          "description": "Point where the source plane crosses the fluid-solid interface."
+        },
+        "tangent": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector",
+          "description": "Scholte propagation direction."
+        },
+        "normal": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector",
+          "description": "Interface normal pointing from fluid into solid."
+        },
+        "amplitude": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Interface pressure amplitude."
+        },
+        "phase": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Complex field phase in degrees."
+        },
+        "fluid": {
+          "$ref": "#/$defs/scholteEquivalentMedium"
+        },
+        "solid": {
+          "$ref": "#/$defs/scholteEquivalentSolid"
+        }
+      },
+      "additionalProperties": false
+    },
+    "equivalentSources": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "surface",
+            "incident_field"
+          ],
+          "properties": {
+            "surface": {
+              "$ref": "#/$defs/gaussianEqvSourceSurface"
+            },
+            "incident_field": {
+              "$ref": "#/$defs/gaussianEquivalentIncidentField"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "surface",
+            "incident_field"
+          ],
+          "properties": {
+            "surface": {
+              "$ref": "#/$defs/pointEqvSourceSurface"
+            },
+            "incident_field": {
+              "$ref": "#/$defs/pointEquivalentIncidentField"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "surface",
+            "incident_field"
+          ],
+          "properties": {
+            "surface": {
+              "$ref": "#/$defs/scholteEqvSourceSurface"
+            },
+            "incident_field": {
+              "$ref": "#/$defs/scholteEquivalentIncidentField"
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "description": "Experimental analytic incident-field injection through an additive DPG source sheet or smooth volume shell. Scholte sheets prescribe the exact acoustic and elastic Cauchy states on both material portions of an internal plane. The trial and trace operators remain unchanged and therefore transparent to solved waves.",
+      "x-fs-visibility": "experimental"
+    },
+    "mtEarthLayer": {
+      "type": "object",
+      "properties": {
+        "conductivity_s_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "resistivity_ohm_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "thickness_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "relative_permittivity": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "relative_permeability": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "chargeability": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0
+        },
+        "time_constant_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "exponent": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 1
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "conductivity_s_m"
+          ]
+        },
+        {
+          "required": [
+            "resistivity_ohm_m"
+          ]
+        }
+      ],
+      "additionalProperties": false,
+      "description": "Isotropic earth layer in SI units. Finite layers require thickness_m; the last layer is an infinite half-space and must omit thickness_m. Runtime validates layer order."
+    },
+    "mtLayeredImpedanceSources": {
+      "type": "object",
+      "required": [
+        "_type",
+        "background",
+        "waves"
+      ],
+      "properties": {
+        "_type": {
+          "const": "MTLayered"
+        },
+        "background": {
+          "type": "object",
+          "required": [
+            "layers"
+          ],
+          "properties": {
+            "surface_m": {
+              "type": "number",
+              "default": 0
+            },
+            "layers": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/mtEarthLayer"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "waves": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "rhs",
+              "electric"
+            ],
+            "properties": {
+              "rhs": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "electric": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": {
+                  "type": "number"
+                },
+                "description": "Nonzero horizontal polarization in solver component coordinates; normalized internally."
+              },
+              "amplitude": {
+                "type": "number",
+                "default": 1,
+                "description": "Electric field amplitude at the background earth surface in V/m."
+              },
+              "phase": {
+                "type": "number",
+                "default": 0,
+                "description": "Phase in degrees."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Cartesian layered-earth total-field impedance driving data, including a vacuum atmosphere. Depth is solver axis 2 in 2D or axis 3 in 3D. Requires zero strike wavenumber. RHS normalization is managed automatically."
+    },
+    "forceFootprint": {
+      "type": "object",
+      "required": [
+        "surface"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Named mesh boundary surface defining the full uniform force footprint. Must consist of exterior, non-PML, free/Neumann elastic faces."
+        },
+        "quadrature_order": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "default": 4
+        }
+      },
+      "additionalProperties": false,
+      "description": "Optional mesh-fitted uniform total-force support for an Inline vector source. Cartesian elastic/elastic2 DPG forward frequency solves only; coordinates remain a reference location. Amplitude is total force, not traction density."
+    },
+    "quadratureSourceGeometry": {
+      "type": "object",
+      "required": [
+        "_type",
+        "kind",
+        "sources"
+      ],
+      "properties": {
+        "_type": {
+          "const": "Quadrature"
+        },
+        "kind": {
+          "enum": [
+            "electric_current",
+            "magnetic_current"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "geometry",
+              "amplitude"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "geometry": {
+                "$ref": "../../fragments/fs-acquisition-quadrature.schema.json",
+                "allOf": [
+                  {
+                    "properties": {
+                      "_type": {
+                        "const": "Polyline"
+                      }
+                    }
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "electric_current",
+                  "magnetic_current"
+                ]
+              },
+              "amplitude": {
+                "type": "object",
+                "required": [
+                  "value",
+                  "units"
+                ],
+                "properties": {
+                  "value": {
+                    "type": "number"
+                  },
+                  "units": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Signed uniform line current: A for electric current, V for impressed magnetic current. Segment orientation supplies the tangent; this is not a point-current moment."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Retained oriented current lines in Cartesian 3D Maxwell. Each logical wire or loop is integrated cell by cell against the test space on affine cells. Positive-length face coincidence is rejected. Quadrature order is a minimum and is raised for the local polynomial order."
+    },
+    "poroelasticPlaneWaveMedium": {
+      "type": "object",
+      "required": [
+        "drained_bulk",
+        "drained_shear",
+        "grain_bulk",
+        "fluid_bulk",
+        "solid_density",
+        "fluid_density",
+        "permeability",
+        "tortuosity",
+        "viscosity",
+        "porosity"
+      ],
+      "properties": {
+        "drained_bulk": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Modulus in Pa."
+        },
+        "drained_shear": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Modulus in Pa."
+        },
+        "grain_bulk": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Modulus in Pa."
+        },
+        "fluid_bulk": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Modulus in Pa."
+        },
+        "solid_density": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Density in kg/m^3."
+        },
+        "fluid_density": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Density in kg/m^3."
+        },
+        "permeability": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Permeability in m^2."
+        },
+        "tortuosity": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "viscosity": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Dynamic fluid viscosity in Pa s."
+        },
+        "porosity": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "exclusiveMaximum": 1.0
+        }
+      },
+      "additionalProperties": false,
+      "description": "Homogeneous isotropic low-frequency Biot medium in SI units. Drained bulk modulus must be smaller than grain bulk modulus; no additional frame attenuation."
+    },
+    "poroelasticPlaneWaveField": {
+      "type": "object",
+      "required": [
+        "rhs",
+        "direction"
+      ],
+      "properties": {
+        "rhs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rhs_normalization": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "default": 1.0
+        },
+        "mode": {
+          "enum": [
+            "fast_p",
+            "slow_p"
+          ],
+          "default": "fast_p"
+        },
+        "direction": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "number"
+          },
+          "description": "Nonzero direction with one entry per Cartesian simulation dimension."
+        },
+        "origin": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+        },
+        "amplitude": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Pressure amplitude at the origin in Pa."
+        },
+        "phase": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Phase in degrees."
+        }
+      },
+      "additionalProperties": false
+    },
+    "poroelasticPlaneWaveImpedanceSources": {
+      "type": "object",
+      "required": [
+        "_type",
+        "frequency_hz",
+        "medium",
+        "waves"
+      ],
+      "properties": {
+        "_type": {
+          "const": "PoroelasticPlaneWave"
+        },
+        "frequency_hz": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Fixed positive real frequency in Hz; must equal the forward job frequency."
+        },
+        "medium": {
+          "$ref": "#/$defs/poroelasticPlaneWaveMedium"
+        },
+        "waves": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/poroelasticPlaneWaveField"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Cached analytic fast/slow Biot P waves applied through Cartesian poroelastic impedance boundaries. Origins use the standard acquisition coordinate convention. Only ordinary forward propagation at the declared real frequency is supported."
+    }
+  },
+  "type": "object",
+  "anyOf": [
+    {
+      "required": [
+        "source_geometry"
+      ]
+    },
+    {
+      "required": [
+        "boundary_loadings"
+      ]
+    },
+    {
+      "required": [
+        "impedance_sources"
+      ]
+    }
+  ],
+  "dependentRequired": {
+    "source_encoding": [
+      "source_geometry"
+    ],
+    "source_signature": [
+      "source_geometry"
+    ]
+  },
+  "properties": {
+    "schema": {
+      "const": "fs-acquisition-2"
+    },
+    "max_batch": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Advanced override for the runtime's tuned 64-RHS batch size. Input generators must omit this property unless a user explicitly requests exceptional hardware or memory tuning."
+    },
+    "write_vtk": {
+      "type": "boolean",
+      "description": "Controls writing acquisition source/receiver VTK schematics during task 1. When omitted, the task-1 runtime writes VTK only if the schematic has fewer than 1,000,000 source and receiver sample points."
+    },
+    "source_geometry": {
+      "$ref": "#/$defs/sourceGeometry"
+    },
+    "source_encoding": {
+      "$ref": "#/$defs/sourceEncoding"
+    },
+    "source_signature": {
+      "$ref": "#/$defs/physicalSourceSignature"
+    },
+    "boundary_loadings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "if": {
+          "required": [
+            "_type"
+          ],
+          "properties": {
+            "_type": {
+              "const": "SurfacePressure"
+            }
+          }
+        },
+        "then": {
+          "$ref": "#/$defs/surfacePressureLoading"
+        },
+        "else": {
+          "$ref": "#/$defs/surfacePressureCovarianceFactor"
+        }
+      },
+      "description": "Distributed nonhomogeneous boundary fields. Deterministic pressure fields and low-rank pressure covariance factors become logical RHS sources."
+    },
+    "impedance_sources": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/gaussianBeamImpedanceSources"
+        },
+        {
+          "$ref": "#/$defs/pointSourceImpedanceSources"
+        },
+        {
+          "$ref": "#/$defs/maxwellPlaneWaveImpedanceSources"
+        },
+        {
+          "$ref": "#/$defs/mtLayeredImpedanceSources"
+        },
+        {
+          "$ref": "#/$defs/poroelasticPlaneWaveImpedanceSources"
+        }
+      ]
+    },
+    "equivalent_sources": {
+      "$ref": "#/$defs/equivalentSources",
+      "x-fs-visibility": "experimental"
+    },
+    "receiver_groups": {
+      "type": "array",
+      "items": {
+        "$ref": "../fs-acquisition-1/schema.json#/$defs/receiverGroup"
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,411 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/fragments/fs-common-defs.schema.json",
+  "title": "FrequenSolve common schema definitions",
+  "description": "Reusable JSON Schema fragments shared by FrequenSolve contracts.",
+  "$defs": {
+    "schemaName": {
+      "type": "string",
+      "pattern": "^fs-[a-z0-9-]+-[0-9]+$",
+      "description": "Versioned FrequenSolve schema identifier."
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A filesystem path. Relative path semantics are defined by each contract."
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^(sha256:)?[A-Fa-f0-9]{64}$",
+      "description": "A SHA-256 content hash, optionally prefixed with 'sha256:'."
+    },
+    "units": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      ],
+      "description": "A scalar unit string or component-wise unit strings."
+    },
+    "guidedNormalAdapt": {
+      "type": "object",
+      "description": "Wall-normal guided-wave boundary-layer controls. Values are dimensionless multiples of the selected evanescent decay length.",
+      "properties": {
+        "grading": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Power-law coarsening exponent from the wall-normal target back to ordinary EPW sizing."
+        },
+        "thickness": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Boundary-layer thickness as a multiple of the selected evanescent decay length."
+        },
+        "h0": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Wall-adjacent target element size as a multiple of the selected evanescent decay length. Zero disables the normal profile."
+        }
+      },
+      "additionalProperties": false
+    },
+    "guidedTangentialAdapt": {
+      "type": "object",
+      "description": "Wall-tangential guided-wave sizing controls.",
+      "properties": {
+        "grading": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Power-law coarsening exponent from the wall target back to ordinary EPW sizing."
+        },
+        "thickness": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Reach of the propagated tangential profile as a multiple of the active guided-wave decay band. Zero keeps only wall-local tangential sizing."
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 1,
+          "description": "Multiplier applied to the target elements per wavelength at the wall."
+        }
+      },
+      "additionalProperties": false
+    },
+    "scholteNormalAdapt": {
+      "type": "object",
+      "description": "Wall-normal Scholte-wave boundary-layer controls. Sizes are dimensionless multiples of the selected evanescent decay length.",
+      "properties": {
+        "grading": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Power-law coarsening exponent from the wall-normal target back to ordinary EPW sizing."
+        },
+        "thickness": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Boundary-layer thickness as a multiple of the selected evanescent decay length."
+        },
+        "h0": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Wall-adjacent target element size as a multiple of the selected evanescent decay length. Zero disables the normal profile."
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 1,
+          "default": 4,
+          "description": "Maximum wall-normal refinement factor relative to Scholte-wave EPW sizing. The profile still coarsens to the local body-wave EPW size."
+        }
+      },
+      "additionalProperties": false
+    },
+    "scholteWaveAdapt": {
+      "type": "object",
+      "description": "Normal and tangential mesh controls for Scholte waves.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether Scholte-wave mesh adaptivity is enabled."
+        },
+        "lower_bound": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "object",
+              "required": [
+                "value"
+              ],
+              "properties": {
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "units": {
+                  "$ref": "#/$defs/units"
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "description": "Optional floor on the Scholte velocity used for mesh sizing. Numeric values use solver velocity units; value/units objects are nondimensionalized by the active runtime."
+        },
+        "normal": {
+          "$ref": "#/$defs/scholteNormalAdapt"
+        },
+        "tangential": {
+          "$ref": "#/$defs/guidedTangentialAdapt"
+        }
+      },
+      "additionalProperties": false
+    },
+    "guidedWaveAdapt": {
+      "type": "object",
+      "description": "Normal and tangential mesh controls for one guided-wave family.",
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/guidedNormalAdapt"
+        },
+        "tangential": {
+          "$ref": "#/$defs/guidedTangentialAdapt"
+        }
+      },
+      "additionalProperties": false
+    },
+    "gravitySurfaceTangentialAdapt": {
+      "type": "object",
+      "description": "Tangential sizing for finite-depth gravity waves throughout the water column.",
+      "properties": {
+        "thickness": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1,
+          "description": "Reach below the free surface as a multiple of local water depth. Zero disables gravity-wave sizing."
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 1,
+          "default": 1,
+          "description": "Multiplier applied to the target elements per gravity-wave wavelength."
+        }
+      },
+      "additionalProperties": false
+    },
+    "gravitySurfaceAdapt": {
+      "type": "object",
+      "description": "Finite-depth gravity-wave mesh sizing for the top acoustic formation.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether gravity-wave mesh sizing is enabled. The block is opt-in when omitted."
+        },
+        "tangential": {
+          "$ref": "#/$defs/gravitySurfaceTangentialAdapt"
+        }
+      },
+      "additionalProperties": false
+    },
+    "numericVector": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 1
+    },
+    "vec2": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "vec3": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "intVector": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 1
+    },
+    "quantity": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "$ref": "#/$defs/numericVector"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "$ref": "#/$defs/numericVector"
+                }
+              ]
+            },
+            "units": {
+              "$ref": "#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "A numeric value, vector, or value/units object."
+    },
+    "complexNumber": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "items": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "real"
+          ],
+          "properties": {
+            "real": {
+              "type": "number"
+            },
+            "imag": {
+              "type": "number",
+              "default": 0.0
+            },
+            "units": {
+              "$ref": "#/$defs/units"
+            }
+          },
+          "additionalProperties": true
+        }
+      ],
+      "description": "A real scalar, [real, imag] pair, or object form."
+    },
+    "fileRef": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "schema": {
+          "const": "fs-file-ref-1"
+        },
+        "type": {
+          "const": "File"
+        },
+        "action": {
+          "enum": [
+            "expand",
+            "reference"
+          ],
+          "default": "expand"
+        },
+        "absolute_path": {
+          "$ref": "#/$defs/path"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/path"
+        },
+        "residency": {
+          "enum": [
+            "host",
+            "remote",
+            "managed"
+          ],
+          "default": "host"
+        },
+        "public_key": {
+          "type": "string"
+        },
+        "meta": {
+          "type": "object",
+          "properties": {
+            "hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "supplier": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "overrides": {
+          "type": "object"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "absolute_path"
+          ],
+          "not": {
+            "required": [
+              "relative_path"
+            ]
+          }
+        },
+        {
+          "required": [
+            "relative_path"
+          ],
+          "not": {
+            "required": [
+              "absolute_path"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": [
+        "severity",
+        "message"
+      ],
+      "properties": {
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "error",
+            "fatal"
+          ]
+        },
+        "category": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "suggested_action": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

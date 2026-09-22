@@ -1,0 +1,9 @@
+{
+  "schema": "fs-objective-report-1",
+  "state_fingerprint": "sha256:state",
+  "total": 0.875,
+  "terms": [
+    {"id": "kinematic", "raw_sum": 512.0, "effective_weight_mass": 1024.0, "normalized_value": 0.5, "weight": 1.0, "weighted_value": 0.5, "active_samples": 1024, "scale": [0.05]},
+    {"id": "waveform", "raw_sum": 1536.0, "effective_weight_mass": 1024.0, "normalized_value": 1.5, "weight": 0.25, "weighted_value": 0.375, "active_samples": 1024, "scale": [1250.0]}
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schema": "fs-implicit-geometry-1",
+  "surfaces": [
+    {
+      "_type": "ellipsoid",
+      "name": "reservoir_outline",
+      "center": [0.0, 0.0, 0.0],
+      "radii": [1200.0, 800.0, 300.0]
+    },
+    {
+      "_type": "cone",
+      "name": "forward_cone",
+      "apex": [0.0, 0.0, 0.0],
+      "axis": [0.0, 0.0, 1.0],
+      "half_angle": 0.5235987755982988
+    }
+  ]
+}

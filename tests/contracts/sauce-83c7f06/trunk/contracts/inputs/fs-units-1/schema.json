@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-units-1/schema.json",
+  "title": "FS Units v1",
+  "description": "Runtime unit scaling and unit-expression defaults. Output units are configured under Outputs/Units.",
+  "x-fs-contract": "fs-units-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "unitExpression": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A units_m expression such as km/s, W/m/K, J/m^3/K, K, degC, degF, delta_degF, or 1. Offset temperature units must stand alone."
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "length": { "$ref": "#/$defs/unitExpression" },
+        "time": { "$ref": "#/$defs/unitExpression" },
+        "temperature": { "$ref": "#/$defs/unitExpression" },
+        "mass": { "$ref": "#/$defs/unitExpression" },
+        "frequency": { "$ref": "#/$defs/unitExpression" },
+        "velocity": { "$ref": "#/$defs/unitExpression" },
+        "density": { "$ref": "#/$defs/unitExpression" },
+        "pressure": { "$ref": "#/$defs/unitExpression" },
+        "stress": { "$ref": "#/$defs/unitExpression" },
+        "strain": { "$ref": "#/$defs/unitExpression" },
+        "force": { "$ref": "#/$defs/unitExpression" },
+        "moment": { "$ref": "#/$defs/unitExpression" },
+        "attenuation": { "$ref": "#/$defs/unitExpression" },
+        "wavenumber": { "$ref": "#/$defs/unitExpression" },
+        "conductivity": { "$ref": "#/$defs/unitExpression" },
+        "permittivity": { "$ref": "#/$defs/unitExpression" },
+        "permeability": { "$ref": "#/$defs/unitExpression" },
+        "efield": { "$ref": "#/$defs/unitExpression" },
+        "bfield": { "$ref": "#/$defs/unitExpression" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-units-1"
+    },
+    "disable_scaling": {
+      "type": "boolean",
+      "default": false
+    },
+    "scaling": {
+      "type": "string",
+      "enum": [
+        "legacy",
+        "default",
+        "manual",
+        "robust"
+      ],
+      "default": "legacy",
+      "description": "Runtime scaling policy. `robust` is honored by simulation initialization after material probing; standalone unit initialization uses the legacy defaults until explicit scales are supplied."
+    },
+    "em_reference_conductivity": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "description": "EM conductivity reference in S/m. Opts into consistent conductive scaling with epsilon_ref=sigma_ref/(2*pi*f_ref), mu_ref=mu0, and E_ref=1 V/m. f_ref is the physical runtime scaling frequency including mesh adaptation settings. Derives length and mass scales; incompatible with length_scale, mass_scale, or disable_scaling=true. Omit to retain vacuum EM scaling."
+    },
+    "f0": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "default": 10.0
+    },
+    "length_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "time_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "mass_scale": {
+      "type": "number",
+      "exclusiveMinimum": 0.0
+    },
+    "Units": {
+      "type": "object",
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/defaults",
+          "description": "Input/default unit conventions. These do not override output units; use Outputs/Units for output formatting."
+        }
+      },
+      "additionalProperties": true
+    },
+    "units": {
+      "type": "object",
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/defaults",
+          "description": "Input/default unit conventions. These do not override output units; use Outputs/Units for output formatting."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["em_reference_conductivity"] },
+      "then": {
+        "properties": { "disable_scaling": { "const": false } },
+        "not": { "anyOf": [{ "required": ["length_scale"] }, { "required": ["mass_scale"] }] }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

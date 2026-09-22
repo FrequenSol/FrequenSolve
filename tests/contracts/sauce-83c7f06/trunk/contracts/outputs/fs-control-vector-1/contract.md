@@ -1,0 +1,27 @@
+# Joint control directions and covectors
+
+The `direction` input for JVP/normal and `covector` output for
+linearize/VJP/normal use the same HDF5 vector contract. Required string datasets:
+`/schema = fs-control-vector-1`, `/packing = real_interleaved`,
+`/state_fingerprint`, `/control_registry_fingerprint`.
+
+Each active block has `/controls/<qualified block ID>` in its declared real
+optimizer coordinates. Distributed material blocks preserve global control IDs
+and basis identity. Complex blocks interleave real/imaginary parts; the real
+Euclidean dot product equals the real-Hermitian complex pairing, with no factor
+of two. Source pullbacks reduce once at their provider; material pullbacks use
+native control ownership. Do not allreduce the concatenated joint vector again.
+
+The ordered `controls/active` list is mandatory and authoritative. Empty spaces
+are valid for linearize/VJP; JVP and normal require a nonempty space. The saved
+baseline and registry identities must match exactly. Output filenames receive
+the normal frequency-task suffix.
+
+`normal` returns the fused joint Gauss-Newton action `J* J direction`, including
+cross terms between active blocks. It is equivalent to JVP followed by VJP under
+the saved derivative policy. It excludes residual second derivatives,
+regularization and nuisance-variable Schur elimination.
+
+Provider-specific source/model artifacts and the old `joint_direction`,
+`joint_covector`, and `model_normal` spellings are rejected by these operations.
+The separate WRI workflow retains its explicit material-only fields.

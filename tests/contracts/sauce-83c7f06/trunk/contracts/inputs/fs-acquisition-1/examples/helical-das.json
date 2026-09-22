@@ -1,0 +1,66 @@
+{
+  "schema": "fs-acquisition-1",
+  "source_groups": [
+    {
+      "name": "source",
+      "source": {
+        "_type": "PointSource",
+        "mechanism": {
+          "type": "isotropic"
+        },
+        "coordinates": {
+          "value": [
+            0.0,
+            0.0
+          ],
+          "units": "m"
+        }
+      }
+    }
+  ],
+  "receiver_groups": [
+    {
+      "name": "helical_das",
+      "coordinates": {
+        "_type": "CoordsArray",
+        "value": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            1000.0,
+            0.0
+          ]
+        ],
+        "units": "m"
+      },
+      "device": {
+        "_type": "ReceiverFiber",
+        "radius": {
+          "value": 0.1,
+          "units": "m"
+        },
+        "angle": 60.0,
+        "gauge_length": {
+          "value": 10.0,
+          "units": "m"
+        },
+        "channel_spacing": {
+          "value": 5.0,
+          "units": "m"
+        },
+        "sample_spacing": {
+          "value": 0.1,
+          "units": "m"
+        },
+        "components": [
+          {
+            "name": "axial_strain",
+            "field": "strain"
+          }
+        ]
+      }
+    }
+  ]
+}

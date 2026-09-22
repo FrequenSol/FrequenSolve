@@ -1,0 +1,18 @@
+{
+  "schema": "fs-job-1",
+  "name": "transient_darcy",
+  "project_path": "project",
+  "workflow": "transient",
+  "simulation": "darcy-sim.json",
+  "result_path": "results/transient_darcy",
+  "Time": {
+    "schema": "fs-time-domain-1",
+    "method": "backward_euler",
+    "start": 0.0,
+    "end": 86400.0,
+    "time_step": 3600.0,
+    "source": {"kind": "step"},
+    "output": {"stride": 1},
+    "checkpoint": {"stride": 6, "path": "checkpoints"}
+  }
+}

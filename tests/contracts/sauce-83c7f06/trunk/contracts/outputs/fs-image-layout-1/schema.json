@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/outputs/fs-image-layout-1/schema.json",
+  "title": "FS image product layout v1",
+  "x-fs-contract": "fs-image-layout-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "type": "object",
+  "required": [
+    "schema",
+    "packing",
+    "width",
+    "channel_count",
+    "axis_count",
+    "channels"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-image-layout-1"
+    },
+    "packing": {
+      "const": "channel_then_axes"
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "channel_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "axis_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 32
+    },
+    "channels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "unit",
+          "role",
+          "value_role"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "unit": {
+            "type": "string",
+            "description": "Empty inherits the image property coordinate unit; 1 means dimensionless."
+          },
+          "role": {
+            "enum": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "description": "Value, forward illumination, adjoint illumination, auxiliary respectively."
+          },
+          "value_role": {
+            "enum": [
+              1,
+              2,
+              3
+            ],
+            "description": "Primal, dual, diagonal respectively; controls coordinate conversion."
+          }
+        },
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "axes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "unit",
+          "coordinates"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1
+          },
+          "coordinates": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "number"
+            },
+            "description": "Finite, strictly increasing physical coordinates; never solver-scaled."
+          }
+        },
+        "additionalProperties": false
+      },
+      "maxItems": 32
+    },
+    "frame": {
+      "type": "object",
+      "required": [
+        "components",
+        "units",
+        "dimensions",
+        "scales"
+      ],
+      "properties": {
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "units": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "dimensions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "scales": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

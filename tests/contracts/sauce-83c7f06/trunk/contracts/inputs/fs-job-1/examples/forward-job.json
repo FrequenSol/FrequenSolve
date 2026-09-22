@@ -1,0 +1,12 @@
+{
+  "schema": "fs-job-1",
+  "name": "simple_acoustic",
+  "project_path": "project",
+  "workflow": "forward",
+  "simulation": "sim.json",
+  "result_path": "results/simple_acoustic",
+  "f_list": [
+    5.0,
+    10.0
+  ]
+}

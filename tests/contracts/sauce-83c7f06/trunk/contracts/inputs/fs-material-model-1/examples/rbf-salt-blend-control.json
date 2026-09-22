@@ -1,0 +1,43 @@
+{
+  "schema": "fs-material-model-1",
+  "units": "m",
+  "surfaces": [
+    {
+      "_type": "rbf_level_set",
+      "name": "salt_boundary",
+      "support_radius": 1500.0,
+      "bias": 700.0,
+      "centers": [
+        [-2400.0, 1800.0],
+        [-1200.0, 2450.0],
+        [0.0, 2700.0],
+        [1200.0, 2350.0],
+        [2400.0, 1750.0]
+      ],
+      "coefficients": [-900.0, -1250.0, -1400.0, -1200.0, -850.0],
+      "control": {
+        "id": "salt_boundary_rbf",
+        "maximum_displacement": 150.0
+      }
+    }
+  ],
+  "subdomains": [
+    {
+      "name": "earth",
+      "mesh_block_id": 1,
+      "physics": "acoustic",
+      "properties": {
+        "vp": {
+          "blend": {
+            "surface": "salt_boundary",
+            "width": 100.0,
+            "inside": { "value": 4500.0 },
+            "outside": { "value": 2500.0 }
+          },
+          "units": "m/s"
+        },
+        "rho": { "value": 2200.0, "units": "kg/m^3" }
+      }
+    }
+  ]
+}

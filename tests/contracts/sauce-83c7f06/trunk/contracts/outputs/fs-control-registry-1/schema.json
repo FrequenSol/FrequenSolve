@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fs-control-registry-1",
+  "title": "Resolved joint control registry",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-control-registry-1"
+    },
+    "fingerprint": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "packing": {
+      "const": "real_interleaved"
+    },
+    "pairing": {
+      "const": "real_euclidean"
+    },
+    "coordinates": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      }
+    },
+    "values": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      }
+    },
+    "active_blocks": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "uniqueItems": true
+    },
+    "active_offsets": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "binding": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "layout": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "units": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actions": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "transform": {
+            "type": "integer"
+          },
+          "scaling": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "basis_identity": {
+            "type": "string"
+          },
+          "distributed": {
+            "type": "boolean"
+          },
+          "global_dofs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "global_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "uniqueItems": true
+          },
+          "owned_global_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "binding",
+          "layout",
+          "units",
+          "actions",
+          "transform",
+          "scaling",
+          "basis_identity",
+          "distributed"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "descriptor_rank": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "n_ranks": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "rank_descriptors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "fingerprint"
+        ],
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "fingerprint",
+    "packing",
+    "pairing",
+    "coordinates",
+    "values",
+    "active_blocks",
+    "active_offsets",
+    "blocks",
+    "descriptor_rank",
+    "n_ranks",
+    "rank_descriptors"
+  ],
+  "additionalProperties": false
+}

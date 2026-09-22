@@ -1,0 +1,60 @@
+{
+  "active_blocks": [
+    1
+  ],
+  "active_offsets": [
+    1
+  ],
+  "blocks": [
+    {
+      "actions": 3,
+      "basis_identity": "",
+      "binding": [
+        2,
+        11,
+        1
+      ],
+      "components": [
+        "x",
+        "z"
+      ],
+      "distributed": false,
+      "id": 1,
+      "layout": [
+        1,
+        2,
+        2,
+        1
+      ],
+      "name": "source.1.position",
+      "scaling": [
+        0.0,
+        1.0,
+        -1.7976931348623157e+308,
+        1.7976931348623157e+308
+      ],
+      "transform": 1,
+      "units": "m"
+    }
+  ],
+  "coordinates": [
+    513.7,
+    34.1
+  ],
+  "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "packing": "real_interleaved",
+  "pairing": "real_euclidean",
+  "schema": "fs-control-registry-1",
+  "values": [
+    513.7,
+    34.1
+  ],
+  "descriptor_rank": 0,
+  "n_ranks": 1,
+  "rank_descriptors": [
+    {
+      "file": "controls.json.rank_0.json",
+      "fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}

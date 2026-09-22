@@ -1,0 +1,39 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "scalar",
+    "domain": 99,
+    "sources": [
+      {
+        "name": "equivalent_beam",
+        "coordinates": [0.0, 0.5]
+      }
+    ]
+  },
+  "equivalent_sources": {
+    "surface": {
+      "kind": "pml_interface",
+      "boundary": "left"
+    },
+    "incident_field": {
+      "kind": "gaussian_beam",
+      "beams": [
+        {
+          "rhs": 1,
+          "source": {
+            "origin": [0.0, 0.5],
+            "theta": 0.0,
+            "width": {
+              "value": 0.075,
+              "units": "km"
+            },
+            "amplitude": 1.0,
+            "n0": 1.0
+          }
+        }
+      ]
+    }
+  },
+  "receiver_groups": []
+}

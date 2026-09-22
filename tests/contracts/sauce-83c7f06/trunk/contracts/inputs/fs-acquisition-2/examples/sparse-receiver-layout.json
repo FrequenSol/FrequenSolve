@@ -1,0 +1,90 @@
+{
+  "schema": "fs-acquisition-2",
+  "max_batch": 1,
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "scalar",
+    "defaults": {
+      "mechanism": {
+        "type": "isotropic"
+      }
+    },
+    "sources": [
+      {
+        "name": "shot_001",
+        "coordinates": {
+          "value": [
+            0.0,
+            0.0
+          ],
+          "units": "km"
+        }
+      },
+      {
+        "name": "shot_002",
+        "coordinates": {
+          "value": [
+            1.0,
+            0.0
+          ],
+          "units": "km"
+        }
+      }
+    ]
+  },
+  "receiver_groups": [
+    {
+      "name": "surface_sparse",
+      "coordinates": {
+        "_type": "CoordsArray",
+        "system": "global",
+        "value": [
+          [
+            0.25,
+            0.0
+          ],
+          [
+            0.75,
+            0.0
+          ]
+        ],
+        "units": "km"
+      },
+      "sampling": {
+        "_type": "Sparse",
+        "traces": [
+          {
+            "trace_id": 1,
+            "source_id": 1,
+            "receiver_id": 1,
+            "component": 1,
+            "weight": 1.0,
+            "source_name": "shot_001",
+            "receiver_name": "R001",
+            "component_name": "pressure"
+          },
+          {
+            "trace_id": 2,
+            "source_id": 2,
+            "receiver_id": 2,
+            "component": 1,
+            "weight": 1.0,
+            "source_name": "shot_002",
+            "receiver_name": "R002",
+            "component_name": "pressure"
+          }
+        ]
+      },
+      "device": {
+        "_type": "ReceiverArray",
+        "components": [
+          {
+            "name": "pressure",
+            "field": "pressure",
+            "units": "Pa"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "fs-material-model-1",
+  "surfaces": [
+    {
+      "name": "outer",
+      "_type": "box",
+      "center": [0, 0, 0],
+      "half_size": [10, 10, 10]
+    },
+    {
+      "name": "bore",
+      "_type": "cylinder",
+      "center": [0, 0, 0],
+      "axis": [0, 0, 1],
+      "radius": 1
+    },
+    {
+      "name": "rock_volume",
+      "_type": "difference",
+      "a": "outer",
+      "b": "bore"
+    }
+  ],
+  "regions": [
+    {
+      "name": "rock",
+      "mesh_block_id": 1,
+      "priority": 0,
+      "geometry": {
+        "_type": "implicit",
+        "surface": "rock_volume"
+      }
+    }
+  ]
+}

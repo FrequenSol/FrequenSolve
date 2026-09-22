@@ -1,0 +1,39 @@
+{
+  "schema": "fs-job-1",
+  "name": "inline_demo",
+  "workflow": "forward",
+  "result_path": "results/inline_demo",
+  "f_list": [
+    10.0
+  ],
+  "simulation": {
+    "schema": "fs-simulation-1",
+    "project_path": "project",
+    "physics": "coupled",
+    "dimension": 2,
+    "Discretization": {},
+    "Mesh": {
+      "adapt": {
+        "order": 2
+      },
+      "max_nodes": 100000
+    },
+    "BCs": [],
+    "Acquisition": {
+      "source_geometry": {
+        "_type": "Inline",
+        "kind": "scalar",
+        "sources": [
+          {
+            "name": "source_001",
+            "coordinates": [
+              0.5,
+              0.1
+            ]
+          }
+        ]
+      }
+    },
+    "Outputs": {}
+  }
+}

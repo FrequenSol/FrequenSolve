@@ -1,0 +1,55 @@
+{
+  "schema": "fs-job-1",
+  "workflow": "fwi_operator",
+  "simulation": "project/simulation.json",
+  "f_list": [
+    [
+      3.0,
+      0.0
+    ]
+  ],
+  "fwi_operator": {
+    "action": "solve",
+    "state": "extension_state_1.json",
+    "controls": {
+      "active": [
+        "model.acoustic_vp"
+      ]
+    },
+    "extension": {
+      "fields": [
+        {
+          "control": "acoustic_vp",
+          "lags": {
+            "count": 5,
+            "origin": -20.0,
+            "spacing": 10.0,
+            "units": "ms"
+          }
+        }
+      ],
+      "solver": {
+        "damping": 0.1,
+        "relative_tolerance": 1e-06,
+        "max_iterations": 100,
+        "require_convergence": true,
+        "solution": "extension_taps.h5",
+        "report": "inner_solve.json",
+        "lag_penalty": 1.0,
+        "lag_scale": {
+          "value": 20.0,
+          "units": "ms"
+        }
+      }
+    },
+    "covector": "physical_reduced_normal.h5",
+    "direction": "physical_direction.h5",
+    "reduced_normal": {
+      "relative_tolerance": 1e-07,
+      "max_iterations": 100
+    }
+  },
+  "name": "time_lag_reduced_normal",
+  "result_path": "results/time_lag_reduced_normal",
+  "Imaging": {}
+}

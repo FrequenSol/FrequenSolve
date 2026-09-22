@@ -1,0 +1,758 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-acquisition-1/schema.json",
+  "title": "FS Acquisition v1",
+  "description": "Source and receiver acquisition configuration.",
+  "x-fs-contract": "fs-acquisition-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "sourceGroup": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "object",
+          "required": [
+            "_type"
+          ],
+          "properties": {
+            "_type": {
+              "enum": [
+                "PointSource",
+                "CompoundSource",
+                "Microseismic",
+                "GaussianBeam"
+              ]
+            },
+            "kind": {
+              "enum": [
+                "scalar",
+                "vector",
+                "tensor",
+                "monopole",
+                "gradient",
+                "dipole"
+              ]
+            },
+            "coordinates": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+            },
+            "origin": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/coordinateValue"
+            },
+            "direction": {
+              "$ref": "../fs-coordinate-system-1/schema.json#/$defs/direction"
+            },
+            "amplitude": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity",
+              "description": "Optional source-strength multiplier. A number is dimensionless and scales explicit unit-bearing direction components when present, otherwise it scales the default physical strength for the source kind. For thermal physics, scalar/monopole sources default to 1 W in 3D or 1 W/m in 2D. An object with `value` is interpreted as an exact physical source strength. For nonthermal physics, if object `units` are omitted, vector sources default to `N`, while scalar, tensor, monopole, gradient, and dipole sources default to `N*m`."
+            },
+            "mechanism": {
+              "oneOf": [
+                {
+                  "$ref": "../../fragments/fs-seismic-mechanism.schema.json#/$defs/mechanism"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "isotropic",
+                        "force"
+                      ]
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              ]
+            },
+            "moment_magnitude": {
+              "type": "number",
+              "description": "GCMT moment magnitude Mw. For a normalized seismic mechanism, M0 = 10^(1.5 Mw + 9.1) N m. Mutually exclusive with amplitude."
+            }
+          },
+          "additionalProperties": true,
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "amplitude",
+                  "moment_magnitude"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "receiverComponent": {
+      "type": "object",
+      "required": [
+        "name",
+        "field"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+        },
+        "direction": {
+          "$ref": "../fs-coordinate-system-1/schema.json#/$defs/direction"
+        },
+        "weight": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/complexNumber"
+        },
+        "weights": false,
+        "time_derivative": {
+          "type": "integer",
+          "minimum": -2,
+          "maximum": 2,
+          "default": 0,
+          "description": "Additional power of i omega applied by the receiver plan; negative values integrate in time. Changes output units accordingly."
+        }
+      },
+      "additionalProperties": true
+    },
+    "receiverWeightTable": {
+      "type": "object",
+      "required": [
+        "_type",
+        "file",
+        "dataset"
+      ],
+      "properties": {
+        "_type": {
+          "const": "HDF5Dense"
+        },
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "enum": [
+            "HDF5",
+            "hdf5"
+          ]
+        },
+        "hash": {
+          "type": "string"
+        },
+        "names_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional encoding-name dataset in the same HDF5 file."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Dense complex EncodedReceiver weights stored as (encoding * component, receiver, complex=2) in HDF5."
+    },
+    "offsetBound": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+    },
+    "sparseTrace": {
+      "type": "object",
+      "required": [
+        "source_id",
+        "receiver_id",
+        "component"
+      ],
+      "properties": {
+        "trace_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "receiver_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "component": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Output component index for this trace."
+        },
+        "weight": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Trace weight. A value of 0 disables the trace."
+        },
+        "source_name": {
+          "type": "string"
+        },
+        "receiver_name": {
+          "type": "string"
+        },
+        "component_name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "offsetDomain": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "enum": [
+            "horizontal",
+            "euclidean"
+          ],
+          "default": "horizontal"
+        },
+        "absolute": {
+          "type": "boolean",
+          "default": true
+        },
+        "min": {
+          "$ref": "#/$defs/offsetBound"
+        },
+        "max": {
+          "$ref": "#/$defs/offsetBound"
+        },
+        "axis": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+        }
+      },
+      "additionalProperties": true
+    },
+    "receiverSampling": {
+      "type": "object",
+      "required": [
+        "_type"
+      ],
+      "properties": {
+        "_type": {
+          "enum": [
+            "DenseAllToAll",
+            "Dense",
+            "Sparse",
+            "SurveyPairs",
+            "OffsetDomain",
+            "HDF5TraceStore",
+            "SPSFiles"
+          ],
+          "default": "DenseAllToAll"
+        },
+        "survey": {
+          "type": "string"
+        },
+        "layout_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "source_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "receiver_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "relation_file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "sps_revision": {
+          "enum": ["auto", "1.0", "2.1"],
+          "default": "auto"
+        },
+        "traces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sparseTrace"
+          }
+        },
+        "offset_domain": {
+          "$ref": "#/$defs/offsetDomain"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "_type": {
+                "const": "Sparse"
+              }
+            },
+            "required": [
+              "_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "traces"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "_type": {
+                "const": "OffsetDomain"
+              }
+            },
+            "required": [
+              "_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "offset_domain"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "_type": {
+                "const": "HDF5TraceStore"
+              }
+            },
+            "required": [
+              "_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "layout_file"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "_type": {
+                "enum": [
+                  "SurveyPairs",
+                  "SPSFiles"
+                ]
+              }
+            },
+            "required": [
+              "_type"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "layout_file"
+                ]
+              },
+              {
+                "required": [
+                  "source_file",
+                  "receiver_file",
+                  "relation_file"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "receiverGroup": {
+      "type": "object",
+      "required": [
+        "name",
+        "device"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "integer",
+          "default": -1
+        },
+        "post_process": {
+          "type": "boolean",
+          "default": false,
+          "description": "Request a registered reconstruction kernel. Currently supported only when every active physics is acoustic or elastic DPG; otherwise initialization warns once and disables post-processing for the problem."
+        },
+        "sampling": {
+          "$ref": "#/$defs/receiverSampling"
+        },
+        "coordinates": {
+          "type": "object",
+          "properties": {
+            "_type": {
+              "enum": [
+                "CoordsFromFile",
+                "CoordsArray",
+                "CoordsGrid"
+              ]
+            },
+            "file": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Coordinate file path. Legacy HDF5 object locators remain accepted by the runtime."
+            },
+            "dataset": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Dataset path within an HDF5 coordinate file."
+            },
+            "format": {
+              "type": "string"
+            },
+            "hash": {
+              "type": "string",
+              "description": "Optional reproducibility metadata ignored by current runtime readers."
+            },
+            "system": {
+              "type": "string",
+              "default": "global"
+            },
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        "device": {
+          "type": "object",
+          "required": [
+            "_type"
+          ],
+          "properties": {
+            "_type": {
+              "enum": [
+                "ReceiverNode",
+                "ReceiverArray",
+                "EncodedReceiver",
+                "ReceiverFiber",
+                "ReceiverFiberOld",
+                "ReceiverIntegral"
+              ]
+            },
+            "components": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/receiverComponent"
+              }
+            },
+            "offsets": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector",
+                "minItems": 2,
+                "maxItems": 3
+              },
+              "description": "Physical ReceiverArray node offsets around every receiver-group coordinate."
+            },
+            "offset_units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            },
+            "encoding_count": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of receiver encodings represented by the HDF5 weight table."
+            },
+            "encoding_names": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "reduction": {
+              "enum": [
+                "none",
+                "sum",
+                "mean"
+              ],
+              "description": "ReceiverArray reduction across offset nodes or EncodedReceiver reduction across the fixed receiver geometry."
+            },
+            "weights": {
+              "$ref": "#/$defs/receiverWeightTable"
+            },
+            "angle": {
+              "description": "Actual helical-fiber winding angle from the cable/core axis. A numeric value is in degrees. Object values accept degrees or radians. The angle must be strictly between 0 and 90 degrees and is mutually exclusive with pitch.",
+              "oneOf": [
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "exclusiveMaximum": 90
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "value"
+                  ],
+                  "properties": {
+                    "value": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "exclusiveMaximum": 90
+                    },
+                    "units": {
+                      "enum": [
+                        "deg",
+                        "degree",
+                        "degrees"
+                      ],
+                      "default": "deg"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "value",
+                    "units"
+                  ],
+                  "properties": {
+                    "value": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "exclusiveMaximum": 1.5707963267948966
+                    },
+                    "units": {
+                      "enum": [
+                        "rad",
+                        "radian",
+                        "radians"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "gauge_length": {
+              "description": "Preferred DAS gauge length key. Accepted as a quantity object or legacy solver-scaled scalar.",
+              "oneOf": [
+                {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "channel_spacing": {
+              "description": "Distance between consecutive DAS channel gauge starts. Defaults to gauge_length.",
+              "oneOf": [
+                {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "sample_spacing": {
+              "description": "Preferred reusable DAS sample spacing along the fiber. When omitted, gauge_length / points_per_gauge is used.",
+              "oneOf": [
+                {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity"
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "points_per_gauge": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "DAS sample count per gauge length when sample_spacing is not provided."
+            },
+            "geometry": {
+              "$ref": "../../fragments/fs-acquisition-quadrature.schema.json"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "_type": {
+                    "const": "EncodedReceiver"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "components",
+                  "encoding_count",
+                  "weights"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "_type": {
+                    "const": "ReceiverArray"
+                  }
+                }
+              },
+              "then": {
+                "oneOf": [
+                  {
+                    "required": [
+                      "components",
+                      "offsets"
+                    ],
+                    "properties": {
+                      "weights": false
+                    }
+                  },
+                  {
+                    "required": [
+                      "components",
+                      "weights"
+                    ],
+                    "properties": {
+                      "offsets": false
+                    },
+                    "description": "Deprecated weighted ReceiverArray compatibility payload."
+                  },
+                  {
+                    "required": [
+                      "components"
+                    ],
+                    "properties": {
+                      "offsets": false,
+                      "weights": false
+                    },
+                    "description": "Deprecated point-receiver ReceiverArray compatibility payload."
+                  }
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "_type": {
+                    "const": "ReceiverIntegral"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "components",
+                  "geometry"
+                ],
+                "properties": {
+                  "weights": false,
+                  "offsets": false,
+                  "components": {
+                    "items": {
+                      "properties": {
+                        "direction": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "dependentRequired": {
+            "angle": [
+              "radius"
+            ],
+            "pitch": [
+              "radius"
+            ]
+          },
+          "not": {
+            "required": [
+              "angle",
+              "pitch"
+            ]
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "device": {
+                "properties": {
+                  "_type": {
+                    "const": "ReceiverIntegral"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "n_avg": false,
+              "sampling": {
+                "properties": {
+                  "_type": {
+                    "enum": [
+                      "DenseAllToAll",
+                      "dense",
+                      "densealltoall"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-acquisition-1"
+    },
+    "max_batch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source_groups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/sourceGroup"
+      }
+    },
+    "receiver_groups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/receiverGroup"
+      }
+    }
+  },
+  "additionalProperties": true
+}

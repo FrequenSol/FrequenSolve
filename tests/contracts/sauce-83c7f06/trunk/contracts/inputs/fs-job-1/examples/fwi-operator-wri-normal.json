@@ -1,0 +1,29 @@
+{
+  "schema": "fs-job-1",
+  "name": "wri_schur_normal",
+  "workflow": "fwi_operator",
+  "simulation": "simulation.json",
+  "result_path": "results/wri_schur_normal",
+  "Imaging": {},
+  "f_list": [
+    4.0
+  ],
+  "fwi_operator": {
+    "action": "wri",
+    "model_covector": "wri_normal.h5",
+    "objective": "wri_objective.h5",
+    "wri": {
+      "penalty": 10.0,
+      "data_scale": "auto",
+      "receiver_group": "surface",
+      "curvature": "joint_schur"
+    },
+    "model_direction": "direction.h5"
+  },
+  "control_sensitivities": {
+    "gram_derivative": "frozen",
+    "active": [
+      "vp"
+    ]
+  }
+}

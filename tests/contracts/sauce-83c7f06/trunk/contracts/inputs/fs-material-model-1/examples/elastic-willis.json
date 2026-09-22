@@ -1,0 +1,76 @@
+{
+  "schema": "fs-material-model-1",
+  "subdomains": [
+    {
+      "name": "willis_solid",
+      "mesh_block_id": 1,
+      "physics": "elastic:iso",
+      "properties": {
+        "vp": 1.5,
+        "vs": 0.8,
+        "rho": 1.5
+      },
+      "willis": {
+        "density": {
+          "real": [
+            [
+              1500,
+              50
+            ],
+            [
+              50,
+              1800
+            ]
+          ],
+          "units": "kg/m^3"
+        },
+        "stress_velocity": {
+          "real": [
+            [
+              150000,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              0
+            ]
+          ],
+          "imag": [
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              0
+            ]
+          ],
+          "units": "Pa*s/m"
+        },
+        "momentum_strain": {
+          "real": [
+            [
+              150000,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          "units": "Pa*s/m"
+        }
+      }
+    }
+  ]
+}
