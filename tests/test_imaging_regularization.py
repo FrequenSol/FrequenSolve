@@ -213,8 +213,11 @@ def test_penalty_values_converge_under_node_refinement(simulation, penalty):
         assert reference == pytest.approx(closed, rel=1e-6)
     values = [_profile_value(simulation, penalty, n, field) for n in (11, 21, 41)]
     errors = [abs(value - reference) for value in values]
-    # the value tracks the continuous seminorm, not the node count
-    assert errors[2] < errors[1] < errors[0]
+    # The value tracks the continuous seminorm, not the node count.  A discrete
+    # total variation is already exact for a field with this few sign changes,
+    # so successive errors may tie to the last bit; only a real increase fails.
+    slack = 1.0 + 1.0e-9
+    assert errors[2] <= errors[1] * slack <= errors[0] * slack**2
     assert errors[2] <= 2.0e-2 * reference
 
 
