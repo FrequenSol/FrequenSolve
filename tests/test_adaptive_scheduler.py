@@ -352,3 +352,4 @@ def test_render_allocation_uses_direct_template_defaults_and_explicit_pool(tmp_p
     assert config["boost_max_factor"] == 8
     assert config["task_indices"] == [1, 2, 3]
     assert config["skip_sizing"] is False
+    assert config["sizing_json"] == str(tmp_path / "example" / "FS_sizing.json")

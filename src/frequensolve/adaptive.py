@@ -139,7 +139,9 @@ def render_allocation(
     if type(task_count) is not int or task_count < 1:
         raise ValueError("Adaptive sweep requires a positive task count")
     ranks = pool.nodes * pool.ranks_per_node
-    sizing = str(Path(output).parent / "FS_sizing.json")
+    # Native initialization writes sizing beside the authored job descriptor.
+    # Diagnostic logs can live elsewhere under an immutable run output prefix.
+    sizing = str(Path(run_path) / Path(job_file).parent / "FS_sizing.json")
     config = {
         "version": ENGINE_VERSION,
         "executable": executable,
