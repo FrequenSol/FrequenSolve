@@ -66,9 +66,12 @@ from frequensolve.imaging._artifacts import (
 from frequensolve.imaging._backend import (
     LinearizationEntry,
     fingerprint,
+    read_manifest,
     read_report,
+    read_state_output,
     read_task_objective_vectors,
     reduce_covectors,
+    task_inputs,
     total_value,
 )
 from frequensolve.imaging.controls import (
@@ -1188,36 +1191,31 @@ class ExtensionLinearization:
 
     # -- inner solve ----------------------------------------------------------
 
-    def _solve_family(
-        self,
-        *,
-        model_gradient: bool = False,
-        per_task: Optional[Callable[[int], Dict[str, Any]]] = None,
-    ) -> List[FWIOperatorJob]:
-        def options(task: int) -> Dict[str, Any]:
-            extra = {} if per_task is None else per_task(task)
-            extension = {
-                "fields": self.extension_space.fields_fs(),
-                "solver": {
-                    **self.extension.solver_fs(),
-                    "solution": "taps.h5",
-                    "report": "inner_solve.json",
-                },
-            }
-            return {"extension": extension, "model_gradient": model_gradient, **extra}
+    def _solve(self, *, model_gradient: bool = False, **options: Any) -> FWIOperatorJob:
+        """Run one ``solve`` job over every saved task (one inner solve per task)."""
 
-        jobs = self._family("solve", options)
-        self.problem.problem._run_jobs(jobs)
-        return jobs
+        extension = {
+            "fields": self.extension_space.fields_fs(),
+            "solver": {
+                **self.extension.solver_fs(),
+                "solution": "taps.h5",
+                "report": "inner_solve.json",
+            },
+        }
+        job = self._action_job(
+            "solve", extension=extension, model_gradient=model_gradient, **options
+        )
+        self.view._run_job(job)
+        return job
 
     def _read_solutions(
-        self, jobs: Sequence[FWIOperatorJob]
+        self, job: FWIOperatorJob
     ) -> List[Tuple[ExtensionVector, ExtensionSolveReport]]:
         out = []
-        for task, job in enumerate(jobs, start=1):
-            report = ExtensionSolveReport.load(job.extension_report_file(1))
+        for task in range(1, job.n_tasks + 1):
+            report = ExtensionSolveReport.load(job.extension_report_file(task))
             taps = ExtensionVector.from_file(
-                job.extension_solution_file(1), self.extension_space
+                job.extension_solution_file(task), self.extension_space
             )
             if self.extension.require_convergence and not report.converged:
                 raise RuntimeError(
@@ -1232,15 +1230,12 @@ class ExtensionLinearization:
         if gradient:
             if self._gradient is not None:
                 return
-            jobs = self._solve_family(
-                model_gradient=True, per_task=lambda task: {"covector": "gradient.h5"}
-            )
-            self._solutions = self._read_solutions(jobs)
-            self._gradient = self._reduce(jobs, weighted=True)
+            job = self._solve(model_gradient=True, covector="gradient.h5")
+            self._solutions = self._read_solutions(job)
+            self._gradient = self._reduce(job, weighted=True)
             return
         if self._solutions is None:
-            jobs = self._solve_family()
-            self._solutions = self._read_solutions(jobs)
+            self._solutions = self._read_solutions(self._solve())
 
     @property
     def solutions(self) -> List[Tuple[ExtensionVector, ExtensionSolveReport]]:
@@ -1358,54 +1353,53 @@ class ExtensionLinearization:
             self._ops[key] = compute()
         return self._ops[key]
 
-    def _family(
-        self, action: str, per_task: Callable[[int], Dict[str, Any]]
-    ) -> List[FWIOperatorJob]:
-        """Build one single-frequency ``action`` job per saved task."""
+    def _action_job(self, action: str, **options: Any) -> FWIOperatorJob:
+        """Build the one ``action`` job over every saved task of this point.
+
+        A multi-task job names the saved-state stem (Sauce resolves each
+        task's ``<stem>_<task><ext>``); a single-task job names task 1's file.
+        """
 
         view = self.view
         view._sync_simulation(self.state)
-        return [
-            view._operator_job(
-                self.space,
-                action,
-                frequencies=[frequency],
-                state=self.job.state_file(task),
-                **per_task(task),
-            )
-            for task, frequency in enumerate(self.frequencies, start=1)
-        ]
-
-    def _tap_file(self, taps: ExtensionVector, directory: Path, task: int) -> Path:
-        fp, baseline = self.extension_fingerprints[task - 1]
-        return taps.to_file(fingerprint=fp, baseline=baseline, role="tangent").write(
-            directory / f"taps_{task}.h5"
+        state = (
+            self.job.state_file(1)
+            if len(self.frequencies) == 1
+            else self.job.state_file()
+        )
+        return view._operator_job(
+            self.space, action, frequencies=self.frequencies, state=state, **options
         )
 
-    def _direction_file(self, dv: ControlVector, directory: Path, task: int) -> Path:
-        state_fp, registry_fp = self.task_fingerprints[task - 1]
-        return dv.to_file(
-            state_fingerprint=state_fp, registry_fingerprint=registry_fp
-        ).write(directory / f"direction_{task}.h5")
+    def _tap_stem(self, taps: ExtensionVector, directory: Path) -> Path:
+        """Write ``taps`` once per task (its extension fingerprints); return the input."""
 
-    def _reduce(
-        self, jobs: Sequence[FWIOperatorJob], *, weighted: bool
-    ) -> ControlVector:
-        total = self.space.zeros()
-        for task, job in enumerate(jobs, start=1):
-            part = _control_vector_from_file(reduce_covectors(job), self.space)
-            if weighted:
-                part = part * float(self.frequency_weights[task - 1])
-            total = total + part
-        return total
+        stem = directory / "taps.h5"
+        for task, path in task_inputs(stem, len(self.frequencies)):
+            fp, baseline = self.extension_fingerprints[task - 1]
+            taps.to_file(fingerprint=fp, baseline=baseline, role="tangent").write(path)
+        return stem
 
-    def _reduce_taps(
-        self, jobs: Sequence[FWIOperatorJob], *, weighted: bool
-    ) -> ExtensionVector:
+    def _direction_stem(self, dv: ControlVector, directory: Path) -> Path:
+        """Write ``dv`` once per task (its state/registry fingerprints); return the input."""
+
+        stem = directory / "direction.h5"
+        for task, path in task_inputs(stem, len(self.frequencies)):
+            state_fp, registry_fp = self.task_fingerprints[task - 1]
+            dv.to_file(
+                state_fingerprint=state_fp, registry_fingerprint=registry_fp
+            ).write(path)
+        return stem
+
+    def _reduce(self, job: FWIOperatorJob, *, weighted: bool) -> ControlVector:
+        weights = self.frequency_weights.tolist() if weighted else [1.0] * job.n_tasks
+        return _control_vector_from_file(reduce_covectors(job, weights), self.space)
+
+    def _reduce_taps(self, job: FWIOperatorJob, *, weighted: bool) -> ExtensionVector:
         total = self.extension_space.zeros()
-        for task, job in enumerate(jobs, start=1):
+        for task in range(1, job.n_tasks + 1):
             part = ExtensionVector.from_file(
-                job.extension_covector_file(1), self.extension_space
+                job.extension_covector_file(task), self.extension_space
             )
             if weighted:
                 part = part * float(self.frequency_weights[task - 1])
@@ -1431,25 +1425,20 @@ class ExtensionLinearization:
 
         def compute() -> DataVector:
             directory = self._ops_dir()
-            jobs = self._family(
+            job = self._action_job(
                 "jvp",
-                lambda task: {
-                    "extension": {
-                        "fields": self.extension_space.fields_fs(),
-                        "direction": self._tap_file(taps, directory, task),
-                    },
-                    "objective_vector": "jvp.json",
+                extension={
+                    "fields": self.extension_space.fields_fs(),
+                    "direction": self._tap_stem(taps, directory),
                 },
+                objective_vector="jvp.json",
             )
-            self.view._run_jobs(jobs)
-            values = np.zeros(self.data_space.size, dtype=self.data_space.dtype)
-            for task, job in enumerate(jobs, start=1):
-                values += read_task_objective_vectors(
-                    job,
-                    self.data_space,
-                    state_fingerprint=self.task_fingerprints[task - 1][0],
-                ).values
-            return DataVector(values, self.data_space)
+            self.view._run_job(job)
+            return read_task_objective_vectors(
+                job,
+                self.data_space,
+                state_fingerprint=[fp for fp, _ in self.task_fingerprints],
+            )
 
         return self._memo("jvp", _digest(taps.values), compute)
 
@@ -1460,26 +1449,26 @@ class ExtensionLinearization:
 
         def compute() -> ExtensionVector:
             directory = self._ops_dir()
-            jobs = self._family(
-                "vjp",
-                lambda task: {
-                    "extension": {
-                        "fields": self.extension_space.fields_fs(),
-                        "covector": "vjp.h5",
-                    },
-                    "objective_vector": directory / f"task_{task}" / "dual.json",
-                },
-            )
-            for task, job in enumerate(jobs, start=1):
-                assert job.objective_vector is not None
+            stem = directory / "dual.json"
+            for task, path in task_inputs(stem, len(self.frequencies)):
                 dual.write_objective_vector(
-                    job.objective_vector,
+                    path,
                     state_fingerprint=self.task_fingerprints[task - 1][0],
-                    term_layout=self.data_space.term_layouts(frequency=job.f_list[0]),
+                    term_layout=self.data_space.term_layouts(
+                        frequency=self.frequencies[task - 1]
+                    ),
                     n_ranks=1,
                 )
-            self.view._run_jobs(jobs)
-            return self._reduce_taps(jobs, weighted=False)
+            job = self._action_job(
+                "vjp",
+                extension={
+                    "fields": self.extension_space.fields_fs(),
+                    "covector": "vjp.h5",
+                },
+                objective_vector=stem,
+            )
+            self.view._run_job(job)
+            return self._reduce_taps(job, weighted=False)
 
         return self._memo("vjp", _digest(dual.values), compute)
 
@@ -1490,18 +1479,16 @@ class ExtensionLinearization:
 
         def compute() -> ExtensionVector:
             directory = self._ops_dir()
-            jobs = self._family(
+            job = self._action_job(
                 "normal",
-                lambda task: {
-                    "extension": {
-                        "fields": self.extension_space.fields_fs(),
-                        "direction": self._tap_file(taps, directory, task),
-                        "covector": "normal.h5",
-                    }
+                extension={
+                    "fields": self.extension_space.fields_fs(),
+                    "direction": self._tap_stem(taps, directory),
+                    "covector": "normal.h5",
                 },
             )
-            self.view._run_jobs(jobs)
-            return self._reduce_taps(jobs, weighted=True)
+            self.view._run_job(job)
+            return self._reduce_taps(job, weighted=True)
 
         return self._memo("normal", _digest(taps.values), compute)
 
@@ -1512,16 +1499,13 @@ class ExtensionLinearization:
 
         def compute() -> ControlVector:
             directory = self._ops_dir()
-            options = dict(self.extension.reduced_normal or {})
-            jobs = self._solve_family(
-                per_task=lambda task: {
-                    "direction": self._direction_file(direction, directory, task),
-                    "covector": "reduced_normal.h5",
-                    "reduced_normal": options,
-                }
+            job = self._solve(
+                direction=self._direction_stem(direction, directory),
+                covector="reduced_normal.h5",
+                reduced_normal=dict(self.extension.reduced_normal or {}),
             )
-            for task, job in enumerate(jobs, start=1):
-                report = ExtensionSolveReport.load(job.extension_report_file(1))
+            for task in range(1, job.n_tasks + 1):
+                report = ExtensionSolveReport.load(job.extension_report_file(task))
                 response = report.reduced_normal
                 if not report.converged or response is None or not response.converged:
                     raise RuntimeError(
@@ -1529,8 +1513,8 @@ class ExtensionLinearization:
                         f"({self.frequencies[task - 1]} Hz) did not converge"
                     )
             if self._solutions is None:
-                self._solutions = self._read_solutions(jobs)
-            return self._reduce(jobs, weighted=True)
+                self._solutions = self._read_solutions(job)
+            return self._reduce(job, weighted=True)
 
         return self._memo("reduced_normal", _digest(direction.values), compute)
 
@@ -1796,7 +1780,9 @@ class ExtendedProblem:
             **self.identity(), state=None if state is None else state.values
         )
 
-    def _linearize_job(self, control_state: Optional[Path]) -> FWIOperatorJob:
+    def _linearize_job(
+        self, control_state: Optional[Path], *, discover: bool = False
+    ) -> FWIOperatorJob:
         problem = self._problem
         shared = problem._shared
         return FWIOperatorJob(
@@ -1808,6 +1794,8 @@ class ExtendedProblem:
             state="state.json",
             objective="report.json",
             control_state=control_state,
+            state_output="baseline.h5" if discover else None,
+            manifest="registry.json" if discover else None,
             min_support=problem.min_support,
             misfit=problem._misfit_payload,
             extension={
@@ -1825,19 +1813,29 @@ class ExtendedProblem:
         if cached is not None:
             shared.cache.get(key)
             return cached
-        if shared.baseline is None:
+        discover = shared.baseline is None
+        if discover and not problem._is_authored(state):
+            # A non-authored point needs the complete registry baseline for
+            # its ``controls.state``; discover it at the authored point first.
             problem._discover_registry()
+            discover = False
             if state is None:
                 state = shared.state
                 key = self._fingerprint(state)
                 cached = self._cache.get(key)
                 if cached is not None:
                     return cached
-        assert state is not None
         problem._sync_simulation(state)
         stage, control_state = problem._stage_state(key, state)
-        job = self._linearize_job(control_state)
+        job = self._linearize_job(control_state, discover=discover)
         problem._run_job(job)
+        if discover:
+            # The job ran at Sauce's own baseline: adopt it (see
+            # ImagingProblem.linearize) and key the state by the adopted point.
+            shared.adopt_baseline(read_state_output(job), read_manifest(job))
+            state = shared.authored
+            key = self._fingerprint(state)
+        assert state is not None
 
         masks = problem._read_masks(job, problem.space)
         if masks is None:
@@ -1853,6 +1851,8 @@ class ExtendedProblem:
         covector = self.extension_space.zeros()
         for task in range(1, len(reports) + 1):
             path = _task_file(manifest_stem, task)
+            if len(reports) == 1 and not path.is_file():
+                path = manifest_stem  # single-task jobs may keep the exact name
             if not path.is_file():
                 raise FileNotFoundError(
                     f"task {task} extension manifest is missing: {path}"
@@ -1910,9 +1910,7 @@ class ExtendedProblem:
                 job (what :class:`~frequensolve.imaging.workflows.FWI` asks).
         """
 
-        problem = self._problem
-        state = None if (v is None and problem.state is None) else problem._state_at(v)
-        linearization = self._linearize_state(state)
+        linearization = self._linearize_state(self._problem._linearization_point(v))
         if gradient:
             linearization._ensure_solved(gradient=True)
         return linearization
@@ -1922,15 +1920,21 @@ class ExtendedProblem:
     def solve_all(
         self, v: Any = None
     ) -> List[Tuple[ExtensionVector, ExtensionSolveReport]]:
-        """Return ``(taps, report)`` of the inner solve per frequency task."""
+        """Return ``(taps, report)`` of the inner solve per frequency task.
+
+        One ``solve`` job carries every frequency of the view; Sauce solves
+        the taps of each task on its own and writes them as task-suffixed
+        outputs, returned here in frequency order.
+        """
 
         return self.linearize(v).solutions
 
     def solve(self, v: Any = None) -> Tuple[ExtensionVector, ExtensionSolveReport]:
         """Return the solved taps and report of a single-frequency view.
 
-        Each frequency task has its own inner solve; restrict the view to one
-        frequency or use :meth:`solve_all` for several.
+        Each frequency task has its own taps, so a multi-frequency view has no
+        single answer: use :meth:`solve_all` (same one job, every task's
+        result) or restrict the view to one frequency.
         """
 
         solutions = self.solve_all(v)
@@ -1967,12 +1971,22 @@ class ExtendedProblem:
         """Describe the extension linearize job at ``v`` without submitting it."""
 
         problem = self._problem
-        state = None if (v is None and problem.state is None) else problem._state_at(v)
+        shared = problem._shared
+        state = (
+            None
+            if (v is None and shared.state is None)
+            else problem._state_at(v, discover=False)
+        )
         key = self._fingerprint(state)
         _stage, control_state = problem._stage_state(key, state)
-        payload = self.backend.dry_run(self._linearize_job(control_state))
+        discover = shared.baseline is None
+        payload = self.backend.dry_run(
+            self._linearize_job(
+                control_state, discover=discover and problem._is_authored(state)
+            )
+        )
         payload["fingerprint"] = key
-        payload["registry_discovery"] = problem._shared.baseline is None
+        payload["registry_discovery"] = discover and not problem._is_authored(state)
         payload["extension"] = self.extension.to_fs(self.extension_space.control_ids)
         payload["taps"] = self.extension_space.size
         return payload

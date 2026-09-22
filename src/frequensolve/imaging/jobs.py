@@ -926,8 +926,9 @@ class FWIOperatorJob(_ImagingJobBase):
             (``vjp``, optional ``solve`` target).
         objective: Optional scalar objective report output.
         control_state: ``fs-control-state-1`` baseline input.
-        state_output: ``fs-control-state-1`` baseline output (exact name).
-        manifest: ``fs-control-registry-1`` output (exact name).
+        state_output: ``fs-control-state-1`` baseline output (exact name in a
+            single-task job, ``<stem>_<task><ext>`` per task otherwise).
+        manifest: ``fs-control-registry-1`` output (same naming rule).
         min_support: Optional ``fwi_operator.controls.min_support`` relative
             support threshold (Sauce default ``1e-2``) used for the
             ``/support/<block>`` bitmasks of ``state_output`` and covectors.
@@ -1337,19 +1338,47 @@ class FWIOperatorJob(_ImagingJobBase):
             raise ValueError("this job has no balance output")
         return _task_path(self.balance, task)
 
-    def state_output_file(self) -> Path:
-        """Return the exact ``fs-control-state-1`` export path."""
+    def _multitask_output(self, path: Path, task: Optional[int]) -> Path:
+        """Return a ``controls`` export of ``task``.
+
+        Sauce keeps the exact configured path in a single-task job and adds
+        the ``_<task>`` suffix when ``f_list`` has more than one entry.
+        """
+
+        if task is None or self.n_tasks <= 1:
+            return path
+        return _task_path(path, task)
+
+    def state_output_file(self, task: Optional[int] = None) -> Path:
+        """Return the ``fs-control-state-1`` export (configured path or one task's)."""
 
         if self.state_output is None:
             raise ValueError("this job has no state_output path")
-        return self.state_output
+        return self._multitask_output(self.state_output, task)
 
-    def manifest_file(self) -> Path:
-        """Return the exact ``fs-control-registry-1`` export path."""
+    def manifest_file(self, task: Optional[int] = None) -> Path:
+        """Return the ``fs-control-registry-1`` export (configured path or one task's)."""
 
         if self.manifest is None:
             raise ValueError("this job has no manifest path")
-        return self.manifest
+        return self._multitask_output(self.manifest, task)
+
+    def task_input(self, path: Union[str, Path], task: int) -> Path:
+        """Return the file Sauce reads for per-task operator input ``path``.
+
+        With more than one frequency task, the inputs ``state`` (jvp, vjp,
+        normal, solve), ``direction``, ``objective_vector`` (vjp),
+        ``extension.direction`` and ``model_direction`` resolve to the
+        task-suffixed sibling ``<stem>_<task><ext>`` when it exists, and to
+        the exact path otherwise; a single-task job uses the exact path.
+        """
+
+        path = Path(path)
+        if self.n_tasks > 1:
+            candidate = _task_path(path, task)
+            if candidate.is_file():
+                return candidate
+        return path
 
     def _extension_path(self, *keys: str) -> Path:
         value: Any = self.extension
@@ -1522,7 +1551,7 @@ class FWIOperatorJob(_ImagingJobBase):
 
         inputs: Dict[str, Any] = {}
         if self.direction is not None:
-            inputs["direction"] = self._path_content_fingerprint(self.direction)
+            inputs["direction"] = self._resolved_input_fingerprint(self.direction)
         if self.objective_vector is not None and self.action != "jvp":
             inputs["objective_vector"] = self._task_input_fingerprints(
                 self.objective_vector
@@ -1530,10 +1559,25 @@ class FWIOperatorJob(_ImagingJobBase):
         if self.control_state is not None:
             inputs["control_state"] = self._path_content_fingerprint(self.control_state)
         if self.extension is not None and self.extension.get("direction") is not None:
-            inputs["extension_direction"] = self._path_content_fingerprint(
-                self.extension["direction"]
+            inputs["extension_direction"] = self._resolved_input_fingerprint(
+                Path(self.extension["direction"])
             )
         return inputs
+
+    def _resolved_input_fingerprint(self, path: Path) -> Any:
+        """Hash a per-task operator input as each task resolves it.
+
+        One file when every task reads the exact path, otherwise one hash per
+        task of the file :meth:`task_input` resolves.
+        """
+
+        resolved = [self.task_input(path, task) for task in range(1, self.n_tasks + 1)]
+        if all(item == Path(path) for item in resolved):
+            return self._path_content_fingerprint(path)
+        return {
+            str(task): self._path_content_fingerprint(item)
+            for task, item in enumerate(resolved, start=1)
+        }
 
     def _task_input_fingerprints(self, stem: Path) -> Dict[str, Any]:
         """Hash per-task manifests, falling back to one shared file."""

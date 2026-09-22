@@ -112,8 +112,8 @@ def test_linearize_job_carries_reflectivity_and_validates_against_the_schema(
     assert op["controls"]["active"] == ["model.vp", "reflectivity.ip"]
     assert _shape(op["reflectivity"]) == example["reflectivity"]
     assert op["action"] == "linearize" and "extension" not in op
-    # every submitted fwi_operator job (discovery, linearize) carried it
-    assert len(fake.jobs) == 2
+    # the authored linearize discovered the registry in its own (one) job
+    assert len(fake.jobs) == 1 and lin.job.state_output is not None
     for job in fake.jobs:
         assert job.to_fs()["fwi_operator"]["reflectivity"] == example["reflectivity"]
         assert job.active == ["model.vp", "reflectivity.ip"]
@@ -420,7 +420,7 @@ def test_linearize_returns_both_blocks_and_restrictions_slice_them(setup, fake):
     surrogate = fake.linearizations[lin.state_fingerprint]
     np.testing.assert_allclose(lin.gradient.values, surrogate.gradient)
     assert "reflectivity.ip" in lin.manifest.names
-    baseline = ControlStateFile.read(fake.jobs[0].state_output_file())
+    baseline = ControlStateFile.read(fake.jobs[0].state_output_file(1))
     np.testing.assert_array_equal(baseline["reflectivity.ip"], 0.0)
 
     only = problem.restrict(active=["refl"])
@@ -533,15 +533,13 @@ def test_reflectivity_vectors_render_on_the_borrowed_basis_coordinates(setup):
     )
 
 
-def test_sauce_reflectivity_support_masks_are_not_adopted(tmp_path):
-    # Sauce 5e07624 writes an all-zero reflectivity support bitmask alongside
-    # a nonzero covector; the problem must keep every reflectivity DOF.
+def test_sauce_reflectivity_support_masks_are_adopted_like_any_block(tmp_path):
     fake = FakeImagingSite(
         block_sizes={"reflectivity.ip": VP_COUNT},
         seed=3,
         support_masks={
             "model.vp": [1, 0, 1, 1, 1],
-            "reflectivity.ip": [0] * VP_COUNT,
+            "reflectivity.ip": [1, 1, 1, 0, 0],
         },
     )
     _sim, problem = _problem(tmp_path, fake, min_support=0.01)
@@ -549,15 +547,15 @@ def test_sauce_reflectivity_support_masks_are_not_adopted(tmp_path):
     lin = problem.linearize()
 
     np.testing.assert_array_equal(lin.support["vp"], [1, 0, 1, 1, 1])
-    assert lin.support["refl"].all()
-    assert lin.space.size == 4 + VP_COUNT
-    assert lin.gradient["refl"].shape == (VP_COUNT,)
+    np.testing.assert_array_equal(lin.support["refl"], [1, 1, 1, 0, 0])
+    assert lin.space.size == 4 + 3
     surrogate = fake.linearizations[lin.state_fingerprint]
-    np.testing.assert_allclose(lin.gradient["refl"], surrogate.gradient[VP_COUNT:])
-    assert np.linalg.norm(lin.gradient["refl"]) > 0.0
+    refl = lin.gradient["refl"]  # frozen DOFs expand as zeros
+    np.testing.assert_allclose(refl[:3], surrogate.gradient[VP_COUNT:][:3])
+    np.testing.assert_array_equal(refl[3:], 0.0)
 
 
-def test_capabilities_warn_about_surface_coordinate_reflectivity_maps(tmp_path, fake):
+def test_surface_coordinate_reflectivity_maps_are_supported(tmp_path, fake):
     _sim, below = _problem(tmp_path, fake)  # ``datum="top"``: seabed_depth
     _sim, global_z = _problem(
         tmp_path,
@@ -569,9 +567,8 @@ def test_capabilities_warn_about_surface_coordinate_reflectivity_maps(tmp_path, 
         ),
     )
 
-    warnings = below.capabilities()["warnings"]
-    assert len(warnings) == 1 and warnings[0].endswith(": reflectivity.ip")
-    assert "Surface-coordinate control map has no evaluation context" in warnings[0]
+    assert below.space.block("refl").coordinate_system == "seabed_depth"
+    assert below.capabilities()["warnings"] == []
     assert below.capabilities()["ok"]
     assert global_z.space.block("refl").coordinate_system == "global"
     assert global_z.capabilities()["warnings"] == []

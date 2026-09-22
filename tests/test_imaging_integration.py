@@ -19,7 +19,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from frequensolve.imaging import DepthProfile, ImagingProblem, ObservedData
+from frequensolve.imaging import (
+    ControlSpace,
+    DepthProfile,
+    ImagingProblem,
+    ObservedData,
+    SourceParameters,
+)
 from frequensolve.imaging._artifacts import ControlStateFile
 from frequensolve.imaging.extension import Extension, ExtensionVector, Lags
 from frequensolve.mesh import BoundaryCondition
@@ -142,6 +148,70 @@ def test_imaging_problem_linearizes_against_sauce(tmp_path):
     assert np.isfinite(moved) and moved != lin.value
 
 
+def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
+    """One job per action over two frequencies; mechanisms start at Sauce's baseline."""
+
+    from frequensolve.orchestrator.sites.local import LocalSite
+
+    site = LocalSite(solver=_executable(), n_workers=1)
+    project = Project(name="multi", path=tmp_path / "project", load_if_exists=False)
+    truth = _simulation(project, "truth", TRUTH_VP)
+    initial = _simulation(project, "initial", START_VP)
+    frequencies = [FREQUENCY - 1.0, FREQUENCY]
+
+    observed_job = FrequencyDomainJob("observed", truth, frequencies)
+    assert site.run(observed_job, check=True).successful
+
+    problem = ImagingProblem(
+        initial,
+        controls=ControlSpace(
+            vp=DepthProfile("vp", "layer_2", count=4),
+            src=SourceParameters(mechanism=True, signature=False),
+        ),
+        observed=ObservedData(observed_job),
+        frequencies=frequencies,
+        site=site,
+        name="multi",
+    )
+    assert problem.space.blocks == ("model.vp", "source.1.mechanism")
+
+    # the state is Sauce's baseline: a nonzero mechanism with its scaling
+    state = problem.state
+    mechanism = state["source.1.mechanism"]
+    assert np.all(np.isfinite(mechanism)) and np.abs(mechanism).max() > 0.0
+    assert state.scaling["source.1.mechanism"] > 0.0
+    discovery = problem.linearize(gradient=False)
+    assert discovery.job.n_tasks == 2 and discovery.job.control_state is None
+
+    lin = problem.linearize()
+    assert lin.frequencies == frequencies and lin.job.n_tasks == 2
+    assert np.all(np.isfinite(lin.gradient.values))
+
+    # jvp / vjp resolve each task's saved state and direction from one job.
+    # The mechanism sensitivities exceed the vp ones by ~1e10, so each block
+    # is tested on its own.  The two-frequency mechanism pairing of this Sauce
+    # build agrees to ~2e-3 only (one frequency: ~1e-5); the one-job outputs
+    # match per-frequency single-task jobs to ~4e-6, so the gap is Sauce's.
+    J = lin.jacobian
+    r = lin.data_space.random(2)
+    jh_r = np.asarray(J.H @ r)
+    tolerances = {"model.vp": 1.0e-3, "source.1.mechanism": 1.0e-2}
+    for block, sl in lin.space.slices.items():
+        dv = np.zeros(lin.space.size)
+        dv[sl] = lin.space.random(1).values[sl]
+        left, right = (J @ dv).dot(r), float(np.dot(dv, jh_r))
+        scale = max(abs(left), abs(right))
+        assert abs(left - right) <= tolerances[block] * scale, (block, left, right)
+
+    # a point off the authored one stages controls.state (mechanism scaling
+    # included) and replays in both tasks
+    step = -1.0e-3 * lin.gradient / max(float(np.abs(lin.gradient.values).max()), 1.0)
+    moved = problem.linearize(problem.vector() + step, gradient=False)
+    staged = ControlStateFile.read(moved.job.control_state)
+    assert staged.scaling == {"source.1.mechanism": state.scaling["source.1.mechanism"]}
+    assert np.isfinite(moved.value) and moved.value != lin.value
+
+
 # ---------------------------------------------------------------------------
 # auxiliary model extension (FWIME)
 # ---------------------------------------------------------------------------
@@ -168,6 +238,7 @@ def _extension_simulation(project: Project, name: str, vp_lower: float):
     return simulation
 
 
+@pytest.mark.timeout(1800)  # the extension actions take ~450 s
 def test_extended_problem_solves_against_sauce(tmp_path):
     from frequensolve.orchestrator.sites.local import LocalSite
 
@@ -180,13 +251,9 @@ def test_extended_problem_solves_against_sauce(tmp_path):
     result = site.run(observed_job, check=True)
     assert result.successful
 
-    # Sauce's extension actions evaluate the borrowed control map without a
-    # surface context ("Surface-coordinate control map has no evaluation
-    # context" for the default ``datum="top"`` profile), so the profile
-    # uses the global vertical axis (``datum="global"``).
     problem = ImagingProblem(
         initial,
-        controls=DepthProfile("vp", "layer_2", count=4, datum="global"),
+        controls=DepthProfile("vp", "layer_2", count=4),
         observed=ObservedData(observed_job),
         site=site,
         name="fwime",

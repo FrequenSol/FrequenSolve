@@ -204,6 +204,10 @@ def test_fwi_jvp_matches_pinned_joint_controls_example(tmp_path):
     assert job.direction == tmp_path / "direction.h5"
     assert job.objective_vector_file(1).name == "jvp_1.json"
     assert job.manifest_file().name == "controls.json"
+    # one task: exact export and input paths
+    assert job.manifest_file(1).name == "controls.json"
+    (tmp_path / "direction_1.h5").write_bytes(b"")
+    assert job.task_input(job.direction, 1) == tmp_path / "direction.h5"
     loaded = _round_trip(job)
     assert loaded.active == [
         "source.2.mechanism",
@@ -238,6 +242,12 @@ def test_fwi_vjp_normal_and_calibrate_payloads(tmp_path):
     assert vjp.report_file(2).name == "state_2_report.json"
     assert vjp.report_file().name == "state_report.json"
     assert vjp.state_output_file().name == "resolved.h5"
+    # several tasks: exports are task-suffixed, inputs resolve per task
+    assert vjp.state_output_file(2).name == "resolved_2.h5"
+    assert vjp.task_input(vjp.objective_vector, 2) == tmp_path / "dual.json"
+    (tmp_path / "dual_2.json").write_text("{}")
+    assert vjp.task_input(vjp.objective_vector, 2) == tmp_path / "dual_2.json"
+    assert vjp.task_input(vjp.objective_vector, 1) == tmp_path / "dual.json"
     _round_trip(vjp)
 
     normal = FWIOperatorJob(

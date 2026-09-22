@@ -521,9 +521,11 @@ def test_fwi_tikhonov_with_diagonal_preconditioner_solves_the_regularized_proble
     for index in (0, 1):
         losses = _stage_losses(result.history, index)
         assert len(losses) >= 2 and np.all(np.diff(losses) <= 1e-9)
-    # the Rademacher probes ran Sauce's normal action for both stages
-    normal = [s for s in fake.submissions if s["action"] == "normal"]
-    assert len(normal) >= 8
+    # the Rademacher probes ran Sauce's normal action for both stages, one
+    # job per probe carrying every frequency of its stage
+    normal = [job for job in fake.jobs if getattr(job, "action", None) == "normal"]
+    assert {len(job.f_list) for job in normal} == {1, 2}
+    assert sum(len(job.f_list) == 2 for job in normal) >= 3
 
 
 @pytest.mark.parametrize(

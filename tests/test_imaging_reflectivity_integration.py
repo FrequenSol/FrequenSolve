@@ -119,12 +119,8 @@ def test_joint_reflectivity_linearizes_against_sauce(tmp_path):
     result = site.run(observed_job, check=True)
     assert result.successful
 
-    # The basis is authored on the global z axis like Sauce's joint e2e
-    # fixture: Sauce 5e07624 evaluates a borrowed (or own) reflectivity map
-    # without its surface-coordinate context, so a ``datum="top"`` profile stops
-    # with "Surface-coordinate control map has no evaluation context".
     controls = ControlSpace(
-        vp=DepthProfile("vp", "layer_2", datum="global", count=VP_COUNT),
+        vp=DepthProfile("vp", "layer_2", count=VP_COUNT),
         refl=ReflectivityParameters(
             "vp_ip", fields=[ReflectivityField("ip", layer=2, axis=2, basis="vp")]
         ),
@@ -158,7 +154,7 @@ def test_joint_reflectivity_linearizes_against_sauce(tmp_path):
 
     # Sauce's complete baseline (exported by this single-task discovery job)
     # covers background and reflectivity; a borrowed basis starts at zero
-    baseline = ControlStateFile.read(lin.job.state_output_file())
+    baseline = ControlStateFile.read(lin.job.state_output_file(1))
     assert {"model.vp", "reflectivity.ip"} <= set(baseline.names)
     np.testing.assert_array_equal(baseline["reflectivity.ip"], 0.0)
     assert baseline.support["reflectivity.ip"].shape == (VP_COUNT,)

@@ -246,6 +246,20 @@ covectors (active blocks only). Two vector types mirror that:
 
 Plain ndarrays are accepted everywhere a typed vector is.
 
+Material and interface blocks start at the coefficients FrequenSolve authors
+into the simulation. Every other block (source positions, mechanisms and
+signatures, reflectivity fields, mesh blocks) starts at a baseline only Sauce
+knows, exported by ``controls.state_output`` together with the mechanism
+``/scaling/<block>`` and ``/scaling_units/<block>``. The first linearize at the
+authored point requests that export (registry discovery) and adopts it:
+``problem.state`` then carries Sauce's baseline for those blocks and
+FrequenSolve's values for material and interface blocks. On a space with such
+blocks, asking for ``problem.state``, ``problem.vector()`` or
+``problem.state_from(...)`` before any linearize runs that value-only
+discovery linearize first, so an optimizer never starts (or steps) from a
+placeholder mechanism. Material/interface-only spaces are known locally and
+submit nothing; ``problem.dry_run()`` never submits.
+
 Observed data and misfit
 ------------------------
 
@@ -345,8 +359,12 @@ The simulation is deep-copied when the problem is declared; the caller's
 object is never mutated. Every linearization maps to one saved Sauce
 ``fwi_operator`` state and is cached by a fingerprint of the problem and the
 full control state, so ``value``, ``gradient``, ``jacobian`` and ``normal``
-at the same point cost one job family. Derivative actions (``jvp``, ``vjp``,
-``normal``) reuse the saved state and are memoized per input vector.
+at the same point cost one job. Each action is one job carrying every
+frequency of the view (one Sauce task per frequency, distributed by the site
+like any multi-frequency job). Derivative actions (``jvp``, ``vjp``,
+``normal``) reuse the saved state and are memoized per input vector; their
+per-task inputs are written as ``<stem>_<task><ext>`` beside the stem the job
+names, which Sauce resolves in each task.
 
 Operators are :class:`scipy.sparse.linalg.LinearOperator` subclasses that
 know their control and data spaces, accept typed vectors or plain arrays, and
@@ -776,10 +794,10 @@ unchanged.
    taps.to_xarray()["vp"].sel(lag=0).plot()
    result = im.FWI(xp, stages=stages).run()  # FWIME
 
-Each frequency solves its own inner problem (``solve`` therefore needs a
-single-frequency view; ``solve_all`` returns every task's solution); reduced
-covectors are summed with the stage's frequency weights like ordinary
-gradients.
+One ``solve`` job carries every frequency, and each frequency task solves
+its own inner problem (``solve`` therefore needs a single-frequency view;
+``solve_all`` returns every task's solution); reduced covectors are summed
+with the stage's frequency weights like ordinary gradients.
 
 :class:`~frequensolve.imaging.ReflectivityParameters` is an ordinary block.
 When the space contains one, the problem emits the joint

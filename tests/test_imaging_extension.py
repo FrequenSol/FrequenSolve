@@ -431,6 +431,36 @@ def test_extension_jobs_validate_against_the_pinned_schema(setup, fake):
     assert all(job.f_list == [4.0] for job in jobs)
 
 
+def test_multi_frequency_actions_submit_one_job_each(setup, fake):
+    sim, problem, xp = setup
+    lin = xp.linearize()
+    assert lin.frequencies == [4.0, 6.0]
+    before = len(fake.jobs)
+    solutions = xp.solve_all()
+    t = xp.extension_space.random(2)
+    lin.jacobian @ t
+    lin.jacobian.H @ lin.data_space.random(3)
+    lin.tap_normal @ t
+    lin.normal @ xp.space.random(1)
+
+    jobs = fake.jobs[before:]
+    assert [(job.action, job.reduced_normal is not None) for job in jobs] == [
+        ("solve", False),
+        ("jvp", False),
+        ("vjp", False),
+        ("normal", False),
+        ("solve", True),
+    ]
+    assert all(job.f_list == [4.0, 6.0] for job in jobs)
+    assert all(job.state == lin.job.state_file() for job in jobs)
+    # per-task taps under one stem; each task's solution is read back
+    jvp = jobs[1]
+    assert all(jvp.task_input(jvp.extension["direction"], t).is_file() for t in (1, 2))
+    assert len(solutions) == 2
+    with pytest.raises(ValueError, match="single-frequency"):
+        xp.solve()
+
+
 def test_dry_run_describes_the_extension_linearize(setup):
     sim, problem, xp = setup
     payload = xp.dry_run()
@@ -440,7 +470,11 @@ def test_dry_run_describes_the_extension_linearize(setup):
     assert payload["job"]["fwi_operator"]["extension"]["manifest"].endswith(
         "extension.json"
     )
-    assert payload["registry_discovery"] is True
+    # the authored point discovers the registry in the extension job itself
+    assert payload["registry_discovery"] is False
+    controls = payload["job"]["fwi_operator"]["controls"]
+    assert controls["state_output"].endswith("baseline.h5")
+    assert controls["manifest"].endswith("registry.json")
 
 
 # ---------------------------------------------------------------------------

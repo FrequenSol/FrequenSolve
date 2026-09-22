@@ -3944,14 +3944,18 @@ class ControlState:
 
     @classmethod
     def from_simulation(cls, space: ControlSpace) -> "ControlState":
-        """Return the authored baseline of a bound space.
+        """Return FrequenSolve's authored baseline of a bound space.
 
-        Material blocks start at zero (the bind installs zero coefficients);
-        interface blocks carry the rbf coefficients; source positions carry
-        the acquisition coordinates.  Mechanism and signature-derivative
-        blocks are zero and signatures are ``1 + 0j``; Sauce's
-        ``controls.state_output`` (see :meth:`from_file`) is authoritative for
-        those.
+        Material blocks start at zero (the bind installs zero coefficients)
+        and interface blocks carry the rbf coefficients; those values are
+        authoritative.  Every other block is a provisional placeholder:
+        source positions carry the acquisition coordinates, mechanism,
+        signature-derivative, reflectivity and mesh blocks are zero and
+        signatures are ``1 + 0j``.  Sauce's ``controls.state_output`` (see
+        :meth:`from_file`) is authoritative for those, and
+        :class:`~frequensolve.imaging.ImagingProblem` replaces them (with the
+        mechanism ``/scaling``) by registry discovery before exposing
+        ``problem.state``.
         """
 
         values = np.zeros(space.full_size, dtype=np.float64)

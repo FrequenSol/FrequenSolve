@@ -39,7 +39,7 @@ def setup(tmp_path):
     return fake, problem, lin, fake.linearizations[lin.state_fingerprint]
 
 
-N = len(FREQUENCIES)  # jvp / vjp / normal submit one single-frequency job per task
+N = 1  # jvp / vjp / normal submit one job carrying every frequency task
 
 
 def _actions(fake):
@@ -109,8 +109,13 @@ def test_jacobian_memoizes_per_input_and_rejects_foreign_vectors(setup):
     assert _actions(fake) == ["linearize"] + ["jvp"] * N + ["vjp"] * N
     J @ (2.0 * dv)
     assert _actions(fake) == ["linearize"] + ["jvp"] * N + ["vjp"] * N + ["jvp"] * N
-    jobs = [s["job"] for s in fake.submissions if s["action"] == "jvp"]
-    assert len(set(jobs)) == 2 * N  # one job per frequency task, all distinct
+    jvps = [job for job in fake.jobs if job.action == "jvp"]
+    assert len({job.name for job in jvps}) == 2  # distinct jobs per direction
+    assert all(job.f_list == FREQUENCIES for job in jvps)
+    # the saved-state stem and a direction stem: Sauce reads each task's sibling
+    assert jvps[0].state == problem.linearize().job.state_file()
+    assert jvps[0].direction.name == "direction.h5"
+    assert all(jvps[0].task_input(jvps[0].direction, t).is_file() for t in (1, 2))
 
     other = problem.restrict(active=["vp"]).space.random(0)
     with pytest.raises(ValueError, match="different control space"):

@@ -251,13 +251,15 @@ def test_linearize_matches_the_surrogate_value_gradient_and_report(setup, fake):
     assert problem.gradient() is lin.gradient
     assert problem.jacobian() is lin.jacobian
     assert problem.normal() is lin.normal
-    # the moved state needed one single-frequency registry-discovery linearize
-    # at the authored point first; the authored point over every frequency is
-    # a new (value-only, state-less) job
+    # the moved state needed one registry-discovery linearize at the authored
+    # point first (value-only, state-less, every frequency in one job); the
+    # authored point reuses it
     assert [s["action"] for s in fake.submissions] == ["linearize", "linearize"]
     discovery = problem.linearize(problem.full_space.zeros(), gradient=False)
-    assert discovery.job.control_state is None and len(fake.submissions) == 3
+    assert discovery.job.control_state is None and len(fake.submissions) == 2
     assert discovery.frequencies == FREQUENCIES
+    assert discovery.job.n_tasks == 2 and discovery.job.state_output is not None
+    assert discovery.job.state_output_file(2).name == "baseline_2.h5"
 
 
 def test_linearize_caches_by_fingerprint_and_misses_after_state_updates(setup, fake):
@@ -268,22 +270,21 @@ def test_linearize_caches_by_fingerprint_and_misses_after_state_updates(setup, f
     assert problem.linearize(problem.vector()) is first
     assert problem.linearize(np.zeros(8)) is first
     assert problem.value() == first.value
-    # two frequencies: one single-frequency registry discovery, then the job
-    assert len(fake.submissions) == 2
-    assert len(problem.cache.keys()) == 2 and problem.cache.keys()[-1] == (
-        first.fingerprint
-    )
+    # the authored point discovers the registry in its own (one) job
+    assert len(fake.submissions) == 1
+    assert first.job.state_output is not None
+    assert problem.cache.keys() == [first.fingerprint]
 
     second = problem.linearize(problem.vector() + 1.0)
-    assert second is not first and len(fake.submissions) == 3
+    assert second is not first and len(fake.submissions) == 2
     assert problem.linearize() is first  # the state itself did not move
 
     problem.state = problem.state.with_update(problem.vector() + 1.0)
     assert problem.linearize() is second  # same point: same fingerprint
-    assert len(fake.submissions) == 3
+    assert len(fake.submissions) == 2
 
     third = problem.linearize(problem.vector() + 1.0)
-    assert len(fake.submissions) == 4
+    assert len(fake.submissions) == 3
     assert problem.cache.keys() == [second.fingerprint, third.fingerprint]
     assert not first.entry.directory.exists()  # evicted staging directory
     assert third.entry.directory.exists()
@@ -292,7 +293,7 @@ def test_linearize_caches_by_fingerprint_and_misses_after_state_updates(setup, f
     assert problem.cache.keys() == []
     assert not third.entry.directory.exists()
     assert problem.linearize() is not second
-    assert len(fake.submissions) == 5
+    assert len(fake.submissions) == 4
 
 
 def test_value_only_linearizations_are_upgraded_when_a_gradient_is_needed(setup, fake):
@@ -304,14 +305,14 @@ def test_value_only_linearizations_are_upgraded_when_a_gradient_is_needed(setup,
     assert (
         value_only.state_fingerprint == _surrogate(fake, value_only).state_fingerprint
     )
-    assert problem.value() == value_only.value and len(fake.submissions) == 2
+    assert problem.value() == value_only.value and len(fake.submissions) == 1
 
     with_gradient = problem.linearize()
     assert with_gradient is not value_only and with_gradient.gradient is not None
-    assert len(fake.submissions) == 3
+    assert len(fake.submissions) == 2
     assert problem.linearize(gradient=False) is with_gradient
-    assert problem.cache.keys()[-1] == with_gradient.fingerprint
-    assert len(problem.cache.keys()) == 2  # plus the registry discovery
+    # the gradient-carrying linearization replaces the value-only entry
+    assert problem.cache.keys() == [with_gradient.fingerprint]
 
 
 def test_restricted_views_share_state_and_submit_only_their_tasks(setup, fake):
@@ -594,11 +595,13 @@ def test_simulation_at_scales_named_encoding_terms(tmp_path, fake):
     from frequensolve.seismic.sources import SourceEncoding
 
     _sim, problem = _source_problem(tmp_path, fake, signature=True)
+    # registry discovery submits the working simulation, so take the state
+    # before installing the (locally unnamed) encoding below
+    state = problem.state_from(np.concatenate([np.zeros(4), [1.0, 0.0, 0.0, -1.0]]))
     names = problem.simulation.acquisition.source_point_names()
     problem.simulation.acquisition.source_encoding = SourceEncoding.named(
         {"shot": {names[0]: 1.0, names[1]: 2.0}, "other": {names[0]: 1.0}}
     )
-    state = problem.state_from(np.concatenate([np.zeros(4), [1.0, 0.0, 0.0, -1.0]]))
 
     installed = problem.simulation_at(state)
 
@@ -751,26 +754,55 @@ def test_simulation_at_rejects_a_mechanism_without_scaling(tmp_path, fake):
     }
 
 
-def test_staged_states_carry_the_mechanism_scaling(tmp_path):
-    fake = FakeImagingSite({"source.1.mechanism": 2, "source.2.mechanism": 2}, seed=7)
+def test_source_blocks_take_sauces_discovered_baseline(tmp_path, fake):
     _sim, problem = _source_problem(tmp_path, fake, mechanism=True, signature=False)
-    problem.linearize(gradient=False)  # learns the registry baseline
+    names = ["source.1.mechanism", "source.2.mechanism"]
     shared = problem._shared
-    names = [n for n in shared.baseline.names if n.endswith(".mechanism")]
-    shared.baseline = ControlStateFile(
-        shared.baseline.blocks,
-        scaling={name: 2.0 for name in names},
-        scaling_units={name: "N*m" for name in names},
-    )
-    state = problem.state_from(problem.vector().values + 0.1)
-    _stage, path = problem._stage_state("sha256:" + "ab" * 32, state)
-    staged = ControlStateFile.read(path)
-    # the state carries no scaling of its own: its mechanism blocks are read
-    # in task coordinates, so no baseline scaling is attached to them
-    assert staged.scaling == {}
+    # before discovery the Sauce-owned blocks are provisional placeholders
+    assert shared.state_provisional and shared.baseline is None
+    np.testing.assert_array_equal(shared.state["src"]["source.2.mechanism"], 0.0)
+    assert fake.submissions == []
+
+    # asking for the state discovers Sauce's baseline (one value-only job)
+    state = problem.state
+    assert [s["action"] for s in fake.submissions] == ["linearize"]
+    discovery = fake.jobs[0]
+    assert discovery.control_state is None and discovery.state_output is not None
+    mechanism = state["src.mechanism"]
+    np.testing.assert_allclose(mechanism["source.1.mechanism"], [0.75 + 0.0j])
+    np.testing.assert_allclose(mechanism["source.2.mechanism"], [1.5 + 0.0j])
+    assert state.scaling == {name: 2.0e9 for name in names}
+    assert state.scaling_units == {name: "N*m" for name in names}
+    np.testing.assert_array_equal(state["vp"], 0.0)  # FrequenSolve-authored
+    assert problem.is_authored() and shared.authored is state
+    assert problem.linearize(gradient=False).job is discovery  # cached
+
+    # an unchanged state leaves the sources of the simulation alone
+    installed = problem.simulation_at(problem.state)
+    assert installed.acquisition.to_fs() == problem.simulation.acquisition.to_fs()
+
+    # the first gradient step starts from Sauce's mechanism, not from zero
+    lin = problem.linearize()
+    step = -0.1 * lin.gradient
+    assert np.any(step["src"]["source.2.mechanism"] != 0.0)
+    moved = problem.linearize(problem.vector() + step)
+    staged = ControlStateFile.read(moved.job.control_state)
+    baseline = shared.baseline
+    for name in names:
+        expected = baseline[name] + ControlVector(step.values, problem.space)["src"][
+            name
+        ].view(np.float64)
+        np.testing.assert_allclose(staged[name], expected)
+    assert staged.scaling == {name: 2.0e9 for name in names}
+    assert staged.scaling_units == {name: "N*m" for name in names}
+    # the fake replays the staged mechanism at baseline + step
+    m = _surrogate(fake, moved).m
+    np.testing.assert_allclose(m, (problem.vector() + step).values)
+
+    # a state with its own scaling is staged with it
     scaled = ControlState(
         state.space,
-        state.values,
+        moved.state.values,
         scaling={name: 5.0 for name in names},
         scaling_units={name: "N" for name in names},
     )
@@ -778,6 +810,29 @@ def test_staged_states_carry_the_mechanism_scaling(tmp_path):
     staged = ControlStateFile.read(path)
     assert staged.scaling == {name: 5.0 for name in names}
     assert staged.scaling_units == {name: "N" for name in names}
+
+
+def test_first_authored_linearize_discovers_in_its_own_job(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, mechanism=True, signature=False)
+    lin = problem.linearize()
+    assert len(fake.submissions) == 1 and lin.gradient is not None
+    assert lin.job.state_output is not None and lin.job.control_state is None
+    assert lin.state is problem.state  # the adopted baseline
+    np.testing.assert_allclose(lin.state["source.2.mechanism"], [1.5 + 0.0j])
+    assert problem.linearize() is lin and len(fake.submissions) == 1
+
+
+def test_vector_and_state_from_discover_before_building_points(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, mechanism=True, signature=False)
+    x0 = problem.vector()  # an optimizer's starting point
+    assert len(fake.submissions) == 1
+    np.testing.assert_allclose(x0["src"]["source.2.mechanism"], [1.5 + 0.0j])
+    update = problem.state_from(x0.values + 0.25)
+    np.testing.assert_allclose(update["source.1.mechanism"], [1.0 + 0.25j])
+    # dry runs never submit, not even the discovery
+    _sim2, other = _source_problem(tmp_path / "other", fake, mechanism=True)
+    other.dry_run(np.ones(other.space.size))
+    assert len(fake.submissions) == 1 and other._shared.baseline is None
 
 
 def test_simulation_at_rejects_a_changed_signature_derivative(tmp_path, fake):
@@ -831,8 +886,11 @@ def test_dry_run_describes_the_linearize_job_without_submitting(setup, fake):
     }
     assert plan["outputs"]["covector"][0].endswith("gradient_1.h5")
     json.dumps(plan)
-    # two frequencies: the registry is discovered by a single-frequency job
-    assert plan["registry_discovery"]
+    # the authored point discovers the registry in its own job
+    assert not plan["registry_discovery"]
+    assert plan["job"]["fwi_operator"]["controls"]["state_output"].endswith(
+        "baseline.h5"
+    )
     assert "state" not in plan["job"]["fwi_operator"]["controls"]
     moved = problem.dry_run(np.ones(8))
     assert moved["registry_discovery"] and fake.submissions == []

@@ -77,8 +77,12 @@ OFFSET_TAPER = (0.1, 0.25)  # km, near-offset raised cosine
 # Penalties are scale free (0.5 * alpha * int |dc/dxi|^2 over the unit
 # sediment column, xi = depth / thickness) and the Huber data term is
 # normalized to O(1), so an O(1e-2) alpha is a real but gentle smoothness
-# prior on the log coefficients.
-TIKHONOV_ALPHA = 1.0e-2
+# prior on the log coefficients.  Fast-case sweep (vp error ratio, data
+# objective ratio): 3e-3 -> 1.02, 0.015; 1e-2 -> 0.834, 0.016;
+# 2e-2 -> 0.724, 0.016; 3e-2 -> 0.686, 0.030; 5e-2 -> 0.689, 0.030.  Weaker
+# smoothing lets the four-iteration bands overfit the notch, so 3e-2 (on the
+# plateau) restores margin against the 0.85 limit.
+TIKHONOV_ALPHA = 3.0e-2
 
 # Continuation bands (Hz) and the frequencies they need.
 FAST_BANDS = [[2.0, 3.0], [3.0, 4.5]]

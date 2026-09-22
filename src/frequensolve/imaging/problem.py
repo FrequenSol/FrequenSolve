@@ -79,6 +79,7 @@ from frequensolve.imaging._backend import (
     read_state_output,
     read_task_objective_vectors,
     reduce_covectors,
+    task_inputs,
     total_value,
 )
 from frequensolve.imaging.controls import (
@@ -115,6 +116,10 @@ class _Unset:
 
 
 _UNSET: Any = _Unset()
+
+# Block kinds whose authored baseline FrequenSolve installs in the simulation;
+# the baseline of every other kind is Sauce's (``controls.state_output``).
+_FRS_AUTHORED_KINDS = frozenset({"profile", "grid", "interface"})
 
 
 # ---------------------------------------------------------------------------
@@ -324,10 +329,23 @@ class _Shared:
         self.family.append(self)
         self.linearizations: Dict[str, "Linearization"] = {}
         self.pending_manifest = not self.space.resolved
+        # ``authored`` is the reference point Sauce runs when no
+        # ``controls.state`` is staged.  Material and interface blocks are
+        # authored by FrequenSolve (the bind installs their coefficients);
+        # every other block (sources, reflectivity, mesh, registry) has a
+        # baseline only Sauce knows, so until registry discovery those blocks
+        # hold provisional placeholders (``ControlState.from_simulation``) and
+        # ``sauce_owned`` makes the public state accessors discover first.
         self.authored: Optional[ControlState] = (
             None if self.pending_manifest else ControlState.from_simulation(self.space)
         )
+        self.sauce_owned = self.pending_manifest or any(
+            block.kind not in _FRS_AUTHORED_KINDS
+            for block in self.space.resolved_blocks
+        )
         self.state: Optional[ControlState] = self.authored
+        # ``state`` still is the provisional ``authored`` (replaced on adoption).
+        self.state_provisional = True
         # Sauce's ``controls.state`` must carry every registry block (source
         # blocks included); the complete baseline is learned from the first
         # ``state_output`` and merged with the space's blocks afterwards.
@@ -400,6 +418,55 @@ class _Shared:
             scaling=state.scaling,
             scaling_units=state.scaling_units,
         )
+        self.state_provisional = False
+
+    def adopt_baseline(
+        self, baseline: ControlStateFile, manifest: ControlRegistryManifest
+    ) -> None:
+        """Adopt Sauce's registry baseline as the authored reference point.
+
+        Sauce-owned blocks (every kind but material profiles/lattices and
+        interfaces) take their values, ``/scaling`` and ``/scaling_units``
+        from ``baseline``; material and interface blocks keep FrequenSolve's
+        authored values.  A still-provisional :attr:`state` becomes the new
+        authored state; a state the caller set explicitly is kept.
+        """
+
+        self.manifest = manifest
+        self.baseline = baseline
+        if self.pending_manifest:
+            self.space = self.space.with_manifest(manifest)  # type: ignore[assignment]
+            self.pending_manifest = False
+        full = self.space.without_support()
+        base = (
+            ControlState.from_simulation(full)
+            if self.authored is None
+            else self.authored
+        )
+        values = np.array(base.values, copy=True)
+        scaling: Dict[str, float] = {}
+        units: Dict[str, str] = {}
+        for block, sl in zip(full.resolved_blocks, full.full_slices.values()):
+            if block.kind in _FRS_AUTHORED_KINDS:
+                continue
+            if block.name not in baseline.blocks:
+                raise ValueError(
+                    f"Sauce's registry baseline has no block {block.name!r}"
+                )
+            exported = np.asarray(baseline[block.name], dtype=np.float64).reshape(-1)
+            if exported.size != sl.stop - sl.start:
+                raise ValueError(
+                    f"block {block.name!r} has {sl.stop - sl.start} DOFs locally but "
+                    f"{exported.size} in Sauce's registry baseline"
+                )
+            values[sl] = exported
+            if block.name in baseline.scaling:
+                scaling[block.name] = baseline.scaling[block.name]
+                if block.name in baseline.scaling_units:
+                    units[block.name] = baseline.scaling_units[block.name]
+        self.authored = ControlState(full, values, scaling=scaling, scaling_units=units)
+        if self.state_provisional:
+            self.state = self.authored
 
     def forget(self, entries: Iterable[LinearizationEntry]) -> None:
         for entry in entries:
@@ -635,8 +702,17 @@ class ImagingProblem:
 
     @property
     def state(self) -> Optional[ControlState]:
-        """Return the current full baseline (shared by every view)."""
+        """Return the current full baseline (shared by every view).
 
+        Source, reflectivity, mesh and registry blocks have baselines only
+        Sauce knows (``controls.state_output``).  On a space with such blocks
+        the first access runs registry discovery (one value-only linearize at
+        the authored point, see :meth:`linearize`) so the state never exposes
+        FrequenSolve's provisional placeholders; material/interface-only
+        spaces are known locally and submit nothing.
+        """
+
+        self._ensure_registry()
         return self._shared.state
 
     @state.setter
@@ -865,7 +941,16 @@ class ImagingProblem:
 
     # -- states and vectors ---------------------------------------------------
 
-    def _require_state(self) -> ControlState:
+    def _ensure_registry(self) -> None:
+        """Run registry discovery if Sauce owns baselines this problem lacks."""
+
+        shared = self._shared
+        if shared.baseline is None and shared.sauce_owned:
+            self._discover_registry()
+
+    def _require_state(self, *, discover: bool = True) -> ControlState:
+        if discover:
+            self._ensure_registry()
         state = self._shared.state
         if state is None:
             raise ValueError(
@@ -874,18 +959,44 @@ class ImagingProblem:
             )
         return state
 
-    def _state_at(self, v: Any, base: Optional[ControlState] = None) -> ControlState:
-        """Return the full state at ``v`` (vector on this view's space)."""
+    def _state_at(
+        self,
+        v: Any,
+        base: Optional[ControlState] = None,
+        *,
+        discover: bool = True,
+    ) -> ControlState:
+        """Return the full state at ``v`` (vector on this view's space).
+
+        ``discover=False`` skips registry discovery (``dry_run`` submits
+        nothing), leaving Sauce-owned blocks at their provisional values.
+        """
 
         if isinstance(v, ControlState):
             if v.space.blocks != self._shared.space.blocks:
                 raise ValueError("state does not cover the problem's control blocks")
             return v
-        state = self._require_state() if base is None else base
+        state = self._require_state(discover=discover) if base is None else base
         if v is None:
             return state
         vector = v if isinstance(v, ControlVector) else ControlVector(v, self.space)
         return state.with_update(vector)
+
+    def _linearization_point(self, v: Any) -> Optional[ControlState]:
+        """Return the state a linearize at ``v`` runs (``None``: pending layout).
+
+        ``v=None`` before registry discovery is the authored point, which
+        discovers the registry in its own job; anything else goes through
+        :meth:`_state_at` (discovering first when Sauce owns baselines).
+        """
+
+        shared = self._shared
+        if v is None and (
+            shared.state is None
+            or (shared.baseline is None and shared.state_provisional)
+        ):
+            return shared.state
+        return self._state_at(v)
 
     def vector(self, state: Optional[ControlState] = None) -> ControlVector:
         """Return the active slice of ``state`` (default: the current state)."""
@@ -927,9 +1038,8 @@ class ImagingProblem:
     ) -> FWIOperatorJob:
         shared = self._shared
         smoothing = self.smoothing if gradient else None
-        # Sauce writes ``state_output`` and ``manifest`` without a task suffix
-        # (every task writes the same path), so only the single-task registry
-        # discovery job asks for them.
+        # Only the registry discovery linearize asks for ``state_output`` and
+        # ``manifest`` (task-suffixed when the job has several tasks).
         return FWIOperatorJob(
             shared.backend.job_name("linearize"),
             shared.simulation,
@@ -963,13 +1073,6 @@ class ImagingProblem:
 
         self.backend.run(job)
         self._check_tasks(job)
-
-    def _run_jobs(self, jobs: Sequence[FWIOperatorJob]) -> None:
-        """Run a job family (siblings submitted before waiting) and check tasks."""
-
-        self.backend.run_many(jobs)
-        for job in jobs:
-            self._check_tasks(job)
 
     @staticmethod
     def _check_tasks(job: FWIOperatorJob) -> None:
@@ -1045,21 +1148,18 @@ class ImagingProblem:
     def _inline_authoring(self) -> bool:
         """Return whether points are authored into the simulation, not a state file.
 
-        Sauce's ``controls.state`` must carry every registry block, and its
-        exported source blocks are in the per-frequency nondimensional units
-        of the task that wrote them, so one state file cannot serve a
-        multi-frequency job.  A space made only of material and interface
-        blocks avoids the file: the coefficients are installed in the working
-        simulation (Sauce's authored baseline is then the point itself).
+        Sauce's ``controls.state`` must carry every registry block.  A space
+        made only of material and interface blocks avoids the file: the
+        coefficients are installed in the working simulation (Sauce's
+        authored baseline is then the point itself).  Other spaces stage
+        ``controls.state`` built on the discovered registry baseline; its
+        mechanism ``/scaling`` lets every frequency task replay it.
         """
 
         space = self._shared.space
         if not space.resolved:
             return False
-        return all(
-            block.kind in {"profile", "grid", "interface"}
-            for block in space.resolved_blocks
-        )
+        return all(block.kind in _FRS_AUTHORED_KINDS for block in space.resolved_blocks)
 
     def _sync_simulation(self, state: Optional[ControlState]) -> None:
         """Author ``state``'s coefficients in the working simulation when inline."""
@@ -1138,7 +1238,7 @@ class ImagingProblem:
         """Return Sauce's support masks for ``space`` or ``None`` when absent."""
 
         file: Any = None
-        if job.state_output is not None and job.state_output_file().is_file():
+        if job.state_output is not None and job.state_output_file(1).is_file():
             file = read_state_output(job)
         elif job.covector is not None and job.covector_file(1).is_file():
             file = ControlVectorFile.read(job.covector_file(1), native=False)
@@ -1146,20 +1246,11 @@ class ImagingProblem:
             file = self._shared.baseline
         if file is None or not file.support:
             return None
-        masks = {
+        return {
             name: file.support_mask(name)
             for name in space.blocks
             if name in file.blocks
         }
-        # Sauce 5e07624 exports an all-zero ``/support/reflectivity.<name>``
-        # (it computes no derivative measure for reflectivity providers) even
-        # though the block's covector is nonzero; adopting it would freeze
-        # every reflectivity DOF.  Treat reflectivity blocks as fully
-        # supported until Sauce measures them (spec section 11, item 4).
-        for name in masks:
-            if name.startswith("reflectivity."):
-                masks[name] = np.ones(masks[name].size, dtype=bool)
-        return masks
 
     def _fallback_masks(self, space: ControlSpace) -> Dict[str, np.ndarray]:
         bound = self._shared.space
@@ -1191,14 +1282,19 @@ class ImagingProblem:
             shared.cache.get(key)
             return cached
         discover = shared.baseline is None
-        if discover and (not self._is_authored(state) or len(self._frequencies) > 1):
-            # Discover the complete registry baseline with a dedicated
-            # single-task, value-only job at the authored point.
+        if discover and not self._is_authored(state):
+            # A point away from the authored one needs the complete registry
+            # baseline for its ``controls.state``: discover it first with a
+            # value-only linearize at the authored point.
             self._discover_registry()
             discover = False
             if state is None:
                 state = shared.state
                 key = self._fingerprint(state)
+                cached = shared.linearizations.get(key)
+                if cached is not None and (cached.gradient is not None or not gradient):
+                    shared.cache.get(key)
+                    return cached
         space = self.space
         self._sync_simulation(state)
         stage, control_state = self._stage_state(key, state)
@@ -1208,20 +1304,16 @@ class ImagingProblem:
         self._run_job(job)
 
         if discover:
-            manifest = read_manifest(job)
-            shared.manifest = manifest
-            shared.baseline = read_state_output(job)
-            if shared.pending_manifest:
-                shared.space = shared.space.with_manifest(manifest)  # type: ignore[assignment]
-                shared.pending_manifest = False
-                shared.state = ControlState.from_file(
-                    shared.baseline, shared.space.without_support()
-                )
-                state = shared.state
-                space = self.space
-        else:
-            assert shared.manifest is not None
-            manifest = shared.manifest
+            # The job ran without ``controls.state``, i.e. at Sauce's own
+            # baseline: adopt it (every task exports the complete baseline;
+            # mechanism blocks carry ``/scaling`` so task 1's replays in any
+            # task) and key the linearization by the adopted point.
+            shared.adopt_baseline(read_state_output(job), read_manifest(job))
+            state = shared.authored
+            key = self._fingerprint(state)
+            space = self.space
+        assert shared.manifest is not None
+        manifest = shared.manifest
         assert state is not None
 
         masks = self._read_masks(job, space)
@@ -1277,18 +1369,16 @@ class ImagingProblem:
     def _discover_registry(self) -> None:
         """Learn Sauce's complete registry baseline (``state_output``/``manifest``).
 
-        Runs one value-only linearize at the authored point over a single
-        frequency (Sauce writes both exports without a task suffix, so a
-        multi-task job would let its tasks clobber each other's files).
+        Runs one value-only linearize of this view at the authored point
+        (one job over the view's frequencies; each task exports its baseline
+        and manifest under ``<stem>_<task><ext>``) and adopts task 1's
+        baseline (:meth:`_Shared.adopt_baseline`).  The linearization is
+        cached like any other, so a following value-only linearize at the
+        authored point reuses it.
         """
 
         shared = self._shared
-        view = (
-            self
-            if len(self._frequencies) == 1
-            else self.restrict(frequencies=[self._frequencies[0]])
-        )
-        view._linearize_state(shared.authored, gradient=False)
+        self._linearize_state(shared.authored, gradient=False)
         assert shared.baseline is not None
 
     def linearize(self, v: Any = None, *, gradient: bool = True) -> "Linearization":
@@ -1301,18 +1391,21 @@ class ImagingProblem:
                 linearization of the same point is reused either way.
 
         The first linearize of a problem learns Sauce's complete registry
-        baseline from ``state_output``: a single-frequency problem does so on
-        its first job at the authored baseline; otherwise (several
-        frequencies, or a non-authored point) one value-only, single-frequency
-        linearize at the authored baseline runs first.  A point of a
-        material/interface-only space is authored into the working simulation;
-        other spaces stage it as ``controls.state``.
+        baseline from ``state_output``/``manifest``: a linearize at the
+        authored point does so in its own job; a non-authored point first runs
+        one value-only linearize at the authored point.  Source, reflectivity,
+        mesh and registry blocks of :attr:`state` then carry Sauce's baseline
+        (with the mechanism ``/scaling``); material and interface blocks keep
+        FrequenSolve's authored values.  Asking for :attr:`state`,
+        :meth:`vector`, :meth:`state_from` or a point ``v`` on a space with
+        Sauce-owned blocks runs that discovery first, so no caller sees (or
+        steps from) the provisional placeholders.  A point of a
+        material/interface-only space is authored into the working
+        simulation; other spaces stage it as ``controls.state``.  Each action
+        is one job over the view's frequencies (one task per frequency).
         """
 
-        state = (
-            None if (v is None and self._shared.state is None) else self._state_at(v)
-        )
-        return self._linearize_state(state, gradient=gradient)
+        return self._linearize_state(self._linearization_point(v), gradient=gradient)
 
     def value(self, v: Any = None) -> float:
         """Return the misfit value at ``v``."""
@@ -1512,13 +1605,17 @@ class ImagingProblem:
     def dry_run(self, v: Any = None) -> Dict[str, Any]:
         """Describe the linearize job at ``v`` without submitting it.
 
-        Before the first linearize the complete registry baseline is unknown,
-        so a non-authored ``v`` is described without ``controls.state`` and
-        ``payload["registry_discovery"]`` is ``True``.
+        Nothing is submitted, not even registry discovery: before the first
+        linearize the complete registry baseline is unknown, so a non-authored
+        ``v`` is described without ``controls.state`` and
+        ``payload["registry_discovery"]`` is ``True`` (a discovery linearize
+        at the authored point would run first).
         """
 
         state = (
-            None if (v is None and self._shared.state is None) else self._state_at(v)
+            None
+            if (v is None and self._shared.state is None)
+            else self._state_at(v, discover=False)
         )
         key = self._fingerprint(state)
         _stage, control_state = self._stage_state(key, state)
@@ -1531,8 +1628,7 @@ class ImagingProblem:
         payload = self.backend.dry_run(job)
         payload["fingerprint"] = key
         payload["registry_discovery"] = bool(
-            self._shared.baseline is None
-            and (not self._is_authored(state) or len(self._frequencies) > 1)
+            self._shared.baseline is None and not self._is_authored(state)
         )
         return payload
 
@@ -1545,26 +1641,12 @@ class ImagingProblem:
         acoustic or classic elastic DPG with unrelaxed assembly and waveform
         objectives; it rejects ``extension``, coupled physics, Galerkin,
         2.5D, axisymmetry, phase objectives, interface (geometry) controls and
-        ``signature_df`` source blocks (spectral observation support).  Maps
-        in a surface-relative coordinate system are a documented limitation
-        of the pinned Sauce build (warning).
+        ``signature_df`` source blocks (spectral observation support).
         """
 
         errors: List[str] = []
         warnings: List[str] = []
         simulation = self._shared.simulation
-        surface_maps = [
-            b.name
-            for b in blocks
-            if b.kind == "reflectivity" and b.coordinate_system not in (None, "global")
-        ]
-        if surface_maps:
-            warnings.append(
-                "Sauce 5e07624 evaluates reflectivity maps without their "
-                "surface-coordinate context ('Surface-coordinate control map has "
-                "no evaluation context'); author the basis on a global axis "
-                "(DepthProfile(..., datum='global')) for: " + ", ".join(surface_maps)
-            )
         if extension is not None:
             errors.append(
                 "reflectivity and extension are mutually exclusive in one problem"
@@ -2248,11 +2330,36 @@ class Linearization:
             )
         return pairs
 
-    def _direction_file(self, dv: ControlVector, directory: Path, task: int) -> Path:
-        state_fp, registry_fp = self.task_fingerprints[task - 1]
-        return dv.to_file(
-            state_fingerprint=state_fp, registry_fingerprint=registry_fp
-        ).write(directory / f"direction_{task}.h5")
+    def _direction_stem(self, dv: ControlVector, directory: Path) -> Path:
+        """Write ``dv`` once per task under its fingerprints; return the job input.
+
+        Sauce resolves a direction input of a multi-task job to the
+        task-suffixed sibling ``<stem>_<task><ext>``, so task ``t`` reads its
+        own copy (each carries that task's state/registry fingerprints).
+        """
+
+        stem = directory / "direction.h5"
+        for task, path in task_inputs(stem, len(self.frequencies)):
+            state_fp, registry_fp = self.task_fingerprints[task - 1]
+            dv.to_file(
+                state_fingerprint=state_fp, registry_fingerprint=registry_fp
+            ).write(path)
+        return stem
+
+    def _objective_vector_stem(self, dual: DataVector, directory: Path) -> Path:
+        """Write each task's rows of ``dual`` under its fingerprint; return the input."""
+
+        stem = directory / "dual.json"
+        for task, path in task_inputs(stem, len(self.frequencies)):
+            dual.write_objective_vector(
+                path,
+                state_fingerprint=self.task_fingerprints[task - 1][0],
+                term_layout=self.data_space.term_layouts(
+                    frequency=self.frequencies[task - 1]
+                ),
+                n_ranks=1,
+            )
+        return stem
 
     def _memo(self, action: str, digest: str, compute: Callable[[], Any]) -> Any:
         key = (action, digest)
@@ -2260,40 +2367,35 @@ class Linearization:
             self._ops[key] = compute()
         return self._ops[key]
 
-    def _family(
-        self, action: str, per_task: Callable[[int], Dict[str, Any]]
-    ) -> List[FWIOperatorJob]:
-        """Build one single-frequency ``action`` job per saved task.
+    def _state_input(self) -> Path:
+        """Return the saved-state input of a derivative action on this point.
 
-        Sauce reads ``fwi_operator.state`` of a derivative action exactly as
-        given (only ``linearize`` appends the task suffix), so task ``t`` of
-        the saved state is applied by its own job over ``frequencies[t-1]``.
+        ``linearize`` always writes ``<state stem>_<task><ext>``; a multi-task
+        derivative job names the stem (Sauce resolves each task's sibling)
+        and a single-task job names task 1's file exactly.
+        """
+
+        return (
+            self.job.state_file(1)
+            if len(self.frequencies) == 1
+            else self.job.state_file()
+        )
+
+    def _action_job(self, action: str, **options: Any) -> FWIOperatorJob:
+        """Build the one ``action`` job over every saved task of this point.
+
         The working simulation is re-synchronized to this linearization's
         point first (a later linearize may have moved it).
         """
 
         self.problem._sync_simulation(self.state)
-        return [
-            self.problem._operator_job(
-                self.space,
-                action,
-                frequencies=[frequency],
-                state=self.job.state_file(task),
-                **per_task(task),
-            )
-            for task, frequency in enumerate(self.frequencies, start=1)
-        ]
-
-    def _reduce(
-        self, jobs: Sequence[FWIOperatorJob], *, weighted: bool
-    ) -> ControlVector:
-        total = self.space.zeros()
-        for task, job in enumerate(jobs, start=1):
-            part = _vector_from_file(reduce_covectors(job), self.space)
-            if weighted:
-                part = part * float(self.frequency_weights[task - 1])
-            total = total + part
-        return total
+        return self.problem._operator_job(
+            self.space,
+            action,
+            frequencies=self.frequencies,
+            state=self._state_input(),
+            **options,
+        )
 
     def weight_data(self, r: Any) -> DataVector:
         """Return ``W r``: the data vector scaled by the per-frequency weights.
@@ -2319,22 +2421,17 @@ class Linearization:
 
         def compute() -> DataVector:
             directory = self._ops_dir()
-            jobs = self._family(
+            job = self._action_job(
                 "jvp",
-                lambda task: {
-                    "direction": self._direction_file(direction, directory, task),
-                    "objective_vector": "jvp.json",
-                },
+                direction=self._direction_stem(direction, directory),
+                objective_vector="jvp.json",
             )
-            self.problem._run_jobs(jobs)
-            values = np.zeros(self.data_space.size, dtype=self.data_space.dtype)
-            for task, job in enumerate(jobs, start=1):
-                values += read_task_objective_vectors(
-                    job,
-                    self.data_space,
-                    state_fingerprint=self.task_fingerprints[task - 1][0],
-                ).values
-            return DataVector(values, self.data_space)
+            self.problem._run_job(job)
+            return read_task_objective_vectors(
+                job,
+                self.data_space,
+                state_fingerprint=[fp for fp, _ in self.task_fingerprints],
+            )
 
         return self._memo("jvp", _digest(direction.values), compute)
 
@@ -2345,26 +2442,15 @@ class Linearization:
 
         def compute() -> ControlVector:
             directory = self._ops_dir()
-            jobs = self._family(
+            job = self._action_job(
                 "vjp",
-                lambda task: {
-                    "objective_vector": directory / f"task_{task}" / "dual.json",
-                    "covector": "vjp.h5",
-                },
+                objective_vector=self._objective_vector_stem(dual, directory),
+                covector="vjp.h5",
             )
-            for task, job in enumerate(jobs, start=1):
-                # Inputs are read exactly as configured (no task suffix); each
-                # single-frequency job receives the rows of its own frequency
-                # under its own saved-state fingerprint.
-                assert job.objective_vector is not None
-                dual.write_objective_vector(
-                    job.objective_vector,
-                    state_fingerprint=self.task_fingerprints[task - 1][0],
-                    term_layout=self.data_space.term_layouts(frequency=job.f_list[0]),
-                    n_ranks=1,
-                )
-            self.problem._run_jobs(jobs)
-            return self._reduce(jobs, weighted=False)
+            self.problem._run_job(job)
+            return _vector_from_file(
+                reduce_covectors(job, [1.0] * job.n_tasks), self.space
+            )
 
         return self._memo("vjp", _digest(dual.values), compute)
 
@@ -2375,14 +2461,14 @@ class Linearization:
 
         def compute() -> ControlVector:
             directory = self._ops_dir()
-            jobs = self._family(
+            job = self._action_job(
                 "normal",
-                lambda task: {
-                    "direction": self._direction_file(direction, directory, task),
-                    "covector": "normal.h5",
-                },
+                direction=self._direction_stem(direction, directory),
+                covector="normal.h5",
             )
-            self.problem._run_jobs(jobs)
-            return self._reduce(jobs, weighted=True)
+            self.problem._run_job(job)
+            return _vector_from_file(
+                reduce_covectors(job, self.frequency_weights.tolist()), self.space
+            )
 
         return self._memo("normal", _digest(direction.values), compute)

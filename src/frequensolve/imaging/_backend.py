@@ -35,6 +35,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Tuple,
     Union,
 )
 
@@ -64,6 +65,7 @@ __all__ = [
     "read_state_output",
     "read_task_objective_vectors",
     "reduce_covectors",
+    "task_inputs",
     "total_value",
     "write_task_objective_vectors",
 ]
@@ -265,6 +267,22 @@ def total_value(
 # ---------------------------------------------------------------------------
 
 
+def task_inputs(stem: Path, n_tasks: int) -> List[Tuple[int, Path]]:
+    """Return ``(task, path)`` of each task's copy of a per-task operator input.
+
+    A job with several frequency tasks names ``stem`` and Sauce reads
+    ``<stem>_<task><ext>`` in task ``task``; a single-task job reads ``stem``
+    exactly.
+    """
+
+    if n_tasks == 1:
+        return [(1, stem)]
+    return [
+        (task, stem.with_name(f"{stem.stem}_{task}{stem.suffix}"))
+        for task in range(1, n_tasks + 1)
+    ]
+
+
 def write_task_objective_vectors(
     job: FWIOperatorJob,
     data_vector: Union[DataVector, np.ndarray],
@@ -304,16 +322,25 @@ def read_task_objective_vectors(
     job: FWIOperatorJob,
     space: DataSpace,
     *,
-    state_fingerprint: Optional[str] = None,
+    state_fingerprint: Optional[Union[str, Sequence[Optional[str]]]] = None,
     verify: bool = True,
 ) -> DataVector:
     """Assemble the per-task objective vectors of ``job`` into one vector.
 
     Each task file fills the frequency block of ``space`` at
     ``job.f_list[t - 1]``; entries of frequencies that are not in ``job`` stay
-    zero.
+    zero.  ``state_fingerprint`` is one fingerprint for every task or one per
+    task (Sauce fingerprints each frequency task's saved state on its own).
     """
 
+    if state_fingerprint is None or isinstance(state_fingerprint, str):
+        expected: List[Optional[str]] = [state_fingerprint] * job.n_tasks
+    else:
+        expected = list(state_fingerprint)
+        if len(expected) != job.n_tasks:
+            raise ValueError(
+                f"expected {job.n_tasks} state fingerprints, received {len(expected)}"
+            )
     values = np.zeros(space.size, dtype=space.dtype)
     for task in _tasks(job):
         path = _require_file(
@@ -324,7 +351,7 @@ def read_task_objective_vectors(
             space,
             frequency=job.f_list[task - 1],
             verify=verify,
-            state_fingerprint=state_fingerprint,
+            state_fingerprint=expected[task - 1],
         )
         values += part.values
     return DataVector(values, space)
@@ -335,19 +362,23 @@ def read_task_objective_vectors(
 # ---------------------------------------------------------------------------
 
 
-def read_state_output(job: FWIOperatorJob) -> ControlStateFile:
-    """Read the ``fs-control-state-1`` baseline exported by ``job``."""
+def read_state_output(job: FWIOperatorJob, task: int = 1) -> ControlStateFile:
+    """Read the ``fs-control-state-1`` baseline exported by ``task`` of ``job``.
+
+    Every task exports the complete baseline; mechanism blocks carry
+    ``/scaling`` so the baseline of any task replays in every other one.
+    """
 
     return ControlStateFile.read(
-        _require_file(job.state_output_file(), "control state output")
+        _require_file(job.state_output_file(task), f"task {task} control state output")
     )
 
 
-def read_manifest(job: FWIOperatorJob) -> ControlRegistryManifest:
-    """Read the ``fs-control-registry-1`` manifest exported by ``job``."""
+def read_manifest(job: FWIOperatorJob, task: int = 1) -> ControlRegistryManifest:
+    """Read the ``fs-control-registry-1`` manifest exported by ``task`` of ``job``."""
 
     return ControlRegistryManifest.load(
-        _require_file(job.manifest_file(), "control registry manifest")
+        _require_file(job.manifest_file(task), f"task {task} control registry manifest")
     )
 
 
