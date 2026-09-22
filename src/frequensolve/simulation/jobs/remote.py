@@ -67,9 +67,15 @@ class JobRemoteMixin:
         self._file = file
         ctx = self.export_context()
         data = self.to_fs(ctx, project_relative=True)
-        data["result_path"] = str(self._result_path.relative_to(self.project_path))
+        # Sauce fingerprints the exact job-file bytes, so key order must not
+        # depend on whether ``to_fs`` saw a warm artifact-metadata cache.
+        data.pop("artifact_contract", None)
+        result_path = str(self._result_path.relative_to(self.project_path))
+        data["result_path"] = result_path
         self._set_output_request_fingerprint(data)
+        del data["result_path"]
         data["artifact_contract"] = self._serialized_artifact_metadata()
+        data["result_path"] = result_path
         self._write_json_file(file, data)
         assert ctx.store is not None
         ctx.store.prune_unreferenced(data)
