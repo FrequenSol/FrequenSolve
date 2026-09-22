@@ -182,11 +182,11 @@ def test_extended_problem_solves_against_sauce(tmp_path):
 
     # Sauce's extension actions evaluate the borrowed control map without a
     # surface context ("Surface-coordinate control map has no evaluation
-    # context" for the default ``axis="below"`` profile), so the profile
-    # lives on the global depth axis.
+    # context" for the default ``datum="top"`` profile), so the profile
+    # uses the global vertical axis (``datum="global"``).
     problem = ImagingProblem(
         initial,
-        controls=DepthProfile("vp", "layer_2", count=4, axis="z"),
+        controls=DepthProfile("vp", "layer_2", count=4, datum="global"),
         observed=ObservedData(observed_job),
         site=site,
         name="fwime",

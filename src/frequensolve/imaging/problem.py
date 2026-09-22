@@ -254,6 +254,8 @@ class _Shared:
         min_support: Optional[float],
         submit_options: Optional[Mapping[str, Any]],
         cache_capacity: int,
+        parent: Optional["_Shared"] = None,
+        working_name: Optional[str] = None,
     ) -> None:
         self.name = str(name).strip()
         if not self.name or "/" in self.name:
@@ -261,9 +263,12 @@ class _Shared:
         if not isinstance(controls, ControlSpace):
             controls = ControlSpace(controls)
         self.project = _project_path(simulation)
+        # The caller's simulation (never mutated); ``with_controls`` rebinds a
+        # new control layout against it.
+        self.source_simulation = simulation
         # Jobs persist their simulation under ``<project>/simulations/<name>``;
         # work on a renamed copy so the authored simulation file stays untouched.
-        working = simulation.copy(f"{simulation.name}__{self.name}")
+        working = simulation.copy(working_name or f"{simulation.name}__{self.name}")
         self.space: BoundControlSpace = controls.bind(working)
         self.simulation = self.space.simulation
         self.observed_source = observed
@@ -304,7 +309,19 @@ class _Shared:
         self._site = site
         self._backend: Optional[Backend] = None
         self.submit_options: Dict[str, Any] = dict(submit_options or {})
-        self.cache = LinearizationCache(self.workdir, cache_capacity)
+        # Problems derived with ``with_controls`` share one backend (job name
+        # counter), one LRU cache and the family list that lets an eviction
+        # by any member forget the evicted linearization everywhere.
+        self.family: List["_Shared"]
+        self.cache: LinearizationCache
+        if parent is not None:
+            self._backend = parent.backend
+            self.cache = parent.cache
+            self.family = parent.family
+        else:
+            self.cache = LinearizationCache(self.workdir, cache_capacity)
+            self.family = []
+        self.family.append(self)
         self.linearizations: Dict[str, "Linearization"] = {}
         self.pending_manifest = not self.space.resolved
         self.authored: Optional[ControlState] = (
@@ -377,11 +394,17 @@ class _Shared:
             or state.size != self.space.full_size
         ):
             raise ValueError("state does not cover the problem's control blocks")
-        self.state = ControlState(self.space.without_support(), state.values)
+        self.state = ControlState(
+            self.space.without_support(),
+            state.values,
+            scaling=state.scaling,
+            scaling_units=state.scaling_units,
+        )
 
     def forget(self, entries: Iterable[LinearizationEntry]) -> None:
         for entry in entries:
-            self.linearizations.pop(entry.fingerprint, None)
+            for member in self.family:
+                member.linearizations.pop(entry.fingerprint, None)
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +468,11 @@ class ImagingProblem:
             submit_options=submit_options,
             cache_capacity=cache_capacity,
         )
+        self._init_view()
+
+    def _init_view(self) -> None:
+        """Initialize the view-level attributes of a full (unrestricted) problem."""
+
         self._active: Optional[Tuple[str, ...]] = None
         self._frequencies: Tuple[Any, ...] = tuple(self._shared.frequencies)
         self._masks: Dict[str, np.ndarray] = {}
@@ -744,6 +772,97 @@ class ImagingProblem:
 
         return self.restrict(misfit=misfit, loss=loss)
 
+    def with_controls(
+        self, controls: Any, *, state: Optional[ControlState] = None
+    ) -> "ImagingProblem":
+        """Return a problem over another control layout (resolution change).
+
+        The new problem shares this problem's caller simulation, site,
+        backend (job naming), observed data, misfit, frequencies, smoothing,
+        support threshold, workdir root and linearization cache; its
+        linearizations are keyed by an identity that includes the new
+        control layout, so they never collide with this problem's.  It is a
+        full problem: this view's active blocks, frequency subset and
+        overrides are not carried over (stage views re-apply them).
+
+        Args:
+            controls: A complete :class:`ControlSpace` (or single block), or a
+                mapping ``{block key: new block spec}`` replacing those blocks
+                of :attr:`full_space` and keeping the others (e.g.
+                ``{"vp": im.DepthProfile("vp", "sediment", spacing=25*u.m)}``).
+            state: The initial state.  ``None`` transfers the current state;
+                a state on this problem's layout is transferred; a state on
+                the new layout is adopted as is.
+
+        The transfer is block-wise: blocks whose layout is unchanged are
+        copied, material profile / lattice blocks are projected with
+        :meth:`ControlSpace.transfer_to` (exact for fields the new basis
+        represents, e.g. a hat profile refined by node bisection), blocks
+        absent from this problem take the new problem's authored values, and
+        interface, source, reflectivity, mesh and registry blocks must keep
+        their layout (``ValueError`` otherwise).
+
+        Raises:
+            KeyError: A mapping names a block key this problem does not have.
+            ValueError: The layouts cannot be transferred, or the new space
+                has mesh blocks whose layout Sauce has not reported yet.
+        """
+
+        shared = self._shared
+        old_full = shared.space
+        if isinstance(controls, Mapping) and not isinstance(controls, ControlSpace):
+            unknown = [key for key in controls if key not in old_full.keys]
+            if unknown:
+                raise KeyError(
+                    f"with_controls names unknown block keys {unknown}; the "
+                    f"problem has {list(old_full.keys)}"
+                )
+            specs = old_full.specs
+            space = ControlSpace(
+                **{key: controls.get(key, spec) for key, spec in specs.items()}
+            )
+        elif isinstance(controls, ControlSpace):
+            space = controls
+        else:
+            space = ControlSpace(controls)
+        layout = fingerprint(
+            space=[[key, repr(spec)] for key, spec in space.specs.items()]
+        )
+        source = shared.source_simulation
+        derived = _Shared(
+            source,
+            controls=space,
+            observed=shared.observed_source,
+            misfit=shared.misfit,
+            frequencies=shared.frequencies,
+            site=shared._site,
+            smoothing=shared.smoothing,
+            workdir=shared.workdir,
+            name=shared.name,
+            min_support=shared.min_support,
+            submit_options=shared.submit_options,
+            cache_capacity=shared.cache.capacity,
+            parent=shared,
+            working_name=f"{source.name}__{shared.name}__{layout.split(':')[-1][:10]}",
+        )
+        if derived.pending_manifest:
+            derived.family.remove(derived)
+            raise ValueError(
+                "with_controls cannot build a layout with mesh blocks before Sauce "
+                "reports it; keep mesh blocks out of resolution changes"
+            )
+        problem = object.__new__(ImagingProblem)
+        problem._shared = derived
+        problem._init_view()
+        new_full = derived.space.without_support()
+        if state is None:
+            state = self._require_state()
+        if state.space.blocks == new_full.blocks and state.size == new_full.full_size:
+            derived.set_state(state)
+        else:
+            derived.set_state(_transfer_state(state, old_full, derived))
+        return problem
+
     # -- states and vectors ---------------------------------------------------
 
     def _require_state(self) -> ControlState:
@@ -994,8 +1113,23 @@ class ImagingProblem:
                     f"{blocks[name].size} in Sauce's registry"
                 )
             blocks[name] = values
+        # ``/scaling`` states the coordinate scale of each mechanism block so
+        # Sauce can replay it in any frequency task: blocks taken from the
+        # registry baseline keep its scaling, blocks of ``state`` use the
+        # state's (a block without scaling is read in task coordinates).
+        own = set(state.space.blocks)
+        scaling = {
+            name: value for name, value in baseline.scaling.items() if name not in own
+        }
+        units = {
+            name: value
+            for name, value in baseline.scaling_units.items()
+            if name in scaling
+        }
+        scaling.update(state.scaling)
+        units.update(state.scaling_units)
         path = stage / "state.h5"
-        ControlStateFile(blocks).write(path)
+        ControlStateFile(blocks, scaling=scaling, scaling_units=units).write(path)
         return stage, path
 
     def _read_masks(
@@ -1280,16 +1414,34 @@ class ImagingProblem:
 
         Material (profile, lattice) and interface blocks are always installed.
         Every other block of the full space is compared with its authored
-        baseline and skipped when unchanged.  A changed ``source.<i>.position``
-        moves the acquisition's (inline) physical source point; a changed
-        signature, mechanism or signature-derivative block, reflectivity map
-        or mesh block has no representation in the authored simulation and
-        raises :class:`NotImplementedError` naming the block.
+        baseline and skipped when unchanged.  Changed source blocks:
+
+        - ``source.<i>.position`` moves the (inline) physical source point.
+        - ``source.<i>.mechanism`` is installed when its coordinate scale is
+          known (``/scaling/<block>`` of the state or of Sauce's registry
+          baseline): the physical components ``coordinate * scaling`` in
+          ``/scaling_units/<block>`` become the inline source's basis --
+          ``amplitude`` for scalar/monopole kinds, unit ``direction`` plus
+          ``amplitude`` for vector/dipole kinds, and a
+          ``moment_tensor`` mechanism (``xx/zz/xz`` in 2D, embedded in the
+          x-z plane; ``xx/yy/zz/yz/xz/xy`` in 3D) for tensor kinds.  Complex
+          coordinates must share one phase; the phase is applied like a
+          signature.  Without scaling the coordinates are task-dependent and
+          :class:`NotImplementedError` is raised.
+        - ``source.<i>.signature`` ``q`` multiplies source ``i``'s column of
+          the source encoding (``C = E diag(q)``; an identity encoding is made
+          explicit first).  ``q`` is frequency independent, so a complex ``q``
+          applies a frequency-independent gain ``|q|`` and phase ``arg q`` to
+          the source.
+        - ``source.<i>.signature_df`` (an additive per-Hz term), reflectivity
+          maps and mesh blocks have no representation in the authored
+          simulation and raise :class:`NotImplementedError` naming the block.
         """
 
         state = self._state_at(v)
         simulation = copy.deepcopy(self.simulation)
         full = self._shared.space
+        factors: Dict[int, complex] = {}
         for block, sl in zip(full.resolved_blocks, full.full_slices.values()):
             values = np.array(state.values[sl], copy=True)
             if block.kind in {"profile", "grid"}:
@@ -1308,8 +1460,37 @@ class ImagingProblem:
             if block.kind == "source" and block.quantity == "position":
                 _install_source_position(simulation, block, values)
                 continue
+            source_id = int(block.source_id or 0)
+            if block.kind == "source" and block.quantity == "signature":
+                q = complex(values[0], values[1])
+                factors[source_id] = factors.get(source_id, 1.0 + 0.0j) * q
+                continue
+            if block.kind == "source" and block.quantity == "mechanism":
+                scale, units = self._mechanism_scaling(state, block.name)
+                if scale is None:
+                    raise NotImplementedError(_uninstallable_message(block))
+                phase = _install_source_mechanism(
+                    simulation, block, values, scale, units
+                )
+                if phase != 1.0:
+                    factors[source_id] = factors.get(source_id, 1.0 + 0.0j) * phase
+                continue
             raise NotImplementedError(_uninstallable_message(block))
+        for source_id, factor in sorted(factors.items()):
+            _scale_source(simulation, source_id, factor)
         return simulation
+
+    def _mechanism_scaling(
+        self, state: ControlState, name: str
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """Return ``(scaling, units)`` of a mechanism block (state, then baseline)."""
+
+        if name in state.scaling:
+            return state.scaling[name], state.scaling_units.get(name)
+        baseline = self._shared.baseline
+        if baseline is not None and name in baseline.scaling:
+            return baseline.scaling[name], baseline.scaling_units.get(name)
+        return None, None
 
     def _authored_block(self, name: str, sl: slice) -> Optional[np.ndarray]:
         """Return the authored baseline of block ``name`` (Sauce layout), if known.
@@ -1382,7 +1563,7 @@ class ImagingProblem:
                 "Sauce 5e07624 evaluates reflectivity maps without their "
                 "surface-coordinate context ('Surface-coordinate control map has "
                 "no evaluation context'); author the basis on a global axis "
-                "(DepthProfile(..., axis='z')) for: " + ", ".join(surface_maps)
+                "(DepthProfile(..., datum='global')) for: " + ", ".join(surface_maps)
             )
         if extension is not None:
             errors.append(
@@ -1575,6 +1756,85 @@ class ImagingProblem:
         return report
 
 
+_FIXED_LAYOUT_KINDS = {"interface", "source", "reflectivity", "mesh", "registry"}
+
+
+def _transfer_state(
+    state: ControlState, old: ControlSpace, shared: "_Shared"
+) -> ControlState:
+    """Transfer a full state on ``old`` to ``shared.space`` block by block."""
+
+    source_space = old.without_support()
+    if (
+        state.space.blocks != source_space.blocks
+        or state.size != source_space.full_size
+    ):
+        raise ValueError(
+            "with_controls state covers neither the current nor the new layout"
+        )
+    target_space = shared.space.without_support()
+    authored = shared.authored
+    by_key = {(b.key, b.address): b for b in source_space.resolved_blocks}
+    by_name = {b.name: b for b in source_space.resolved_blocks}
+    values = np.zeros(target_space.full_size, dtype=np.float64)
+    transfers: List[str] = []
+    for target, sl in zip(
+        target_space.resolved_blocks, target_space.full_slices.values()
+    ):
+        source = by_key.get((target.key, target.address)) or by_name.get(target.name)
+        if source is None:
+            if authored is None:
+                raise ValueError(
+                    f"block {target.name!r} is new and has no authored baseline"
+                )
+            values[sl] = authored.values[sl]
+            continue
+        old_values = state.values[source_space.full_slices[source.name]]
+        same = (
+            source.size == target.size
+            and source.complex == target.complex
+            and source.kind == target.kind
+            and _same_layout(source, target)
+        )
+        if same:
+            values[sl] = old_values
+            continue
+        if target.kind in _FIXED_LAYOUT_KINDS or source.kind in _FIXED_LAYOUT_KINDS:
+            raise ValueError(
+                f"with_controls cannot change the layout of {target.kind} block "
+                f"{target.name!r} ({source.size} -> {target.size} DOFs); only "
+                "material profile and lattice blocks change resolution"
+            )
+        transfers.append(target.name)
+    if transfers:
+        # ``transfer_to`` projects every material block of a two-space pair;
+        # restrict both to the blocks that actually change.
+        mine = source_space.restrict(
+            [
+                (by_key.get((b.key, b.address)) or by_name[b.name]).name
+                for b in target_space.resolved_blocks
+                if b.name in transfers
+            ]
+        )
+        theirs = target_space.restrict(transfers)
+        moved = mine.transfer_to(theirs, state.vector(mine))
+        full = theirs.to_sauce_vector(moved)
+        for name, sl in theirs.full_slices.items():
+            values[target_space.full_slices[name]] = full[sl]
+    return ControlState(
+        target_space, values, scaling=state.scaling, scaling_units=state.scaling_units
+    )
+
+
+def _same_layout(a: ResolvedBlock, b: ResolvedBlock) -> bool:
+    if a.control is None or b.control is None:
+        return a.control is None and b.control is None
+    try:
+        return bool(a.control.to_fs() == b.control.to_fs())
+    except Exception:
+        return False
+
+
 def _install_material(simulation: Any, block_id: str, values: np.ndarray) -> None:
     from frequensolve.model.parameterization import ParameterizedProperty
 
@@ -1619,15 +1879,185 @@ def _install_source_position(
         ) from exc
 
 
+_MECHANISM_PHASE_TOLERANCE = 1.0e-9
+
+
+def _inline_point(simulation: Any, block: ResolvedBlock) -> Tuple[Any, Any, int]:
+    """Return ``(geometry, point, index)`` of an inline physical source."""
+
+    geometry = getattr(simulation.acquisition, "source_geometry", None)
+    if geometry is None or geometry.geometry_type != "Inline":
+        kind = "none" if geometry is None else geometry.geometry_type
+        raise NotImplementedError(
+            f"source block {block.name!r} differs from its authored baseline, but "
+            f"the acquisition's source geometry is {kind}; only inline sources "
+            "can carry a per-source mechanism"
+        )
+    index = int(block.source_id or 0) - 1
+    count = int(geometry.point_count or 0)
+    if index < 0 or index >= count:
+        raise NotImplementedError(
+            f"source block {block.name!r}: the geometry has {count} sources"
+        )
+    return geometry, geometry.sources[index], index
+
+
+def _real_components(values: np.ndarray, name: str) -> Tuple[np.ndarray, complex]:
+    """Split complex coordinates ``c`` into real ``r`` and a phase with ``c = r * phase``.
+
+    The phase is that of the largest component folded into the half-plane
+    ``Re(phase) > 0`` (or ``phase = i``), so real coordinates keep their signs
+    and get ``phase = 1``.  Components with different phases have no real
+    representation.
+    """
+
+    coords = np.asarray(values[0::2], dtype=np.float64) + 1j * np.asarray(
+        values[1::2], dtype=np.float64
+    )
+    magnitude = np.abs(coords)
+    peak = float(magnitude.max()) if magnitude.size else 0.0
+    if peak == 0.0:
+        return np.zeros(coords.size), 1.0 + 0.0j
+    phase = complex(coords[int(np.argmax(magnitude))] / peak)
+    if phase.real < 0.0 or (phase.real == 0.0 and phase.imag < 0.0):
+        phase = -phase
+    if abs(phase - 1.0) <= _MECHANISM_PHASE_TOLERANCE:
+        phase = 1.0 + 0.0j
+    real = coords / phase
+    if float(np.max(np.abs(real.imag))) > _MECHANISM_PHASE_TOLERANCE * peak:
+        raise NotImplementedError(
+            f"source block {name!r} has complex mechanism components with "
+            "different phases; only a real mechanism times one common phase can "
+            "be authored (the phase is installed like a signature)"
+        )
+    return np.asarray(real.real, dtype=np.float64), phase
+
+
+def _install_source_mechanism(
+    simulation: Any,
+    block: ResolvedBlock,
+    values: np.ndarray,
+    scale: float,
+    units: Optional[str],
+) -> complex:
+    """Author ``coordinate * scale`` as source ``block.source_id``'s basis.
+
+    Returns the common phase of the complex coordinates; the caller applies
+    it to the source encoding like a signature.
+    """
+
+    geometry, point, _index = _inline_point(simulation, block)
+    kind = str(point.kind or geometry.kind).strip().lower()
+    dimension = int(simulation.dimension)
+    real, phase = _real_components(values, block.name)
+    physical = real * float(scale)
+    if kind in {"scalar", "monopole"}:
+        if physical.size != 1:
+            raise ValueError(f"{block.name!r} must have one component for {kind}")
+        point.amplitude = {"value": float(physical[0]), "units": units or "N*m"}
+        return phase
+    if kind in {"vector", "dipole"}:
+        if physical.size != dimension:
+            raise ValueError(
+                f"{block.name!r} must have {dimension} components for {kind}"
+            )
+        strength = float(np.linalg.norm(physical))
+        default_units = "N" if kind == "vector" else "N*m"
+        if strength > 0.0:
+            point.direction = (physical / strength).tolist()
+        point.amplitude = {"value": strength, "units": units or default_units}
+        return phase
+    if kind == "tensor":
+        tensor = np.zeros((3, 3), dtype=np.float64)
+        if dimension == 2 and physical.size == 3:
+            xx, zz, xz = physical
+            tensor[0, 0], tensor[2, 2] = xx, zz
+            tensor[0, 2] = tensor[2, 0] = xz
+        elif dimension == 3 and physical.size == 6:
+            xx, yy, zz, yz, xz, xy = physical
+            tensor[0, 0], tensor[1, 1], tensor[2, 2] = xx, yy, zz
+            tensor[1, 2] = tensor[2, 1] = yz
+            tensor[0, 2] = tensor[2, 0] = xz
+            tensor[0, 1] = tensor[1, 0] = xy
+        else:
+            raise ValueError(
+                f"{block.name!r} has {physical.size} components; a {dimension}-D "
+                "tensor source needs " + ("3" if dimension == 2 else "6")
+            )
+        point.mechanism = {
+            "type": "moment_tensor",
+            "tensor": tensor.tolist(),
+            "units": units or "N*m",
+        }
+        # The raw tensor entries are the physical moment components; a
+        # separate strength would renormalize them.
+        point.amplitude = None
+        point.extra.pop("moment_magnitude", None)
+        return phase
+    raise NotImplementedError(
+        f"source block {block.name!r}: cannot author a mechanism for {kind!r} sources"
+    )
+
+
+def _scale_source(simulation: Any, source_id: int, factor: complex) -> None:
+    """Multiply physical source ``source_id`` by ``factor`` through the encoding.
+
+    ``C = E diag(q)``: the source's column of the source encoding is scaled.
+    Without an encoding (identity, one field per source named after it) the
+    identity is made explicit as a dense encoding first.
+    """
+
+    if factor == 1.0:
+        return
+    from frequensolve.seismic.sources import SourceEncoding
+
+    acquisition = simulation.acquisition
+    geometry = getattr(acquisition, "source_geometry", None)
+    if geometry is None:
+        raise NotImplementedError("the acquisition has no physical sources to scale")
+    index = int(source_id) - 1
+    names = acquisition.source_point_names()
+    encoding = acquisition.source_encoding
+    if encoding is None:
+        count = acquisition.known_source_point_count()
+        if count is None or len(names) != int(count):
+            raise NotImplementedError(
+                f"cannot make the identity encoding of source {source_id} explicit: "
+                "the physical source catalog is not known locally"
+            )
+        encoding = SourceEncoding.dense(
+            np.eye(int(count), dtype=np.complex128), names=names
+        )
+    try:
+        scaled = encoding.scaled_source(
+            index,
+            factor,
+            source_name=names[index] if 0 <= index < len(names) else None,
+        )
+    except (ValueError, IndexError) as exc:
+        raise NotImplementedError(
+            f"cannot apply the signature of source {source_id}: {exc}"
+        ) from exc
+    acquisition.source_encoding = scaled
+
+
 def _uninstallable_message(block: ResolvedBlock) -> str:
     """Return why a changed non-material block cannot be authored."""
 
+    if block.kind == "source" and block.quantity == "mechanism":
+        return (
+            f"source block {block.name!r} differs from its authored baseline, but "
+            "no /scaling is known for it: Sauce's mechanism coordinates are in "
+            "the writing task's nondimensional units, and only a state export "
+            "with /scaling/<block> (Sauce >= imaging-api/multitask-operators) "
+            "converts them to physical source strengths"
+        )
     if block.kind == "source":
         return (
             f"source block {block.name!r} differs from its authored baseline; "
-            f"Sauce's {block.quantity} coefficients are in the writing task's "
-            "nondimensional units and have no frequency-independent field on the "
-            "authored sources (PointSource.amplitude/mechanism), so "
+            f"the {block.quantity} coefficients have no representation on the "
+            "authored sources (signature_df is an additive per-Hz term and "
+            "FrequenSolve authors no Acquisition/source_signature spectrum), so "
             "simulation_at cannot install them"
         )
     if block.kind == "mesh":

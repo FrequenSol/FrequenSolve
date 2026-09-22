@@ -2526,6 +2526,57 @@ class SourceEncoding(ExtraFieldsMixin):
             dtype=float,
         )
 
+    def scaled_source(
+        self,
+        index: int,
+        factor: Any,
+        *,
+        source_name: Optional[str] = None,
+    ) -> "SourceEncoding":
+        """Return a copy whose weights on one physical source are scaled.
+
+        Implements the solver's per-source multiplier ``C = E diag(q)``
+        (``Acquisition/source_signature``) for one frequency-independent
+        complex ``factor``: every encoded field's coefficient on physical
+        source ``index`` (zero-based, source-geometry order) is multiplied by
+        ``factor``.  A conjugated encoding stores ``conj(factor)`` so the
+        effective coefficient is still multiplied by ``factor``.  Named
+        encodings address sources by name, so ``source_name`` is required
+        for them; a source no field references is left alone.
+
+        Raises:
+            ValueError: For HDF5-backed weights (stored externally) or a
+                Named encoding without ``source_name``.
+            IndexError: If ``index`` is outside the dense source axis.
+        """
+
+        value = complex(factor)
+        if not np.isfinite(value.real) or not np.isfinite(value.imag):
+            raise ValueError("source scale factor must be finite")
+        stored = value.conjugate() if self.conjugate_coefficients else value
+        encoding = copy.deepcopy(self)
+        storage = encoding._storage
+        if isinstance(storage, (_DenseSourceEncoding, _FrequencyDenseSourceEncoding)):
+            weights = np.array(storage.coefficients, dtype=np.complex128, copy=True)
+            if index < 0 or index >= weights.shape[-1]:
+                raise IndexError("source index is outside the encoding weights")
+            weights[..., index] *= stored
+            storage.coefficients = weights
+            return encoding
+        if isinstance(storage, _NamedSourceEncoding):
+            if source_name is None:
+                raise ValueError("Named source encodings need the source name")
+            for encoded in storage.fields:
+                if source_name in encoded.terms:
+                    encoded.terms[source_name] = (
+                        _complex_value(encoded.terms[source_name]) * stored
+                    )
+            return encoding
+        raise ValueError(
+            "HDF5 source-encoding weights are stored externally and cannot be "
+            "scaled in place"
+        )
+
     def conjugated(self) -> "SourceEncoding":
         """Return a lazy conjugated view without copying weight arrays."""
 

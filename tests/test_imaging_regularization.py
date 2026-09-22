@@ -36,6 +36,7 @@ from frequensolve.imaging.regularization import (
 from frequensolve.inversion.least_squares import QuadraticRegularization
 from frequensolve.inversion.preconditioning import DiagonalInverseHessian
 from frequensolve.orchestrator.sites.base import JobStatus, RunResult
+from frequensolve.units import ureg
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
 pytestmark = pytest.mark.unit
@@ -111,28 +112,44 @@ def _directional_derivative(bound, v, direction, h=1.0e-6):
 # ---------------------------------------------------------------------------
 
 
-def test_tikhonov_value_and_gradient_follow_the_scaled_difference_formula(space):
+def _unit(nodes):
+    nodes = np.asarray(nodes, dtype=float)
+    return (nodes - nodes[0]) / (nodes[-1] - nodes[0])
+
+
+def _trapezoid(xi):
+    h = np.diff(xi)
+    return np.concatenate([[0.0], h / 2]) + np.concatenate([h / 2, [0.0]])
+
+
+def test_tikhonov_is_the_quadrature_of_the_unit_domain_seminorm(space):
     bound = Tikhonov(0.7).bind(space)
     v = _random(space)
     blocks = v.blocks()
 
-    def first_difference(values, nodes):
-        return np.diff(values) / np.diff(nodes)
+    def edge_sum(values, xi):
+        # int_0^1 |c'|^2 dxi for the piecewise-linear interpolant
+        return np.sum(np.diff(values) ** 2 / np.diff(xi))
 
-    vp_nodes = space.block("vp").control.coordinates
+    vp_xi = _unit(space.block("vp").control.coordinates)
     rho = space.block("rho").control
     knots = np.asarray(rho.knots)
     greville = np.array([knots[i + 1 : i + 4].mean() for i in range(rho.size)])
     grid = space.block("grid").control
+    gx, gz = (_unit(axis) for axis in grid.axis_coordinates)
     lattice = blocks["model.grid"].reshape(grid.shape, order="F")
+    grid_terms = np.sum(
+        _trapezoid(gz)[None, :] * np.diff(lattice, axis=0) ** 2 / np.diff(gx)[:, None]
+    ) + np.sum(
+        _trapezoid(gx)[:, None] * np.diff(lattice, axis=1) ** 2 / np.diff(gz)[None, :]
+    )
     expected = (
         0.5
         * 0.7
         * (
-            np.sum(first_difference(blocks["model.vp"], vp_nodes) ** 2)
-            + np.sum(first_difference(blocks["model.rho"], greville) ** 2)
-            + np.sum((np.diff(lattice, axis=0) / grid.spacing[0]) ** 2)
-            + np.sum((np.diff(lattice, axis=1) / grid.spacing[1]) ** 2)
+            edge_sum(blocks["model.vp"], vp_xi)
+            + edge_sum(blocks["model.rho"], _unit(greville))
+            + grid_terms
         )
     )
     assert bound.value(v) == pytest.approx(expected)
@@ -144,6 +161,130 @@ def test_tikhonov_value_and_gradient_follow_the_scaled_difference_formula(space)
     np.testing.assert_array_equal(gradient["src.signature"]["source.1.signature"], 0.0)
     # constants cost nothing
     assert bound.value(space.ones()) == pytest.approx(0.0)
+
+
+def _integrate(values, x):
+    values = np.asarray(values)
+    h = np.diff(x)
+    return np.sum(0.5 * h * (values[..., 1:] + values[..., :-1]), axis=-1)
+
+
+def _profile_value(simulation, penalty, count, field):
+    space = ControlSpace(vp=DepthProfile("vp", "sediment", count=count)).bind(
+        simulation
+    )
+    xi = _unit(space.block("vp").control.coordinates)
+    return penalty.bind(space).value(space.pack({"vp": field(xi)}))
+
+
+@pytest.mark.parametrize(
+    "penalty",
+    [
+        Tikhonov(1.0),
+        Tikhonov(1.0, order=2),
+        TV(1.0, epsilon=1e-9),
+        TV(1.0, epsilon=1e-9, order=2),
+    ],
+    ids=["tikhonov1", "tikhonov2", "tv1", "tv2"],
+)
+def test_penalty_values_converge_under_node_refinement(simulation, penalty):
+    def field(xi):
+        return np.sin(3.0 * xi) + xi**2
+
+    fine = np.linspace(0.0, 1.0, 200001)
+    first = 3.0 * np.cos(3.0 * fine) + 2.0 * fine
+    second = -9.0 * np.sin(3.0 * fine) + 2.0
+    integrand = {
+        ("Tikhonov", 1): 0.5 * first**2,
+        ("Tikhonov", 2): 0.5 * second**2,
+        ("TV", 1): np.abs(first),
+        ("TV", 2): np.abs(second),
+    }[(type(penalty).__name__, penalty.order)]
+    reference = _integrate(integrand, fine)
+    if isinstance(penalty, Tikhonov) and penalty.order == 1:
+        # 0.5 * int_0^1 (3 cos 3xi + 2 xi)^2 dxi in closed form
+        closed = 0.5 * (
+            4.5
+            + 0.75 * np.sin(6.0)
+            + 4.0 * np.sin(3.0)
+            + 4.0 * (np.cos(3.0) - 1.0) / 3.0
+            + 4.0 / 3.0
+        )
+        assert reference == pytest.approx(closed, rel=1e-6)
+    values = [_profile_value(simulation, penalty, n, field) for n in (11, 21, 41)]
+    errors = [abs(value - reference) for value in values]
+    # the value tracks the continuous seminorm, not the node count
+    assert errors[2] < errors[1] < errors[0]
+    assert errors[2] <= 2.0e-2 * reference
+
+
+def test_lattice_penalties_converge_under_refinement(simulation):
+    def field(x, z):
+        return np.sin(2.0 * x) * np.cos(z) + x * z
+
+    def value(penalty, shape):
+        space = ControlSpace(grid=GridParameters("vp", "water", shape=shape)).bind(
+            simulation
+        )
+        gx, gz = (_unit(axis) for axis in space.block("grid").control.axis_coordinates)
+        grid = field(gx[:, None], gz[None, :])
+        return penalty.bind(space).value(space.pack({"grid": grid.ravel(order="F")}))
+
+    x = np.linspace(0.0, 1.0, 801)
+    X, Z = np.meshgrid(x, x, indexing="ij")
+    fx = 2.0 * np.cos(2.0 * X) * np.cos(Z) + Z
+    fz = -np.sin(2.0 * X) * np.sin(Z) + X
+    exact = {
+        "tikhonov": 0.5 * _integrate(_integrate(fx**2 + fz**2, x), x),
+        "tv": _integrate(_integrate(np.hypot(fx, fz), x), x),
+    }
+    for name, penalty in (("tikhonov", Tikhonov(1.0)), ("tv", TV(1.0, 1e-9))):
+        values = [value(penalty, (n, n)) for n in (6, 11, 21)]
+        errors = [abs(v - exact[name]) for v in values]
+        assert errors[2] < errors[1] < errors[0], name
+        assert errors[2] <= 1.0e-2 * exact[name], name
+
+
+def test_penalty_length_sets_a_physical_scale(simulation):
+    space = ControlSpace(
+        vp=DepthProfile("vp", "sediment", count=6),
+        grid=GridParameters("vp", "water", shape=[4, 3]),
+    ).bind(simulation)
+    nodes = space.block("vp").control.coordinates
+    span = float(nodes[-1] - nodes[0])
+    v = _random(space, 3)
+    only_vp = {"grid": 0.0}
+    default = Tikhonov(1.0, weights=only_vp).bind(space).value(v)
+    # xi' = x / L = (span / L) xi: first-order term scales by (L / span)
+    assert Tikhonov(1.0, weights=only_vp, length=span).bind(space).value(
+        v
+    ) == pytest.approx(default)
+    assert Tikhonov(1.0, weights=only_vp, length=2.0 * span).bind(space).value(
+        v
+    ) == pytest.approx(2.0 * default)
+    second = Tikhonov(1.0, order=2, weights=only_vp)
+    scaled = Tikhonov(1.0, order=2, weights=only_vp, length=2.0 * span)
+    assert scaled.bind(space).value(v) == pytest.approx(
+        8.0 * second.bind(space).value(v)
+    )
+    tv = TV(1.0, epsilon=1e-12, weights=only_vp)
+    tv_scaled = TV(1.0, epsilon=1e-12, weights=only_vp, length={"vp": 2.0 * span})
+    assert tv_scaled.bind(space).value(v) == pytest.approx(tv.bind(space).value(v))
+    # a mapping leaves unnamed blocks on their span; per-axis lengths for grids
+    grid = space.block("grid").control.axis_coordinates
+    spans = [float(axis[-1] - axis[0]) for axis in grid]
+    only_grid = {"vp": 0.0}
+    assert Tikhonov(1.0, weights=only_grid, length={"grid": spans}).bind(space).value(
+        v
+    ) == pytest.approx(Tikhonov(1.0, weights=only_grid).bind(space).value(v))
+    with pytest.raises(ValueError, match="positive"):
+        Tikhonov(1.0, length=0.0).bind(space)
+    with pytest.raises(ValueError, match="lattice axes"):
+        Tikhonov(1.0, length={"grid": [1.0, 2.0, 3.0]}).bind(space)
+    with pytest.raises(ValueError, match="not a length"):
+        Tikhonov(1.0, length=1.0 * ureg.s).bind(space)
+    with pytest.raises(KeyError):
+        Tikhonov(1.0, length={"nope": 1.0}).bind(space)
 
 
 @pytest.mark.parametrize("name", sorted(PENALTIES))
@@ -523,7 +664,10 @@ def test_identity_and_from_operator_preconditioners(space):
     # the action drops into SciPy's cg as ``M``
     H = Tikhonov(1.0).bind(space).hessian_operator(g) + sp.identity(space.size)
     solution, info = cg(
-        H, g.values, M=FromOperator(np.diag(scale)).bind(space).operator()
+        H,
+        g.values,
+        M=FromOperator(np.diag(scale)).bind(space).operator(),
+        rtol=1e-10,
     )
     assert info == 0
     np.testing.assert_allclose(H @ solution, g.values, atol=1e-6)
@@ -629,7 +773,9 @@ def test_penalty_and_diagonal_preconditioner_follow_sauce_support_masks(tmp_path
     assert R.shape == (1 + 2, 6)
     nodes = space.block("vp").control.coordinates
     expected_row = np.zeros(6)
-    expected_row[1:3] = np.sqrt(3.0) * np.array([-1.0, 1.0]) / (nodes[3] - nodes[2])
+    # edge row: sqrt(alpha) * (c_3 - c_2) / sqrt(h_xi) on the unit coordinate
+    h_xi = (nodes[3] - nodes[2]) / (nodes[-1] - nodes[0])
+    expected_row[1:3] = np.sqrt(3.0) * np.array([-1.0, 1.0]) / np.sqrt(h_xi)
     np.testing.assert_allclose(R[0], expected_row)
     np.testing.assert_allclose(penalty.curvature_diagonal(lin.point), np.sum(R * R, 0))
     v = space.random(2)

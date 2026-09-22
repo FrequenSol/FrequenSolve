@@ -121,10 +121,10 @@ def test_joint_reflectivity_linearizes_against_sauce(tmp_path):
 
     # The basis is authored on the global z axis like Sauce's joint e2e
     # fixture: Sauce 5e07624 evaluates a borrowed (or own) reflectivity map
-    # without its surface-coordinate context, so a ``below`` profile stops
+    # without its surface-coordinate context, so a ``datum="top"`` profile stops
     # with "Surface-coordinate control map has no evaluation context".
     controls = ControlSpace(
-        vp=DepthProfile("vp", "layer_2", axis="z", count=VP_COUNT),
+        vp=DepthProfile("vp", "layer_2", datum="global", count=VP_COUNT),
         refl=ReflectivityParameters(
             "vp_ip", fields=[ReflectivityField("ip", layer=2, axis=2, basis="vp")]
         ),

@@ -63,7 +63,7 @@ A :term:`control block` names one Sauce control registry block (or one family
 of blocks). It is defined by where it lives (a subdomain or surface), its
 basis (exactly one of ``spacing``, ``count``, ``nodes``) and, optionally, how
 its values are constrained (``transform`` and ``limits``). Extent is never
-authored; it is the subdomain's span along the profile axis. Lengths accept
+authored; it is the subdomain's span measured from the profile's datum. Lengths accept
 plain numbers in the model's units or Pint quantities.
 
 .. list-table::
@@ -73,12 +73,12 @@ plain numbers in the model's units or Pint quantities.
    * - Block
      - Sauce block(s)
      - Notes
-   * - :class:`~frequensolve.imaging.DepthProfile` ``(prop, subdomain, axis="below", spacing | count | nodes, transform, limits)``
+   * - :class:`~frequensolve.imaging.DepthProfile` ``(prop, subdomain, datum="top", spacing | count | nodes, transform, limits)``
        and ``DepthProfile.bspline(..., degree=3)``
      - ``model.<id>`` (hat or B-spline map)
-     - 1-D profile along ``below`` (depth under the layer's top surface) or
-       ``z``; hat nodes end at the subdomain boundaries, B-spline knots are
-       open-uniform over the same span.
+     - Vertical 1-D profile; ``datum`` says where depth is measured from
+       (below). Hat nodes end at the subdomain boundaries, B-spline knots
+       are open-uniform over the same span.
    * - :class:`~frequensolve.imaging.GridParameters` ``(props, subdomain=None, spacing | shape | grid, transform, limits)``
      - one ``model.<id>`` per property (tensor-hat lattice)
      - Lattice over the subdomain's bounding box, or the whole model; nodes
@@ -157,8 +157,33 @@ are joined by piecewise-linear hat functions, so at most two coefficients
 contribute at any point and evaluation, :term:`JVP` and :term:`VJP` scatter
 cost constant work per quadrature point. ``DepthProfile.bspline`` uses a
 B-spline basis (cubic by default) when higher-order continuity is wanted.
-Both support the surface-relative ``below`` axis used for a 1-D column
-beneath bathymetry and the global ``z`` axis.
+
+A depth profile is always vertical. Its ``datum`` says where depth is
+measured from; ``spacing``, ``count``, ``nodes`` and ``limits`` are measured
+in that frame:
+
+.. code-block:: python
+
+   im.DepthProfile("vp", "sediment", count=40)                       # datum="top": depth below the layer's upper surface
+   im.DepthProfile("vp", "sediment", datum="global", count=40)       # the model's global vertical coordinate z
+   im.DepthProfile("vp", "sediment", datum="below_seabed", count=40) # a coordinate system registered on the simulation
+   im.DepthProfile("vp", "sediment", datum="bottom", count=40)       # depth below a named model surface
+
+- ``"top"`` (default) follows the subdomain's upper surface, which is the
+  natural choice for a 1-D column beneath bathymetry; the surface-relative
+  system Sauce evaluates it in is created internally.
+- ``"global"`` uses global ``z``; the extent is the subdomain's
+  ``[min(upper surface), max(lower surface)]``.
+- A coordinate-system name uses that system's single vertical axis
+  (direction ``z``), oriented by the axis' ``positive``; a user-authored
+  seabed-relative system is the typical case.
+- A model-surface name measures depth below that surface; the extent is the
+  subdomain's span measured from it and need not start at zero.
+
+The keywords win over names; a name that is both a coordinate system and a
+surface is rejected as ambiguous. Rendered profiles use the ``depth``
+dimension (``z`` for ``"global"``) and plot vertically, depth increasing
+downwards.
 
 .. _imaging-support:
 
@@ -198,8 +223,8 @@ dimension cannot change inside a stage solve), then refreshed at the stage
 transition; nodes that become supported as an interface moves are picked up
 by the next stage. ``ImagingProblem(min_support=...)`` and
 ``Stage(min_support=...)`` change the threshold. Before the first
-linearization FrequenSolve uses a geometric fallback for layered models along
-``below``/``z`` (exact for 1-D profiles, bounding box for lattices), and
+linearization FrequenSolve uses a geometric fallback for layered models
+(exact for 1-D profiles in any datum, bounding box for lattices), and
 ``space.with_support({...})`` installs an explicit mask.
 
 State versus vector
@@ -397,19 +422,41 @@ Three families with different roles:
 
 .. code-block:: python
 
-   penalty = im.Tikhonov(alpha=1e-2, order=1)                       # finite differences per block
+   penalty = im.Tikhonov(alpha=1e-2, order=1)                       # first-derivative seminorm per block
    penalty = im.TV(alpha=1e-3) + 0.5 * im.Tikhonov(alpha=1e-2, order=2)
    penalty = im.Tikhonov(alpha=1e-2, weights={"vp": 1.0, "salt": 0.1}, reference=problem.vector())
+   penalty = im.Tikhonov(alpha=1e-2, length=100 * u.m)               # derivatives per 100 m instead
 
-Difference operators are scaled by the block's physical spacing (per lattice
-axis for :class:`~frequensolve.imaging.GridParameters`, Greville abscissae for
-B-spline profiles). Material blocks have unit weight; source, interface and
-reflectivity blocks are unpenalized unless ``weights`` names them, in which
-case they receive a ridge toward the reference. :class:`~frequensolve.imaging.TV`
-is the smoothed total variation with a lagged-diffusivity Hessian;
-``TV(order=2)`` is a second-order TV. Full TGV is a Sauce-side smoothing (below),
-not a Python penalty. :class:`~frequensolve.imaging.Quadratic` wraps an
-arbitrary matrix.
+Penalties are scale free. Each lattice block is measured on its
+nondimensional coordinate :math:`\xi = (x - x_0)/L`, with :math:`L` the
+block's span per axis, and the penalty is a quadrature-weighted
+discretization of a continuous seminorm over the unit interval (square,
+cube):
+
+.. math::
+
+   \mathrm{Tikhonov}_k(c) = \tfrac12\,\alpha \sum_{\text{axes}}
+   \int_{[0,1]^d} \Bigl|\frac{\partial^k (c - c_{\mathrm{ref}})}{\partial \xi^k}\Bigr|^2 d\xi,
+   \qquad
+   \mathrm{TV}(c) = \alpha \int_{[0,1]^d}
+   \Bigl(\sqrt{|\nabla_\xi (c - c_{\mathrm{ref}})|^2 + \epsilon^2} - \epsilon\Bigr) d\xi .
+
+First differences are weighted by their edge length (exact for the
+piecewise-linear hat profile), second differences by their dual-cell length,
+other lattice axes by trapezoid weights; TV evaluates the gradient per
+lattice cell. The value of a fixed smooth field therefore converges as the
+profile is refined instead of growing with the node count, and because the
+default misfit normalization (``observed_rms``) makes the data term order
+one, ``alpha`` between :math:`10^{-3}` and :math:`10^{-1}` is a meaningful
+range. ``length=`` (a length, a per-axis sequence or a ``block -> length``
+mapping) measures derivatives per physical length instead of per block span.
+B-spline profiles difference their coefficients at the Greville abscissae.
+Material blocks have unit weight; source, interface and reflectivity blocks
+are unpenalized unless ``weights`` names them, in which case they receive a
+ridge toward the reference. :class:`~frequensolve.imaging.TV` has a
+lagged-diffusivity Hessian; ``TV(order=2)`` is a second-order TV. Full TGV is
+a Sauce-side smoothing (below), not a Python penalty.
+:class:`~frequensolve.imaging.Quadratic` wraps an arbitrary matrix.
 
 Smoothing
 ~~~~~~~~~
@@ -585,25 +632,44 @@ complete ``controls.state``, so any stage may activate any subset.
 Changing resolution between stages
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Declare one problem per parameterization and transfer the accepted vector
-with ``space.transfer_to``: profile and lattice blocks are evaluated on their
-basis and least-squares projected into the target basis; blocks matched by
-key with identical layout are copied.
+A stage may change the control layout for itself and every later stage with
+``Stage(controls=...)``: a complete :class:`~frequensolve.imaging.ControlSpace`
+or a mapping ``{block key: new block spec}`` replacing those blocks.
 
 .. code-block:: python
 
-   coarse = im.FWI(coarse_problem, stages=coarse_stages, checkpoint="coarse.h5").run()
-   v_fine = coarse_problem.space.transfer_to(fine_problem.space, coarse.vector())
-   fine_problem.state = fine_problem.state.with_update(fine_problem.space, v_fine)
-   fine = im.FWI(fine_problem, stages=fine_stages, checkpoint="fine.h5").run()
+   stages = [
+       im.Stage([3, 5], iterations=15, active=["vp"]),                  # coarse profile
+       im.Stage([5, 8], iterations=15, active=["vp"],
+                controls={"vp": im.DepthProfile("vp", "sediment", spacing=25 * u.m)}),
+   ]
+   result = im.FWI(problem, stages=stages, checkpoint="fwi.h5").run()
+   result.problem               # the problem of the last stage (fine layout)
+   result.state                 # complete state on that layout
 
-Create fresh optimizer state after a change of basis; L-BFGS pairs and
-Newton state must not be reused across it. The transfer is a least-squares
-projection with an LSQR tolerance, not a physical error bound: evaluate the
-transferred field and reject unacceptable projection or clipping error before
-launching the next solve. With different references or transforms, fit the
-physical material in the destination parameterization instead of
-interpolating raw coefficients.
+At the transition :class:`~frequensolve.imaging.FWI` builds the new problem
+with :meth:`ImagingProblem.with_controls <frequensolve.imaging.ImagingProblem.with_controls>`,
+which shares the simulation, site, backend, observed data, misfit,
+frequencies, workdir and linearization cache (keyed by the new layout) and
+transfers the accepted state block by block: unchanged blocks are copied,
+profile and lattice blocks are evaluated on their basis and least-squares
+projected into the new basis (exact when the new basis represents the old
+field, e.g. a hat profile refined by bisection), and interface, source and
+reflectivity blocks must keep their layout. The next stage starts with fresh
+optimizer state. Checkpoints record each stage's control layout, so
+``run(resume=True)`` rebuilds the right space and rejects a mismatched
+refinement. The same transfer is available by hand:
+
+.. code-block:: python
+
+   fine_problem = problem.with_controls({"vp": im.DepthProfile("vp", "sediment", count=81)})
+   v_fine = problem.space.transfer_to(fine_problem.space, v_coarse)   # vectors only
+
+The transfer is a least-squares projection with an LSQR tolerance, not a
+physical error bound: evaluate the transferred field and reject unacceptable
+projection or clipping error before relying on it. With different references
+or transforms, fit the physical material in the destination parameterization
+instead of interpolating raw coefficients.
 
 LSRTM, RTM, kernels and focusing
 --------------------------------
@@ -636,11 +702,29 @@ xarray ``raw``, ``smoothed`` and ``incremental`` datasets on ``(z, x)``. With
 ``observed=None`` (the default) Sauce uses zero data and the images are the
 pure model sensitivity kernels; ``observed=True`` images the misfit residual
 instead. ``condition="fwi"`` resolves to the property-gradient condition of
-the physics; other condition names are passed verbatim. Kernels and focusing
-run on a simulation copy with the current coefficients installed
-(``problem.simulation_at(v)``), which today installs material and interface
-blocks only: declare a separate problem over the material blocks when the
-inversion space also carries source blocks.
+the physics; other condition names are passed verbatim. Kernels run on a
+simulation copy with the current state installed
+(``problem.simulation_at(v)``, also :attr:`FWIResult.simulation
+<frequensolve.imaging.FWIResult.simulation>`). It installs material and
+interface coefficients and every changed source block it can represent:
+
+- ``source.<i>.position`` moves the inline source point;
+- ``source.<i>.signature`` :math:`q` multiplies source :math:`i`'s column of
+  the source encoding (:math:`C = E\,\operatorname{diag}(q)`; an identity
+  encoding is written out explicitly). :math:`q` is frequency independent, so
+  a complex :math:`q` applies a frequency-independent gain :math:`|q|` and
+  phase :math:`\arg q`;
+- ``source.<i>.mechanism`` needs Sauce's ``/scaling/<block>`` (the physical
+  strength of one stored coordinate, in ``/scaling_units/<block>``), which a
+  state export from a current Sauce records; the physical components become
+  the inline source's ``amplitude`` (scalar kinds), unit ``direction`` and
+  ``amplitude`` (vector and dipole kinds) or a ``moment_tensor`` mechanism
+  (``xx, zz, xz`` in 2D, ``xx, yy, zz, yz, xz, xy`` in 3D). Complex
+  components must share one phase, which is applied like a signature.
+
+A mechanism without scaling, ``signature_df`` (an additive per-Hz term),
+reflectivity and mesh blocks raise :class:`NotImplementedError`. Focusing runs
+on the authored simulation and accepts changed material blocks only.
 
 :class:`~frequensolve.imaging.TimeReversalFocus` is a data-domain focusing
 objective that needs no modeled forward wavefield. For each frequency Sauce

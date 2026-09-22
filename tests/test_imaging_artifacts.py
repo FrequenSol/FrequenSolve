@@ -268,6 +268,56 @@ def test_control_state_file_round_trips_blocks_support_and_measure(tmp_path):
         loaded.with_update(ControlVectorFile({"model.vp": [1.0]}))
 
 
+def test_control_state_file_round_trips_mechanism_scaling(tmp_path):
+    # the Sauce export layout (imaging-api/multitask-operators):
+    # /scaling/<block> float64 and /scaling_units/<block> string
+    path = tmp_path / "sauce_state.h5"
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("schema", data=np.bytes_(b"fs-control-state-1"))
+        h5.create_dataset("packing", data=np.bytes_(b"real_interleaved"))
+        h5.create_dataset("controls/model.vp", data=np.zeros(3))
+        h5.create_dataset("controls/source.1.mechanism", data=[0.5, 0.0, 0.25, 0.0])
+        h5.create_dataset("scaling/source.1.mechanism", data=4.0e6, dtype=np.float64)
+        h5.create_dataset("scaling_units/source.1.mechanism", data=np.bytes_(b"N"))
+
+    loaded = ControlStateFile.read(path)
+    assert loaded.scaling == {"source.1.mechanism": 4.0e6}
+    assert loaded.scaling_units == {"source.1.mechanism": "N"}
+    written = loaded.write(tmp_path / "again.h5")
+    with h5py.File(written, "r") as h5:
+        assert h5["scaling/source.1.mechanism"].dtype == np.float64
+        assert h5["scaling/source.1.mechanism"][()] == 4.0e6
+        assert _string(h5, "scaling_units/source.1.mechanism") == "N"
+    again = ControlStateFile.read(written)
+    assert again.scaling == loaded.scaling
+    assert again.scaling_units == loaded.scaling_units
+    updated = again.with_update(ControlVectorFile({"model.vp": np.ones(3)}))
+    assert updated.scaling == loaded.scaling
+    # files without /scaling read as task coordinates
+    plain = ControlStateFile({"vp": [1.0]}).write(tmp_path / "plain.h5")
+    with h5py.File(plain, "r") as h5:
+        assert "scaling" not in h5 and "scaling_units" not in h5
+    assert ControlStateFile.read(plain).scaling == {}
+
+    with pytest.raises(ValueError, match="no /controls block"):
+        ControlStateFile({"vp": [1.0]}, scaling={"source.1.mechanism": 1.0})
+    with pytest.raises(ValueError, match="finite and positive"):
+        ControlStateFile(
+            {"source.1.mechanism": [1.0, 0.0]}, scaling={"source.1.mechanism": 0.0}
+        )
+    with pytest.raises(ValueError, match="has no /scaling"):
+        ControlStateFile(
+            {"source.1.mechanism": [1.0, 0.0]},
+            scaling_units={"source.1.mechanism": "N"},
+        )
+    with pytest.raises(ValueError, match="non-empty"):
+        ControlStateFile(
+            {"source.1.mechanism": [1.0, 0.0]},
+            scaling={"source.1.mechanism": 1.0},
+            scaling_units={"source.1.mechanism": " "},
+        )
+
+
 def test_control_state_file_rejects_control_vector_schema(tmp_path):
     path = ControlVectorFile(
         {"model.vp": [1.0]},

@@ -17,7 +17,7 @@ from frequensolve.imaging import (
     ObservedData,
     SourceParameters,
 )
-from frequensolve.imaging._artifacts import ControlVectorFile
+from frequensolve.imaging._artifacts import ControlStateFile, ControlVectorFile
 from frequensolve.model.parameterization import ParameterizedProperty
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
@@ -437,7 +437,7 @@ def test_geometric_support_is_the_fallback_when_sauce_supplies_no_masks(
     sim = layered_simulation(tmp_path / "project")
     # A profile authored on z in [0, 400] over the 200..1500 m sediment layer:
     # the node at z = 0 has no support inside the layer.
-    controls = DepthProfile("vp", "sediment", axis="z", nodes=[0.0, 200.0, 400.0])
+    controls = DepthProfile("vp", "sediment", datum="global", nodes=[0.0, 200.0, 400.0])
     problem = ImagingProblem(
         sim,
         controls=controls,
@@ -552,18 +552,240 @@ def test_simulation_at_skips_unchanged_source_blocks(tmp_path, fake):
     np.testing.assert_allclose(sediment.properties["vp"].control.coefficients, 0.5)
 
 
-def test_simulation_at_rejects_a_changed_source_signature(tmp_path, fake):
+def test_simulation_at_installs_a_changed_source_signature(tmp_path, fake):
     _sim, problem = _source_problem(tmp_path, fake, signature=True)
+    assert problem.simulation.acquisition.source_encoding is None  # identity
+    q = 0.5 + 0.25j
     state = ControlState.from_blocks(
         problem.full_space,
         {
             "model.vp": np.zeros(4),
             "source.1.signature": np.array([1.0 + 0.0j]),
-            "source.2.signature": np.array([0.5 + 0.25j]),
+            "source.2.signature": np.array([q]),
         },
     )
-    with pytest.raises(NotImplementedError, match=r"'source\.2\.signature'"):
+
+    installed = problem.simulation_at(state)
+
+    # C = E diag(q): the identity encoding is made explicit (one field per
+    # source, named after it) and source 2's column carries q
+    encoding = installed.acquisition.source_encoding
+    assert encoding.encoding_type == "JsonDense"
+    assert encoding.field_names() == installed.acquisition.source_point_names()
+    np.testing.assert_allclose(encoding.weights, np.diag([1.0, q]))
+    payload = installed.acquisition.to_fs()["source_encoding"]
+    assert payload["_type"] == "JsonDense"
+    assert problem.simulation.acquisition.source_encoding is None  # untouched
+
+    # an authored dense (or conjugated) encoding is scaled column-wise
+    authored = np.array([[1.0, 2.0j], [0.5, -1.0]])
+    problem.simulation.acquisition.encode_sources(authored)
+    scaled = problem.simulation_at(state).acquisition.source_encoding
+    np.testing.assert_allclose(scaled.weights, authored * np.array([1.0, q]))
+    problem.simulation.acquisition.encode_sources(authored, conjugate=True)
+    scaled = problem.simulation_at(state).acquisition.source_encoding
+    np.testing.assert_allclose(
+        np.conj(scaled.weights), np.conj(authored) * np.array([1.0, q])
+    )
+    problem.simulation.acquisition.source_encoding = None
+
+
+def test_simulation_at_scales_named_encoding_terms(tmp_path, fake):
+    from frequensolve.seismic.sources import SourceEncoding
+
+    _sim, problem = _source_problem(tmp_path, fake, signature=True)
+    names = problem.simulation.acquisition.source_point_names()
+    problem.simulation.acquisition.source_encoding = SourceEncoding.named(
+        {"shot": {names[0]: 1.0, names[1]: 2.0}, "other": {names[0]: 1.0}}
+    )
+    state = problem.state_from(np.concatenate([np.zeros(4), [1.0, 0.0, 0.0, -1.0]]))
+
+    installed = problem.simulation_at(state)
+
+    fields = {f.name: f.terms for f in installed.acquisition.source_encoding.fields}
+    assert complex(fields["shot"][names[1]]) == pytest.approx(-2.0j)
+    assert complex(fields["shot"][names[0]]) == pytest.approx(1.0)
+    assert fields["other"] == {names[0]: 1.0}
+
+
+def _mechanism_state(problem, tmp_path, mechanism, *, scaling=None, units=None):
+    """Write a synthetic Sauce state export (with /scaling) and read it back."""
+
+    blocks = {
+        "model.vp": np.zeros(4),
+        "source.1.mechanism": np.array([1.0 + 0.0j]),
+        "source.2.mechanism": np.asarray(mechanism, dtype=complex),
+    }
+    file = ControlStateFile(
+        blocks,
+        scaling=scaling or {},
+        scaling_units=units or {},
+    )
+    path = file.write(tmp_path / "state_output.h5")
+    return ControlState.load(path, problem.full_space.without_support())
+
+
+def test_simulation_at_installs_a_scaled_mechanism(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, mechanism=True, signature=False)
+    scaling = {"source.1.mechanism": 1.0e9, "source.2.mechanism": 2.5e8}
+    units = {"source.1.mechanism": "N*m", "source.2.mechanism": "N*m"}
+    state = _mechanism_state(problem, tmp_path, [4.0], scaling=scaling, units=units)
+    assert state.scaling == scaling and state.scaling_units == units
+    # scaling travels with updates and file round trips
+    moved = state.with_update(problem.space, state.vector(problem.space).values)
+    assert moved.scaling == scaling
+    again = ControlState.load(
+        state.save(tmp_path / "again.h5"), problem.full_space.without_support()
+    )
+    assert again.scaling == scaling and again.scaling_units == units
+
+    installed = problem.simulation_at(state)
+
+    points = installed.acquisition.source_geometry.sources
+    # physical scalar strength = coordinate * scaling in the scaling units
+    assert points[0].amplitude == {"value": 1.0e9, "units": "N*m"}
+    assert points[1].amplitude == {"value": 1.0e9, "units": "N*m"}
+    assert installed.acquisition.source_encoding is None  # real: no phase
+    exported = installed.acquisition.to_fs()["source_geometry"]["sources"][1]
+    assert exported["amplitude"] == {"value": 1.0e9, "units": "N*m"}
+
+    # a complex coordinate installs its magnitude and applies the phase
+    # through the encoding like a signature
+    phased = _mechanism_state(problem, tmp_path, [2.0j], scaling=scaling, units=units)
+    installed = problem.simulation_at(phased)
+    assert installed.acquisition.source_geometry.sources[1].amplitude["value"] == (
+        pytest.approx(5.0e8)
+    )
+    np.testing.assert_allclose(
+        installed.acquisition.source_encoding.weights, np.diag([1.0, 1.0j])
+    )
+
+
+@pytest.mark.parametrize(
+    "kind, dimension, components, expected",
+    [
+        ("vector", 2, [3.0, 4.0], {"direction": [0.6, 0.8], "amplitude": 10.0}),
+        ("dipole", 3, [0.0, 0.0, -2.0], {"direction": [0, 0, -1.0], "amplitude": 4.0}),
+        (
+            "tensor",
+            2,
+            [1.0, -1.0, 0.5],
+            {"tensor": [[2.0, 0.0, 1.0], [0.0, 0.0, 0.0], [1.0, 0.0, -2.0]]},
+        ),
+        (
+            "tensor",
+            3,
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            {"tensor": [[2.0, 12.0, 10.0], [12.0, 4.0, 8.0], [10.0, 8.0, 6.0]]},
+        ),
+    ],
+)
+def test_mechanism_components_map_to_the_source_basis(
+    kind, dimension, components, expected
+):
+    from types import SimpleNamespace
+
+    from frequensolve.imaging.controls import ResolvedBlock
+    from frequensolve.imaging.problem import _install_source_mechanism
+    from frequensolve.seismic.acquisition import Acquisition
+    from frequensolve.seismic.sources import SourceGeometry
+
+    coords = [[0.0] * dimension, [1.0] * dimension]
+    geometry = SourceGeometry.points(kind=kind, coords=coords)
+    geometry.sources[1].amplitude = 7.0  # replaced (tensor: dropped)
+    simulation = SimpleNamespace(
+        dimension=dimension, acquisition=Acquisition(source_geometry=geometry)
+    )
+    values = np.zeros(2 * len(components))
+    values[0::2] = components
+    block = ResolvedBlock(
+        name="source.2.mechanism",
+        key="src",
+        address="src.mechanism",
+        size=values.size,
+        complex=True,
+        kind="source",
+        source_id=2,
+        quantity="mechanism",
+    )
+
+    phase = _install_source_mechanism(simulation, block, values, 2.0, None)
+
+    point = geometry.sources[1]
+    assert phase == pytest.approx(1.0)
+    if "tensor" in expected:
+        assert point.mechanism == {
+            "type": "moment_tensor",
+            "tensor": expected["tensor"],
+            "units": "N*m",
+        }
+        assert point.amplitude is None
+    else:
+        np.testing.assert_allclose(point.direction, expected["direction"])
+        units = "N" if kind == "vector" else "N*m"
+        assert point.amplitude == {"value": expected["amplitude"], "units": units}
+    assert geometry.sources[0].amplitude is None  # other sources untouched
+    # mixed phases have no real representation
+    mixed = values.copy()
+    mixed[1] = 1.0
+    with pytest.raises(NotImplementedError, match="different phases"):
+        _install_source_mechanism(simulation, block, mixed, 2.0, None)
+
+
+def test_simulation_at_rejects_a_mechanism_without_scaling(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, mechanism=True, signature=False)
+    state = _mechanism_state(problem, tmp_path, [4.0])
+    assert state.scaling == {}
+    with pytest.raises(NotImplementedError, match=r"'source\.1\.mechanism'.*scaling"):
         problem.simulation_at(state)
+    # Sauce's registry baseline supplies the scaling when the state has none
+    problem._shared.baseline = ControlStateFile(
+        state.blocks(),
+        scaling={"source.1.mechanism": 3.0, "source.2.mechanism": 3.0},
+        scaling_units={"source.1.mechanism": "N*m", "source.2.mechanism": "N*m"},
+    )
+    installed = problem.simulation_at(state)
+    assert installed.acquisition.source_geometry.sources[1].amplitude == {
+        "value": 12.0,
+        "units": "N*m",
+    }
+
+
+def test_staged_states_carry_the_mechanism_scaling(tmp_path):
+    fake = FakeImagingSite({"source.1.mechanism": 2, "source.2.mechanism": 2}, seed=7)
+    _sim, problem = _source_problem(tmp_path, fake, mechanism=True, signature=False)
+    problem.linearize(gradient=False)  # learns the registry baseline
+    shared = problem._shared
+    names = [n for n in shared.baseline.names if n.endswith(".mechanism")]
+    shared.baseline = ControlStateFile(
+        shared.baseline.blocks,
+        scaling={name: 2.0 for name in names},
+        scaling_units={name: "N*m" for name in names},
+    )
+    state = problem.state_from(problem.vector().values + 0.1)
+    _stage, path = problem._stage_state("sha256:" + "ab" * 32, state)
+    staged = ControlStateFile.read(path)
+    # the state carries no scaling of its own: its mechanism blocks are read
+    # in task coordinates, so no baseline scaling is attached to them
+    assert staged.scaling == {}
+    scaled = ControlState(
+        state.space,
+        state.values,
+        scaling={name: 5.0 for name in names},
+        scaling_units={name: "N" for name in names},
+    )
+    _stage, path = problem._stage_state("sha256:" + "cd" * 32, scaled)
+    staged = ControlStateFile.read(path)
+    assert staged.scaling == {name: 5.0 for name in names}
+    assert staged.scaling_units == {name: "N" for name in names}
+
+
+def test_simulation_at_rejects_a_changed_signature_derivative(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, signature=False, signature_df=True)
+    values = problem.vector().values.copy()
+    values[-1] = 0.3
+    with pytest.raises(NotImplementedError, match=r"'source\.2\.signature_df'"):
+        problem.simulation_at(values)
 
 
 def test_simulation_at_moves_changed_source_positions(tmp_path, fake):

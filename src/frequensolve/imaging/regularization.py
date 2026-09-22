@@ -22,11 +22,16 @@ Three small families live here (spec section 5.3):
 Lattice conventions
 -------------------
 
-Difference operators are scaled by the block's physical spacing.  1-D
-profiles (hat) differentiate along the profile axis at the node coordinates;
-B-spline profiles difference their coefficients at the Greville abscissae;
-lattices (:class:`~frequensolve.imaging.controls.GridParameters`) sum one
-term per lattice axis with that axis' spacing.  Blocks without a lattice
+Penalties are scale free: every lattice block is measured on its
+nondimensional coordinate ``xi = (x - x0) / L`` (``L`` the block span per
+axis unless ``length=`` names a physical scale) and each penalty is the
+quadrature-weighted discretization of a continuous seminorm over the unit
+interval / square / cube, so the value of a fixed smooth field does not
+depend on the node count.  1-D profiles (hat) differentiate along the
+profile axis at the node coordinates; B-spline profiles difference their
+coefficients at the Greville abscissae; lattices
+(:class:`~frequensolve.imaging.controls.GridParameters`) sum one term per
+lattice axis with trapezoid weights on the other axes.  Blocks without a lattice
 (source, interface, registry-only blocks) fall back to the identity
 "difference" (a ridge toward the reference) when a nonzero weight is
 requested for them; mesh blocks have no local topology and raise.
@@ -70,6 +75,7 @@ from scipy.sparse.linalg import LinearOperator
 
 from frequensolve.imaging._artifacts import ControlVectorFile, SmoothingConfig
 from frequensolve.imaging.controls import (
+    _DEFAULT_LENGTH_UNITS,
     ControlSpace,
     ControlState,
     ControlVector,
@@ -88,6 +94,7 @@ from frequensolve.model.parameterization import (
     TensorHatControl,
 )
 from frequensolve.model.representation import ControlRepresentation
+from frequensolve.units import is_quantity
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from frequensolve.imaging.problem import ImagingProblem, Linearization
@@ -168,7 +175,7 @@ def _material_default(block: ResolvedBlock) -> float:
 
 
 # ---------------------------------------------------------------------------
-# lattice difference operators
+# lattice quadrature operators
 # ---------------------------------------------------------------------------
 
 
@@ -193,6 +200,94 @@ def _axis_nodes(block: ResolvedBlock) -> Optional[List[np.ndarray]]:
             np.asarray(values, dtype=np.float64) for values in control.axis_coordinates
         ]
     return None
+
+
+def _length_magnitude(value: Any, block: ResolvedBlock) -> float:
+    if is_quantity(value):
+        units = block.units or _DEFAULT_LENGTH_UNITS
+        try:
+            magnitude = float(value.to(units).magnitude)
+        except Exception as exc:
+            raise ValueError(f"penalty length {value!r} is not a length") from exc
+    else:
+        magnitude = float(value)
+    if not math.isfinite(magnitude) or magnitude <= 0.0:
+        raise ValueError(f"penalty length must be positive and finite; got {value!r}")
+    return magnitude
+
+
+def _resolve_lengths(
+    space: ControlSpace, length: Any
+) -> Dict[str, Optional[Tuple[Any, ...]]]:
+    """Return ``block name -> per-axis length spec`` (``None``: block span)."""
+
+    table: Dict[str, Optional[Tuple[Any, ...]]] = {
+        block.name: None for block in space.resolved_blocks
+    }
+    if length is None:
+        return table
+    if isinstance(length, Mapping):
+        items = list(length.items())
+    else:
+        items = [(block.name, length) for block in space.resolved_blocks]
+    for key, value in items:
+        spec = (
+            tuple(value)
+            if isinstance(value, (list, tuple, np.ndarray)) and not is_quantity(value)
+            else (value,)
+        )
+        for block in space._select(key):
+            table[block.name] = spec
+    return table
+
+
+def _unit_coordinates(
+    block: ResolvedBlock, length: Optional[Tuple[Any, ...]]
+) -> Optional[List[np.ndarray]]:
+    """Return per-axis nondimensional nodes ``xi = (x - x0) / L`` or ``None``.
+
+    ``L`` is the block span along the axis unless ``length`` supplies one
+    physical scale (applied to every axis) or one per axis.  Axes with a
+    single node keep ``xi = [0]`` (no differences, unit measure).
+    """
+
+    nodes = _axis_nodes(block)
+    if nodes is None:
+        return None
+    if length is not None and len(length) not in (1, len(nodes)):
+        raise ValueError(
+            f"block {block.name!r} has {len(nodes)} lattice axes; penalty length "
+            f"gives {len(length)} values"
+        )
+    out: List[np.ndarray] = []
+    for k, axis in enumerate(nodes):
+        span = float(axis[-1] - axis[0]) if axis.size > 1 else 0.0
+        if axis.size > 1 and not span > 0.0:
+            raise ValueError(f"block {block.name!r} axis {k} nodes must increase")
+        if length is None:
+            scale = span if span > 0.0 else 1.0
+        else:
+            scale = _length_magnitude(length[0 if len(length) == 1 else k], block)
+        out.append((axis - axis[0]) / scale)
+    return out
+
+
+def _trapezoid(xi: np.ndarray) -> np.ndarray:
+    """Return trapezoid (dual-cell) node weights; a single node weighs 1."""
+
+    if xi.size < 2:
+        return np.ones(xi.size, dtype=np.float64)
+    h = np.diff(xi)
+    weights = np.zeros(xi.size, dtype=np.float64)
+    weights[:-1] += 0.5 * h
+    weights[1:] += 0.5 * h
+    return weights
+
+
+def _cells(xi: np.ndarray) -> np.ndarray:
+    """Return cell widths along one axis (a single node is one unit cell)."""
+
+    return np.diff(xi) if xi.size > 1 else np.ones(1, dtype=np.float64)
 
 
 def _difference_1d(nodes: np.ndarray, order: int) -> csr_matrix:
@@ -228,6 +323,15 @@ def _difference_1d(nodes: np.ndarray, order: int) -> csr_matrix:
     raise ValueError("difference order must be 1 or 2")
 
 
+def _edge_weights(xi: np.ndarray, order: int) -> np.ndarray:
+    """Quadrature weight of each row of :func:`_difference_1d`."""
+
+    if order == 1:
+        return np.diff(xi)
+    h = np.diff(xi)
+    return 0.5 * (h[:-1] + h[1:])
+
+
 def _node_difference_1d(nodes: np.ndarray, order: int) -> csr_matrix:
     """Return the ``n x n`` node-based difference (zero rows at the boundary)."""
 
@@ -239,15 +343,37 @@ def _node_difference_1d(nodes: np.ndarray, order: int) -> csr_matrix:
     )
 
 
-def _lattice_operator(shape: Sequence[int], axis: int, op1d: csr_matrix) -> csr_matrix:
-    """Lift a 1-D operator along ``axis`` of a first-axis-fastest lattice."""
+def _cell_average_1d(n: int) -> csr_matrix:
+    """Return the ``(n - 1) x n`` midpoint average (``1 x 1`` identity if n == 1)."""
+
+    if n < 2:
+        return csr_matrix(np.ones((1, 1)))
+    rows = np.repeat(np.arange(n - 1), 2)
+    cols = np.stack([np.arange(n - 1), np.arange(1, n)], axis=1).reshape(-1)
+    return csr_matrix((np.full(rows.size, 0.5), (rows, cols)), shape=(n - 1, n))
+
+
+def _cell_difference_1d(xi: np.ndarray) -> csr_matrix:
+    if xi.size < 2:
+        return csr_matrix((1, 1), dtype=np.float64)
+    return _difference_1d(xi, 1)
+
+
+def _kron(factors: Sequence[Any]) -> csr_matrix:
+    """Kronecker product of per-axis factors on a first-axis-fastest lattice."""
 
     result: Optional[Any] = None
-    for j in reversed(range(len(shape))):
-        factor = op1d if j == axis else identity(int(shape[j]), format="csr")
+    for factor in reversed(list(factors)):
         result = factor if result is None else kron(result, factor, format="csr")
     assert result is not None
     return csr_matrix(result)
+
+
+def _kron_vector(factors: Sequence[np.ndarray]) -> np.ndarray:
+    result = np.ones(1, dtype=np.float64)
+    for factor in reversed(list(factors)):
+        result = np.kron(result, np.asarray(factor, dtype=np.float64))
+    return result
 
 
 def _restrict(
@@ -257,11 +383,12 @@ def _restrict(
     columns: int,
     *,
     drop_rows: bool,
-) -> csr_matrix:
+) -> Tuple[csr_matrix, np.ndarray]:
     """Map a block-local operator onto the optimizer layout.
 
     Rows touching a frozen column are dropped (``drop_rows``) or zeroed;
     active columns are shifted to ``offset`` in a ``columns``-wide matrix.
+    Returns the matrix and the boolean mask of the input rows it kept.
     """
 
     coo = matrix.tocoo()
@@ -279,7 +406,7 @@ def _restrict(
     col_map = np.full(mask.size, -1, dtype=np.int64)
     col_map[mask] = np.arange(int(np.count_nonzero(mask))) + int(offset)
     select = keep_row[coo.row]
-    return csr_matrix(
+    restricted = csr_matrix(
         (
             coo.data[select],
             (row_map[coo.row[select]], col_map[coo.col[select]]),
@@ -287,17 +414,19 @@ def _restrict(
         shape=(rows_out, int(columns)),
         dtype=np.float64,
     )
+    return restricted, (keep_row if drop_rows else np.ones(m, dtype=bool))
 
 
-def _block_operators(
-    space: ControlSpace,
-    block: ResolvedBlock,
-    *,
-    order: int,
-    node_based: bool,
-) -> List[csr_matrix]:
-    """Return the per-axis difference operators of ``block`` on the space."""
+def _check_lattice(block: ResolvedBlock, xi: Sequence[np.ndarray]) -> Tuple[int, ...]:
+    shape = tuple(int(axis.size) for axis in xi)
+    if int(np.prod(shape)) != block.size:
+        raise ValueError(
+            f"block {block.name!r} lattice {shape} does not match its {block.size} DOFs"
+        )
+    return shape
 
+
+def _reject_mesh(block: ResolvedBlock) -> None:
     if block.kind == "mesh":
         raise NotImplementedError(
             f"mesh block {block.name!r} has no lattice: nodal differences need the "
@@ -306,32 +435,115 @@ def _block_operators(
             "smoothing (im.Smoothing / ImagingProblem(smoothing=...)) where the "
             "solver supports it"
         )
-    mask = np.asarray(space.support[block.name], dtype=bool)
-    offset = space.slices[block.name].start
-    columns = space.size
-    nodes = _axis_nodes(block)
-    if nodes is None:
+
+
+def _placement(space: ControlSpace, block: ResolvedBlock) -> Tuple[np.ndarray, int]:
+    return (
+        np.asarray(space.support[block.name], dtype=bool),
+        space.slices[block.name].start,
+    )
+
+
+def _tikhonov_rows(
+    space: ControlSpace,
+    block: ResolvedBlock,
+    *,
+    order: int,
+    length: Optional[Tuple[Any, ...]],
+) -> List[csr_matrix]:
+    """Return ``R_b`` with ``||R_b c||^2 ~= int |d^k c / d xi^k|^2 dxi``.
+
+    One stack per lattice axis: the order-``k`` difference on the
+    nondimensional nodes, each row scaled by the square root of its
+    quadrature weight (edge length or dual-cell length along the axis times
+    the trapezoid weights of the other axes).  Blocks without a lattice get
+    the identity (a ridge toward the reference).
+    """
+
+    _reject_mesh(block)
+    mask, offset = _placement(space, block)
+    xi = _unit_coordinates(block, length)
+    if xi is None:
         eye = identity(block.size, format="csr")
-        return [_restrict(eye, mask, offset, columns, drop_rows=True)]
-    shape = tuple(int(axis.size) for axis in nodes)
-    if int(np.prod(shape)) != block.size:
-        raise ValueError(
-            f"block {block.name!r} lattice {shape} does not match its {block.size} DOFs"
-        )
-    operators: List[csr_matrix] = []
-    for k, axis_nodes in enumerate(nodes):
-        one_d = (
-            _node_difference_1d(axis_nodes, order)
-            if node_based
-            else _difference_1d(axis_nodes, order)
-        )
-        if one_d.shape[0] == 0 or one_d.nnz == 0:
+        return [_restrict(eye, mask, offset, space.size, drop_rows=True)[0]]
+    _check_lattice(block, xi)
+    rows: List[csr_matrix] = []
+    for k, axis in enumerate(xi):
+        difference = _difference_1d(axis, order)
+        if difference.shape[0] == 0:
             continue
-        full = _lattice_operator(shape, k, one_d)
-        operators.append(
-            _restrict(full, mask, offset, columns, drop_rows=not node_based)
-        )
-    return operators
+        factors = [
+            (
+                csr_matrix(np.sqrt(_edge_weights(axis, order))[:, None])
+                .multiply(difference)
+                .tocsr()
+                if j == k
+                else csr_matrix(np.diag(np.sqrt(_trapezoid(other))))
+            )
+            for j, other in enumerate(xi)
+        ]
+        full = _kron(factors)
+        rows.append(_restrict(full, mask, offset, space.size, drop_rows=True)[0])
+    return rows
+
+
+def _tv_terms(
+    space: ControlSpace,
+    block: ResolvedBlock,
+    *,
+    order: int,
+    length: Optional[Tuple[Any, ...]],
+) -> Optional[Tuple[List[csr_matrix], np.ndarray]]:
+    """Return per-axis gradient components ``G_k`` and quadrature weights ``w``.
+
+    ``order=1`` evaluates the gradient per lattice cell (the axis difference
+    averaged over the other axes, exact for multilinear fields) with the cell
+    volume as weight; ``order=2`` evaluates per-axis second differences at
+    the nodes (zero on the axis boundary) with trapezoid node weights.  All
+    components share one row set.  ``None`` when the block has no rows.
+    """
+
+    _reject_mesh(block)
+    mask, offset = _placement(space, block)
+    xi = _unit_coordinates(block, length)
+    if xi is None:
+        eye = identity(block.size, format="csr")
+        matrix, kept = _restrict(eye, mask, offset, space.size, drop_rows=True)
+        return [matrix], np.ones(int(np.count_nonzero(kept)), dtype=np.float64)
+    shape = _check_lattice(block, xi)
+    active_axes = [k for k, axis in enumerate(xi) if axis.size > order]
+    if not active_axes:
+        return None
+    operators: List[csr_matrix] = []
+    if order == 1:
+        weights = _kron_vector([_cells(axis) for axis in xi])
+        for k in active_axes:
+            full = _kron(
+                [
+                    _cell_difference_1d(axis) if j == k else _cell_average_1d(shape[j])
+                    for j, axis in enumerate(xi)
+                ]
+            )
+            operators.append(
+                _restrict(full, mask, offset, space.size, drop_rows=False)[0]
+            )
+    else:
+        weights = _kron_vector([_trapezoid(axis) for axis in xi])
+        for k in active_axes:
+            full = _kron(
+                [
+                    (
+                        _node_difference_1d(axis, order)
+                        if j == k
+                        else identity(shape[j], format="csr")
+                    )
+                    for j, axis in enumerate(xi)
+                ]
+            )
+            operators.append(
+                _restrict(full, mask, offset, space.size, drop_rows=False)[0]
+            )
+    return operators, weights
 
 
 def _column_squares(matrix: csr_matrix) -> np.ndarray:
@@ -508,29 +720,56 @@ class _BoundQuadraticForm(BoundPenalty):
 
 @dataclass(frozen=True)
 class Tikhonov(Penalty):
-    """Finite-difference Tikhonov penalty ``0.5 * alpha * sum_b w_b ||D_b (v - v_ref)||^2``.
+    r"""Scale-free Tikhonov penalty on each block's nondimensional coordinate.
 
-    One term per block, summed.  ``D_b`` is the order-``order`` finite
-    difference scaled by the block's physical spacing (per lattice axis for
-    :class:`~frequensolve.imaging.controls.GridParameters`, Greville abscissae
-    for B-spline profiles).  Material blocks (profile, grid) have unit weight;
-    source, interface and reflectivity blocks are unpenalized unless
-    ``weights`` names them, in which case blocks without a lattice receive an
-    identity (ridge) term.  Mesh blocks raise unless weighted zero.
+    For every block ``b`` with lattice nodes ``x`` the coordinate is
+    ``xi = (x - x0) / L`` (``L`` the block span per axis by default) and the
+    term is the quadrature-weighted discretization of the continuous seminorm
+
+    .. math::
+
+        \tfrac12\,\alpha\, w_b \sum_{k} \int_{[0,1]^d}
+        \bigl|\partial^{p} (c - c_{\mathrm{ref}}) / \partial \xi_k^{p}\bigr|^2
+        \, d\xi
+
+    with ``p = order`` and one term per lattice axis ``k``.  Order ``1`` uses
+    edge differences weighted by the edge length (exact for the
+    piecewise-linear hat interpolant), order ``2`` interior second
+    differences weighted by the dual-cell length; the other lattice axes
+    carry trapezoid weights.  The value of a fixed smooth field therefore
+    converges under node refinement instead of growing with the node count,
+    and because the default misfit is normalized to ``O(1)`` values,
+    ``alpha`` in ``1e-3 .. 1e-1`` is meaningful.  B-spline profiles
+    difference their coefficients at the Greville abscissae.
+
+    Material blocks (profile, grid) have unit weight; source, interface and
+    reflectivity blocks are unpenalized unless ``weights`` names them, in
+    which case blocks without a lattice receive an identity (ridge) term
+    ``0.5 * alpha * w_b * ||c - c_ref||^2`` over their DOFs.  Mesh blocks
+    raise unless weighted zero.  Rows touching a frozen DOF are dropped.
 
     Args:
         alpha: Penalty strength (nonnegative).
-        order: Difference order, ``1`` or ``2``.
+        order: Derivative order, ``1`` or ``2``.
         weights: Optional ``block -> weight`` (user key, address or qualified
             name) multiplying that block's term.
         reference: ``v_ref`` as a :class:`ControlVector`, :class:`ControlState`
             or array on the bound space; ``None`` penalizes ``v`` itself.
+        length: Physical length scale ``L`` of the nondimensional
+            coordinate ``xi = (x - x0) / L``.  ``None`` (default) uses each
+            block's span along each lattice axis, so the penalty is a
+            seminorm over the unit interval, square or cube and ``alpha`` is
+            scale free.  A length quantity (or a float in model coordinate
+            units), a per-axis sequence, or a mapping ``block -> length``
+            (unnamed blocks keep their span) measures derivatives per ``L``
+            instead.
     """
 
     alpha: float
     order: int = 1
     weights: Optional[Mapping[str, Any]] = None
     reference: Any = None
+    length: Any = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "alpha", _finite_scalar(self.alpha, "alpha"))
@@ -540,16 +779,19 @@ class Tikhonov(Penalty):
         object.__setattr__(self, "order", order)
         if self.weights is not None:
             object.__setattr__(self, "weights", dict(self.weights))
+        if isinstance(self.length, Mapping):
+            object.__setattr__(self, "length", dict(self.length))
 
     def bind(self, space: ControlSpace) -> BoundPenalty:
         weights = _block_weights(space, self.weights, _material_default)
+        lengths = _resolve_lengths(space, self.length)
         rows: List[csr_matrix] = []
         for block in space.resolved_blocks:
             weight = weights[block.name]
             if weight == 0.0:
                 continue
-            operators = _block_operators(
-                space, block, order=self.order, node_based=False
+            operators = _tikhonov_rows(
+                space, block, order=self.order, length=lengths[block.name]
             )
             if not operators:
                 continue
@@ -623,25 +865,36 @@ class Quadratic(Penalty):
 
 @dataclass(frozen=True)
 class TV(Penalty):
-    """Smoothed total variation ``alpha * sum_b w_b sum_i (sqrt(|G_b v|_i^2 + eps^2) - eps)``.
+    r"""Scale-free smoothed total variation on the nondimensional coordinate.
 
-    ``G_b`` collects node-based forward differences along every lattice axis
-    of block ``b`` (order ``1``) or node-based second differences (``order=2``,
-    a second-order TV); ``|G_b v|_i`` is the Euclidean norm over axes at node
-    ``i``.  ``value`` and ``gradient`` are exact; ``hessian_operator`` is the
-    lagged-diffusivity (IRLS) operator ``alpha * sum_k G_k^T diag(1 / r) G_k``
-    with ``r = sqrt(|G v|^2 + eps^2)`` frozen at ``v``, which is self-adjoint
-    and positive semidefinite.  Sums run over nodes without a lattice measure,
-    consistent with :class:`Tikhonov`.  The ``- eps`` offset makes constant
-    fields cost zero.  Frozen nodes zero every difference that touches them.
+    .. math::
+
+        \alpha\, w_b \int_{[0,1]^d}
+        \Bigl(\sqrt{|\nabla_\xi (c - c_{\mathrm{ref}})|^2 + \epsilon^2}
+        - \epsilon\Bigr)\, d\xi
+
+    per block, with ``xi`` as in :class:`Tikhonov`.  ``order=1`` evaluates
+    the gradient once per lattice cell (the axis difference averaged over the
+    other axes; exact for piecewise-linear profiles) weighted by the cell
+    volume; ``order=2`` (second-order TV) replaces the gradient by the
+    per-axis second differences at the nodes, weighted by trapezoid node
+    weights.  ``value`` and ``gradient`` are exact; ``hessian_operator`` is
+    the lagged-diffusivity (IRLS) operator
+    ``alpha * sum_k G_k^T diag(w / r) G_k`` with
+    ``r = sqrt(|G v|^2 + eps^2)`` frozen at ``v``, which is self-adjoint and
+    positive semidefinite.  The ``- eps`` offset makes constant fields cost
+    zero.  Frozen nodes zero every row that touches them.  Blocks without a
+    lattice (when weighted) sum ``sqrt(c_i^2 + eps^2) - eps`` over their
+    DOFs.
 
     Args:
         alpha: Penalty strength.
-        epsilon: Smoothing parameter of the absolute value (same units as
-            ``|G v|``).
+        epsilon: Smoothing parameter of the absolute value, in units of
+            ``|grad_xi c|`` (coefficient units per unit ``xi``).
         order: ``1`` (TV) or ``2`` (second-order TV).
         weights: Per-block weights (see :class:`Tikhonov`).
         reference: Optional reference vector (see :class:`Tikhonov`).
+        length: Physical length scale of ``xi`` (see :class:`Tikhonov`).
     """
 
     alpha: float
@@ -649,6 +902,7 @@ class TV(Penalty):
     order: int = 1
     weights: Optional[Mapping[str, Any]] = None
     reference: Any = None
+    length: Any = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "alpha", _finite_scalar(self.alpha, "alpha"))
@@ -662,22 +916,31 @@ class TV(Penalty):
         object.__setattr__(self, "order", order)
         if self.weights is not None:
             object.__setattr__(self, "weights", dict(self.weights))
+        if isinstance(self.length, Mapping):
+            object.__setattr__(self, "length", dict(self.length))
 
     def bind(self, space: ControlSpace) -> BoundPenalty:
         weights = _block_weights(space, self.weights, _material_default)
-        terms: List[Tuple[float, List[csr_matrix]]] = []
+        lengths = _resolve_lengths(space, self.length)
+        terms: List[Tuple[float, List[csr_matrix], np.ndarray]] = []
         for block in space.resolved_blocks:
             weight = weights[block.name]
             if weight == 0.0:
                 continue
-            operators = _block_operators(
-                space, block, order=self.order, node_based=True
+            found = _tv_terms(
+                space, block, order=self.order, length=lengths[block.name]
             )
-            if operators:
-                terms.append((self.alpha * weight, operators))
+            if found is not None:
+                operators, measure = found
+                terms.append((self.alpha * weight, operators, measure))
         return _BoundTV(
             self, space, terms, self.epsilon, _reference_values(self.reference, space)
         )
+
+
+_TVNorms = List[
+    Tuple[float, List[csr_matrix], np.ndarray, List[np.ndarray], np.ndarray]
+]
 
 
 class _BoundTV(BoundPenalty):
@@ -685,12 +948,15 @@ class _BoundTV(BoundPenalty):
         self,
         penalty: Penalty,
         space: ControlSpace,
-        terms: Sequence[Tuple[float, Sequence[csr_matrix]]],
+        terms: Sequence[Tuple[float, Sequence[csr_matrix], np.ndarray]],
         epsilon: float,
         reference: Optional[np.ndarray],
     ) -> None:
         super().__init__(penalty, space)
-        self.terms = [(float(scale), list(ops)) for scale, ops in terms]
+        self.terms = [
+            (float(scale), list(ops), np.asarray(measure, dtype=np.float64))
+            for scale, ops, measure in terms
+        ]
         self.epsilon = float(epsilon)
         self.reference = reference
 
@@ -698,34 +964,32 @@ class _BoundTV(BoundPenalty):
         values = self._values(v)
         return values if self.reference is None else values - self.reference
 
-    def _norms(
-        self, u: np.ndarray
-    ) -> List[Tuple[float, List[csr_matrix], List[np.ndarray], np.ndarray]]:
-        out = []
-        for scale, ops in self.terms:
+    def _norms(self, u: np.ndarray) -> _TVNorms:
+        out: _TVNorms = []
+        for scale, ops, measure in self.terms:
             components = [np.asarray(op @ u) for op in ops]
             squares = sum(c * c for c in components)
             radius = np.sqrt(squares + self.epsilon**2)
-            out.append((scale, ops, components, radius))
+            out.append((scale, ops, measure, components, radius))
         return out
 
     def value(self, v: Any) -> float:
         total = 0.0
-        for scale, _ops, _components, radius in self._norms(self._shift(v)):
-            total += scale * float(np.sum(radius - self.epsilon))
+        for scale, _ops, measure, _components, radius in self._norms(self._shift(v)):
+            total += scale * float(np.dot(measure, radius - self.epsilon))
         return total
 
     def gradient(self, v: Any) -> ControlVector:
         out = np.zeros(self.space.size, dtype=np.float64)
-        for scale, ops, components, radius in self._norms(self._shift(v)):
+        for scale, ops, measure, components, radius in self._norms(self._shift(v)):
             for op, component in zip(ops, components):
-                out += scale * np.asarray(op.T @ (component / radius))
+                out += scale * np.asarray(op.T @ (measure * component / radius))
         return self._wrap(out)
 
     def _weights(self, v: Any) -> List[Tuple[float, List[csr_matrix], np.ndarray]]:
         return [
-            (scale, ops, 1.0 / radius)
-            for scale, ops, _components, radius in self._norms(self._shift(v))
+            (scale, ops, measure / radius)
+            for scale, ops, measure, _components, radius in self._norms(self._shift(v))
         ]
 
     def hessian_operator(self, v: Any) -> ModelOperator:

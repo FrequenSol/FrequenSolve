@@ -444,6 +444,9 @@ class ResolvedBlock:
         components: Component labels for source blocks.
         prop: Material property name for material blocks.
         subdomain: Subdomain name for material blocks.
+        axis_label: Plot label of a vertical profile axis.
+        downward: Whether a profile's coordinate grows downwards (plots put
+            larger values lower).
     """
 
     name: str
@@ -466,6 +469,8 @@ class ResolvedBlock:
     components: Tuple[str, ...] = ()
     prop: Optional[str] = None
     subdomain: Optional[str] = None
+    axis_label: Optional[str] = None
+    downward: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", qualified_block_name(self.name))
@@ -507,6 +512,29 @@ class ResolvedBlock:
 # ---------------------------------------------------------------------------
 # bind context
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Datum:
+    """A resolved :class:`DepthProfile` datum.
+
+    Attributes:
+        axis: Control axis name (Sauce evaluates the map along it).
+        system: Coordinate system of ``axis``.
+        dim: xarray dimension name (``depth``, or ``z`` for ``global``).
+        label: Plot label of the axis.
+        downward: Whether the coordinate grows downwards.
+        surface: Reference surface of surface-relative datums.
+        positive: ``down`` or ``up`` orientation of ``axis``.
+    """
+
+    axis: str
+    system: str
+    dim: str
+    label: str
+    downward: bool
+    surface: Any = None
+    positive: str = "down"
 
 
 class _BindContext:
@@ -615,66 +643,128 @@ class _BindContext:
                 return system
         raise KeyError(f"simulation has no coordinate system {name!r}")
 
-    def ensure_below_system(self, layer: Any) -> str:
-        """Return a surface-relative system with a ``below`` axis on ``layer``'s top."""
+    def ensure_depth_system(self, surface: Any) -> str:
+        """Return the internal surface-relative ``depth`` system on ``surface``.
+
+        The system (``<surface>_depth`` with one ``depth`` axis, positive
+        down) is created on the bound simulation copy the first time a
+        profile measures depth below ``surface``; users never name it.
+        """
 
         from frequensolve.geometry.frame import Axis, SurfaceCoordinateSystem
 
-        name = f"{layer.upper.name}_below"
+        name = f"{surface.name}_depth"
         for system in self.simulation.coordinate_systems:
             if system.name == name:
                 return name
         self.simulation.coordinate_systems.append(
             SurfaceCoordinateSystem(
                 name,
-                layer.upper.name,
-                axes=[Axis("below", direction="z", positive="down")],
+                surface.name,
+                axes=[Axis("depth", direction="z", positive="down")],
                 normal="down",
             )
         )
         return name
 
-    def profile_extent(
-        self, subdomain: str, axis: str, coordinate_system: Optional[str]
-    ) -> Tuple[Tuple[float, float], str, str]:
-        """Return ``(extent, axis, coordinate_system)`` for a depth profile."""
+    def _vertical_axis(self, system: Any) -> Any:
+        """Return the one axis of ``system`` following the physical ``z``."""
+
+        axes = list(getattr(system, "axes", None) or [])
+        vertical = [a for a in axes if str(a.direction).strip().lower() == "z"]
+        if not axes and getattr(system, "inherit_axes", False):
+            from frequensolve.geometry.frame import Axis
+
+            return Axis("z", direction="z")
+        if len(vertical) != 1:
+            raise ValueError(
+                f"coordinate system {system.name!r} has {len(vertical)} vertical "
+                "axes (direction 'z'); a DepthProfile datum needs exactly one"
+            )
+        return vertical[0]
+
+    def resolve_datum(self, subdomain: str, datum: str) -> "_Datum":
+        """Resolve a :class:`DepthProfile` ``datum`` to its axis and system.
+
+        Keywords ``"top"`` and ``"global"`` come first, then coordinate
+        systems registered on the simulation, then model surfaces; a name
+        that is both a coordinate system and a surface is ambiguous.
+        """
+
+        if datum == "top":
+            layer = self.layer(subdomain)
+            return _Datum(
+                "depth",
+                self.ensure_depth_system(layer.upper),
+                "depth",
+                f"depth below {layer.upper.name}",
+                True,
+                surface=layer.upper,
+            )
+        if datum == "global" or self.is_global(datum):
+            return _Datum("z", "global", "z", "z", True)
+        systems = [
+            s.name for s in self.simulation.coordinate_systems if s.name is not None
+        ]
+        surfaces = [
+            s.name for s in (getattr(self.model, "surfaces", None) or []) if s.name
+        ]
+        if datum in systems and datum in surfaces:
+            raise ValueError(
+                f"DepthProfile datum {datum!r} names both a coordinate system and a "
+                "model surface; rename one of them to disambiguate"
+            )
+        if datum in systems:
+            system = self.coordinate_system(datum)
+            axis = self._vertical_axis(system)
+            surface_ref = getattr(system, "surface_ref", None)
+            positive = str(axis.positive or system.normal or "up").strip().lower()
+            if getattr(system, "type", "") == "surface" and surface_ref is not None:
+                surface = self._surface(surface_ref)
+                label = f"{axis.name} relative to {surface.name}"
+                if positive == "down":
+                    label = f"depth below {surface.name}"
+                return _Datum(
+                    axis.name,
+                    datum,
+                    "depth",
+                    label,
+                    positive == "down",
+                    surface=surface,
+                    positive=positive,
+                )
+            return _Datum(axis.name, datum, "depth", f"{axis.name} ({datum})", True)
+        if datum in surfaces:
+            surface = self._surface(datum)
+            return _Datum(
+                "depth",
+                self.ensure_depth_system(surface),
+                "depth",
+                f"depth below {surface.name}",
+                True,
+                surface=surface,
+            )
+        raise ValueError(
+            f"unknown DepthProfile datum {datum!r}: use 'top', 'global', a "
+            f"coordinate system ({systems}) or a model surface ({surfaces})"
+        )
+
+    def profile_extent(self, subdomain: str, datum: "_Datum") -> Tuple[float, float]:
+        """Return the subdomain's span in the datum frame."""
 
         layer = self.layer(subdomain)
         upper = _surface_extrema(layer.upper)
         lower = _surface_extrema(layer.lower)
-        if coordinate_system is not None and self.is_global(coordinate_system):
-            if axis == "below":
-                raise ValueError("a 'below' profile needs a surface-relative system")
-            coordinate_system = None
-        if coordinate_system is None:
-            if axis == "below":
-                system = self.ensure_below_system(layer)
-                return (0.0, lower[1] - upper[0]), "below", system
-            if axis == "z":
-                return (upper[0], lower[1]), "z", "global"
-            if axis in {"x", "y"}:
-                return self.lateral_extent(axis), axis, "global"
-            raise ValueError(
-                f"axis {axis!r} needs an explicit coordinate_system declaring it"
-            )
-        system = self.coordinate_system(coordinate_system)
-        if getattr(system, "type", "") == "surface":
-            axes = {a.name: a for a in (system.axes or [])}
-            if axis not in axes:
-                raise ValueError(
-                    f"coordinate system {coordinate_system!r} declares no axis {axis!r}"
-                )
-            positive = str(axes[axis].positive or system.normal or "up").lower()
-            surface = self._surface(system.surface_ref)
-            ref = _surface_extrema(surface)
-            if positive == "down":
-                return (upper[0] - ref[1], lower[1] - ref[0]), axis, coordinate_system
-            return (ref[0] - lower[1], ref[1] - upper[0]), axis, coordinate_system
-        if axis == "z":
-            return (upper[0], lower[1]), axis, coordinate_system
-        if axis in {"x", "y"}:
-            return self.lateral_extent(axis), axis, coordinate_system
-        raise ValueError(f"cannot derive the extent of axis {axis!r}")
+        if datum.surface is None:
+            # global (or a Cartesian system sharing the global vertical axis)
+            return (upper[0], lower[1])
+        if datum.surface is layer.upper or datum.surface.name == layer.upper.name:
+            if datum.positive == "down":
+                return (0.0, lower[1] - upper[0])
+        ref = _surface_extrema(datum.surface)
+        if datum.positive == "down":
+            return (upper[0] - ref[1], lower[1] - ref[0])
+        return (ref[0] - lower[1], ref[1] - upper[0])
 
     def _surface(self, ref: Any) -> Any:
         surfaces = list(getattr(self.model, "surfaces", []) or [])
@@ -1085,19 +1175,36 @@ class _BlockSpec:
 
 @dataclass(frozen=True)
 class DepthProfile(_BlockSpec):
-    """One-dimensional hat or B-spline profile of a property in a subdomain.
+    """One-dimensional vertical hat or B-spline profile of a property.
+
+    A depth profile is always vertical; ``datum`` says where depth is
+    measured from:
+
+    - ``"top"`` (default): depth below the subdomain's upper surface,
+      following that surface (an internal surface-relative system
+      ``<upper surface>_depth`` with a ``depth`` axis is created on the
+      bound simulation copy).
+    - ``"global"``: the model's global vertical coordinate ``z``; the
+      extent is ``[min(upper surface), max(lower surface)]``.
+    - a coordinate-system name registered on the simulation (e.g. a
+      user-authored seabed-relative system): its one vertical axis
+      (direction ``z``), oriented by the axis' ``positive``.
+    - a model-surface name: depth below that surface (the extent is the
+      subdomain's span measured from it and need not start at 0).
+
+    Keywords win over names; a name that is both a coordinate system and a
+    surface raises.
 
     Args:
         prop: Material property name (``vp``, ``rho`` ...).
         subdomain: Layer or subdomain the profile lives in.
-        axis: Coordinate axis; ``below`` is depth below the layer's upper
-            surface, ``z`` the global depth axis.
+        datum: Where depth is measured from (see above).
         spacing: Maximum node spacing; nodes end exactly at the extent.
         count: Number of coefficients.
         nodes: Explicit uniform node coordinates (hat) or breakpoints
-            (B-spline).  Exactly one of ``spacing``, ``count`` and ``nodes``.
-        coordinate_system: Coordinate system of ``axis``; ``None`` selects
-            ``global`` (or an automatic surface-relative system for ``below``).
+            (B-spline) in the datum frame (depth below the datum, global
+            ``z`` for ``"global"``).  Exactly one of ``spacing``, ``count``
+            and ``nodes``.
         transform: Sauce control transform.
         limits: Optional ``(lower, upper)`` physical value limits.  A constant
             reference property gives scalar optimizer bounds; a varying one
@@ -1114,11 +1221,10 @@ class DepthProfile(_BlockSpec):
 
     prop: str
     subdomain: str
-    axis: str = "below"
+    datum: str = "top"
     spacing: Any = None
     count: Optional[int] = None
     nodes: Any = None
-    coordinate_system: Optional[str] = None
     transform: str = "identity"
     limits: Any = None
     degree: Optional[int] = None
@@ -1127,9 +1233,11 @@ class DepthProfile(_BlockSpec):
     def __post_init__(self) -> None:
         object.__setattr__(self, "prop", str(self.prop).strip())
         object.__setattr__(self, "subdomain", str(self.subdomain).strip())
-        object.__setattr__(self, "axis", str(self.axis).strip())
-        if not self.prop or not self.subdomain or not self.axis:
-            raise ValueError("DepthProfile requires prop, subdomain and axis")
+        if not isinstance(self.datum, str) or not self.datum.strip():
+            raise ValueError("DepthProfile datum must be a non-empty string")
+        object.__setattr__(self, "datum", self.datum.strip())
+        if not self.prop or not self.subdomain:
+            raise ValueError("DepthProfile requires prop and subdomain")
         given = [
             name
             for name, value in (
@@ -1162,11 +1270,6 @@ class DepthProfile(_BlockSpec):
                 if not np.all(np.isfinite(nodes)) or np.any(np.diff(nodes) <= 0.0):
                     raise ValueError("DepthProfile nodes must be finite and increasing")
                 object.__setattr__(self, "nodes", tuple(float(v) for v in nodes))
-        if self.coordinate_system is not None:
-            system = str(self.coordinate_system).strip()
-            if not system:
-                raise ValueError("coordinate_system cannot be empty")
-            object.__setattr__(self, "coordinate_system", system)
         object.__setattr__(self, "transform", _validate_transform(self.transform))
         object.__setattr__(self, "limits", _validate_limits(self.limits))
         if self.degree is not None:
@@ -1200,35 +1303,36 @@ class DepthProfile(_BlockSpec):
             )
         return np.asarray(nodes, dtype=np.float64), None
 
+    def _datum(self, ctx: Optional[_BindContext]) -> _Datum:
+        if ctx is not None:
+            return ctx.resolve_datum(self.subdomain, self.datum)
+        if self.datum == "global":
+            return _Datum("z", "global", "z", "z", True)
+        raise UnresolvedControlError(
+            f"DepthProfile datum {self.datum!r} needs a simulation to anchor its "
+            "axis; bind the space first"
+        )
+
     def build_control(
         self, ctx: Optional[_BindContext]
-    ) -> Tuple[Union[HatControl, BSplineControl], str, Tuple[float, float]]:
-        """Return ``(control, coordinate_system, extent)`` with zero coefficients."""
+    ) -> Tuple[Union[HatControl, BSplineControl], _Datum, Tuple[float, float]]:
+        """Return ``(control, datum, extent)`` with zero coefficients."""
 
         units: Optional[str] = None
         if self.nodes is not None:
             nodes, units = self._node_values(ctx)
-            system = self.coordinate_system
-            if system is None:
-                if self.axis == "below":
-                    if ctx is None:
-                        raise UnresolvedControlError(
-                            "a 'below' profile needs a simulation to anchor its axis"
-                        )
-                    system = ctx.ensure_below_system(ctx.layer(self.subdomain))
-                else:
-                    system = "global"
+            datum = self._datum(ctx)
             extent = (float(nodes[0]), float(nodes[-1]))
             if self.degree is None:
                 spacing = np.diff(nodes)
                 if not np.allclose(spacing, spacing[0], rtol=1e-9, atol=0.0):
                     raise ValueError("hat profiles require uniformly spaced nodes")
                 control: Union[HatControl, BSplineControl] = HatControl(
-                    axis=self.axis,
+                    axis=datum.axis,
                     spacing=float(spacing[0]),
                     origin=float(nodes[0]),
                     coefficients=np.zeros(nodes.size),
-                    coordinate_system=system,
+                    coordinate_system=datum.system,
                     units=units,
                 )
             else:
@@ -1237,26 +1341,25 @@ class DepthProfile(_BlockSpec):
                     ([nodes[0]] * degree, nodes, [nodes[-1]] * degree)
                 )
                 control = BSplineControl(
-                    axis=self.axis,
+                    axis=datum.axis,
                     knots=knots,
                     degree=degree,
                     coefficients=np.zeros(knots.size - degree - 1),
-                    coordinate_system=system,
+                    coordinate_system=datum.system,
                     units=units,
                 )
-            return control, system, extent
+            return control, datum, extent
         if ctx is None:
             raise UnresolvedControlError(
                 f"DepthProfile({self.prop!r}, {self.subdomain!r}) needs a simulation "
                 "to derive its extent; bind the space first"
             )
-        extent, axis, system = ctx.profile_extent(
-            self.subdomain, self.axis, self.coordinate_system
-        )
+        datum = self._datum(ctx)
+        extent = ctx.profile_extent(self.subdomain, datum)
         length = extent[1] - extent[0]
         if length <= 0.0:
             raise ValueError(
-                f"subdomain {self.subdomain!r} has no extent along {axis!r}"
+                f"subdomain {self.subdomain!r} has no extent along {datum.label!r}"
             )
         if self.spacing is not None:
             spacing, units = ctx.length(self.spacing)
@@ -1270,26 +1373,26 @@ class DepthProfile(_BlockSpec):
             spacing = length / (count - 1)
         if self.degree is None:
             control = HatControl(
-                axis=axis,
+                axis=datum.axis,
                 spacing=spacing,
                 origin=extent[0],
                 coefficients=np.zeros(count),
-                coordinate_system=system,
+                coordinate_system=datum.system,
                 units=units,
             )
         else:
             control = BSplineControl(
-                axis=axis,
+                axis=datum.axis,
                 knots=_open_uniform_knots(extent, count, self.degree),
                 degree=self.degree,
                 coefficients=np.zeros(count),
-                coordinate_system=system,
+                coordinate_system=datum.system,
                 units=units,
             )
-        return control, system, extent
+        return control, datum, extent
 
     def resolve(self, key: str, ctx: Optional[_BindContext]) -> List[ResolvedBlock]:
-        control, system, _extent = self.build_control(ctx)
+        control, datum, _extent = self.build_control(ctx)
         block_id = self.block_id(key)
         if ctx is None and self.limits is not None:
             raise UnresolvedControlError(
@@ -1323,13 +1426,15 @@ class DepthProfile(_BlockSpec):
                 transform=self.transform,
                 lower=lower,
                 upper=upper,
-                dims=(control.axis,),
-                coords={control.axis: coordinates},
+                dims=(datum.dim,),
+                coords={datum.dim: coordinates},
                 units=control.units,
-                coordinate_system=system,
+                coordinate_system=datum.system,
                 baseline=np.zeros(control.size),
                 prop=self.prop,
                 subdomain=self.subdomain,
+                axis_label=datum.label,
+                downward=datum.downward,
             )
         ]
 
@@ -1923,7 +2028,7 @@ class ReflectivityField:
                         f"{self.layer} but its DepthProfile lives in "
                         f"{control.subdomain!r} (layer {index})"
                     )
-            resolved, _system, _extent = control.build_control(ctx)
+            resolved, _datum, _extent = control.build_control(ctx)
             return resolved
         return control
 
@@ -2034,11 +2139,24 @@ class ReflectivityParameters(_BlockSpec):
                 )
             dims: Tuple[str, ...] = ()
             coords: Optional[Dict[str, np.ndarray]] = None
+            label: Optional[str] = None
+            downward = True
             if isinstance(control, (HatControl, BSplineControl)):
-                dims = (control.axis,)
-                coords = {
-                    control.axis: np.asarray(control.coordinates, dtype=np.float64)
-                }
+                if isinstance(f.control, (HatControl, BSplineControl)):
+                    dim = control.axis  # authored as is
+                else:
+                    # a DepthProfile map (own or borrowed): same dimension
+                    # naming as the material profiles
+                    dim = (
+                        "z"
+                        if control.coordinate_system in (None, "global")
+                        else "depth"
+                    )
+                if isinstance(f.control, DepthProfile) and ctx is not None:
+                    datum = f.control._datum(ctx)
+                    label, downward = datum.label, datum.downward
+                dims = (dim,)
+                coords = {dim: np.asarray(control.coordinates, dtype=np.float64)}
             elif isinstance(control, TensorHatControl):
                 dims = tuple(control.axes)
                 coords = {
@@ -2059,6 +2177,8 @@ class ReflectivityParameters(_BlockSpec):
                     coordinate_system=getattr(control, "coordinate_system", None),
                     baseline=np.zeros(size),
                     subdomain=subdomains.get(f.name),
+                    axis_label=label,
+                    downward=downward,
                 )
             )
         if ctx is not None:
@@ -3056,10 +3176,8 @@ class BoundControlSpace(ControlSpace):
             spec = self._specs.get(block.key)
             if block.kind == "profile" and isinstance(spec, DepthProfile):
                 try:
-                    extent, _axis, _system = ctx.profile_extent(
-                        spec.subdomain,
-                        block.control.axis,
-                        block.control.coordinate_system,
+                    extent = ctx.profile_extent(
+                        spec.subdomain, ctx.resolve_datum(spec.subdomain, spec.datum)
                     )
                 except (UnresolvedControlError, KeyError, ValueError):
                     continue
@@ -3126,7 +3244,7 @@ def _lattice_support(
 # rendering helpers
 # ---------------------------------------------------------------------------
 
-_VERTICAL_AXES = {"z", "below", "depth"}
+_VERTICAL_AXES = {"z", "depth"}
 
 
 def _matplotlib() -> Any:
@@ -3236,11 +3354,13 @@ def _draw_block_group(
     if block.coords and len(block.dims) == 1 and block.kind != "interface":
         coords = np.asarray(block.coords[block.dims[0]], dtype=np.float64)
         axis = block.dims[0]
-        if axis in _VERTICAL_AXES:
+        if block.kind == "profile" or axis in _VERTICAL_AXES:
+            # Depth profiles are always vertical: values across, the datum
+            # coordinate down (larger depth lower when it grows downwards).
             (line,) = ax.plot(values, coords, **kwargs)
-            ax.set_ylabel(_axis_label(axis, block))
+            ax.set_ylabel(_axis_label(block.axis_label or axis, block))
             ax.set_xlabel(block.address)
-            if not ax.yaxis_inverted():
+            if block.downward and not ax.yaxis_inverted():
                 ax.invert_yaxis()
         else:
             (line,) = ax.plot(coords, values, **kwargs)
@@ -3611,8 +3731,9 @@ class ControlVector:
     def plot(self, key: Optional[str] = None, ax: Any = None, **kwargs: Any) -> Any:
         """Plot blocks with matplotlib (PyVista for mesh blocks).
 
-        Depth profiles are drawn as lines against their axis coordinate
-        (vertical axes ``z``/``below``/``depth`` run downwards); lattices as a
+        Depth profiles are drawn vertically, values against the datum
+        coordinate (``depth below <surface>`` or global ``z``, growing
+        downwards); lattices as a
         ``pcolormesh`` over the physical extent (``z`` downwards; 3-D lattices
         take a ``slice={axis: index}`` keyword, default the middle ``y``
         plane); interface blocks as coefficients against the center index;
@@ -3759,9 +3880,23 @@ class ControlState:
     Values live in the Sauce layout (frozen DOFs included, complex blocks
     interleaved).  Use :meth:`vector` to take the active slice on a
     restricted space and :meth:`with_update` to write one back.
+
+    ``scaling`` / ``scaling_units`` carry Sauce's per-block physical scale of
+    one stored coordinate (``/scaling/<block>``, written for
+    ``source.<i>.mechanism`` blocks of a ``state_output``); they travel with
+    :meth:`with_update`, :meth:`from_file` and :meth:`to_file` and let
+    :meth:`~frequensolve.imaging.problem.ImagingProblem.simulation_at`
+    convert mechanism coordinates to physical source strengths.
     """
 
-    def __init__(self, space: ControlSpace, values: Any):
+    def __init__(
+        self,
+        space: ControlSpace,
+        values: Any,
+        *,
+        scaling: Optional[Mapping[str, float]] = None,
+        scaling_units: Optional[Mapping[str, str]] = None,
+    ):
         if not isinstance(space, ControlSpace):
             raise TypeError("ControlState requires a ControlSpace")
         array = np.asarray(values)
@@ -3777,6 +3912,22 @@ class ControlState:
             raise ValueError("control state values must be finite")
         self.space = space
         self._values = array
+        names = set(space.blocks)
+        self.scaling: Dict[str, float] = {}
+        for name, value in dict(scaling or {}).items():
+            number = float(value)
+            if not math.isfinite(number) or number <= 0.0:
+                raise ValueError(f"scaling of {name!r} must be finite and positive")
+            if name in names:
+                self.scaling[name] = number
+        self.scaling_units: Dict[str, str] = {
+            name: str(units)
+            for name, units in dict(scaling_units or {}).items()
+            if name in self.scaling
+        }
+
+    def _scales(self) -> Dict[str, Any]:
+        return {"scaling": self.scaling, "scaling_units": self.scaling_units}
 
     @property
     def values(self) -> np.ndarray:
@@ -3854,7 +4005,7 @@ class ControlState:
                     f"the space has {sl.stop - sl.start}"
                 )
             full[sl] = values
-        return cls(space, full)
+        return cls(space, full, scaling=file.scaling, scaling_units=file.scaling_units)
 
     @classmethod
     def from_manifest(
@@ -3875,6 +4026,8 @@ class ControlState:
             blocks,
             support=self.space.support_masks(),
             support_min_support=self.space.min_support,
+            scaling=dict(self.scaling),
+            scaling_units=dict(self.scaling_units),
         )
 
     def save(self, path: Union[str, Path]) -> Path:
@@ -3957,7 +4110,7 @@ class ControlState:
             segment = values[target]
             segment[mask] = full[sl][mask]
             values[target] = segment
-        return ControlState(self.space, values)
+        return ControlState(self.space, values, **self._scales())
 
     def to_xarray(self, key: Optional[str] = None) -> Any:
         """Render material blocks as xarray (see :meth:`ControlVector.to_xarray`)."""

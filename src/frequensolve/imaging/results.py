@@ -184,8 +184,11 @@ class FWIResult:
             every stage, with stage metrics).
         stages: One :class:`StageResult` per stage in order.
         checkpoint: Path of the last written checkpoint, if any.
-        problem: The problem the run belonged to (used by :attr:`simulation`
-            and :meth:`vector`); ``None`` after :meth:`load` without one.
+        problem: The problem of the run's last stage (used by
+            :attr:`simulation` and :meth:`vector`); a stage with
+            ``controls`` makes it the problem built by
+            :meth:`ImagingProblem.with_controls`, whose layout ``state``
+            covers.  ``None`` after :meth:`load` without one.
     """
 
     state: ControlState

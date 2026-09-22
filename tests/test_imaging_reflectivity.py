@@ -92,9 +92,9 @@ def test_bound_space_emits_the_pinned_reflectivity_payload(tmp_path):
     np.testing.assert_array_equal(im.ControlState.from_simulation(bound)["refl"], 0.0)
     # the borrowed basis renders on the material block's coordinates
     vp, ip = bound.block("vp"), bound.block("refl")
-    assert ip.dims == vp.dims == ("below",)
-    np.testing.assert_array_equal(ip.coords["below"], vp.coords["below"])
-    assert ip.coordinate_system == vp.coordinate_system == "seabed_below"
+    assert ip.dims == vp.dims == ("depth",)
+    np.testing.assert_array_equal(ip.coords["depth"], vp.coords["depth"])
+    assert ip.coordinate_system == vp.coordinate_system == "seabed_depth"
     assert ip.transform == "identity" and ip.lower == -np.inf and ip.upper == np.inf
 
 
@@ -212,8 +212,8 @@ def test_own_map_depth_profile_is_authored_like_a_material_profile(tmp_path):
     payload = bound.reflectivity_payload()
     assert payload["workspace_mb"] == 256.0
     hat, bspline = [f["control"] for f in payload["fields"]]
-    assert hat["kind"] == "hat" and hat["coordinate_system"] == "seabed_below"
-    assert hat["axis"] == "below" and hat["origin"] == 0.0
+    assert hat["kind"] == "hat" and hat["coordinate_system"] == "seabed_depth"
+    assert hat["axis"] == "depth" and hat["origin"] == 0.0
     assert hat["coefficients"] == [0.0] * 8
     assert np.isclose(hat["spacing"] * 7, 1300.0)  # sediment: 200 .. 1500 m
     assert bspline["kind"] == "bspline" and bspline["degree"] == 2
@@ -223,7 +223,7 @@ def test_own_map_depth_profile_is_authored_like_a_material_profile(tmp_path):
     assert sediment.properties["vp"].id == "vp"
     assert not hasattr(sediment.properties["rho"], "control")
     ip = bound.block("refl.ip")
-    assert ip.dims == ("below",) and ip.coords["below"].size == 8
+    assert ip.dims == ("depth",) and ip.coords["depth"].size == 8
     assert ip.subdomain == "sediment"
     np.testing.assert_array_equal(
         im.ControlState.from_simulation(bound)["refl"]["reflectivity.ip"], 0.0
@@ -521,15 +521,15 @@ def test_reflectivity_vectors_render_on_the_borrowed_basis_coordinates(setup):
     dataset = lin.gradient.to_xarray()
 
     vp = lin.space.block("vp")
-    assert array.dims == ("below",)
-    np.testing.assert_array_equal(array["below"].values, vp.coords["below"])
+    assert array.dims == ("depth",)
+    np.testing.assert_array_equal(array["depth"].values, vp.coords["depth"])
     np.testing.assert_allclose(array.values, lin.gradient["refl"])
     assert array.attrs["block"] == "reflectivity.ip"
-    assert array.attrs["coordinate_system"] == "seabed_below"
+    assert array.attrs["coordinate_system"] == "seabed_depth"
     assert array.attrs["transform"] == "identity"
     assert set(dataset.data_vars) == {"vp", "refl.ip"}  # block addresses
     np.testing.assert_array_equal(
-        dataset["refl.ip"]["below"].values, vp.coords["below"]
+        dataset["refl.ip"]["depth"].values, vp.coords["depth"]
     )
 
 
@@ -558,13 +558,13 @@ def test_sauce_reflectivity_support_masks_are_not_adopted(tmp_path):
 
 
 def test_capabilities_warn_about_surface_coordinate_reflectivity_maps(tmp_path, fake):
-    _sim, below = _problem(tmp_path, fake)  # ``below`` profile: seabed_below
+    _sim, below = _problem(tmp_path, fake)  # ``datum="top"``: seabed_depth
     _sim, global_z = _problem(
         tmp_path,
         fake,
         subdir="global",
         controls=im.ControlSpace(
-            vp=im.DepthProfile("vp", "sediment", axis="z", count=VP_COUNT),
+            vp=im.DepthProfile("vp", "sediment", datum="global", count=VP_COUNT),
             refl=_reflectivity(),
         ),
     )

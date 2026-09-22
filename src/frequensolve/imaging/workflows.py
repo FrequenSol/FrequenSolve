@@ -13,7 +13,8 @@ The workflow layer owns the outer loop of an inversion while
 - :class:`FWI` runs the stage sequence through
   :func:`~frequensolve.inversion.continuation.run_continuation`, threads the
   complete :class:`~frequensolve.imaging.controls.ControlState` through the
-  stages, adopts support masks from each stage's first linearization,
+  stages (transferring it when a stage changes the control layout with
+  ``Stage(controls=...)``), adopts support masks from each stage's first linearization,
   records every evaluation and iteration in an
   :class:`~frequensolve.inversion.history.OptimizationHistory`, checkpoints
   after every accepted iteration and resumes from a matching checkpoint.
@@ -61,7 +62,12 @@ from frequensolve.imaging._artifacts import (
     unqualified_block_name,
 )
 from frequensolve.imaging._backend import fingerprint
-from frequensolve.imaging.controls import ControlSpace, ControlState, ControlVector
+from frequensolve.imaging.controls import (
+    ControlSpace,
+    ControlState,
+    ControlVector,
+    _BlockSpec,
+)
 from frequensolve.imaging.data import DataVector, TraceStoreRef
 from frequensolve.imaging.jobs import ControlGradientJob, ImageKernelJob, ImageSpec
 from frequensolve.imaging.misfit import Loss, Misfit
@@ -269,6 +275,14 @@ class Stage:
         name: Stage label (default ``stage_<index>``).
         min_support: Relative support threshold for the stage.
         metadata: Free-form scalar metadata recorded with the stage.
+        controls: Change the control layout from this stage on: a complete
+            :class:`~frequensolve.imaging.controls.ControlSpace` or a mapping
+            ``{block key: new block spec}`` replacing those blocks (e.g.
+            ``{"vp": im.DepthProfile("vp", "sediment", spacing=25*u.m)}``).
+            :class:`FWI` builds the stage problem with
+            :meth:`ImagingProblem.with_controls`, transferring the accepted
+            state of the previous stage; later stages keep the new layout
+            until another stage changes it.
     """
 
     frequencies: Tuple[Any, ...]
@@ -283,6 +297,7 @@ class Stage:
     name: Optional[str] = None
     min_support: Optional[float] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    controls: Any = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frequencies", _stage_frequencies(self.frequencies))
@@ -328,6 +343,24 @@ class Stage:
                 raise ValueError("min_support must be finite and non-negative")
             object.__setattr__(self, "min_support", threshold)
         object.__setattr__(self, "metadata", dict(self.metadata))
+        controls = self.controls
+        if controls is not None:
+            if isinstance(controls, Mapping) and not isinstance(controls, ControlSpace):
+                if not controls:
+                    raise ValueError("stage controls mapping cannot be empty")
+                if not all(isinstance(spec, _BlockSpec) for spec in controls.values()):
+                    raise TypeError(
+                        "stage controls mapping values must be block specs "
+                        "(DepthProfile, GridParameters, ...)"
+                    )
+                controls = {str(key): spec for key, spec in controls.items()}
+            elif isinstance(controls, _BlockSpec):
+                controls = ControlSpace(controls)
+            elif not isinstance(controls, ControlSpace):
+                raise TypeError(
+                    "stage controls must be a ControlSpace or a {key: block} mapping"
+                )
+            object.__setattr__(self, "controls", controls)
 
     # -- constructors ---------------------------------------------------------
 
@@ -488,6 +521,12 @@ class Stage:
         }
         if self.active is not None:
             metadata["active"] = list(self.active)
+        if self.controls is not None:
+            metadata["controls"] = (
+                sorted(self.controls)
+                if isinstance(self.controls, Mapping)
+                else list(self.controls.keys)
+            )
         return ContinuationStage(
             self.label(index),
             tuple(complex(v) for v in self.frequencies),
@@ -954,6 +993,7 @@ class _ResumePlan:
     start: int
     start_iteration: int
     checkpoint: OptimizationCheckpoint
+    stage_index: int
 
 
 class _ContinuationResult:
@@ -967,9 +1007,15 @@ class _ContinuationResult:
 class FWI:
     """Staged full-waveform inversion over one :class:`ImagingProblem`.
 
+    A stage with ``controls`` switches the run (from that stage on) to
+    ``problem.with_controls(stage.controls)`` with the accepted state
+    transferred to the new layout; :attr:`final_problem` and
+    :attr:`FWIResult.problem` are the last stage's problem.
+
     Args:
         problem: The problem (or any object with the same ``restrict`` /
-            ``linearize`` / ``state`` protocol, e.g. an extended problem).
+            ``linearize`` / ``state`` protocol, e.g. an extended problem) the
+            first stage runs on.
         stages: :class:`Stage` sequence, a single stage, or a
             :class:`ContinuationSchedule`.
         optimizer: :class:`LBFGS` (default) or :class:`NewtonCG`; a stage's
@@ -1048,6 +1094,50 @@ class FWI:
         )
         self.results: List[StageResult] = []
         self._views: Dict[str, ImagingProblem] = {}
+        self._problems: Dict[int, ImagingProblem] = {}
+
+    # -- stage problems
+
+    def _problem_for(self, index: int) -> ImagingProblem:
+        """Return the problem stage ``index`` runs on (built lazily).
+
+        A stage with ``controls`` gets
+        ``previous_problem.with_controls(stage.controls)``, built when first
+        requested; the state is transferred from the previous problem's
+        current state at that moment (the accepted state of the previous
+        stage during :meth:`run`).  Stages without ``controls`` share the
+        problem of the stage before them; stage 0 starts from
+        :attr:`problem`.
+        """
+
+        cached = self._problems.get(index)
+        if cached is not None:
+            return cached
+        previous = self.problem if index == 0 else self._problem_for(index - 1)
+        stage = self.stages[index]
+        if stage.controls is not None and not callable(
+            getattr(previous, "with_controls", None)
+        ):
+            raise TypeError(
+                f"stage {stage.label(index)!r} changes the control layout, which "
+                f"needs an ImagingProblem; {type(previous).__name__} has no "
+                "with_controls"
+            )
+        problem = (
+            previous
+            if stage.controls is None
+            else previous.with_controls(stage.controls)
+        )
+        self._problems[index] = problem
+        return problem
+
+    @property
+    def final_problem(self) -> ImagingProblem:
+        """Return the problem of the last stage built so far (:attr:`problem` before a run)."""
+
+        if not self._problems:
+            return self.problem
+        return self._problems[max(self._problems)]
 
     # -- bookkeeping ----------------------------------------------------------
 
@@ -1098,8 +1188,18 @@ class FWI:
         self._history = history
         return history
 
-    def _identity(self) -> str:
-        return fingerprint(**self.problem.identity())
+    def _identity(self, problem: Optional[ImagingProblem] = None) -> str:
+        return fingerprint(**(self.problem if problem is None else problem).identity())
+
+    @staticmethod
+    def _layout(problem: ImagingProblem) -> Tuple[str, str]:
+        """Return the ``(control_ids, control_sizes)`` record of a problem."""
+
+        full = problem.full_space
+        return (
+            ",".join(full.blocks),
+            ",".join(str(size) for size in full.sizes.values()),
+        )
 
     def _stage_metrics(
         self,
@@ -1131,7 +1231,7 @@ class FWI:
         completed: bool,
         history: OptimizationHistory,
     ) -> Dict[str, Any]:
-        problem = self.problem
+        problem = self._problem_for(index)
         assert self.state_path is not None
         masks = space.support_masks()
         support = hashlib.sha256(
@@ -1145,11 +1245,11 @@ class FWI:
         return {
             "schema": CHECKPOINT_SCHEMA,
             "problem": problem.name,
-            "identity": self._identity(),
-            "control_ids": ",".join(problem.full_space.blocks),
-            "control_sizes": ",".join(
-                str(size) for size in problem.full_space.sizes.values()
-            ),
+            "identity": self._identity(problem),
+            # The control layout of this stage's problem (stages with
+            # ``controls`` change it); resume rebuilds the same layout.
+            "control_ids": self._layout(problem)[0],
+            "control_sizes": self._layout(problem)[1],
             "stage_index": int(index),
             "stage_name": stage.label(index),
             "stage_iteration": int(stage_iteration),
@@ -1206,14 +1306,20 @@ class FWI:
         meta = checkpoint.metadata
         if meta.get("schema") != CHECKPOINT_SCHEMA:
             raise ValueError(f"{path} is not an FWI checkpoint")
-        problem = self.problem
-        if meta.get("problem") != problem.name:
+        if meta.get("problem") != self.problem.name:
             raise ValueError(
                 f"checkpoint {path} belongs to problem {meta.get('problem')!r}, "
-                f"not {problem.name!r}"
+                f"not {self.problem.name!r}"
             )
-        control_ids = ",".join(problem.full_space.blocks)
-        control_sizes = ",".join(str(s) for s in problem.full_space.sizes.values())
+        index = int(meta["stage_index"])
+        if index >= len(self.stages):
+            raise ValueError(
+                f"checkpoint stage index {index} exceeds the {len(self.stages)} stages"
+            )
+        # Rebuild the control layout the checkpointed stage ran on (stage
+        # ``controls`` of every stage up to it) before comparing layouts.
+        problem = self._problem_for(index)
+        control_ids, control_sizes = self._layout(problem)
         if meta.get("control_ids") != control_ids:
             raise ValueError(
                 "checkpoint control blocks do not match the problem: "
@@ -1224,15 +1330,10 @@ class FWI:
                 "checkpoint control sizes do not match the problem: "
                 f"{meta.get('control_sizes')} != {control_sizes}"
             )
-        if meta.get("identity") != self._identity():
+        if meta.get("identity") != self._identity(problem):
             raise ValueError(
                 "checkpoint identity does not match the problem (simulation, "
-                "observed data, misfit or smoothing changed)"
-            )
-        index = int(meta["stage_index"])
-        if index >= len(self.stages):
-            raise ValueError(
-                f"checkpoint stage index {index} exceeds the {len(self.stages)} stages"
+                "control layout, observed data, misfit or smoothing changed)"
             )
         stage = self.stages[index]
         expected_active = ",".join(stage.view(problem).space.blocks)
@@ -1255,8 +1356,8 @@ class FWI:
         state = ControlState.load(state_path, problem.full_space.without_support())
         stage_iteration = int(meta.get("stage_iteration", 0))
         if bool(meta.get("stage_completed")) or stage_iteration >= stage.iterations:
-            return _ResumePlan(state, index + 1, 0, checkpoint)
-        return _ResumePlan(state, index, stage_iteration, checkpoint)
+            return _ResumePlan(state, index + 1, 0, checkpoint, index)
+        return _ResumePlan(state, index, stage_iteration, checkpoint, index)
 
     def _skipped_result(
         self, index: int, stage: Stage, history: OptimizationHistory
@@ -1274,7 +1375,7 @@ class FWI:
         else:
             initial = final = LossTerms(data=0.0)
             stage_iteration = stage.iterations
-        view = stage.view(self.problem)
+        view = stage.view(self._problem_for(index))
         return StageResult(
             index=index,
             name=stage.label(index),
@@ -1317,10 +1418,10 @@ class FWI:
 
         if not isinstance(stage, Stage):
             raise TypeError("stage must be a Stage")
-        if state is not None:
-            self.problem.state = state
         if index is None:
             index = self.stages.index(stage) if stage in self.stages else 0
+        if state is not None:
+            self._problem_for(index).state = state
         if self._history is None:
             self._history = self._open_history(resume=False)
         return self._solve_stage(index, stage, start_iteration)
@@ -1333,7 +1434,7 @@ class FWI:
         *,
         expected_model: Optional[np.ndarray] = None,
     ) -> StageResult:
-        problem = self.problem
+        problem = self._problem_for(index)
         history = self._history
         assert history is not None
         label = stage.label(index)
@@ -1539,19 +1640,26 @@ class FWI:
         skipped and an interrupted stage continues from its last accepted
         iterate with the remaining budget.  A checkpoint of a different
         problem, block layout, stage active set or frequencies is rejected.
+
+        Stages with ``controls`` switch to a problem built with
+        :meth:`ImagingProblem.with_controls` at their transition (the
+        accepted state is transferred to the new layout);
+        :attr:`FWIResult.problem` and :attr:`FWIResult.state` are those of
+        the last stage.
         """
 
-        problem = self.problem
-        plan = self._resume_plan() if resume else None
         self.results = []
         self._views = {}
+        self._problems = {}
+        plan = self._resume_plan() if resume else None
         if plan is not None:
-            problem.state = plan.state
+            # ``_resume_plan`` built the checkpointed stage's problem.
+            self._problem_for(plan.stage_index).state = plan.state
             start, start_iteration = plan.start, plan.start_iteration
         else:
             start, start_iteration = 0, 0
-            if problem.state is None:
-                problem.linearize(gradient=False)  # registry discovery
+            if self.problem.state is None:
+                self.problem.linearize(gradient=False)  # registry discovery
         remaining = self.stages[start:]
         if not remaining:
             history = self._history
@@ -1569,13 +1677,14 @@ class FWI:
             stages = tuple(
                 self._skipped_result(i, s, history) for i, s in enumerate(self.stages)
             )
-            assert problem.state is not None
+            final_problem = self._problem_for(len(self.stages) - 1)
+            assert final_problem.state is not None
             return FWIResult(
-                state=problem.state,
+                state=final_problem.state,
                 history=history,
                 stages=stages,
                 checkpoint=self.checkpoint_path,
-                problem=problem,
+                problem=final_problem,
             )
         history = self._open_history(resume=plan is not None)
         skipped = [
@@ -1592,10 +1701,11 @@ class FWI:
             )[start:]
         )
         first_stage = self.stages[start]
-        first_view = first_stage.view(problem)
+        first_problem = self._problem_for(start)
+        first_view = first_stage.view(first_problem)
         self._views[first_stage.label(start)] = first_view
-        assert problem.state is not None
-        initial = first_view.vector(problem.state).values
+        assert first_problem.state is not None
+        initial = first_view.vector(first_problem.state).values
 
         def solve(cs: ContinuationStage, _model: np.ndarray) -> _ContinuationResult:
             index = index_of[cs.name]
@@ -1608,8 +1718,9 @@ class FWI:
                 expected_model=expected if resumed else None,
             )
             view = self._views[cs.name]
-            assert problem.state is not None
-            model = problem.state.vector(view.space.without_support()).values
+            state = self._problem_for(index).state
+            assert state is not None
+            model = state.vector(view.space.without_support()).values
             return _ContinuationResult(model, result)
 
         def transition(
@@ -1617,20 +1728,25 @@ class FWI:
             following: ContinuationStage,
             accepted: np.ndarray,
         ) -> Sequence[float]:
-            # Write the accepted vector into the shared state (idempotent: the
-            # stage solve already did) and build the next stage's view, which
-            # adopts fresh support masks from its first linearize.  Block
-            # layouts never change inside one problem, so the whole state
-            # threads through without ``transfer_to``.
+            # Write the accepted vector into the previous stage's state
+            # (idempotent: the stage solve already did) and build the next
+            # stage's view, which adopts fresh support masks from its first
+            # linearize.  A stage with ``controls`` gets a new problem whose
+            # state is the accepted state transferred to the new layout, so
+            # the returned vector may differ in size from ``accepted``.
+            previous_index = index_of[previous.name]
+            previous_problem = self._problem_for(previous_index)
             previous_view = self._views[previous.name]
-            assert problem.state is not None
-            problem.state = problem.state.with_update(
+            assert previous_problem.state is not None
+            previous_problem.state = previous_problem.state.with_update(
                 previous_view.space.without_support(), accepted
             )
-            next_stage = self.stages[index_of[following.name]]
-            next_view = next_stage.view(problem)
+            next_index = index_of[following.name]
+            next_problem = self._problem_for(next_index)
+            next_view = self.stages[next_index].view(next_problem)
             self._views[following.name] = next_view
-            return cast(Sequence[float], next_view.vector(problem.state).values)
+            assert next_problem.state is not None
+            return cast(Sequence[float], next_view.vector(next_problem.state).values)
 
         try:
             run_continuation(
@@ -1643,13 +1759,14 @@ class FWI:
         stages = tuple(skipped) + tuple(self.results)
         success = all(s.success for s in self.results)
         history.finish("converged" if success else "stopped", stages[-1].message)
-        assert problem.state is not None
+        final_problem = self._problem_for(len(self.stages) - 1)
+        assert final_problem.state is not None
         return FWIResult(
-            state=problem.state,
+            state=final_problem.state,
             history=history,
             stages=stages,
             checkpoint=self.checkpoint_path,
-            problem=problem,
+            problem=final_problem,
         )
 
 

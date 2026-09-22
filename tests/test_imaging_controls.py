@@ -206,7 +206,7 @@ def test_unbound_space_reports_unresolved_layout():
         space.size
     # Explicit global nodes need no simulation.
     resolved = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", axis="z", nodes=[0.0, 1.0, 2.0])
+        vp=im.DepthProfile("vp", "sediment", datum="global", nodes=[0.0, 1.0, 2.0])
     )
     assert resolved.resolved
     assert resolved.blocks == ("model.vp",)
@@ -225,22 +225,22 @@ def test_profile_extent_is_the_layer_span_below_its_top_surface(simulation):
     control = bound.block("vp").control
     assert isinstance(control, HatControl)
     thickness = SEDIMENT[1] - SEDIMENT[0]
-    assert control.axis == "below"
-    assert control.coordinate_system == "seabed_below"
+    assert control.axis == "depth"
+    assert control.coordinate_system == "seabed_depth"
     np.testing.assert_allclose(control.coordinates[0], 0.0)
     np.testing.assert_allclose(control.coordinates[-1], thickness)
     assert control.size == 14
     system = next(
-        s for s in bound.simulation.coordinate_systems if s.name == "seabed_below"
+        s for s in bound.simulation.coordinate_systems if s.name == "seabed_depth"
     )
     assert system.surface_ref == "seabed"
-    assert [axis.name for axis in system.axes] == ["below"]
+    assert [axis.name for axis in system.axes] == ["depth"]
     assert simulation.coordinate_systems == []
 
 
 def test_profile_spacing_is_a_maximum_that_ends_on_the_boundaries(simulation):
     bound = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", axis="z", spacing=400.0)
+        vp=im.DepthProfile("vp", "sediment", datum="global", spacing=400.0)
     ).bind(simulation)
     control = bound.block("vp").control
     np.testing.assert_allclose(control.origin, SEDIMENT[0])
@@ -251,24 +251,26 @@ def test_profile_spacing_is_a_maximum_that_ends_on_the_boundaries(simulation):
 
 def test_profile_count_and_nodes_and_pint_spacing(simulation):
     counted = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", axis="z", count=5)
+        vp=im.DepthProfile("vp", "sediment", datum="global", count=5)
     ).bind(simulation)
     np.testing.assert_allclose(
         counted.block("vp").control.coordinates, np.linspace(*SEDIMENT, 5)
     )
     explicit = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", axis="z", nodes=[100.0, 600.0, 1100.0])
+        vp=im.DepthProfile(
+            "vp", "sediment", datum="global", nodes=[100.0, 600.0, 1100.0]
+        )
     ).bind(simulation)
     assert explicit.block("vp").control.origin == 100.0
     assert explicit.block("vp").control.spacing == 500.0
     with pytest.raises(ValueError, match="uniformly spaced"):
         im.ControlSpace(
-            vp=im.DepthProfile("vp", "sediment", axis="z", nodes=[0.0, 1.0, 3.0])
+            vp=im.DepthProfile("vp", "sediment", datum="global", nodes=[0.0, 1.0, 3.0])
         ).bind(simulation)
     # Pint spacing converts to the model's length unit (Sauce default km) and
     # records the unit on the control.
     quantity = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", axis="z", spacing=0.5 * u.km)
+        vp=im.DepthProfile("vp", "sediment", datum="global", spacing=0.5 * u.km)
     ).bind(simulation)
     control = quantity.block("vp").control
     assert control.units == "km"
@@ -277,7 +279,9 @@ def test_profile_count_and_nodes_and_pint_spacing(simulation):
 
 def test_bspline_profile_uses_open_uniform_knots(simulation):
     bound = im.ControlSpace(
-        rho=im.DepthProfile.bspline("rho", "sediment", count=6, degree=3, axis="z")
+        rho=im.DepthProfile.bspline(
+            "rho", "sediment", count=6, degree=3, datum="global"
+        )
     ).bind(simulation)
     control = bound.block("rho").control
     assert isinstance(control, BSplineControl)
@@ -309,26 +313,125 @@ def test_explicit_surface_coordinate_system_extent(simulation):
         )
     )
     bound = im.ControlSpace(
-        vp=im.DepthProfile(
-            "vp", "sediment", axis="height", coordinate_system="above_bottom", count=3
-        )
+        vp=im.DepthProfile("vp", "sediment", datum="above_bottom", count=3)
     ).bind(simulation)
-    control = bound.block("vp").control
+    block = bound.block("vp")
+    control = block.control
+    # the system's vertical axis, oriented by its ``positive``
+    assert (control.axis, control.coordinate_system) == ("height", "above_bottom")
     np.testing.assert_allclose(control.coordinates, [0.0, 650.0, 1300.0])
-    with pytest.raises(ValueError, match="declares no axis"):
+    assert block.dims == ("depth",) and not block.downward
+
+
+def test_depth_profile_datums_resolve_their_frame_and_extent(simulation):
+    from frequensolve.geometry.frame import Axis, SurfaceCoordinateSystem
+
+    thickness = SEDIMENT[1] - SEDIMENT[0]
+    # a user-authored seabed-relative system, used by name
+    simulation.coordinate_systems.append(
+        SurfaceCoordinateSystem(
+            "below_seabed",
+            "seabed",
+            axes=[Axis("below", direction="z", positive="down")],
+            normal="down",
+        )
+    )
+    bound = im.ControlSpace(
+        top=im.DepthProfile("vp", "sediment", count=3),
+        glob=im.DepthProfile("rho", "sediment", datum="global", count=3),
+        user=im.DepthProfile("vp", "water", datum="below_seabed", count=3),
+        surf=im.DepthProfile("rho", "water", datum="bottom", count=3),
+    ).bind(simulation)
+
+    top, glob = bound.block("top"), bound.block("glob")
+    user, surf = bound.block("user"), bound.block("surf")
+    # "top": depth below the subdomain's upper surface (internal system)
+    assert top.control.axis == "depth"
+    assert top.control.coordinate_system == "seabed_depth"
+    assert top.dims == ("depth",) and top.axis_label == "depth below seabed"
+    np.testing.assert_allclose(top.control.coordinates, [0.0, 650.0, thickness])
+    # "global": the model's vertical coordinate; the sediment top is not z=0
+    assert (glob.control.axis, glob.control.coordinate_system) == ("z", "global")
+    assert glob.dims == ("z",) and glob.axis_label == "z"
+    np.testing.assert_allclose(glob.control.coordinates, [200.0, 850.0, 1500.0])
+    # a coordinate system: its vertical axis; the water layer lies above it
+    assert (user.control.axis, user.control.coordinate_system) == (
+        "below",
+        "below_seabed",
+    )
+    np.testing.assert_allclose(user.control.coordinates, [-200.0, -100.0, 0.0])
+    assert user.dims == ("depth",) and user.axis_label == "depth below seabed"
+    # a surface name: depth below that surface (need not start at 0)
+    assert surf.control.axis == "depth"
+    assert surf.control.coordinate_system == "bottom_depth"
+    np.testing.assert_allclose(surf.control.coordinates, [-1500.0, -1400.0, -1300.0])
+    names = [s.name for s in bound.simulation.coordinate_systems]
+    assert names.count("seabed_depth") == 1 and "bottom_depth" in names
+    # nodes are measured in the datum frame
+    nodes = im.ControlSpace(
+        vp=im.DepthProfile("vp", "sediment", datum="bottom", nodes=[-1300.0, 0.0])
+    ).bind(simulation)
+    assert nodes.block("vp").control.coordinate_system == "bottom_depth"
+    np.testing.assert_allclose(nodes.block("vp").control.coordinates, [-1300.0, 0.0])
+    assert simulation.coordinate_systems[-1].name == "below_seabed"  # untouched
+
+
+def test_depth_profile_datum_errors(simulation):
+    from frequensolve.geometry.frame import Axis, CoordinateSystem
+
+    simulation.coordinate_systems.append(
+        CoordinateSystem(
+            name="bottom",
+            axes=[Axis("depth", direction="z")],
+            inherit_axes=False,
+        )
+    )
+    with pytest.raises(
+        ValueError, match="both a coordinate system and a model surface"
+    ):
         im.ControlSpace(
-            vp=im.DepthProfile(
-                "vp",
-                "sediment",
-                axis="depth",
-                coordinate_system="above_bottom",
-                count=3,
-            )
+            vp=im.DepthProfile("vp", "sediment", datum="bottom", count=3)
         ).bind(simulation)
-    with pytest.raises(KeyError, match="no coordinate system"):
+    with pytest.raises(
+        ValueError, match="unknown DepthProfile datum 'nowhere'.*seabed"
+    ):
         im.ControlSpace(
-            vp=im.DepthProfile("vp", "sediment", coordinate_system="missing", count=3)
+            vp=im.DepthProfile("vp", "sediment", datum="nowhere", count=3)
         ).bind(simulation)
+    simulation.coordinate_systems.append(
+        CoordinateSystem(
+            name="flat",
+            axes=[Axis("x", direction="x")],
+            inherit_axes=False,
+        )
+    )
+    with pytest.raises(ValueError, match="0 vertical axes"):
+        im.ControlSpace(
+            vp=im.DepthProfile("vp", "sediment", datum="flat", count=3)
+        ).bind(simulation)
+    simulation.coordinate_systems.append(
+        CoordinateSystem(
+            name="twice",
+            axes=[Axis("a", direction="z"), Axis("b", direction="z")],
+        )
+    )
+    with pytest.raises(ValueError, match="2 vertical axes"):
+        im.ControlSpace(
+            vp=im.DepthProfile("vp", "sediment", datum="twice", count=3)
+        ).bind(simulation)
+    for bad in ("", "  ", None, 3):
+        with pytest.raises(ValueError, match="datum must be a non-empty string"):
+            im.DepthProfile("vp", "sediment", datum=bad, count=3)
+    with pytest.raises(TypeError):
+        im.DepthProfile("vp", "sediment", axis="z", count=3)
+    with pytest.raises(TypeError):
+        im.DepthProfile("vp", "sediment", coordinate_system="global", count=3)
+    # surface datums need a simulation to anchor them; global nodes do not
+    with pytest.raises(im.UnresolvedControlError, match="datum 'top'"):
+        im.DepthProfile("vp", "sediment", nodes=[0.0, 1.0]).build_control(None)
+    assert not im.ControlSpace(
+        vp=im.DepthProfile("vp", "sediment", nodes=[0.0, 1.0])
+    ).resolved
 
 
 def test_bind_reports_unknown_subdomains_and_properties(simulation):
@@ -592,7 +695,7 @@ def test_varying_reference_gives_per_node_bounds(
 
     block = bound.block("p")
     below = np.linspace(0.0, 1300.0, 5)
-    np.testing.assert_allclose(block.coords["below"], below)
+    np.testing.assert_allclose(block.coords["depth"], below)
     # hat nodes sit on the reference samples: z = seabed + below
     r = reference(SEDIMENT[0] + below)
     lower, upper = expected(r)
@@ -636,7 +739,7 @@ def test_bspline_bounds_are_enforced_at_the_greville_abscissae(simulation):
     _depth_reference(simulation, "vp", _vp_at)
     bound = im.ControlSpace(
         vp=im.DepthProfile.bspline(
-            "vp", "sediment", axis="z", count=6, limits=(1700.0, 3000.0)
+            "vp", "sediment", datum="global", count=6, limits=(1700.0, 3000.0)
         )
     ).bind(simulation)
 
@@ -788,10 +891,13 @@ def test_support_masks_can_come_from_sauce_state_files(simulation):
 def test_geometric_support_freezes_nodes_outside_the_layer(simulation):
     bound = im.ControlSpace(
         vp=im.DepthProfile(
-            "vp", "sediment", axis="z", nodes=np.arange(0.0, 2001.0, 250.0)
+            "vp", "sediment", datum="global", nodes=np.arange(0.0, 2001.0, 250.0)
         ),
         rho=im.DepthProfile.bspline(
-            "rho", "sediment", axis="z", nodes=[0.0, 500.0, 1000.0, 1500.0, 2000.0]
+            "rho",
+            "sediment",
+            datum="global",
+            nodes=[0.0, 500.0, 1000.0, 1500.0, 2000.0],
         ),
         inside=im.DepthProfile("vp", "water", count=3),
     ).bind(simulation)
@@ -849,8 +955,8 @@ def test_bind_installs_controls_into_a_copy_that_validates(simulation):
     _material_validator().validate(payload)
     hat = payload["subdomains"][1]["properties"]["vp"]["parameterized"]["control"]
     assert hat["kind"] == "hat"
-    assert hat["coordinate_system"] == "seabed_below"
-    assert hat["axis"] == "below"
+    assert hat["coordinate_system"] == "seabed_depth"
+    assert hat["axis"] == "depth"
     systems = [s.to_fs() for s in bound.simulation.coordinate_systems]
     assert systems[0]["_type"] == "SurfaceCoordinateSystem"
     assert systems[0]["surface"] == "seabed"
@@ -1118,15 +1224,15 @@ def test_to_xarray_exposes_block_coordinates(simulation):
     vector = bound.random(seed=3)
     profile = vector.to_xarray("vp")
     assert isinstance(profile, xr.DataArray)
-    assert profile.dims == ("below",)
-    np.testing.assert_allclose(profile.coords["below"], np.arange(14) * 100.0)
+    assert profile.dims == ("depth",)
+    np.testing.assert_allclose(profile.coords["depth"], np.arange(14) * 100.0)
     np.testing.assert_array_equal(profile.values, vector["vp"])
-    assert profile.attrs["coordinate_system"] == "seabed_below"
+    assert profile.attrs["coordinate_system"] == "seabed_depth"
     assert profile.attrs["transform"] == "log"
 
     spline = vector.to_xarray("rho")
     control = bound.block("rho").control
-    np.testing.assert_allclose(spline.coords["below"], control.coordinates)
+    np.testing.assert_allclose(spline.coords["depth"], control.coordinates)
 
     lattice = vector.to_xarray("grid.vp")
     assert lattice.dims == ("x", "z")
@@ -1162,12 +1268,12 @@ def test_to_xarray_exposes_block_coordinates(simulation):
 
 def test_transfer_to_between_profile_resolutions_preserves_affine_fields(simulation):
     fine = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", axis="z", count=27),
-        rho=im.DepthProfile.bspline("rho", "sediment", axis="z", count=8),
+        vp=im.DepthProfile("vp", "sediment", datum="global", count=27),
+        rho=im.DepthProfile.bspline("rho", "sediment", datum="global", count=8),
     ).bind(simulation)
     coarse = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", axis="z", count=14),
-        rho=im.DepthProfile.bspline("rho", "sediment", axis="z", count=5),
+        vp=im.DepthProfile("vp", "sediment", datum="global", count=14),
+        rho=im.DepthProfile.bspline("rho", "sediment", datum="global", count=5),
     ).bind(simulation)
     z_fine = fine.block("vp").coords["z"]
     rho_fine = fine.block("rho").coords["z"]  # Greville abscissae
@@ -1204,9 +1310,9 @@ def test_transfer_to_handles_lattices_and_copies_identical_blocks(simulation):
         transferred["g"], 1.0 + 0.001 * target[:, 0] + 0.01 * target[:, 1], atol=1e-8
     )
     np.testing.assert_array_equal(transferred["s"], [1.0, 2.0, 3.0])
-    other = im.ControlSpace(g=im.DepthProfile("vp", "water", axis="z", count=3)).bind(
-        simulation
-    )
+    other = im.ControlSpace(
+        g=im.DepthProfile("vp", "water", datum="global", count=3)
+    ).bind(simulation)
     with pytest.raises(ValueError, match="cannot transfer"):
         coarse.transfer_to(other, vector)
 
@@ -1273,13 +1379,13 @@ def test_plot_renders_profile_lattice_interface_and_source_blocks(simulation, pl
     ax = vector.plot("vp")
     assert isinstance(ax, plt.Axes)
     (line,) = ax.lines
-    assert ax.yaxis_inverted()  # "below" runs downwards
+    assert ax.yaxis_inverted()  # "depth" runs downwards
     ydata = np.asarray(line.get_ydata(), dtype=float)
     xdata = np.asarray(line.get_xdata(), dtype=float)
     np.testing.assert_allclose(ydata, bound.block("vp").control.coordinates)
     assert np.isnan(xdata[3]) and np.count_nonzero(np.isnan(xdata)) == 1
     np.testing.assert_allclose(np.delete(xdata, 3), vector["vp"][mask])
-    assert ax.get_ylabel().startswith("below")
+    assert ax.get_ylabel().startswith("depth")
 
     ax = vector.plot("grid.vp", cmap="viridis")
     (mesh,) = ax.collections

@@ -74,6 +74,10 @@ PROFILE_SAMPLES = 301
 VP_LOG_BOUNDS = (-0.35, 0.25)
 HUBER_DELTA = 1.345
 OFFSET_TAPER = (0.1, 0.25)  # km, near-offset raised cosine
+# Penalties are scale free (0.5 * alpha * int |dc/dxi|^2 over the unit
+# sediment column, xi = depth / thickness) and the Huber data term is
+# normalized to O(1), so an O(1e-2) alpha is a real but gentle smoothness
+# prior on the log coefficients.
 TIKHONOV_ALPHA = 1.0e-2
 
 # Continuation bands (Hz) and the frequencies they need.

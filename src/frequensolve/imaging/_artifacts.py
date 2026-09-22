@@ -522,6 +522,57 @@ def _read_control_blocks(
     return blocks
 
 
+def _normalize_scaling(
+    blocks: Mapping[str, np.ndarray],
+    scaling: Mapping[str, Any],
+    units: Mapping[str, Any],
+) -> Tuple[Dict[str, float], Dict[str, str]]:
+    """Validate ``/scaling`` and ``/scaling_units`` against the state blocks."""
+
+    out_scaling: Dict[str, float] = {}
+    for name, value in dict(scaling or {}).items():
+        key = qualified_block_name(name)
+        if key not in blocks:
+            raise ValueError(f"/scaling/{key} has no /controls block")
+        number = float(np.asarray(value, dtype=np.float64).reshape(()))
+        if not np.isfinite(number) or number <= 0.0:
+            raise ValueError(f"/scaling/{key} must be finite and positive")
+        out_scaling[key] = number
+    out_units: Dict[str, str] = {}
+    for name, value in dict(units or {}).items():
+        key = qualified_block_name(name)
+        if key not in out_scaling:
+            raise ValueError(f"/scaling_units/{key} has no /scaling/{key}")
+        text = _decode(value) if isinstance(value, (bytes, np.bytes_)) else value
+        text = str(text).strip()
+        if not text:
+            raise ValueError(f"/scaling_units/{key} must be a non-empty string")
+        out_units[key] = text
+    return out_scaling, out_units
+
+
+def _read_scaling_datasets(
+    h5: h5py.File, blocks: Mapping[str, np.ndarray], path: Union[str, Path]
+) -> Tuple[Dict[str, float], Dict[str, str]]:
+    """Read the optional ``/scaling`` and ``/scaling_units`` groups."""
+
+    scaling: Dict[str, float] = {}
+    units: Dict[str, str] = {}
+    for group_name in ("scaling", "scaling_units"):
+        if group_name not in h5:
+            continue
+        for name in h5[group_name]:
+            key = str(name)
+            if key not in blocks:
+                raise ValueError(f"{path}: /{group_name}/{key} has no /controls block")
+            value = h5[group_name][name][()]
+            if group_name == "scaling":
+                scaling[key] = float(value)
+            else:
+                units[key] = str(_decode(value))
+    return scaling, units
+
+
 @dataclass
 class ControlStateFile:
     """One complete ``fs-control-state-1`` baseline over every registry block.
@@ -535,12 +586,25 @@ class ControlStateFile:
             measure written to ``/support_measure/<block>``.
         support_min_support: Optional relative support threshold the writer
             used (``/support_min_support``).
+        scaling: Optional ``block -> float`` physical strength of one stored
+            coordinate (``/scaling/<block>``).  Sauce writes it for every
+            ``source.<i>.mechanism`` block because mechanism coordinates are
+            the writing task's nondimensional source-load components; on
+            import Sauce multiplies the block by ``stored / current`` so the
+            physical source ``coordinate * scaling`` is the same in every
+            task.  A block without scaling is read in the reading task's
+            coordinates.
+        scaling_units: Optional ``block -> units`` of ``scaling``
+            (``/scaling_units/<block>``, e.g. ``"N"`` or ``"N*m"``); every
+            entry needs a ``scaling`` entry.
     """
 
     blocks: Dict[str, np.ndarray]
     support: Dict[str, np.ndarray] = field(default_factory=dict)
     support_measure: Dict[str, np.ndarray] = field(default_factory=dict)
     support_min_support: Optional[float] = None
+    scaling: Dict[str, float] = field(default_factory=dict)
+    scaling_units: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         ordered: Dict[str, np.ndarray] = {}
@@ -554,6 +618,9 @@ class ControlStateFile:
             self.blocks, self.support, self.support_measure, qualified_block_name
         )
         self.support_min_support = _normalize_min_support(self.support_min_support)
+        self.scaling, self.scaling_units = _normalize_scaling(
+            self.blocks, self.scaling, self.scaling_units
+        )
 
     @property
     def names(self) -> Tuple[str, ...]:
@@ -612,6 +679,8 @@ class ControlStateFile:
             support=dict(self.support),
             support_measure=dict(self.support_measure),
             support_min_support=self.support_min_support,
+            scaling=dict(self.scaling),
+            scaling_units=dict(self.scaling_units),
         )
 
     def write(self, path: Union[str, Path]) -> Path:
@@ -628,6 +697,14 @@ class ControlStateFile:
             _write_support_datasets(
                 h5, self.support, self.support_measure, self.support_min_support
             )
+            if self.scaling:
+                group = h5.create_group("scaling")
+                for name, value in self.scaling.items():
+                    group.create_dataset(name, data=float(value), dtype=np.float64)
+            if self.scaling_units:
+                group = h5.create_group("scaling_units")
+                for name, units in self.scaling_units.items():
+                    group.create_dataset(name, data=np.bytes_(units.encode("utf-8")))
         return path
 
     @classmethod
@@ -645,11 +722,14 @@ class ControlStateFile:
                 raise ValueError(f"{path} has unsupported packing {packing!r}")
             blocks = _read_control_blocks(h5, path)
             support, measure, min_support = _read_support_datasets(h5, blocks, path)
+            scaling, units = _read_scaling_datasets(h5, blocks, path)
         return cls(
             blocks,
             support=support,
             support_measure=measure,
             support_min_support=min_support,
+            scaling=scaling,
+            scaling_units=units,
         )
 
 

@@ -10,6 +10,7 @@ from frequensolve import imaging as im
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging import (
     ControlSpace,
+    ControlState,
     ControlVector,
     DepthProfile,
     ImageSet,
@@ -489,13 +490,13 @@ def test_fwi_tikhonov_with_diagonal_preconditioner_solves_the_regularized_proble
     problem, fake, optimizer, atol
 ):
     J, d = _surrogate(fake, problem)
-    # first differences are scaled by the node spacing (hundreds of metres),
-    # so alpha is sized for R^T R to weigh about as much as Re(J^H J)
-    alpha = 1.0e6
+    # penalties are scale free (unit-interval seminorms), so an O(1e-2)
+    # alpha is a meaningful weight against the surrogate's data term
+    alpha = 5.0e-2
     R = _penalty_matrix(im.Tikhonov(alpha), problem.space)
     assert R.shape == (4 + 2, 8)  # first differences of a 5- and a 3-node profile
     expected = _least_squares(J, d, R=R)
-    assert not np.allclose(expected, _least_squares(J, d), atol=1e-2)
+    assert not np.allclose(expected, _least_squares(J, d), atol=5e-3)
     stages = [Stage([4.0], 6, active=["vp"], name="low"), Stage(FREQUENCIES, 60)]
     fwi = FWI(
         problem,
@@ -886,7 +887,7 @@ def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
 
 def test_lsrtm_with_tikhonov_matches_the_dense_regularized_solve(problem, fake):
     J, d = _surrogate(fake, problem)
-    penalty = im.Tikhonov(2.0e10, order=2)  # second differences scale as 1/h^2
+    penalty = im.Tikhonov(1.0e-2, order=2)
     R = _penalty_matrix(penalty, problem.space)
     assert R.shape == (3 + 1, 8)  # second differences of the two profiles
     expected = _least_squares(J, d, R=R)
@@ -903,7 +904,7 @@ def test_lsrtm_with_tikhonov_matches_the_dense_regularized_solve(problem, fake):
 
     # a TV penalty has no operator rows: cg solves the lagged-diffusivity
     # normal equations at the origin, lsqr refuses
-    tv = im.TV(1.0e5, epsilon=0.1)
+    tv = im.TV(1.0e-2, epsilon=1.0e-2)
     hessian = tv.bind(problem.space).hessian_operator(problem.space.zeros())
     dense = np.column_stack([np.asarray(hessian @ e).reshape(-1) for e in np.eye(8)])
     assert np.linalg.norm(dense, 2) > 1.0
@@ -1180,13 +1181,17 @@ def test_kernel_and_focus_run_on_a_problem_with_source_blocks(tmp_path, fake):
     assert np.isfinite(value) and gradient.space is problem.space
     np.testing.assert_array_equal(gradient["src"]["source.1.signature"], 0.0)
     assert np.any(gradient["vp"] != 0.0)
-    # a moved source block is not what the authored focus job would image
+    # a changed signature is authored into the kernel's simulation (q scales
+    # source 1's column of the made-explicit identity encoding); focusing runs
+    # on the authored simulation and still refuses a moved source block
     signature = problem.vector().values.copy()
     signature[5] = 0.5
+    job = sensitivity_kernel_job(problem, grid, v=signature)
+    np.testing.assert_allclose(
+        job.simulation.acquisition.source_encoding.weights, np.diag([0.5, 1.0])
+    )
     with pytest.raises(NotImplementedError, match=r"'source\.1\.signature'"):
         focus.job(signature)
-    with pytest.raises(NotImplementedError, match=r"'source\.1\.signature'"):
-        sensitivity_kernel_job(problem, grid, v=signature)
 
 
 def test_fwi_result_simulation_installs_a_state_with_source_blocks(tmp_path, fake):
@@ -1203,3 +1208,182 @@ def test_fwi_result_simulation_installs_a_state_with_source_blocks(tmp_path, fak
         s for s in result.simulation.model.subdomains if s.name == "sediment"
     )
     np.testing.assert_allclose(sediment.properties["vp"].control.coefficients, 0.25)
+
+
+# ---------------------------------------------------------------------------
+# resolution changes between stages
+# ---------------------------------------------------------------------------
+
+
+FINE_VP = {"vp": DepthProfile("vp", "sediment", count=9)}
+
+
+def test_with_controls_transfers_the_state_block_wise(tmp_path, fake):
+    problem = _problem(tmp_path, fake, subdir="refine")
+    coarse_nodes = problem.full_space.block("vp").control.coordinates
+    coarse = problem.full_space.pack(
+        {"vp": np.array([0.3, -0.2, 0.5, 0.1, -0.4]), "rho": [0.2, 0.0, -0.1]}
+    )
+    problem.state = problem.state.with_update(problem.full_space, coarse)
+
+    fine = problem.with_controls(FINE_VP)
+
+    assert fine is not problem and fine.name == problem.name
+    assert fine.full_space.blocks == ("model.vp", "model.rho")
+    assert fine.full_space.sizes == {"model.vp": 9, "model.rho": 3}
+    assert fine.backend is problem.backend and fine.cache is problem.cache
+    assert fine.workdir == problem.workdir and fine.site is problem.site
+    assert fine.frequencies == problem.frequencies
+    assert fine.observed_groups == problem.observed_groups
+    assert fine.simulation is not problem.simulation
+    fine_nodes = fine.full_space.block("vp").control.coordinates
+    np.testing.assert_allclose(fine_nodes[::2], coarse_nodes)
+    # the coarse hat profile is exactly representable on the bisected nodes:
+    # shared nodes keep their values, midpoints interpolate linearly
+    vp = fine.state["vp"]
+    np.testing.assert_allclose(vp[::2], coarse["vp"], atol=1e-10)
+    np.testing.assert_allclose(
+        vp[1::2], 0.5 * (coarse["vp"][:-1] + coarse["vp"][1:]), atol=1e-10
+    )
+    np.testing.assert_array_equal(fine.state["rho"], coarse["rho"])  # copied
+    # the original problem is untouched
+    np.testing.assert_array_equal(problem.state.values, coarse.values)
+
+    # an affine field transfers exactly to any node set
+    affine = problem.state.with_update(
+        problem.full_space,
+        problem.full_space.pack({"vp": 0.4 + 2.0e-4 * coarse_nodes, "rho": [0, 0, 0]}),
+    )
+    odd = problem.with_controls(
+        {"vp": DepthProfile("vp", "sediment", count=7)}, state=affine
+    )
+    odd_nodes = odd.full_space.block("vp").control.coordinates
+    np.testing.assert_allclose(odd.state["vp"], 0.4 + 2.0e-4 * odd_nodes, atol=1e-10)
+    # a state already on the new layout is adopted as is
+    adopted = problem.with_controls(FINE_VP, state=fine.state)
+    np.testing.assert_array_equal(adopted.state.values, fine.state.values)
+    # a complete ControlSpace works too; the fine problem linearizes on its own
+    spaced = problem.with_controls(
+        ControlSpace(
+            vp=DepthProfile("vp", "sediment", count=9),
+            rho=DepthProfile("rho", "sediment", count=3),
+        )
+    )
+    np.testing.assert_allclose(spaced.state.values, fine.state.values)
+    lin = fine.linearize()
+    assert lin.space.size == 12 and lin.gradient.size == 12
+    assert lin.state_fingerprint != problem.linearize().state_fingerprint
+
+    with pytest.raises(KeyError, match="unknown block keys"):
+        problem.with_controls({"vs": DepthProfile("vs", "sediment", count=3)})
+    with pytest.raises(ValueError, match="cannot change the layout of interface"):
+        problem.with_controls({"rho": im.InterfaceParameters("salt_top")})
+    with pytest.raises(ValueError, match="neither the current nor the new layout"):
+        problem.with_controls(
+            FINE_VP,
+            state=ControlState(
+                ControlSpace(vp=DepthProfile("vp", "sediment", count=4)).bind(
+                    problem.simulation
+                ),
+                np.zeros(4),
+            ),
+        )
+
+
+def _refine_stages(fine=FINE_VP):
+    return [
+        Stage(FREQUENCIES, 6, active=["vp"], name="coarse"),
+        Stage(FREQUENCIES, 40, active=["vp"], name="fine", controls=fine),
+    ]
+
+
+def test_fwi_stage_controls_refine_the_profile_between_stages(tmp_path, fake):
+    problem = _problem(tmp_path, fake, subdir="stages")
+    fwi = FWI(problem, _refine_stages(), optimizer=LBFGS(**TIGHT))
+
+    result = fwi.run()
+
+    coarse, fine = result.stages
+    assert coarse.space.size == 5 and fine.space.size == 9
+    assert result.problem is fwi.final_problem and result.problem is not problem
+    assert result.problem.full_space.sizes == {"model.vp": 9, "model.rho": 3}
+    assert result.state.space.blocks == ("model.vp", "model.rho")
+    assert result.state.size == 12
+    assert result.vector().size == 12
+    # the fine stage starts from the coarse result transferred to 9 nodes
+    # (the base problem keeps the coarse stage's accepted state)
+    np.testing.assert_allclose(problem.state["vp"], coarse.vector.values)
+    check = problem.with_controls(FINE_VP)
+    np.testing.assert_allclose(check.state["vp"][::2], coarse.vector.values, atol=1e-10)
+    start = check.restrict(frequencies=FREQUENCIES, active=["vp"])
+    assert fine.initial_loss.data == pytest.approx(start.value())
+    # and decreases the objective on the fine layout
+    assert fine.final_loss.total < fine.initial_loss.total
+    losses = _stage_losses(result.history, 1)
+    assert len(losses) >= 2 and np.all(np.diff(losses) <= 1e-9)
+    J, d = _surrogate(fake, result.problem, active=["vp"])
+    np.testing.assert_allclose(
+        result.state["vp"], _least_squares(J, d), atol=1e-4
+    )  # the fine stage converged on its own surrogate
+    np.testing.assert_array_equal(result.state["rho"], 0.0)  # never active
+    assert result.simulation is not None  # simulation_at on the fine layout
+
+
+def test_fwi_resumes_inside_a_refined_stage(tmp_path, fake):
+    class Interrupt(RuntimeError):
+        pass
+
+    def interrupt(event):
+        if event.stage_index == 1 and event.stage_iteration == 2:
+            raise Interrupt("simulated crash")
+
+    problem = _problem(tmp_path, fake, subdir="refine_resume")
+    checkpoint = tmp_path / "refine" / "fwi.ckpt.h5"
+    options = dict(optimizer=LBFGS(**TIGHT), checkpoint=checkpoint)
+    with pytest.raises(Interrupt):
+        FWI(problem, _refine_stages(), callback=interrupt, **options).run()
+
+    saved = OptimizationCheckpoint.load(checkpoint)
+    assert saved.metadata["stage_index"] == 1 and saved.metadata["stage_iteration"] == 2
+    assert saved.metadata["control_ids"] == "model.vp,model.rho"
+    assert saved.metadata["control_sizes"] == "9,3"
+    assert saved.model.size == 9
+
+    # a different refinement is rejected
+    with pytest.raises(ValueError, match="control sizes"):
+        FWI(
+            problem,
+            _refine_stages({"vp": DepthProfile("vp", "sediment", count=7)}),
+            **options,
+        ).run()
+
+    resumed = FWI(problem, _refine_stages(), **options).run(resume=True)
+
+    assert resumed.stages[0].skipped and resumed.stages[1].resumed
+    assert resumed.stages[1].stage_iteration >= 3
+    assert resumed.state.size == 12
+    assert resumed.problem.full_space.sizes["model.vp"] == 9
+    J, d = _surrogate(fake, resumed.problem, active=["vp"])
+    np.testing.assert_allclose(resumed.state["vp"], _least_squares(J, d), atol=1e-4)
+    final = OptimizationCheckpoint.load(checkpoint)
+    assert (
+        final.metadata["stage_completed"] and final.metadata["control_sizes"] == "9,3"
+    )
+    # a completed run resumes to a no-op on the fine layout
+    again = FWI(problem, _refine_stages(), **options).run(resume=True)
+    assert all(s.skipped for s in again.stages)
+    np.testing.assert_allclose(again.state.values, resumed.state.values)
+
+
+def test_stage_controls_validation():
+    stage = Stage(FREQUENCIES, 2, controls=FINE_VP)
+    assert isinstance(stage.controls, dict) and stage.controls["vp"].count == 9
+    assert stage.to_continuation_stage().metadata["controls"] == ["vp"]
+    single = Stage(FREQUENCIES, 2, controls=DepthProfile("vp", "sediment", count=4))
+    assert isinstance(single.controls, ControlSpace)
+    with pytest.raises(TypeError, match="block specs"):
+        Stage(FREQUENCIES, 2, controls={"vp": 9})
+    with pytest.raises(ValueError, match="cannot be empty"):
+        Stage(FREQUENCIES, 2, controls={})
+    with pytest.raises(TypeError, match="ControlSpace"):
+        Stage(FREQUENCIES, 2, controls=[1, 2])
