@@ -108,7 +108,7 @@ def test_dense_source_encoding_roundtrip_preserves_coefficients(case, coefficien
     field_count = len(coefficients)
     names = [f"source_{index}" for index in range(source_count)]
     matrix = np.asarray(
-        [coefficients for _ in range(source_count)],
+        [[coefficient] * source_count for coefficient in coefficients],
         dtype=float,
     )
     acquisition = Acquisition(
@@ -118,7 +118,7 @@ def test_dense_source_encoding_roundtrip_preserves_coefficients(case, coefficien
             names=names,
         ),
         source_encoding=SourceEncoding.dense(
-            matrix,
+            weights=matrix,
             names=[f"field_{index}" for index in range(field_count)],
         ),
     )

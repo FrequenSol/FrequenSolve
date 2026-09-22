@@ -1,3 +1,4 @@
+import json
 import traceback
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
 from frequensolve.orchestrator.sites.base import JobStatus
+from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+from frequensolve.simulation.artifact_contract import ArtifactRecord, ArtifactRequest
 from frequensolve.simulation.jobs import BaseJob, ImagingJob
 from frequensolve.simulation.outputs import JobOutputs
 
@@ -53,6 +56,11 @@ class FakeS3Client:
 
     def download_file(self, bucket, key, filename):
         self.downloads.append({"Bucket": bucket, "Key": key, "Filename": filename})
+        if key not in self.objects:
+            raise ClientError(
+                {"Error": {"Code": "404", "Message": "Not found"}},
+                "GetObject",
+            )
         Path(filename).parent.mkdir(parents=True, exist_ok=True)
         Path(filename).write_text(self.objects[key])
 
@@ -60,37 +68,18 @@ class FakeS3Client:
 def make_site(s3_client):
     site = AWSSite.__new__(AWSSite)
     site.s3_client = s3_client
+    site.config = SimpleNamespace(s3_bucket="bucket")
     return site
-
-
-def result_job(project_path, run_id="simulation-1"):
-    job = object.__new__(BaseJob)
-    job.name = "job-a"
-    job.simulation = SimpleNamespace(
-        name="simulation-a",
-        project_path=project_path,
-        acquisition=SimpleNamespace(receiver_groups=[], source_field_ids=lambda: []),
-    )
-    job.outputs = JobOutputs()
-    job.f_list = [10.0]
-    job._job_id = run_id
-    return job
-
-
-def result_api(site, job):
-    prefix = f"{job.project_path.name}/{job._result_path.relative_to(job.project_path).as_posix()}"
-    site.graphql_client = SimpleNamespace(
-        get_simulation_status_details=lambda run_id: {
-            "id": run_id,
-            "status": "SUCCEEDED",
-            "outputIdentity": f"s3://bucket/{prefix}/runs/{run_id}/",
-        }
-    )
 
 
 def test_get_downloads_single_s3_object_without_forcing_prefix(tmp_path):
     s3_client = FakeS3Client({"path/to/file.json": "{}"})
     site = make_site(s3_client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
 
     site.get("s3://bucket/path/to/file.json", tmp_path / "downloads")
 
@@ -113,6 +102,11 @@ def test_get_falls_back_to_prefix_download_when_exact_object_is_missing(tmp_path
         }
     )
     site = make_site(s3_client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
 
     site.get("s3://bucket/path/to/results", tmp_path / "downloads")
 
@@ -126,6 +120,11 @@ def test_get_falls_back_to_prefix_download_when_exact_object_is_missing(tmp_path
 def test_get_reports_missing_object_or_prefix_without_private_key(tmp_path):
     s3_client = FakeS3Client({})
     site = make_site(s3_client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     private_path = "s3://bucket/accounts/private-user/missing-result"
 
     with pytest.raises(FileNotFoundError) as exc_info:
@@ -142,6 +141,11 @@ def test_get_refreshes_expired_credentials_once_then_downloads(tmp_path):
     )
     s3_client = FakeS3Client({"path/result.json": "{}"}, failures=[expired])
     site = make_site(s3_client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     refreshes = []
     site.cognito_auth = object()
     site._refresh_s3_credentials = lambda: refreshes.append(True)
@@ -159,6 +163,11 @@ def test_get_refreshes_when_head_object_masks_expired_credentials(tmp_path):
     )
     s3_client = FakeS3Client({"path/result.json": "{}"}, failures=[masked_expiry])
     site = make_site(s3_client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     refreshes = []
     site.cognito_auth = object()
     site._refresh_s3_credentials = lambda: refreshes.append(True)
@@ -201,6 +210,11 @@ def test_get_rejects_object_key_that_escapes_destination(tmp_path):
     outside = tmp_path / "outside.txt"
     s3_client = FakeS3Client({"path/results/../../outside.txt": "private content"})
     site = make_site(s3_client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
 
     with pytest.raises(RuntimeError, match="S3 transfer failed"):
         site.get("s3://bucket/path/results/", tmp_path / "downloads")
@@ -211,73 +225,77 @@ def test_get_rejects_object_key_that_escapes_destination(tmp_path):
 
 def test_fetch_vtk_reraises_download_failures(tmp_path):
     site = AWSSite.__new__(AWSSite)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     site.config = SimpleNamespace(s3_bucket="bucket")
 
-    def fail_get(*args, **kwargs):
+    def fail_fetch(*args, **kwargs):
         raise RuntimeError("download failed")
 
-    site.get = fail_get
-    job = result_job(tmp_path / "project-a")
-    result_api(site, job)
+    site.fetch_artifacts = fail_fetch
+    job = SimpleNamespace(
+        project_path=tmp_path,
+        name="job-a",
+        simulation=SimpleNamespace(
+            name="simulation-a",
+            project_path=tmp_path / "project-a",
+        ),
+    )
 
     with pytest.raises(RuntimeError, match="download failed"):
         site.fetch_vtk(job)
 
 
 def test_fetch_image_downloads_only_the_aggregate_image(tmp_path):
-    project_path = tmp_path / "imaging-project"
-    image_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
-    image_key = (
-        "imaging-project/jobs/model/rtm/results/runs/simulation-1/imaging/image.h5"
+    project = tmp_path / "project"
+    image = project / "results/opaque-generation/image.h5"
+    key = "project/results/opaque-generation/image.h5"
+    client = FakeS3Client({key: "image payload", "project/results/unused.h5": "old"})
+    site = make_site(client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
     )
-    s3_client = FakeS3Client(
-        {
-            image_key: "image payload",
-            f"{image_key.removesuffix('image.h5')}image_1.h5": "shard payload",
-        }
-    )
-    site = make_site(s3_client)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    site._emit = lambda message: None
-
     job = object.__new__(ImagingJob)
-    job.name = "rtm"
-    job.simulation = SimpleNamespace(project_path=project_path, name="model")
-    job.save_path = image_path
-    job.outputs = JobOutputs()
-    job.f_list = [10.0]
-    job._job_id = "simulation-1"
-    result_api(site, job)
-    image_path = image_path.parent / "runs/simulation-1/imaging"
-    expected = object()
-    job.load_images = lambda: expected
+    job.simulation = SimpleNamespace(project_path=project)
+    job.save_path = image.parent
+    job.load_images = lambda: "image reader"
 
-    assert site.fetch_image(job) is expected
-    assert (image_path / "image.h5").read_text() == "image payload"
-    assert s3_client.downloads == [
-        {
-            "Bucket": "bucket",
-            "Key": image_key,
-            "Filename": str(image_path / "image.h5"),
-        }
-    ]
-    assert s3_client.paginate_calls == []
+    def fetch(job, **kwargs):
+        assert kwargs["operations"] == ("smooth",)
+        assert kwargs["requests"] == (ArtifactRequest(role="image"),)
+        assert not kwargs["include_defaults"]
+        return site._download_s3_files(
+            "project/results", project / "results", ("opaque-generation/image.h5",)
+        )
+
+    site.fetch_artifacts = fetch
+    assert site.fetch_image(job) == "image reader"
+    assert image.read_text() == "image payload"
+    assert [row["Key"] for row in client.downloads] == [key]
+    assert not client.paginate_calls
 
 
 def test_fetch_image_rejects_paths_outside_the_project(tmp_path):
     project_path = tmp_path / "imaging-project"
     site = make_site(FakeS3Client({}))
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     site.config = SimpleNamespace(s3_bucket="bucket")
 
     job = object.__new__(ImagingJob)
     job.name = "rtm"
     job.simulation = SimpleNamespace(project_path=project_path, name="model")
     job.save_path = tmp_path / "other" / "imaging"
-    job.outputs = JobOutputs()
-    job.f_list = [10.0]
-    job._job_id = "simulation-1"
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="outside project root"):
         site.fetch_image(job)
 
 
@@ -304,6 +322,11 @@ def test_fetch_image_normalizes_missing_output_after_credential_refresh(
 
     s3_client = ExpiredThenMissingS3Client()
     site = make_site(s3_client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     site.config = SimpleNamespace(s3_bucket="bucket")
     site.cognito_auth = object()
     site._refresh_s3_credentials = lambda: None
@@ -312,45 +335,23 @@ def test_fetch_image_normalizes_missing_output_after_credential_refresh(
     job.name = "rtm"
     job.simulation = SimpleNamespace(project_path=project_path, name="model")
     job.save_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
-    job.outputs = JobOutputs()
-    job.f_list = [10.0]
-    job._job_id = "simulation-1"
-    result_api(site, job)
 
-    with pytest.raises(FileNotFoundError, match="AWS imaging output .* is missing"):
+    site.fetch_artifacts = lambda *_args, **_kwargs: site._download_s3_files(
+        "project/results", tmp_path / "downloads", ("opaque/image.h5",)
+    )
+    with pytest.raises(FileNotFoundError, match="S3 artifact is missing"):
         site.fetch_image(job)
 
     assert s3_client.attempts == 2
 
 
-def test_fetch_vtk_downloads_only_configured_output_paths(tmp_path):
-    key = "project-a/jobs/simulation-a/job-a/results/runs/simulation-1/paraview/pv_00000.vtu"
-    s3_client = FakeS3Client({key: "mesh"})
-    site = make_site(s3_client)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    job = result_job(tmp_path / "project-a")
-    job.outputs.paraview = [SimpleNamespace(path="paraview")]
-    result_api(site, job)
-
-    site.fetch_vtk(job)
-
-    assert (
-        tmp_path
-        / "project-a/jobs/simulation-a/job-a/results/runs/simulation-1/paraview/pv_00000.vtu"
-    ).read_text() == "mesh"
-    assert {
-        "Bucket": "bucket",
-        "Prefix": "project-a/jobs/simulation-a/job-a/results/runs/simulation-1/paraview/",
-    } in s3_client.paginate_calls
-    assert {
-        "Bucket": "bucket",
-        "Prefix": "project-a/jobs/simulation-a/job-a/results/runs/simulation-1/ParaView/",
-    } not in s3_client.paginate_calls
-
-
 def test_fetch_output_files_downloads_paraview_outputs(tmp_path):
     site = AWSSite.__new__(AWSSite)
     site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     calls = []
 
     def fetch_paraview(job):
@@ -379,6 +380,10 @@ def test_fetch_output_files_downloads_paraview_outputs(tmp_path):
 def test_fetch_output_files_downloads_xdmf_outputs(tmp_path, kind, suffix):
     site = AWSSite.__new__(AWSSite)
     site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     calls = []
     site.fetch_paraview = calls.append
     job = SimpleNamespace(
@@ -402,6 +407,10 @@ def test_fetch_output_files_downloads_xdmf_outputs(tmp_path, kind, suffix):
 def test_fetch_output_files_skips_unsupported_filters(tmp_path, kind, suffix):
     site = AWSSite.__new__(AWSSite)
     site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     calls = []
     site.fetch_paraview = calls.append
     job = SimpleNamespace(
@@ -414,61 +423,198 @@ def test_fetch_output_files_skips_unsupported_filters(tmp_path, kind, suffix):
 
 
 def test_fetch_run_metadata_downloads_job_run_directory(tmp_path):
+    site = make_site(FakeS3Client({}))
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
+    job = SimpleNamespace(_result_path=tmp_path / "results")
+    calls = []
+    site.fetch_artifact_catalog = lambda item: calls.append(item)
+    assert site.fetch_run_metadata(job) == job._result_path / "_fs_run"
+    assert calls == [job]
+
+
+@pytest.mark.parametrize("explicit_run_id", [None, "older-simulation"])
+def test_fetch_logs_falls_back_to_authenticated_cloudwatch_events(
+    tmp_path, explicit_run_id
+):
+    expected_run_id = explicit_run_id or "simulation-1"
+
+    class CloudLogs:
+        def __init__(self):
+            self.requested = []
+
+        def list_simulation_frequency_jobs(self, simulation_id):
+            assert simulation_id == expected_run_id
+            return [
+                {"frequencyIndex": 0, "batchJobId": "batch-1"},
+                {"frequencyIndex": 1, "batchJobId": "batch-2"},
+            ]
+
+        def get_job_logs(self, batch_job_id):
+            self.requested.append(batch_job_id)
+            return [
+                {
+                    "timestamp": "2026-09-06T14:00:00.000Z",
+                    "message": f"{batch_job_id} complete\n",
+                }
+            ]
+
     site = AWSSite.__new__(AWSSite)
     site.config = SimpleNamespace(s3_bucket="bucket")
-    downloads = []
-    messages = []
-    site.get = lambda remote, local: downloads.append((remote, local))
-    site._emit = messages.append
-    job = result_job(tmp_path / "project-a")
-    result_api(site, job)
-    manifest_path = job._result_path / "runs/simulation-1/_fs_run/run_manifest.json"
-    job.collect_task_run_manifests = lambda: manifest_path
+    site.graphql_client = CloudLogs()
+    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
+    job = SimpleNamespace(
+        project_path=tmp_path / "project-a",
+        _stdout_path=tmp_path / "project-a/logs",
+        _job_id="simulation-1",
+        f_list=[10.0, 20.0],
+        name="job-a",
+        simulation=SimpleNamespace(name="simulation-a"),
+    )
+    (job._stdout_path / expected_run_id).mkdir(parents=True)
+    (job._stdout_path / expected_run_id / "task_99.log").write_text("stale\n")
 
-    assert site.fetch_run_metadata(job) == manifest_path
-    assert downloads == [
-        (
-            "s3://bucket/project-a/jobs/simulation-a/job-a/results/runs/simulation-1/_fs_run",
-            manifest_path.parent,
-        )
-    ]
+    assert (
+        site.fetch_logs(job, simulation_id=explicit_run_id)
+        == job._stdout_path / expected_run_id
+    )
+    assert site.graphql_client.requested == ["batch-1", "batch-2"]
+    assert not (job._stdout_path / expected_run_id / "task_99.log").exists()
+    assert (
+        job._stdout_path / expected_run_id / "task_1.log"
+    ).read_text() == "batch-1 complete\n"
+    assert (
+        job._stdout_path / expected_run_id / "task_2.log"
+    ).read_text() == "batch-2 complete\n"
+
+
+def test_fetch_logs_cloudwatch_fallback_honors_frequency_selector(tmp_path):
+    class CloudLogs:
+        def list_simulation_frequency_jobs(self, simulation_id):
+            return [
+                {"frequencyIndex": 0, "batchJobId": "batch-1"},
+                {"frequencyIndex": 1, "batchJobId": "batch-2"},
+            ]
+
+        def get_job_logs(self, batch_job_id):
+            assert batch_job_id == "batch-2"
+            return [{"timestamp": "now", "message": "selected"}]
+
+    site = AWSSite.__new__(AWSSite)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    site.graphql_client = CloudLogs()
+    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
+    job = SimpleNamespace(
+        project_path=tmp_path / "project-a",
+        _stdout_path=tmp_path / "project-a/logs",
+        _job_id="simulation-1",
+        f_list=[10.0, 20.0],
+        name="job-a",
+        simulation=SimpleNamespace(name="simulation-a"),
+    )
+
+    selected = site.fetch_logs(job, frequency=20.0)
+
+    assert selected == job._stdout_path / "simulation-1" / "task_2.log"
+    assert selected.read_text() == "selected\n"
+    assert not (job._stdout_path / "simulation-1" / "task_1.log").exists()
+
+
+def test_fetch_logs_cloudwatch_failure_preserves_existing_cache(tmp_path):
+    class CloudLogs:
+        def list_simulation_frequency_jobs(self, simulation_id):
+            return [
+                {"frequencyIndex": 0, "batchJobId": "batch-1"},
+                {"frequencyIndex": 1, "batchJobId": "batch-2"},
+            ]
+
+        def get_job_logs(self, batch_job_id):
+            if batch_job_id == "batch-2":
+                raise RuntimeError("CloudWatch unavailable")
+            return [{"timestamp": "now", "message": "replacement"}]
+
+    site = AWSSite.__new__(AWSSite)
+    site.config = SimpleNamespace(s3_bucket="bucket")
+    site.graphql_client = CloudLogs()
+    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
+    job = SimpleNamespace(
+        project_path=tmp_path / "project-a",
+        _stdout_path=tmp_path / "project-a/logs",
+        _job_id="simulation-1",
+        f_list=[10.0, 20.0],
+        name="job-a",
+        simulation=SimpleNamespace(name="simulation-a"),
+    )
+    (job._stdout_path / "simulation-1").mkdir(parents=True)
+    (job._stdout_path / "simulation-1" / "task_1.log").write_text("cached one\n")
+    (job._stdout_path / "simulation-1" / "task_2.log").write_text("cached two\n")
+
+    with pytest.raises(RuntimeError, match="CloudWatch unavailable"):
+        site.fetch_logs(job)
+
+    assert (
+        job._stdout_path / "simulation-1" / "task_1.log"
+    ).read_text() == "cached one\n"
+    assert (
+        job._stdout_path / "simulation-1" / "task_2.log"
+    ).read_text() == "cached two\n"
 
 
 def test_fetch_outputs_downloads_complete_configured_artifact_set():
-    site = AWSSite.__new__(AWSSite)
+    site = object.__new__(AWSSite)
     site._result_job = lambda job: job
-    calls = []
-    site.fetch_run_metadata = lambda job: calls.append("metadata")
-    site.fetch_traces = lambda job: calls.append("traces") or "trace-data"
-    site.fetch_wavefields = lambda job: calls.append("wavefields") or "wave-data"
-    site.fetch_paraview = lambda job: calls.append("paraview")
-    job = SimpleNamespace(
-        outputs=SimpleNamespace(wavefields=[object()], paraview=[object()])
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
     )
-
+    calls = []
+    site.fetch_artifacts = lambda job, **kwargs: calls.append(kwargs)
+    job = SimpleNamespace(
+        outputs=SimpleNamespace(wavefields=[object()]),
+        traces=SimpleNamespace(open=lambda: "trace-data"),
+        wavefields=SimpleNamespace(open=lambda: "wave-data"),
+    )
     assert site.fetch_outputs(job) == {
         "traces": "trace-data",
         "wavefields": "wave-data",
     }
-    assert calls == ["metadata", "traces", "wavefields", "paraview"]
+    assert calls == [{"requests": (), "include_defaults": True, "operations": ()}]
 
 
-def test_fetch_outputs_downloads_aggregate_image_for_imaging_job():
+def test_fetch_outputs_downloads_aggregate_image_for_imaging_job(monkeypatch):
+    site = object.__new__(AWSSite)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
+    calls = []
+    site.fetch_artifacts = lambda job, **kwargs: calls.append(kwargs)
+    job = object.__new__(ImagingJob)
+    job.outputs = SimpleNamespace(wavefields=[])
+    job.load_images = lambda: calls.append("image")
+    monkeypatch.setattr(
+        ImagingJob,
+        "traces",
+        property(lambda self: SimpleNamespace(open=lambda: "trace-data")),
+    )
+    assert site.fetch_outputs(job) == "trace-data"
+    assert calls == [
+        {"requests": (), "include_defaults": True, "operations": ("smooth",)},
+        "image",
+    ]
+
+
+def test_aws_run_handle_honors_submit_time_fetch_after_success():
     site = AWSSite.__new__(AWSSite)
     site._result_job = lambda job: job
-    calls = []
-    site.fetch_run_metadata = lambda job: calls.append("metadata")
-    site.fetch_traces = lambda job: calls.append("traces") or "trace-data"
-    site.fetch_image = lambda job: calls.append("image")
-    job = object.__new__(ImagingJob)
-    job.outputs = SimpleNamespace(wavefields=[], paraview=[])
-
-    assert site.fetch_outputs(job) == "trace-data"
-    assert calls == ["metadata", "traces", "image"]
-
-
-def test_aws_run_handle_honors_submit_time_fetch_after_success(tmp_path):
-    site = AWSSite.__new__(AWSSite)
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
     fetch_calls = []
     site._poll_run = lambda run: JobStatus(
         state="completed",
@@ -477,7 +623,12 @@ def test_aws_run_handle_honors_submit_time_fetch_after_success(tmp_path):
     )
     site.fetch_outputs = lambda job: fetch_calls.append(job)
     site._emit_status = lambda *args, **kwargs: None
-    job = result_job(tmp_path / "project-a")
+    job = SimpleNamespace(
+        name="job-a",
+        trace_manifest=None,
+        _stdout_path=None,
+        run_metadata=None,
+    )
     run = site._make_run_handle(
         job,
         "simulation-1",
@@ -489,9 +640,384 @@ def test_aws_run_handle_honors_submit_time_fetch_after_success(tmp_path):
     result = run.wait()
 
     assert result.successful
-    assert fetch_calls == [run.job]
-    assert run.job is not job
-    assert run.job._result_path == job._result_path / "runs/simulation-1"
+    assert fetch_calls == [job]
+
+
+def test_fetch_vtk_downloads_only_configured_output_paths(tmp_path):
+    site = make_site(FakeS3Client({"project/results/pv/opaque.vtu": "mesh"}))
+    calls = []
+
+    def fetch(job, **kwargs):
+        calls.append(kwargs)
+        return site._download_s3_files("project/results", tmp_path, ("pv/opaque.vtu",))
+
+    site._result_job = lambda job: job
+    site.fetch_artifacts = fetch
+    site.fetch_vtk(SimpleNamespace())
+    assert (tmp_path / "pv/opaque.vtu").read_text() == "mesh"
+    assert {request.role for request in calls[0]["requests"]} == {
+        "visualization",
+        "visualization_data",
+    }
+    assert not site.s3_client.paginate_calls
+
+
+def test_exact_s3_transfer_downloads_direct_keys_without_listing(tmp_path):
+    client = FakeS3Client(
+        {
+            "project/jobs/simulation/job/results/traces/data.h5": "trace",
+            "project/jobs/simulation/job/results/fields/forward.h5": "wave",
+        }
+    )
+    site = make_site(client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
+
+    fetched = site._download_s3_files(
+        "project/jobs/simulation/job/results",
+        tmp_path,
+        ("traces/data.h5",),
+    )
+
+    assert fetched == [tmp_path / "traces/data.h5"]
+    assert [item["Key"] for item in client.downloads] == [
+        "project/jobs/simulation/job/results/traces/data.h5"
+    ]
+    assert client.paginate_calls == []
+
+
+def test_exact_s3_artifact_fetch_excludes_unrelated_wavefields(tmp_path):
+    result_path = tmp_path / "project/jobs/simulation/job/results"
+    records = (
+        ArtifactRecord.from_fs(
+            {
+                "id": "traces",
+                "role": "simulated_traces",
+                "representation": "hdf5_shard",
+                "schema": "trace-1",
+                "path": "traces/data.h5",
+                "retention": "durable",
+                "bytes": 5,
+            },
+            result_path=result_path,
+        ),
+        ArtifactRecord.from_fs(
+            {
+                "id": "forward-wavefield",
+                "role": "wavefield",
+                "representation": "hdf5",
+                "schema": "field-1",
+                "path": "fields/forward.h5",
+                "retention": "durable",
+                "bytes": 4,
+            },
+            result_path=result_path,
+        ),
+    )
+
+    class Catalog:
+        def query(self, **filters):
+            return [
+                record
+                for record in records
+                if all(
+                    value is None or getattr(record, name) == value
+                    for name, value in filters.items()
+                )
+            ]
+
+        def select(self, request, *, task=None):
+            del task
+            return self.query(
+                id=request.id,
+                role=request.role,
+                retention=request.retention,
+            )
+
+    client = FakeS3Client(
+        {
+            "project/jobs/simulation/job/results/traces/data.h5": "trace",
+            "project/jobs/simulation/job/results/fields/forward.h5": "wave",
+        }
+    )
+    site = make_site(client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
+    site.fetch_artifact_catalog = lambda job, project_path=None: Catalog()
+    job = SimpleNamespace(
+        project_path=tmp_path / "project",
+        _result_path=result_path,
+        name="job",
+        simulation=SimpleNamespace(name="simulation"),
+    )
+
+    fetched = site.fetch_artifacts(job)
+
+    assert fetched == [result_path / "traces/data.h5"]
+    assert [item["Key"] for item in client.downloads] == [
+        "project/jobs/simulation/job/results/traces/data.h5"
+    ]
+    assert client.paginate_calls == []
+
+
+def test_s3_json_catalog_fallback_removes_stale_local_index(tmp_path):
+    fingerprint = "sha256:" + "a" * 64
+    result_path = tmp_path / "project/jobs/simulation/job/results"
+    stale_index = result_path / "_fs_run/tasks.h5"
+    stale_index.parent.mkdir(parents=True)
+    stale_index.write_bytes(b"stale-index")
+    task_result = json.dumps(
+        {
+            "schema": "fs-task-result-2",
+            "partition": {
+                "task": 1,
+                "task_count": 1,
+                "frequency": {"real": 2.0, "imag": 0.1},
+            },
+            "fingerprints": {
+                "job": fingerprint,
+                "simulation": fingerprint,
+                "outputs": fingerprint,
+            },
+            "status": {"state": "success", "code": 0},
+            "artifacts": [],
+        }
+    )
+    result_key = (
+        "project/jobs/simulation/job/results/" "_fs_run/tasks/task_000001/result.json"
+    )
+    client = FakeS3Client({result_key: task_result})
+    site = make_site(client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
+    job = SimpleNamespace(
+        n_tasks=1,
+        f_list=(complex(2.0, 0.1),),
+        project_path=tmp_path / "project",
+        _result_path=result_path,
+        name="job",
+        simulation=SimpleNamespace(name="simulation"),
+        staged_artifact_fingerprints=lambda site_name: {
+            "job": fingerprint,
+            "simulation": fingerprint,
+            "outputs": fingerprint,
+        },
+    )
+
+    catalog = site.fetch_artifact_catalog(job)
+
+    assert tuple(catalog.results) == (1,)
+    assert not stale_index.exists()
+    assert client.paginate_calls == []
+
+
+def test_s3_fetches_explicit_operation_catalog_and_payload_without_listing(tmp_path):
+    fingerprint = "sha256:" + "a" * 64
+    result_path = tmp_path / "project/jobs/simulation/job/results"
+    fingerprints = {
+        "job": fingerprint,
+        "simulation": fingerprint,
+        "outputs": fingerprint,
+    }
+    task_result = {
+        "schema": "fs-task-result-2",
+        "partition": {
+            "task": 1,
+            "frequency": {"real": 2.0, "imag": 0.1},
+        },
+        "fingerprints": fingerprints,
+        "status": {"state": "success", "code": 0},
+        "artifacts": [],
+    }
+    operation_result = {
+        "schema": "fs-operation-result-1",
+        "operation": {"name": "smooth", "generation": "smooth-1"},
+        "fingerprints": fingerprints,
+        "status": {"state": "success", "code": 0},
+        "artifacts": [
+            {
+                "id": "smooth-image",
+                "role": "image",
+                "representation": "hdf5",
+                "schema": "image-1",
+                "path": "images/smooth.h5",
+                "retention": "durable",
+                "bytes": 5,
+            }
+        ],
+    }
+    prefix = "project/jobs/simulation/job/results"
+    client = FakeS3Client(
+        {
+            f"{prefix}/_fs_run/tasks/task_000001/result.json": json.dumps(task_result),
+            f"{prefix}/_fs_run/operations/smooth/result.json": json.dumps(
+                operation_result
+            ),
+            f"{prefix}/images/smooth.h5": "image",
+        }
+    )
+    site = make_site(client)
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
+    job = SimpleNamespace(
+        n_tasks=1,
+        f_list=(complex(2.0, 0.1),),
+        project_path=tmp_path / "project",
+        _result_path=result_path,
+        name="job",
+        simulation=SimpleNamespace(name="simulation"),
+        staged_artifact_fingerprints=lambda site_name: fingerprints,
+    )
+
+    fetched = site.fetch_artifacts(
+        job,
+        requests=(ArtifactRequest(role="image"),),
+        include_defaults=False,
+        operations=("smooth",),
+    )
+
+    assert fetched == [result_path / "images/smooth.h5"]
+    assert result_path.joinpath("images/smooth.h5").read_text() == "image"
+    assert client.paginate_calls == []
+    assert [item["Key"] for item in client.downloads] == [
+        f"{prefix}/_fs_run/tasks.h5",
+        f"{prefix}/_fs_run/tasks/task_000001/result.json",
+        f"{prefix}/_fs_run/operations/smooth/result.json",
+        f"{prefix}/images/smooth.h5",
+    ]
+
+
+def test_fetch_outputs_preserves_control_postprocess_with_exact_catalog(tmp_path):
+    site = make_site(FakeS3Client({}))
+    site._result_job = lambda job: job
+    site._snapshot_run_job = lambda job, run_id: job
+    site._s3_result_prefix = lambda job: (
+        f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
+    )
+    calls = []
+    gradient = tmp_path / "gradient.h5"
+
+    def fetch(job, **kwargs):
+        calls.append(kwargs)
+        return [gradient]
+
+    site.fetch_artifacts = fetch
+    job = SimpleNamespace(requires_postprocess=lambda: True)
+    assert site.fetch_outputs(job) == [gradient]
+    assert calls[0]["operations"] == ("smooth",)
+    assert {request.role for request in calls[0]["requests"]} == {
+        "gradient",
+        "objective",
+        "focus_objective",
+    }
+    site.fetch_artifacts = lambda *args, **kwargs: []
+    with pytest.raises(FileNotFoundError, match="No postprocess artifact"):
+        site.fetch_outputs(job)
+
+
+def result_job(project_path, run_id="simulation-1"):
+    job = object.__new__(BaseJob)
+    job.name = "job-a"
+    job.simulation = SimpleNamespace(
+        name="simulation-a",
+        project_path=project_path,
+        acquisition=SimpleNamespace(receiver_groups=[], source_field_ids=lambda: []),
+    )
+    job.outputs = JobOutputs()
+    job.f_list = [10.0]
+    job._job_id = run_id
+    return job
+
+
+def result_api(site, job):
+    prefix = f"{job.project_path.name}/{job._result_path.relative_to(job.project_path).as_posix()}"
+    fingerprint = "sha256:" + "a" * 64
+    job._frozen_staged_provenance = {
+        "AWSSite": {
+            "job": {"digest": fingerprint},
+            "simulation": {"digest": fingerprint},
+        }
+    }
+    job._output_request_fingerprint_cache = {"digest": fingerprint}
+    for run_id in ("simulation-1", "simulation-2"):
+        run_prefix = f"{prefix}/runs/{run_id}/"
+        records = []
+        for key, value in list(site.s3_client.objects.items()):
+            if not key.startswith(run_prefix) or "/_fs_run/" in key:
+                continue
+            relative = key.removeprefix(run_prefix)
+            role = (
+                "visualization"
+                if relative.endswith(".vtu")
+                else (
+                    "wavefield"
+                    if "waves" in relative
+                    else "image" if "image.h5" in relative else "simulated_traces"
+                )
+            )
+            records.append(
+                {
+                    "id": "traces" if role == "simulated_traces" else relative,
+                    "role": role,
+                    "representation": (
+                        "vtk"
+                        if role == "visualization"
+                        else "hdf5_container" if role == "wavefield" else "hdf5_shard"
+                    ),
+                    "schema": "synthetic-artifact-1",
+                    "path": relative,
+                    "retention": "durable",
+                    "bytes": len(value.encode()),
+                }
+            )
+        document = {
+            "schema": "fs-task-result-2",
+            "partition": {
+                "task": 1,
+                "task_count": 1,
+                "frequency": {"real": 10.0, "imag": 0.0},
+            },
+            "fingerprints": {
+                key: fingerprint for key in ("job", "simulation", "outputs")
+            },
+            "status": {"state": "success", "code": 0},
+            "artifacts": records,
+        }
+        site.s3_client.objects[run_prefix + "_fs_run/tasks/task_000001/result.json"] = (
+            json.dumps(document)
+        )
+        images = [record for record in records if record["role"] == "image"]
+        if images:
+            site.s3_client.objects[
+                run_prefix + "_fs_run/operations/smooth/result.json"
+            ] = json.dumps(
+                {
+                    "schema": "fs-operation-result-1",
+                    "operation": {"name": "smooth", "generation": run_id},
+                    "fingerprints": document["fingerprints"],
+                    "status": document["status"],
+                    "artifacts": images,
+                }
+            )
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status_details=lambda run_id: {
+            "id": run_id,
+            "status": "SUCCEEDED",
+            "outputIdentity": f"s3://bucket/{prefix}/runs/{run_id}/",
+        }
+    )
 
 
 def log_job(tmp_path):
@@ -621,6 +1147,10 @@ def test_rerun_handles_and_results_keep_their_own_downloads(tmp_path, monkeypatc
         assert all(path.is_relative_to(result.job._result_path) for path in files)
     # Repeated explicit fetch of the old run still uses its own job snapshot.
     site.fetch_run_metadata = lambda *_: None
+    monkeypatch.setattr(
+        "frequensolve.simulation.jobs.artifacts.TraceOutputHandle.open",
+        lambda handle: handle.job.trace_outputs.path,
+    )
     first.fetch()
     first.fetch()
     assert (first.job._result_path / "paraview/mesh.vtu").read_text() == "first mesh"
@@ -628,11 +1158,7 @@ def test_rerun_handles_and_results_keep_their_own_downloads(tmp_path, monkeypatc
     assert first.job._job_id == "simulation-1"
     assert first.job._result_path != second.job._result_path
     assert not (job._result_path / "paraview/mesh.vtu").exists()
-    assert {call["Prefix"] for call in client.paginate_calls} == {
-        prefix + run_id + "/" + path + "/"
-        for run_id in ("simulation-1", "simulation-2")
-        for path in ("nested/traces", "paraview")
-    }
+    assert client.paginate_calls == []
 
 
 @pytest.mark.parametrize(
@@ -722,9 +1248,7 @@ def test_wavefields_preserve_nested_output_path_in_the_selected_run(
         == alternate / "jobs/simulation-a/job-a/results/runs/simulation-1/nested/waves"
     )
     assert (path / "traces_1.h5").read_text() == "wavefield"
-    assert site.s3_client.paginate_calls == [
-        {"Bucket": "bucket", "Prefix": prefix + "nested/waves/"}
-    ]
+    assert site.s3_client.paginate_calls == []
 
 
 def test_imaging_results_keep_each_run_separate(tmp_path, monkeypatch):
@@ -757,7 +1281,7 @@ def test_imaging_results_keep_each_run_separate(tmp_path, monkeypatch):
     assert first.images() == "first image"
     assert second.job.image_file().read_text() == "second image"
     assert first.job.image_file().read_text() == "first image"
-    assert not job.image_file().exists()
+    assert not (job.save_path / "image.h5").exists()
 
 
 def test_old_run_keeps_nested_receiver_and_simulation_metadata(tmp_path):
@@ -765,7 +1289,9 @@ def test_old_run_keeps_nested_receiver_and_simulation_metadata(tmp_path):
     job = result_job(tmp_path / "project-a")
     group = SimpleNamespace(
         name="line-a",
-        device=SimpleNamespace(components=[SimpleNamespace(name="pressure")]),
+        device=ReceiverNode(
+            components=[ReceiverComponent(name="pressure", field="pressure")]
+        ),
     )
     job.simulation.acquisition.receiver_groups = [group]
     job.simulation.units = {"pressure": "Pa"}
@@ -778,7 +1304,7 @@ def test_old_run_keeps_nested_receiver_and_simulation_metadata(tmp_path):
     group.name = "changed-line"
     group.device.components[0].name = "velocity"
     job.simulation.acquisition.receiver_groups.append(
-        SimpleNamespace(name="line-b", device=SimpleNamespace(components=[]))
+        SimpleNamespace(name="line-b", device=ReceiverNode(components=[]))
     )
     job.simulation.units["pressure"] = "kPa"
     job.simulation.extra["coordinates"][0] = 99.0
@@ -826,9 +1352,6 @@ def test_snapshot_copies_real_simulation_without_copying_its_project(tmp_path):
 
 
 def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
-    import h5py
-    import numpy as np
-
     from frequensolve.geometry.grids import CartesianGrid
     from frequensolve.simulation.jobs.fwi import build_imaging_job
     from frequensolve.simulation.simulation import SeismicSimulation
@@ -849,11 +1372,6 @@ def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
     site = make_site(FakeS3Client({}))
     first = site._make_run_handle(job, "simulation-1")
     first_result = first._make_result(JobStatus(state="completed", return_code=0))
-    first_image = first.job.image_file()
-    first_image.parent.mkdir(parents=True, exist_ok=True)
-    with h5py.File(first_image, "w") as image:
-        image.create_dataset("vp", data=np.arange(6).reshape(2, 3))
-
     job.grid.n[0] = 4
     job.grid.x1[0] = 3.0
     job.weights[0] = 2.0
@@ -869,7 +1387,6 @@ def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
         assert run.job.regularization["schedule"] == [0.1]
         assert run.job.kwargs["interpretation"]["units"] == ["m/s"]
         assert run.job.images
-        assert run.job.load_images().shape == (2, 3)
     assert second.job.grid.shape == (2, 4)
     assert second.job.regularization["schedule"] == [0.9]
     assert second.job.images == {}
@@ -937,8 +1454,6 @@ def test_upload_stops_on_partial_failure_without_deleting_existing_objects(
     with pytest.raises(RuntimeError, match="Cloud file upload failed"):
         getattr(site, method)(source, "project/inputs")
     assert len(uploaded) == 2
-    # The SDK has no ownership proof permitting deletion of pre-existing keys.
-    # No delete API exists on this fake, so an invented rollback would fail.
 
 
 @pytest.mark.parametrize("method", ["sync_s3", "put"])

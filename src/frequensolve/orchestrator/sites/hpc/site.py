@@ -12,9 +12,11 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from asyncio import Future
 from dataclasses import dataclass, field
@@ -31,10 +33,12 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Type,
     Union,
     cast,
 )
+from uuid import uuid4
 
 from frequensolve import __version__ as frequensolve_version
 from frequensolve._optional import optional_dependency_error
@@ -51,13 +55,6 @@ except ModuleNotFoundError as exc:
 
 from jinja2 import Environment, PackageLoader
 
-from frequensolve.frequensolver import (
-    IDENTITY_QUERY_TIMEOUT_SECONDS,
-    FrequenSolverCompatibility,
-    check_frequensolver_compatibility,
-    query_remote_frequensolver_identity,
-    resolve_frequensolver_policy,
-)
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
@@ -113,13 +110,34 @@ from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
 from frequensolve.orchestrator.utils.environment import (
     NUMERIC_RUNTIME_DEFAULTS,
+    solver_environment,
     validate_environment,
 )
 from frequensolve.orchestrator.utils.pool import PoolInfo
 from frequensolve.orchestrator.utils.ssh import SSHClientClass
 from frequensolve.seismic.traces import TraceDataset
+from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
+from frequensolve.simulation.artifact_contract import (
+    ArtifactCatalog,
+    ArtifactContractError,
+    ArtifactRequest,
+    OperationResult,
+    operation_result_path,
+)
+from frequensolve.simulation.artifact_transfer import (
+    fetch_artifact_payloads,
+)
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.jobs.imaging import ImagingJob
+from frequensolve.simulation.task_index import TaskIndex
+from frequensolve.solver import (
+    IDENTITY_QUERY_TIMEOUT_SECONDS,
+    SolverCompatibility,
+    check_solver_compatibility,
+    query_remote_solver_identity,
+    resolve_solver_policy,
+)
+from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = [
@@ -143,6 +161,15 @@ _HPC_RUNTIME_DEFAULTS = {
 _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 60.0
 
 _SHELL_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _job_requires_postprocess(job: Any) -> bool:
+    """Return a job's optional frequency-postprocess capability."""
+
+    requires = getattr(job, "requires_postprocess", None)
+    if callable(requires):
+        return bool(requires())
+    return isinstance(job, ImagingJob)
 
 
 def _quote_runtime_environment_value(value: str) -> str:
@@ -201,6 +228,7 @@ class SlurmSiteConfig(BaseSiteConfig):
     queue: str = "normal"
     scheduler: str = "SLURM"
     mpi_wrapper: str = "srun"
+    launcher_args: tuple[str, ...] = field(default=(), kw_only=True)
     poll_interval: int = 5
     account: str = ""
     tmp_dir: Optional[Union[str, Path]] = None
@@ -225,6 +253,12 @@ class SlurmSiteConfig(BaseSiteConfig):
         self.ssh_port = ssh_port
         if self.known_hosts_file is not None:
             self.known_hosts_file = Path(self.known_hosts_file).expanduser()
+
+        if not isinstance(self.launcher_args, (list, tuple)) or any(
+            not isinstance(value, str) for value in self.launcher_args
+        ):
+            raise ValueError("launcher_args must be an array of strings")
+        self.launcher_args = tuple(self.launcher_args)
         normalized: Dict[str, SlurmPartitionConfig] = {}
         for name, value in self.partitions.items():
             if isinstance(value, SlurmPartitionConfig):
@@ -391,6 +425,8 @@ class SlurmRunConfig:
         scheduler_heartbeat_timeout: Maximum seconds without a new adaptive
             scheduler heartbeat before the run is reported failed. ``None``
             disables heartbeat enforcement.
+        mpi_health_check_timeout: Optional Slurm time limit for a full-rank MPI
+            health check before solver initialization. ``None`` disables it.
         run_path: Remote run directory override.
         slurm_args: Additional raw ``sbatch`` arguments.
     """
@@ -407,6 +443,7 @@ class SlurmRunConfig:
     notify_email: Optional[str] = None
     poll_interval: Optional[int] = None
     scheduler_heartbeat_timeout: Optional[float] = _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT
+    mpi_health_check_timeout: Optional[str] = None
     run_path: Optional[Union[str, Path]] = None
     slurm_args: List[str] = field(default_factory=list)
 
@@ -428,6 +465,8 @@ class SlurmRunConfig:
         ),
         run_path: Optional[Union[str, Path]] = None,
         slurm_args: Optional[List[str]] = None,
+        *,
+        mpi_health_check_timeout: Optional[str] = None,
         **aliases,
     ):
         values = _normalize_rank_aliases(
@@ -474,6 +513,17 @@ class SlurmRunConfig:
             if scheduler_heartbeat_timeout is None
             else float(scheduler_heartbeat_timeout)
         )
+        if mpi_health_check_timeout is not None:
+            try:
+                timeout_seconds = _hms_to_seconds(str(mpi_health_check_timeout))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "mpi_health_check_timeout must use HH:MM:SS or D-HH:MM:SS"
+                ) from exc
+            if timeout_seconds <= 0:
+                raise ValueError("mpi_health_check_timeout must be greater than zero")
+            mpi_health_check_timeout = _seconds_to_hms(timeout_seconds)
+        self.mpi_health_check_timeout = mpi_health_check_timeout
         self.run_path = run_path
         self.slurm_args = list(slurm_args or [])
 
@@ -527,6 +577,7 @@ class SlurmRunConfig:
             "notify_email": self.notify_email,
             "poll_interval": self.poll_interval,
             "scheduler_heartbeat_timeout": self.scheduler_heartbeat_timeout,
+            "mpi_health_check_timeout": self.mpi_health_check_timeout,
             "run_path": self.run_path,
             "slurm_args": list(self.slurm_args),
         }
@@ -592,7 +643,7 @@ class SlurmSite(BaseSite):
         modules: Environment modules loaded before remote solver execution.
         environment: Non-secret environment values exported before remote
             solver execution.
-        frequensolver_policy: Compatibility behavior: ``"warn"`` (default),
+        solver_policy: Compatibility behavior: ``"warn"`` (default),
             ``"strict"``, or ``"off"``.
         run_config: Default SLURM resource request.
         config.tmp_dir: Optional remote directory for transient transfer
@@ -615,9 +666,9 @@ class SlurmSite(BaseSite):
     _scratch_dir: Optional[Path]
     modules: List[str]
     environment: Dict[str, str]
-    frequensolver_policy: Optional[str]
-    _frequensolver_compatibility_result: Optional[FrequenSolverCompatibility]
-    _frequensolver_compatibility_policy: Optional[str]
+    solver_policy: Optional[str]
+    _solver_compatibility_result: Optional[SolverCompatibility]
+    _solver_compatibility_policy: Optional[str]
     enterprise_hpc: Optional[_EnterpriseHPCProfile]
     _enterprise_hpc_preflight_result: Optional[EnterpriseHPCPreflightResult]
     _enterprise_hpc_limits: Optional[_EnterpriseLimits]
@@ -654,7 +705,7 @@ class SlurmSite(BaseSite):
         environment: Optional[Mapping[str, object]] = None,
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
-        frequensolver_policy: Optional[str] = None,
+        solver_policy: Optional[str] = None,
     ):
         if (
             default_partition is not None
@@ -737,9 +788,9 @@ class SlurmSite(BaseSite):
             raise ValueError("modules must be an array of module names")
         self.modules = [str(module) for module in (modules or [])]
         self.environment = validate_environment(environment)
-        self.frequensolver_policy = frequensolver_policy
-        self._frequensolver_compatibility_result = None
-        self._frequensolver_compatibility_policy = None
+        self.solver_policy = solver_policy
+        self._solver_compatibility_result = None
+        self._solver_compatibility_policy = None
         self._enterprise_hpc_preflight_result = None
         self._enterprise_hpc_limits = None
         self.transfer_method = transfer_method
@@ -802,6 +853,11 @@ class SlurmSite(BaseSite):
     def mpi_cmd(self) -> str:
         """Get the MPI launch command."""
         return f"{self.config.mpi_wrapper}"
+
+    @property
+    def mpi_args(self) -> tuple[str, ...]:
+        """Get site-configured arguments passed to every MPI launch."""
+        return self.config.launcher_args
 
     @property
     def pool_host(self) -> str:
@@ -926,9 +982,7 @@ class SlurmSite(BaseSite):
                 if value is not None
             }
         )
-        frequensolver_policy = overrides.pop(
-            "frequensolver_policy", self.frequensolver_policy
-        )
+        solver_policy = overrides.pop("solver_policy", self.solver_policy)
         fresh_run = bool(force or overrides.pop("rerun", False))
         skip_policy_value = overrides.pop("skip", overrides.pop("skip_policy", None))
         residual = overrides.pop("residual", None)
@@ -953,7 +1007,7 @@ class SlurmSite(BaseSite):
         validate = overrides.pop("validate", True)
         enterprise_hpc = getattr(self, "enterprise_hpc", None)
         if enterprise_hpc is None:
-            self.check_frequensolver_compatibility(policy=frequensolver_policy)
+            self.check_solver_compatibility(policy=solver_policy)
         self.prepare_job(job, validate=validate)
         if mode not in {"auto", "attached", "batch"}:
             raise ValueError("mode must be 'auto', 'attached', or 'batch'")
@@ -981,10 +1035,16 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        self.prepare_job(job, sync_project=True, validate=False)
-
         active_allocation = self.provisioned if mode in {"auto", "attached"} else False
         use_attached = mode == "attached" or (mode == "auto" and active_allocation)
+        if run_config.mpi_health_check_timeout is not None:
+            if use_attached or Path(self.mpi_cmd).name != "srun":
+                raise ValueError(
+                    "mpi_health_check_timeout requires batch mode with the srun launcher; "
+                    "use mode='batch' with mpi_wrapper='srun', or disable the check "
+                    "with mpi_health_check_timeout=None"
+                )
+        self.prepare_job(job, sync_project=True, validate=False)
         if use_attached:
             if not active_allocation:
                 raise RuntimeError(
@@ -1012,10 +1072,21 @@ class SlurmSite(BaseSite):
                     ranks=int(self.pool.nproc),
                     cores=int(self.pool.ncore),
                 )
-            pack = bool(extra_kwargs.pop("pack", True))
+            pack = bool(extra_kwargs.pop("pack", True)) and bool(
+                getattr(job, "supports_trace_packing", True)
+            )
+            ranks_per_task = run_config.ranks_per_task
+            max_ranks = getattr(job, "max_ranks_per_task", None)
+            if ranks_per_task is None:
+                ranks_per_task = max_ranks or 2
+            if max_ranks is not None and ranks_per_task > max_ranks:
+                raise ValueError(
+                    f"{type(job).__name__} supports at most {max_ranks} MPI rank "
+                    f"per task; received {ranks_per_task}"
+                )
             future = self._submit_attached(
                 job,
-                ranks_per_task=run_config.ranks_per_task or 2,
+                ranks_per_task=ranks_per_task,
                 mpi_async_progress=run_config.mpi_async_progress,
                 fresh=fresh_run,
                 **({"pack": pack} if not pack else {}),
@@ -1061,9 +1132,9 @@ class SlurmSite(BaseSite):
         else:
             pending_indices = list(range(int(getattr(job, "n_tasks", 0))))
         smooth_only = (
-            isinstance(job, ImagingJob)
+            _job_requires_postprocess(job)
             and not pending_indices
-            and self._remote_image_smoothing_needed(job)
+            and self._remote_job_postprocess_needed(job)
         )
         if task_plan is not None and not pending_indices and not smooth_only:
             job.write_run_state(
@@ -1083,6 +1154,28 @@ class SlurmSite(BaseSite):
                 self.fetch_outputs(job)
             return handle
 
+        if not getattr(job, "supports_trace_packing", True):
+            extra_kwargs["pack"] = False
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if (
+            max_ranks is not None
+            and run_config.ranks_per_task is not None
+            and run_config.ranks_per_task > max_ranks
+        ):
+            raise ValueError(
+                f"{type(job).__name__} supports at most {max_ranks} MPI rank "
+                f"per task; received {run_config.ranks_per_task}"
+            )
+        if max_ranks == 1:
+            requested_min_ranks = int(extra_kwargs.get("min_ranks", 1))
+            if requested_min_ranks > 1:
+                raise ValueError(
+                    f"{type(job).__name__} requires one MPI rank per task; "
+                    f"received min_ranks={requested_min_ranks}"
+                )
+            extra_kwargs["min_ranks"] = 1
+            extra_kwargs["round_to"] = 1
+            extra_kwargs["skip_sizing"] = True
         job_id = self._submit_slurm_batch(
             job,
             run_config,
@@ -1111,24 +1204,24 @@ class SlurmSite(BaseSite):
             handle.backend["task_plan"] = task_plan
         return handle
 
-    def check_frequensolver_compatibility(
+    def check_solver_compatibility(
         self,
         *,
         policy: Optional[str] = None,
         force: bool = False,
-    ) -> FrequenSolverCompatibility:
+    ) -> SolverCompatibility:
         """Check the remote solver once before this site submits work."""
 
-        selected = resolve_frequensolver_policy(
-            policy if policy is not None else self.frequensolver_policy
+        selected = resolve_solver_policy(
+            policy if policy is not None else self.solver_policy
         )
         if (
             not force
-            and self._frequensolver_compatibility_result is not None
-            and self._frequensolver_compatibility_policy == selected
+            and self._solver_compatibility_result is not None
+            and self._solver_compatibility_policy == selected
         ):
-            return self._frequensolver_compatibility_result
-        result = check_frequensolver_compatibility(
+            return self._solver_compatibility_result
+        result = check_solver_compatibility(
             self.executable,
             policy=selected,
             remote_runner=lambda command: self.run_login(
@@ -1137,8 +1230,8 @@ class SlurmSite(BaseSite):
             ),
             setup_commands=self._runtime_setup_lines(),
         )
-        self._frequensolver_compatibility_result = result
-        self._frequensolver_compatibility_policy = selected
+        self._solver_compatibility_result = result
+        self._solver_compatibility_policy = selected
         return result
 
     def _run_login_checked(self, command: str, *, purpose: str) -> str:
@@ -1322,7 +1415,7 @@ class SlurmSite(BaseSite):
             profile.installed_path(COMPATIBILITY_SCHEMA_RELATIVE),
             "compatibility schema",
         )
-        identity_query = query_remote_frequensolver_identity(
+        identity_query = query_remote_solver_identity(
             solver_path,
             lambda command: self._run_login_checked(
                 command,
@@ -1532,8 +1625,10 @@ class SlurmSite(BaseSite):
             return False
         if not self._remote_run_successful(record):
             return False
-        if isinstance(job, ImagingJob):
-            return self._remote_image_output_exists(job)
+        if _job_requires_postprocess(job):
+            if isinstance(job, ImagingJob):
+                return self._remote_image_output_exists(job)
+            return self._remote_postprocess_output_exists(job)
         return True
 
     def _remote_file_exists(self, path: Union[str, Path]) -> bool:
@@ -1547,23 +1642,65 @@ class SlurmSite(BaseSite):
             return False
 
     def _remote_image_file(self, job: ImagingJob, part: Optional[int] = None) -> Path:
-        image_dir = job._remote_image_path(self.work_dir)
-        if part is None:
-            return image_dir / "image.h5"
-        return image_dir / f"image_{part}.h5"
+        return self._remote_postprocess_file(job, part)
+
+    def _remote_postprocess_file(
+        self, job: BaseJob, part: Optional[int] = None
+    ) -> Path:
+        """Map one job-owned postprocess product into the remote project."""
+
+        return self._remote_project_artifact_file(job, job.postprocess_file(part))
+
+    def _remote_project_artifact_file(
+        self, job: BaseJob, local: Union[str, Path]
+    ) -> Path:
+        """Map one project-owned artifact into the remote project root."""
+
+        local = Path(local).resolve()
+        try:
+            relative = local.relative_to(Path(job.project_path).resolve())
+        except ValueError as error:
+            raise ValueError(
+                "remote postprocess outputs must be located below the project path"
+            ) from error
+        return Path(self.work_dir) / relative
+
+    def _remote_postprocess_output_exists(self, job: BaseJob) -> bool:
+        """Return whether a remote aggregate postprocess product exists."""
+
+        return self._remote_file_exists(self._remote_postprocess_file(job))
+
+    def _remote_postprocess_part_outputs_exist(self, job: BaseJob) -> bool:
+        """Return whether every remote task-local postprocess input exists."""
+
+        return all(
+            self._remote_file_exists(self._remote_postprocess_file(job, part))
+            for part in range(1, job.n_tasks + 1)
+        )
+
+    def _remote_postprocess_needed(self, job: BaseJob) -> bool:
+        """Return whether remote shards still need the final postprocess."""
+
+        return self._remote_postprocess_part_outputs_exist(
+            job
+        ) and not self._remote_postprocess_output_exists(job)
+
+    def _remote_job_postprocess_needed(self, job: BaseJob) -> bool:
+        """Dispatch compatibility image checks or the generic job protocol."""
+
+        if isinstance(job, ImagingJob):
+            return self._remote_image_smoothing_needed(job)
+        return self._remote_postprocess_needed(job)
 
     def _remote_image_output_exists(self, job: ImagingJob) -> bool:
         """Return whether the remote aggregate image file exists."""
 
-        return self._remote_file_exists(self._remote_image_file(job))
+        return self._remote_postprocess_output_exists(job)
 
     def _remote_image_part_outputs_exist(self, job: ImagingJob) -> bool:
         """Return whether all remote per-frequency image shards exist."""
 
-        return all(
-            self._remote_file_exists(self._remote_image_file(job, part))
-            for part in range(1, job.n_tasks + 1)
-        )
+        return self._remote_postprocess_part_outputs_exist(job)
 
     def _remote_image_smoothing_needed(self, job: ImagingJob) -> bool:
         """Return whether remote image shards need the final smooth/stack step."""
@@ -1646,11 +1783,22 @@ class SlurmSite(BaseSite):
 
         for j in jobs:
             try:
-                trace_dir_name = Path(j.trace_outputs.path).name
-                remote_dir = self._remote_result_dir(j) / trace_dir_name
-                local_dir = j._local_path / "results" / trace_dir_name
-                local_dir.mkdir(parents=True, exist_ok=True)
-                self.get(remote_dir, local_dir)
+                self.fetch_artifacts(
+                    j,
+                    requests=(
+                        ArtifactRequest(
+                            role="simulated_traces",
+                            representations=(
+                                "hdf5_shard",
+                                "packed_hdf5",
+                                "collection_manifest",
+                            ),
+                            retention="durable",
+                        ),
+                    ),
+                    include_defaults=False,
+                    operations=("pack",),
+                )
 
                 db = TraceDataset.from_job(j, upscale)
                 db_map[j.name] = db
@@ -1679,11 +1827,18 @@ class SlurmSite(BaseSite):
                 wavefield_outputs = j.wavefield_trace_outputs
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
-                wavefield_dir_name = Path(wavefield_outputs.path).name
-                remote_dir = self._remote_result_dir(j) / wavefield_dir_name
-                local_dir = j._local_path / "results" / wavefield_dir_name
-                local_dir.mkdir(parents=True, exist_ok=True)
-                self.get(remote_dir, local_dir)
+                fetched = self.fetch_artifacts(
+                    j,
+                    requests=tuple(
+                        ArtifactRequest(role=role)
+                        for role in ("wavefield", "wavefields")
+                    ),
+                    include_defaults=False,
+                )
+                if not fetched:
+                    raise FileNotFoundError(
+                        "No retained wavefield artifact was published for this job"
+                    )
 
                 db_map[j.name] = j.wavefields.open(upscale=upscale)
 
@@ -1695,47 +1850,228 @@ class SlurmSite(BaseSite):
             return db_map[jobs[0].name]
         return db_map
 
-    def fetch_outputs(self, job: BaseJob):
-        """Fetch common result metadata and trace outputs for a completed job."""
+    def fetch_outputs(
+        self,
+        job: BaseJob,
+        *,
+        requests: tuple[ArtifactRequest, ...] = (),
+    ):
+        """Fetch durable final artifacts, plus any explicit typed requests."""
 
         local_results = job._local_path / "results"
         local_results.mkdir(parents=True, exist_ok=True)
-
-        self.fetch_run_metadata(job)
-        try:
-            self.get(
-                self._remote_logs_dir(job),
-                job._local_path / "logs",
-            )
-        except Exception as exc:
-            logger.debug("Could not fetch logs for job %s: %s", job.name, exc)
-
-        try:
-            self.fetch_traces(job)
-        except Exception as exc:
-            logger.debug("Could not fetch traces for job %s: %s", job.name, exc)
-
-        if getattr(job.outputs, "wavefields", None):
-            try:
-                self.fetch_wavefields(job)
-            except Exception as exc:
-                logger.debug(
-                    "Could not fetch wavefields for job %s: %s",
-                    job.name,
-                    exc,
-                )
-
-        if getattr(job.outputs, "vtk", None):
-            try:
-                self.fetch_vtk(job)
-            except Exception as exc:
-                logger.debug(
-                    "Could not fetch VTK outputs for job %s: %s",
-                    job.name,
-                    exc,
-                )
-
+        self.fetch_artifacts(job, requests=requests, include_defaults=True)
+        if _job_requires_postprocess(job) and not isinstance(job, ImagingJob):
+            self.fetch_postprocess(job)
         return local_results
+
+    def fetch_artifacts(
+        self,
+        job: BaseJob,
+        *,
+        requests: tuple[ArtifactRequest, ...] = (),
+        include_defaults: bool = True,
+        operations: tuple[str, ...] = (),
+    ) -> list[Path]:
+        """Fetch an exact catalog-selected artifact closure."""
+
+        catalog = (
+            self.fetch_artifact_catalog(job, operations=operations)
+            if operations
+            else self.fetch_artifact_catalog(job)
+        )
+        remote_root = self._remote_result_dir(job)
+        return fetch_artifact_payloads(
+            catalog,
+            fetch_files=lambda paths: self._transfer.get_files(
+                remote_root,
+                job._result_path,
+                paths,
+            ),
+            requests=requests,
+            include_defaults=include_defaults,
+        )
+
+    def fetch_artifact_catalog(
+        self,
+        job: BaseJob,
+        *,
+        operations: tuple[str, ...] = (),
+    ) -> Union[TaskIndex, ArtifactCatalog, CombinedArtifactCatalog]:
+        """Fetch authoritative task metadata and named operation results."""
+
+        tasks = tuple(range(1, job.n_tasks + 1))
+        requested_operations = tuple(dict.fromkeys(operations))
+        remote_root = self._remote_result_dir(job)
+        local_root = job._result_path
+        local_root.parent.mkdir(parents=True, exist_ok=True)
+        if job.staged_artifact_fingerprints(self.__class__.__name__) is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
+            )
+        index_path = "_fs_run/tasks.h5"
+        result_paths = tuple(
+            f"_fs_run/tasks/task_{task:06d}/result.json" for task in tasks
+        )
+        operation_paths = {
+            operation: operation_result_path(Path(), operation).as_posix()
+            for operation in requested_operations
+        }
+        with tempfile.TemporaryDirectory(
+            prefix=".fs-catalog-", dir=local_root.parent
+        ) as temporary:
+            stage = Path(temporary)
+            self._transfer.get_files(
+                remote_root,
+                stage,
+                (index_path,),
+                missing_ok=True,
+            )
+            use_index = False
+            try:
+                catalog: Union[TaskIndex, ArtifactCatalog] = TaskIndex.read(stage)
+                self._validate_remote_catalog(job, catalog, tasks)
+                use_index = True
+            except (ArtifactContractError, OSError, RuntimeError):
+                self._transfer.get_files(
+                    remote_root,
+                    stage,
+                    result_paths,
+                    missing_ok=True,
+                )
+                catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
+                self._validate_remote_catalog(job, catalog, tasks)
+
+            if operation_paths:
+                self._transfer.get_files(
+                    remote_root,
+                    stage,
+                    tuple(operation_paths.values()),
+                    missing_ok=True,
+                )
+            operation_results = {}
+            for operation, relative in operation_paths.items():
+                path = stage / relative
+                if not path.is_file():
+                    continue
+                result = OperationResult.read(
+                    path,
+                    result_path=stage,
+                    workflow=operation,
+                )
+                self._validate_remote_operation(job, result)
+                operation_results[operation] = result
+
+            candidates = (index_path,) if use_index else result_paths
+            publish = [path for path in candidates if (stage / path).is_file()]
+            publish.extend(
+                relative
+                for operation, relative in operation_paths.items()
+                if operation in operation_results
+            )
+            for relative in publish:
+                source = stage / relative
+                target = local_root / relative
+                with atomic_output_path(target) as temporary_path:
+                    shutil.copyfile(source, temporary_path)
+            if not use_index:
+                (local_root / index_path).unlink(missing_ok=True)
+            for operation, relative in operation_paths.items():
+                if operation not in operation_results:
+                    (local_root / relative).unlink(missing_ok=True)
+
+        task_catalog = (
+            TaskIndex.read(local_root)
+            if use_index
+            else ArtifactCatalog.read_task_results(local_root, tasks=tasks)
+        )
+        if not requested_operations:
+            return task_catalog
+        return CombinedArtifactCatalog(
+            result_path=local_root.resolve(strict=False),
+            task_catalog=task_catalog,
+            operations={
+                operation: OperationResult.read(
+                    local_root / relative,
+                    result_path=local_root,
+                    workflow=operation,
+                )
+                for operation, relative in operation_paths.items()
+                if (local_root / relative).is_file()
+            },
+        )
+
+    def _validate_remote_catalog(
+        self,
+        job: BaseJob,
+        catalog: Union[TaskIndex, ArtifactCatalog],
+        tasks: Sequence[int],
+    ) -> None:
+        """Require exact task partitions and current staged provenance."""
+
+        expected_fingerprints = getattr(
+            job, "staged_task_fingerprints", job.staged_artifact_fingerprints
+        )(self.__class__.__name__)
+        if expected_fingerprints is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
+            )
+        for task in tasks:
+            expected_frequency = complex(job.f_list[task - 1])
+            if isinstance(catalog, TaskIndex):
+                current = catalog.is_task_current(
+                    task,
+                    frequency=expected_frequency,
+                    fingerprints=expected_fingerprints,
+                )
+            else:
+                result = catalog.results.get(task)
+                current = bool(
+                    result is not None
+                    and result.successful
+                    and result.partition.frequency == expected_frequency
+                    and all(
+                        result.fingerprints.get(key) == value
+                        for key, value in expected_fingerprints.items()
+                    )
+                )
+            if not current:
+                raise RuntimeError(
+                    f"Remote task {task} does not match the current staged job"
+                )
+
+    def _validate_remote_operation(self, job: BaseJob, result: OperationResult) -> None:
+        """Require a successful operation from the current staged generation."""
+
+        fingerprints = job.staged_artifact_fingerprints(self.__class__.__name__)
+        if (
+            fingerprints is None
+            or not result.successful
+            or any(
+                result.fingerprints.get(key) != value
+                for key, value in fingerprints.items()
+            )
+        ):
+            raise RuntimeError(
+                f"Remote operation {result.name!r} does not match the current "
+                "staged job"
+            )
+
+    def fetch_postprocess(self, job: BaseJob) -> list[Path]:
+        """Fetch typed gradient and objective postprocess products."""
+
+        fetched = self.fetch_artifacts(
+            job,
+            requests=tuple(
+                ArtifactRequest(role=role)
+                for role in ("gradient", "objective", "focus_objective")
+            ),
+            include_defaults=False,
+            operations=("smooth",),
+        )
+        if not fetched:
+            raise FileNotFoundError("No postprocess artifact was published")
+        return fetched
 
     @staticmethod
     def _fetch_message(
@@ -1746,16 +2082,14 @@ class SlurmSite(BaseSite):
         return f"{label}\n\tFrom: {remote}\n\tTo: {local}"
 
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
-        """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
+        """Fetch the exact catalog metadata without directory traversal."""
 
-        remote_run_dir = self._remote_result_dir(job) / "_fs_run"
-        local_run_dir = job._result_path / "_fs_run"
         try:
-            self.get(remote_run_dir, local_run_dir)
+            self.fetch_artifact_catalog(job)
         except Exception as exc:
             logger.debug("Could not fetch _fs_run for job %s: %s", job.name, exc)
             return None
-        return job.collect_task_run_manifests()
+        return job._result_path / "_fs_run"
 
     def fetch_vtk(self, job: BaseJob):
         """Get configured VTK/visualization files from the remote site.
@@ -1764,22 +2098,16 @@ class SlurmSite(BaseSite):
             job: A BaseJob object.
         """
 
-        self.fetch_run_metadata(job)
-        job.outputs.ensure_unique_names()
-        seen = set()
-        for output in job.outputs.vtk:
-            path = Path(output.path)
-            key = str(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            remote_dir = self._remote_result_dir(job) / path
-            local_dir = job._local_path / "results" / path
-            local_dir.mkdir(parents=True, exist_ok=True)
-            self._emit(
-                self._fetch_message("Fetching VTK outputs", remote_dir, local_dir)
-            )
-            self.get(remote_dir, local_dir)
+        fetched = self.fetch_artifacts(
+            job,
+            requests=(
+                ArtifactRequest(role="visualization"),
+                ArtifactRequest(role="visualization_data"),
+            ),
+            include_defaults=False,
+        )
+        if not fetched:
+            raise FileNotFoundError("No visualization artifact was published")
         return job.vtk_outputs
 
     def fetch_paraview(self, job: BaseJob):
@@ -1827,13 +2155,18 @@ class SlurmSite(BaseSite):
 
         jobs, single = _as_list(job, ImagingJob)
         images = {}
-        for job in jobs:
+        for image_job in jobs:
             try:
-                remote = job._remote_image_path(self.work_dir)
-                local = job._local_image_path
-                self.get(remote, local)
+                fetched = self.fetch_artifacts(
+                    image_job,
+                    requests=(ArtifactRequest(role="image"),),
+                    include_defaults=False,
+                    operations=("smooth",),
+                )
+                if not fetched:
+                    raise FileNotFoundError("No image artifact was published")
 
-                images[job.name] = job.load_images()
+                images[image_job.name] = image_job.load_images()
 
             except Exception as e:
                 logger.exception("Error retrieving payload: %s", str(e))
@@ -2123,30 +2456,29 @@ class SlurmSite(BaseSite):
         if not self._record_status_successful(record.status):
             return False
 
-        manifest = self._read_remote_json(
-            record.result_dir / "_fs_run" / "run_manifest.json"
-        )
-        if not isinstance(manifest, dict):
-            return False
-
-        task_summary = manifest.get("task_summary")
-        if not isinstance(task_summary, dict):
-            return False
-        try:
-            failed = int(task_summary.get("failed") or 0)
-            complete = int(task_summary.get("complete") or 0)
-            total = int(task_summary.get("total") or 0)
-        except (TypeError, ValueError):
-            return False
         expected_total = self._record_expected_task_count(record)
-        if expected_total is not None and total != expected_total:
+        if expected_total is None or expected_total <= 0:
             return False
-        if failed != 0 or total <= 0 or complete != total:
-            return False
-        succeeded = task_summary.get("succeeded", task_summary.get("successful"))
-        if succeeded is not None:
+        for task in range(1, expected_total + 1):
+            result = self._read_remote_json(
+                record.result_dir
+                / "_fs_run"
+                / "tasks"
+                / f"task_{task:06d}"
+                / "result.json"
+            )
+            if (
+                not isinstance(result, dict)
+                or result.get("schema") != "fs-task-result-2"
+            ):
+                return False
+            status = result.get("status")
+            if not isinstance(status, Mapping):
+                return False
+            if status.get("state") not in {"success", "skipped"}:
+                return False
             try:
-                if int(succeeded) != total:
+                if int(status.get("code")) != 0:
                     return False
             except (TypeError, ValueError):
                 return False
@@ -2572,6 +2904,11 @@ class SlurmSite(BaseSite):
             )
         task_indices = [int(index) + 1 for index in task_plan["pending_indices"]]
         kwargs.setdefault("skip_sizing", len(task_indices) == 1)
+        job_rank_limit = getattr(job, "max_ranks_per_task", None)
+        if job_rank_limit is not None:
+            kwargs["max_ranks_per_task"] = min(
+                job_rank_limit, int(kwargs.get("max_ranks_per_task", job_rank_limit))
+            )
         run_path = self._remote_run_path(config.run_path, job=job)
         script = self._sweep_SLURM_script(
             n_tasks=len(task_indices),
@@ -2580,8 +2917,9 @@ class SlurmSite(BaseSite):
             n_nodes=config.nodes,
             stdout=str(job._remote_path(self.work_dir) / "logs"),
             duration=duration,
-            imaging_job=isinstance(job, ImagingJob),
+            imaging_job=_job_requires_postprocess(job),
             mpi_async_progress=config.mpi_async_progress,
+            mpi_health_check_timeout=config.mpi_health_check_timeout,
             **(
                 {"ranks_per_task": config.ranks_per_task}
                 if config.ranks_per_task is not None
@@ -2741,6 +3079,9 @@ class SlurmSite(BaseSite):
             mpi_async_progress=mpi_async_progress,
         )
         ntasks_per_item = max(ranks_per_task, self.pool.nproc // job.n_tasks)
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if max_ranks is not None:
+            ntasks_per_item = min(ntasks_per_item, max_ranks)
 
         if self._compute_client.is_proxy():
             interactive = self.compute_client.invoke_shell()
@@ -2809,7 +3150,7 @@ class SlurmSite(BaseSite):
             lines.append("module list")
         runtime_environment = {
             **_HPC_RUNTIME_DEFAULTS,
-            **self.environment,
+            **solver_environment(self._get_solver_path(), self.environment),
         }
         lines.extend(
             f"export {name}={_quote_runtime_environment_value(value)}"
@@ -2926,7 +3267,12 @@ class SlurmSite(BaseSite):
 
     def _transfer_SLURM_job(self, script: str, job: BaseJob):
         """Transfer a SLURM job to the remote site."""
-        remote_script = (self.work_dir / "sweep").with_suffix(".slurm")
+        local_job, remote_job = job.save_for_remote(
+            self.__class__.__name__, self.work_dir
+        )
+        remote_script = (
+            Path(remote_job).parent / "logs" / "batch" / f"sweep-{uuid4().hex}.slurm"
+        )
         remote_runner = self._adaptive_scheduler_remote_path()
         with _temporary_text_file(
             script,
@@ -2938,10 +3284,6 @@ class SlurmSite(BaseSite):
         ) as script_path:
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)
-
-        local_job, remote_job = job.save_for_remote(
-            self.__class__.__name__, self.work_dir
-        )
 
         self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
@@ -3019,7 +3361,9 @@ class SlurmSite(BaseSite):
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
 
-        remote_script = (self.work_dir / "sweep").with_suffix(".sh")
+        remote_script = (
+            Path(remote_job).parent / "logs" / "batch" / f"sweep-{uuid4().hex}.sh"
+        )
         with _temporary_text_file(
             script,
             suffix=".sh",
@@ -3122,11 +3466,16 @@ class SlurmSite(BaseSite):
             batch_job=False,
             n_tasks=n_tasks,
             n_procs=self.pool.nproc,
+            init_ranks=min(
+                self.pool.nproc,
+                getattr(job, "max_ranks_per_task", None) or self.pool.nproc,
+            ),
             n_threads=n_threads,
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
             dir_out_shell=shlex.quote(dir_out),
             executable_shell=shlex.quote(str(self.executable)),
-            imaging_job=isinstance(job, ImagingJob),
+            imaging_job=_job_requires_postprocess(job),
+            mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
             pack_job=bool(pack_job),
             runtime_setup=self._runtime_setup_lines(),
             mpi_async_progress_setup=mpi_async_progress_setup,
@@ -3193,6 +3542,11 @@ class SlurmSite(BaseSite):
         min_ranks = int(kwargs.pop("min_ranks", 1))
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
+        max_ranks_per_task = int(
+            kwargs.pop("max_ranks_per_task", n_nodes * ranks_per_node)
+        )
+        if max_ranks_per_task < 1 or min_ranks > max_ranks_per_task:
+            raise ValueError("max_ranks_per_task must be positive and >= min_ranks")
         kwargs.pop("tail_threshold", None)
         boost_max_factor = float(kwargs.pop("boost_max_factor", 8.0))
         tolerate_failures = _normalize_failure_tolerance(
@@ -3203,6 +3557,7 @@ class SlurmSite(BaseSite):
         if not sizing_json:
             sizing_json = str(Path(stdout).parent / "FS_sizing.json")
         launch_delay_seconds = float(kwargs.pop("launch_delay_seconds", 0.25))
+        mpi_health_check_timeout = kwargs.pop("mpi_health_check_timeout", None)
         pack_job = bool(kwargs.pop("pack", True))
         mpi_async_progress = bool(kwargs.pop("mpi_async_progress", False))
         kwargs.pop("executable", None)
@@ -3224,6 +3579,7 @@ class SlurmSite(BaseSite):
         scheduler_config = {
             "executable": str(self.executable),
             "mpi": str(self.mpi_cmd),
+            "mpi_args": list(self.mpi_args),
             "fresh": bool(kwargs.get("fresh", False)),
             "total_ranks": n_nodes * ranks_per_node,
             "omp_threads": n_threads,
@@ -3234,6 +3590,7 @@ class SlurmSite(BaseSite):
             "min_ranks": min_ranks,
             "round_to": round_to,
             "cap_fraction": cap_fraction,
+            "max_ranks_per_task": max_ranks_per_task,
             "mem_cushion": mem_cushion,
             "boost_max_factor": boost_max_factor,
             "failure_tolerance": tolerate_failures,
@@ -3258,6 +3615,7 @@ class SlurmSite(BaseSite):
             skip_sizing=1 if skip_sizing else 0,
             n_nodes=n_nodes,
             n_procs=n_nodes * ranks_per_node,
+            init_ranks=min(n_nodes * ranks_per_node, max_ranks_per_task),
             n_threads=n_threads,
             n_tasks=n_tasks,
             n_job_tasks=n_job_tasks,
@@ -3269,6 +3627,13 @@ class SlurmSite(BaseSite):
             pack_job=pack_job,
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
             executable_shell=shlex.quote(str(self.executable)),
+            mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
+            mpi_health_check_timeout=mpi_health_check_timeout,
+            mpi_health_check_timeout_shell=(
+                shlex.quote(str(mpi_health_check_timeout))
+                if mpi_health_check_timeout is not None
+                else ""
+            ),
             runtime_setup=self._runtime_setup_lines(),
             mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),

@@ -88,6 +88,19 @@ if namespace['LayeredModel'] is None:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def test_current_source_import_keeps_legacy_adapter_lazy():
+    code = """
+import sys
+from frequensolve.seismic.sources import PointSource, SourceGroup
+
+if PointSource is None or SourceGroup is None:
+    raise SystemExit('source exports unavailable')
+if 'frequensolve.seismic._legacy_sources' in sys.modules:
+    raise SystemExit('heavy legacy source adapter loaded eagerly')
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_top_level_import_does_not_load_optional_backends():
     code = """
 import sys
@@ -137,7 +150,12 @@ def test_top_level_authoring_exports_are_available():
         "PointSource",
         "SourceGeometry",
         "SourceEncoding",
+        "EncodedSource",
         "DistributedSource",
+        "PreprocessHook",
+        "EncodedReceiver",
+        "ReceiverArray",
+        "ReceiverWeightTable",
         "ReceiverNode",
         "SparseSurvey",
         "RickerWavelet",
@@ -158,6 +176,7 @@ def test_top_level_authoring_exports_are_available():
         "info",
         "output_property",
         "BaseJob",
+        "TimeReversalFocusJob",
         "FrequencyDomainJob",
         "TimeDomainJob",
         "RunFailedError",

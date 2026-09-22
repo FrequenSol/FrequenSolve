@@ -190,8 +190,8 @@ class AssistantIdentity(ClosedModel):
     catalog_version: str
     authoring_rules_schema: str
     compatibility_schema: str
-    preferred_frequensolver_release: str | None
-    preferred_frequensolver_commit: str | None
+    preferred_solver_release: str | None
+    preferred_solver_commit: str | None
     solver_validation_profile: str | None
     cloud_read_contract_id: str
     cloud_read_contract_version: str
@@ -828,8 +828,8 @@ def _identity() -> AssistantIdentity:
         catalog_version=identities.catalog_version,
         authoring_rules_schema=identities.authoring_rules_schema,
         compatibility_schema=identities.compatibility_schema,
-        preferred_frequensolver_release=identities.preferred_frequensolver_release,
-        preferred_frequensolver_commit=identities.preferred_frequensolver_commit,
+        preferred_solver_release=identities.preferred_solver_release,
+        preferred_solver_commit=identities.preferred_solver_commit,
         solver_validation_profile=identities.solver_validation_profile,
         cloud_read_contract_id=CLOUD_READ_CONTRACT_ID,
         cloud_read_contract_version=CLOUD_READ_CONTRACT_VERSION,

@@ -63,11 +63,16 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
             hint="Create one FrequencyDomainJob per plotted frequency.",
         )
     acquisition = getattr(ctx.simulation, "acquisition", None)
-    source_count = (
-        acquisition.known_source_field_count()
-        if acquisition is not None and hasattr(acquisition, "known_source_field_count")
-        else 0
-    )
+    # Acquisition diagnostics are already reported. Avoid deriving output bounds
+    # from invalid external metadata, which can itself raise while loading names.
+    source_count = None
+    if not any(issue.code.startswith("acquisition.") for issue in ctx.report.errors):
+        source_count = (
+            acquisition.known_source_field_count()
+            if acquisition is not None
+            and hasattr(acquisition, "known_source_field_count")
+            else 0
+        )
     for index, vtk_output in enumerate(outputs.vtk):
         _validate_paraview_output(vtk_output, index, source_count, ctx)
     for index, wavefield_output in enumerate(outputs.wavefields):
@@ -333,6 +338,9 @@ def _validate_wavefield_output(
         _validate_source_id(source_id, source_count, f"{path}.sources", ctx.report)
     for field_index, requested_field in enumerate(getattr(output, "fields", []) or []):
         _validate_field(requested_field, f"{path}.fields[{field_index}]", ctx)
+    properties = getattr(output, "properties", None) or []
+    if properties:
+        _validate_requested_properties(properties, f"{path}.properties", ctx)
     device = getattr(output, "device", None)
     if device is not None:
         for component_index, component in enumerate(device.components):
@@ -374,6 +382,14 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
     except Exception:
         return
     allowed = set(registry.allowed_components())
+    discretization = getattr(ctx.simulation, "discretization", None)
+    settings = getattr(discretization, "extra", {}) or {}
+    if str(settings.get("method", "DPG")).strip().lower() == "galerkin":
+        physics = str(ctx.simulation.physics).strip().lower()
+        if physics in {"acoustic", "acoustic_axisym"}:
+            allowed &= {"pressure", "p_velocity", "s_velocity"}
+        elif physics == "elastic":
+            allowed &= {"velocity", "p_velocity", "s_velocity"}
     if value not in allowed and not _is_component_selector(value, allowed):
         ctx.report.error(
             "field.unsupported",

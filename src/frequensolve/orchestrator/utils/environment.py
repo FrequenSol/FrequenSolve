@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
+from pathlib import PurePosixPath
 from typing import Optional
 
 __all__ = [
     "NUMERIC_RUNTIME_DEFAULTS",
     "build_subprocess_environment",
     "validate_environment",
+    "solver_environment",
 ]
 
 NUMERIC_RUNTIME_DEFAULTS = {
@@ -84,4 +86,17 @@ def build_subprocess_environment(
     ).items():
         environment.setdefault(name, value)
     environment.update(validate_environment(_without_sensitive_variables(overrides)))
+    return environment
+
+
+def solver_environment(
+    solver: str | os.PathLike[str] | None,
+    values: Optional[Mapping[str, object]] = None,
+) -> dict[str, str]:
+    """Bind a selected dispatcher to its installation unless explicitly overridden."""
+
+    environment = validate_environment(values)
+    path = PurePosixPath(str(solver)) if solver else None
+    if path is not None and path.name == "FS_seismic" and str(path.parent) != ".":
+        environment.setdefault("FS_SOLVER_PATH", str(path.parent))
     return environment

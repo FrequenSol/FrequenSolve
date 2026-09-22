@@ -26,6 +26,11 @@ class JobRecordMixin:
     submissions, and fetch outputs through a recorded or explicit site object.
     """
 
+    if TYPE_CHECKING:
+
+        @property
+        def n_tasks(self) -> int: ...
+
     @property
     def run_state_file(self) -> Path:
         """Return the path to the Python-side run state summary.
@@ -54,7 +59,7 @@ class JobRecordMixin:
             ``RunMetadata`` read from this job's result directory.
         """
 
-        return RunMetadata.read(self._result_path)
+        return RunMetadata.read(self._result_path, tasks=range(1, self.n_tasks + 1))
 
     def run_records(self) -> List[JobRecord]:
         """Return saved locations where this job has been staged or run.

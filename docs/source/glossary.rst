@@ -128,6 +128,12 @@ standard capitalization.
       A runnable solver request created from a simulation, selected numerics,
       and requested outputs.
 
+   JVP
+      Jacobian-vector product. It applies a model-to-data linearization to one
+      model-space direction without constructing the full Jacobian matrix. In
+      control-sensitivity Born jobs, the vector contains ordered property-control
+      coefficients.
+
    JSON
       Text data format used by FrequenSolve for solver contracts, manifests,
       and saved project metadata.
@@ -349,6 +355,11 @@ standard capitalization.
    VTI
       Vertical transverse isotropy, an anisotropic material model with a
       vertical symmetry axis.
+
+   VJP
+      Vector-Jacobian product. It applies the transpose of a model-to-data
+      linearization to a data-space vector. In control-sensitivity RTM jobs, it
+      accumulates a gradient in the ordered property-control coefficients.
 
    VTK
       Visualization Toolkit file family used by ParaView and PyVista for mesh

@@ -71,7 +71,7 @@ class DummyJob:
 
 def make_site(monkeypatch):
     monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
-    site = LocalSite(frequensolver_policy="off")
+    site = LocalSite(solver_policy="off")
     closed = []
     site.close = lambda **kwargs: closed.append(kwargs)
     return site, closed
@@ -210,6 +210,24 @@ def test_local_poll_reports_finished_futures_without_failed_count(monkeypatch):
     }
 
 
+def test_ensure_dask_retains_finished_futures_until_run_finalization(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+    site.n_workers = 1
+    site.threads_per_worker = 2
+    site.memory_per_worker = 4096
+    site._dask_client = object()
+    site._active_n_workers = 1
+    site._active_threads_per_worker = 2
+    site._active_memory_per_worker = 4096
+    future = DummyFuture()
+    site._futures = [future]
+
+    site._ensure_dask_for_tasks(1)
+
+    assert site._futures == [future]
+    assert not future.released
+
+
 def test_local_wait_releases_futures_and_closes_by_default(monkeypatch, capsys):
     site, closed = make_site(monkeypatch)
     job = DummyJob()
@@ -303,7 +321,7 @@ def test_run_task_supports_solver_pack_mode(monkeypatch, tmp_path):
     )
 
 
-def test_run_task_init_does_not_request_map(monkeypatch, tmp_path):
+def test_run_task_local_preparation_skips_sizing(monkeypatch, tmp_path):
     captured = {}
 
     class FakeProcess:
@@ -333,7 +351,7 @@ def test_run_task_init_does_not_request_map(monkeypatch, tmp_path):
         "1",
         "--job",
         str(job_file),
-        "--init",
+        "--init-no-size",
     ]
 
 
@@ -367,7 +385,46 @@ def test_run_task_adds_fresh_flag(monkeypatch, tmp_path):
     ]
 
 
-def test_run_task_reports_solver_convergence_failure(monkeypatch, tmp_path):
+def _task_result_payload(
+    *,
+    state="success",
+    code=0,
+    real=2.5,
+    imag=-0.05,
+    artifacts=None,
+):
+    return {
+        "schema": "fs-task-result-2",
+        "partition": {
+            "task": 1,
+            "task_count": 1,
+            "frequency": {"real": real, "imag": imag},
+        },
+        "fingerprints": {
+            "job": f"sha256:{'1' * 64}",
+            "simulation": f"sha256:{'2' * 64}",
+            "outputs": f"sha256:{'3' * 64}",
+        },
+        "status": {"state": state, "code": code},
+        "solver": {
+            "convergence": {
+                "converged": state == "success",
+                "iterations": 16,
+                "residual": 2.2e-3,
+            }
+        },
+        "artifacts": list(artifacts or []),
+    }
+
+
+def _write_local_task_result(tmp_path, payload):
+    task_result = tmp_path / "results/_fs_run/tasks/task_000001/result.json"
+    task_result.parent.mkdir(parents=True, exist_ok=True)
+    task_result.write_text(json.dumps(payload), encoding="utf-8")
+    return task_result
+
+
+def test_run_task_reports_failed_producer_task_result(monkeypatch, tmp_path):
     class FakeProcess:
         def wait(self):
             return 0
@@ -383,46 +440,146 @@ def test_run_task_reports_solver_convergence_failure(monkeypatch, tmp_path):
             {
                 "project_path": str(tmp_path),
                 "result_path": "results",
+                "f_list": [[2.5, -0.05]],
             }
         )
     )
-    manifest = tmp_path / "results/_fs_run/tasks/task_000001/run_manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text(
-        json.dumps(
-            {
-                "solver": {
-                    "convergence": {
-                        "converged": True,
-                        "status": "converged",
-                        "solve_count": 1,
-                        "failure_count": 0,
-                        "worst_code": 0,
-                        "solves": [
-                            {
-                                "context": "forward",
-                                "converged": True,
-                                "iterations": 16,
-                                "residual": 2.2e-3,
-                                "solver": "FS_MG",
-                                "status": "converged",
-                            }
-                        ],
-                    }
-                }
-            }
-        )
+    task_result = _write_local_task_result(
+        tmp_path,
+        _task_result_payload(state="failed", code=9),
     )
 
     result = run_task(str(job_file), 0, "/solver", {}, stdout_dir=None)
 
     assert result["status"] == "error"
     assert result["complete"] is True
-    assert result["run_manifest"] == str(manifest)
+    assert result["task_result"] == str(task_result)
+    assert result["error"] == "Sauce task reported failed status with code 9"
     convergence = result["solver"]["convergence"]
-    assert convergence["failed"] is True
     assert convergence["iterations"] == 16
     assert convergence["residual"] == 0.0022
+
+
+def test_run_task_returns_producer_authored_artifacts(monkeypatch, tmp_path):
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        local_module.subprocess,
+        "Popen",
+        lambda args, **kwargs: FakeProcess(),
+    )
+    job_file = tmp_path / "job.json"
+    job_file.write_text(
+        json.dumps(
+            {
+                "project_path": str(tmp_path),
+                "result_path": "results",
+                "f_list": [[2.5, -0.05]],
+            }
+        )
+    )
+    artifacts = [
+        {
+            "id": "receivers",
+            "role": "simulated_traces",
+            "representation": "hdf5_shard",
+            "schema": "fs_trace_payload_shard_v1",
+            "path": "traces/opaque-generation-a.h5",
+            "retention": "durable",
+            "generation": "a",
+            "bytes": 4096,
+        }
+    ]
+    task_result = _write_local_task_result(
+        tmp_path,
+        _task_result_payload(artifacts=artifacts),
+    )
+
+    result = run_task(str(job_file), 0, "/solver", {}, stdout_dir=None)
+
+    assert result["status"] == "success"
+    assert result["task_result"] == str(task_result)
+    assert result["partition"] == {
+        "task": 1,
+        "task_count": 1,
+        "frequency": {"real": 2.5, "imag": -0.05},
+    }
+    assert result["artifacts"] == artifacts
+
+
+@pytest.mark.parametrize("contents", [None, "{not-json"])
+def test_run_task_rejects_missing_or_malformed_task_result(
+    monkeypatch, tmp_path, contents
+):
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        local_module.subprocess,
+        "Popen",
+        lambda args, **kwargs: FakeProcess(),
+    )
+    job_file = tmp_path / "job.json"
+    job_file.write_text(
+        json.dumps(
+            {
+                "project_path": str(tmp_path),
+                "result_path": "results",
+                "f_list": [2.5],
+            }
+        )
+    )
+    if contents is not None:
+        task_result = tmp_path / "results/_fs_run/tasks/task_000001/result.json"
+        task_result.parent.mkdir(parents=True)
+        task_result.write_text(contents, encoding="utf-8")
+
+    result = run_task(str(job_file), 0, "/solver", {}, stdout_dir=None)
+
+    assert result["status"] == "error"
+    assert result["complete"] is False
+    assert "task_result" not in result
+    if contents is None:
+        assert "result.json" in result["error"]
+    else:
+        assert "invalid task result JSON" in result["error"]
+
+
+def test_run_task_rejects_task_result_for_different_exact_frequency(
+    monkeypatch, tmp_path
+):
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        local_module.subprocess,
+        "Popen",
+        lambda args, **kwargs: FakeProcess(),
+    )
+    job_file = tmp_path / "job.json"
+    job_file.write_text(
+        json.dumps(
+            {
+                "project_path": str(tmp_path),
+                "result_path": "results",
+                "f_list": [[2.5, -0.05]],
+            }
+        )
+    )
+    _write_local_task_result(
+        tmp_path,
+        _task_result_payload(real=2.5, imag=0.0),
+    )
+
+    result = run_task(str(job_file), 0, "/solver", {}, stdout_dir=None)
+
+    assert result["status"] == "error"
+    assert result["complete"] is False
+    assert "reports frequency (2.5+0j), expected (2.5-0.05j)" in result["error"]
 
 
 def test_submit_local_tasks_captures_init_log(monkeypatch, tmp_path):
@@ -643,7 +800,8 @@ def test_submit_local_tasks_fresh_run_disables_reuse_and_passes_fresh(
 
     assert plan_calls == [{"reuse": False, "force": True}]
     assert [item["task_id"] for item in submissions] == [local_module.MESH_TASK_ID, 0]
-    assert all(item["kwargs"]["fresh"] is True for item in submissions)
+    assert submissions[0]["kwargs"]["fresh"] is True
+    assert submissions[1]["kwargs"]["fresh"] is True
 
 
 def test_auto_dask_sizing_refreshes_for_larger_later_job(monkeypatch):
@@ -908,7 +1066,7 @@ def test_local_wait_runs_pack_after_frequency_tasks(monkeypatch, tmp_path):
     assert submissions[-1]["func"] is run_task
     assert submissions[-1]["task_id"] == local_module.PACK_TASK_ID
     assert submissions[-1]["kwargs"]["stdout_dir"] == str(job._stdout_path)
-    assert job.removed_packed
+    assert not job.removed_packed
     assert job.states[-1][0] == "completed"
     assert job.states[-1][1]["pack"]["task_id"] == local_module.PACK_TASK_ID
     assert closed == [{"wait": True, "retire": True}]
@@ -950,6 +1108,93 @@ def test_local_wait_smooth_only_runs_imaging_postprocess(monkeypatch, tmp_path):
     assert job.states[-1][0] == "completed"
     assert job.states[-1][1]["smooth"]["status"] == "success"
     assert closed == [{"wait": True, "retire": True}]
+
+
+def test_local_submit_postprocess_only_never_plans_frequency_tasks(
+    monkeypatch, tmp_path
+):
+    site, _closed = make_site(monkeypatch)
+    submitted = []
+
+    class PostprocessJob(DummyJob):
+        name = "postprocess-only"
+        n_tasks = 1
+
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def is_run_current(self):
+            return False
+
+        def requires_postprocess(self):
+            return True
+
+        def postprocess_part_outputs_exist(self):
+            return True
+
+        def postprocess_output_exists(self):
+            return False
+
+        def needs_postprocess(self):
+            return True
+
+    monkeypatch.setattr(site, "check_solver_compatibility", lambda **_: None)
+    monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
+    monkeypatch.setattr(
+        site,
+        "_submit_local_tasks",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+
+    run = site.submit(
+        PostprocessJob(),
+        postprocess_only=True,
+        shutdown_on_completion=False,
+    )
+
+    assert submitted == []
+    assert run.backend["futures"] == []
+    assert run.backend["task_plan"]["pending_indices"] == []
+    assert run.backend["smooth_only"] is True
+
+
+def test_local_submit_force_runs_current_postprocess(monkeypatch, tmp_path):
+    site, _closed = make_site(monkeypatch)
+
+    class PostprocessJob(DummyJob):
+        name = "postprocess-only"
+        n_tasks = 1
+
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def requires_postprocess(self):
+            return True
+
+        def postprocess_part_outputs_exist(self):
+            return True
+
+        def needs_postprocess(self):
+            return False
+
+    monkeypatch.setattr(site, "check_solver_compatibility", lambda **_: None)
+    monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
+
+    run = site.submit(
+        PostprocessJob(),
+        postprocess_only=True,
+        force_run=True,
+        shutdown_on_completion=False,
+    )
+
+    assert run.backend["smooth_only"] is True
+    assert run.backend["fresh"] is True
 
 
 def test_local_watch_reuses_terminal_smooth_only_result(monkeypatch, tmp_path):
@@ -1191,7 +1436,7 @@ def test_local_watch_finalizes_without_zero_timeout_before_packing(
     assert [status.state for status in statuses] == ["completed"]
     assert submissions[-1]["func"] is run_task
     assert submissions[-1]["task_id"] == local_module.PACK_TASK_ID
-    assert job.removed_packed
+    assert not job.removed_packed
     assert statuses[-1].raw["pack"]["task_id"] == local_module.PACK_TASK_ID
     assert job.states[-1][0] == "completed"
     assert 0 not in wait_timeouts
@@ -1463,3 +1708,24 @@ def test_dask_logging_preload_quiets_distributed_core_connection_noise():
         logger.handlers = old_handlers
         logger.propagate = old_propagate
         logger.setLevel(old_level)
+
+
+def test_selected_dispatcher_overrides_inherited_installation(monkeypatch, tmp_path):
+    selected = tmp_path / "selected" / "FS_seismic"
+    selected.parent.mkdir()
+    selected.touch()
+    monkeypatch.setenv("FS_SOLVER_PATH", "/old/install")
+
+    site = LocalSite(solver=selected)
+
+    assert site.env["FS_SOLVER_PATH"] == str(selected.parent)
+
+
+def test_selected_dispatcher_allows_explicit_backend_directory(tmp_path):
+    selected = tmp_path / "FS_seismic"
+    selected.touch()
+    site = LocalSite(
+        solver=selected, environment={"FS_SOLVER_PATH": "/custom/backends"}
+    )
+
+    assert site.env["FS_SOLVER_PATH"] == "/custom/backends"

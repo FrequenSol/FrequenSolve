@@ -361,6 +361,7 @@ extra.
    account = "allocation"
    transfer_method = "rsync"
    modules = []
+   launcher_args = []
 
    # Add one table per partition using limits and node resources from your
    # cluster documentation or administrator. Memory values are in MiB.
@@ -382,6 +383,8 @@ extra.
    ranks_per_node = 4
    ranks_per_task = 1
    scheduler_heartbeat_timeout = 60
+   # Optional controller-enforced deadline for a full-rank MPI check before sizing.
+   # mpi_health_check_timeout = "00:02:00"
 
 An Enterprise HPC installation adds a closed, generated ``enterprise_hpc``
 table to the existing Slurm site configuration. It does not add constructor
@@ -474,12 +477,21 @@ The generated profile is equivalent to this minimal configuration:
        loaded; other shell expressions remain escaped.
    * - ``mpi_wrapper``
      - MPI launcher such as ``srun`` or ``ibrun``.
+   * - ``launcher_args``
+     - Arguments passed to every MPI launcher invocation, such as SLURM's
+       ``--kill-on-bad-exit=1`` and ``--wait=30``.
    * - ``poll_interval``
      - Seconds between scheduler status polls.
    * - ``scheduler_heartbeat_timeout``
      - Maximum seconds without a new adaptive-scheduler heartbeat before a
        running SLURM job is reported failed. Defaults to 60. Set it to
        ``None`` through ``SlurmRunConfig`` to disable the check.
+   * - ``mpi_health_check_timeout``
+     - Optional SLURM step time limit for a full-rank solver MPI health check
+       before sizing. The solver must support ``--mpi-health-check``. Disabled
+       by default for compatibility with older solver installations. Requires
+       batch mode with ``srun``; attached allocations and other MPI launchers
+       reject this option before input upload or launch.
    * - ``account``
      - HPC allocation/account name.
    * - ``max_duration``
@@ -653,6 +665,15 @@ a verified control socket are non-interactive and bounded by connection and
 command timeouts, so an expired socket produces an exception instead of an
 invisible credential prompt.
 
+The site CLI uses a bounded remote probe rather than relying only on the local
+OpenSSH master process when deciding that a shared connection is alive. Inspect
+managed connections with ``frequensolve site connections``. Close the default
+profile with ``frequensolve site disconnect``, select another one with
+``--profile``, or close every configured SSH connection with
+``frequensolve site disconnect --all``. A timed-out probe causes
+``frequensolve site connect`` to close and remove the stale socket before it
+authenticates again.
+
 At DEBUG logging level, ``rsync`` streams file names and ``-P`` transfer
 progress to the console. At INFO and higher levels, FrequenSolve runs rsync
 quietly with partial-transfer preservation and includes captured stderr only
@@ -729,3 +750,20 @@ Local and SSH imaging paths are unaffected.
 Only the registered FrequenSol-managed sites are supported here. This does not
 discover, provision, or connect arbitrary external clusters. Site operations and
 advanced provider settings belong to the service deployment, outside job APIs.
+
+
+Dispatcher installation selection
+---------------------------------
+
+When ``solver`` selects ``FS_seismic`` by a directory-qualified path, local and
+SLURM sites set ``FS_SOLVER_PATH`` to that directory for execution. An inherited
+shell setting or a loaded module therefore cannot redirect the dispatcher to an
+older installation. An explicit ``environment.FS_SOLVER_PATH`` still overrides
+this default for installations that intentionally separate the dispatcher and
+backend executables. A bare ``FS_seismic`` command retains normal site lookup.
+
+HPC launch scripts are stored under each remote job's ``logs/batch`` directory
+with a unique name for every submission. Concurrent submissions no longer share
+an overwriteable ``sweep.slurm`` or ``sweep.sh`` file. This isolates launch
+scripts; concurrent runs writing the same job's simulation or result files still
+require separate job/output directories.

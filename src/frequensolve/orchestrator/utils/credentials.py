@@ -106,10 +106,18 @@ class Credentials:
         filename = self.ssh_key_path or Path("~/.ssh/id_rsa").expanduser()
         try:
             return PKey.from_path(filename)
-        except PasswordRequiredException:
+        except (PasswordRequiredException, TypeError) as exc:
+            # Paramiko 3.5's PKey.from_path delegates encrypted-key loading to
+            # cryptography, which raises TypeError instead of Paramiko's
+            # PasswordRequiredException when no passphrase was supplied.
+            if (
+                isinstance(exc, TypeError)
+                and "private key is encrypted" not in str(exc).lower()
+            ):
+                raise
             passphrase = self._ssh_passphrase
             try:
-                return PKey.from_path(filename, passphrase=passphrase)
+                return PKey.from_path(filename, passphrase=passphrase.encode())
             except Exception:
                 self._pending_secrets.pop("ssh-passphrase", None)
                 raise

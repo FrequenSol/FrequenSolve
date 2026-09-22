@@ -8,14 +8,14 @@ auditable interface consumed by launchers and the :term:`fast solver`.
 
 Related tutorials:
 
-- :download:`Acoustic modeling <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+- :download:`Acoustic modeling <../../../tutorials/01_modeling_basics/01_acoustic.ipynb>`
   for the first :term:`project`, :term:`simulation`, :term:`job`, and result
   artifacts.
-- :download:`Layered models <../../../examples/tutorials/03_velocity_model_building/03_layered_models.ipynb>`
+- :download:`Layered models <../../../tutorials/03_velocity_model_building/03_layered_models.ipynb>`
   for exported material and geometry contracts.
-- :download:`Traces <../../../examples/tutorials/06_outputs/01_traces.ipynb>`
+- :download:`Traces <../../../tutorials/06_outputs/01_traces.ipynb>`
   for :term:`HDF5` trace output and :term:`TraceDataset <trace dataset>` reads.
-- :download:`ParaView and VTK <../../../examples/tutorials/06_outputs/02_paraview_vtk.ipynb>`
+- :download:`ParaView and VTK <../../../tutorials/06_outputs/02_paraview_vtk.ipynb>`
   for job-owned visualization output contracts.
 
 Authoring Flow
@@ -51,6 +51,10 @@ The core workflow is intentionally repetitive across tutorials:
    * - ``TimeDomainJob`` / ``FrequencyDomainJob``
      - ``fs-job-1`` plus job-owned outputs
      - Frequency list or band, result path, logs, traces, and visualization requests.
+   * - ``EikonalJob`` / ``EikonalConfig``
+     - ``fs-job-1`` with ``fs-eikonal-1``
+     - First-arrival sources and receivers, FIM tolerances and budgets,
+       retained field/characteristic products, and output paths.
    * - ``VtkOutput``
      - ``fs-output-config-1``
      - Output target, fields, properties, sources, :term:`PML` visibility, :term:`upscaling`, and :term:`VTK` files.
@@ -58,6 +62,10 @@ The core workflow is intentionally repetitive across tutorials:
      - ``fs_seismic_trace_store_v1`` HDF5 trace output
      - Groups, :term:`components <component>`, source ids, dense/sparse layout,
        frequency and :term:`time-domain` reads.
+   * - ``EikonalResults``
+     - ``fs-eikonal-output-1`` HDF5 output
+     - Native-vertex fields, receiver-time matrices, per-source diagnostics,
+       winning-stencil characteristics, and ragged-offset consistency.
 
 Material Names
 --------------

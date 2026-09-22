@@ -1,7 +1,7 @@
-"""Test suite for the simple 2D acoustic simulation example (ex01_simple.ipynb).
+"""Regression suite derived from the retired ex01_simple.ipynb notebook.
 
-This module contains tests that verify the functionality demonstrated in the
-ex01_simple.ipynb example notebook. The tests cover the complete workflow of
+This module retains coverage of the functionality demonstrated in that
+notebook after its removal. The tests cover the complete workflow of
 setting up and running a simple 2D acoustic simulation.
 
 Test Structure and Design
@@ -130,12 +130,7 @@ The tests are organized into several categories:
    - These tests use the module-scoped time_domain_results fixture
 
 Note: This test suite focuses on verifying the setup and configuration of
-simulations rather than the numerical accuracy of the results. The example
-notebook provides more detailed analysis of the simulation results.
-
-See Also
---------
-ex01_simple.ipynb : The example notebook that this test suite verifies
+simulations rather than the numerical accuracy of the results.
 """
 
 import json

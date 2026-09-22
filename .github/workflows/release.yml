@@ -129,11 +129,15 @@ jobs:
               python scripts/validate_heavy_test_evidence.py \
                 .release-evidence/heavy/frequensolve-test-evidence.json \
                 --commit "$release_sha"
-              python scripts/validate_frequensolver_identity.py \
-                .release-evidence/heavy/frequensolver-identity.json \
-                --version "$(jq -r '.frequensolverVersion' "$evidence_file")" \
-                --commit "$(jq -r '.frequensolverGitCommit' "$evidence_file")" \
-                --build-id="$(jq -r '.frequensolverBuildId' "$evidence_file")"
+              solver_identity=.release-evidence/heavy/solver-identity.json
+              if [[ ! -e "$solver_identity" && ! -L "$solver_identity" ]]; then
+                solver_identity=.release-evidence/heavy/frequensolver-identity.json
+              fi
+              python scripts/validate_solver_identity.py \
+                "$solver_identity" \
+                --version "$(jq -r '.solverVersion // .frequensolverVersion' "$evidence_file")" \
+                --commit "$(jq -r '.solverGitCommit // .frequensolverGitCommit' "$evidence_file")" \
+                --build-id="$(jq -r '.solverBuildId // .frequensolverBuildId' "$evidence_file")"
               ;;
             *)
               echo "Unexpected validated profile: ${validation_profile}" >&2
@@ -191,11 +195,11 @@ jobs:
             python -c 'import versioneer; print(versioneer.get_version())'
           )"
           test "$staged_version" = "$PACKAGE_VERSION"
-          python "$build_source/scripts/materialize_frequensolver_compatibility.py" \
+          python "$build_source/scripts/materialize_solver_compatibility.py" \
             --release-evidence "$GITHUB_WORKSPACE/.release-evidence/release-evidence.json" \
             --package-release "$PACKAGE_VERSION" \
             --package-commit "$release_sha" \
-            --output "$build_source/src/frequensolve/frequensolver_compatibility.json"
+            --output "$build_source/src/frequensolve/solver_compatibility.json"
           test -z "$(git status --porcelain --untracked-files=no)"
           python -m build --outdir "$GITHUB_WORKSPACE/dist" "$build_source"
 
@@ -211,11 +215,11 @@ jobs:
           for name in ("Project", "LayeredModel", "LocalSite", "AWSSite"):
               if getattr(fs, name, None) is None:
                   raise SystemExit(f"missing release-wheel export: {name}")
-          manifest = fs.load_frequensolver_compatibility()
+          manifest = fs.load_solver_compatibility()
           if manifest.package_release != fs.__version__:
-              raise SystemExit("packaged FrequenSolver metadata version mismatch")
-          if manifest.preferred_frequensolver is None:
-              raise SystemExit("release wheel has no preferred FrequenSolver")
+              raise SystemExit("packaged Solver metadata version mismatch")
+          if manifest.preferred_solver is None:
+              raise SystemExit("release wheel has no preferred Solver")
           if manifest.validation_profile not in {"standard", "solver-backed"}:
               raise SystemExit("release wheel has no validation profile")
           if manifest.solver_backed != (

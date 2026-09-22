@@ -1,4 +1,5 @@
 import pytest
+from paramiko import RSAKey
 
 from frequensolve.orchestrator.sites.hpc import auth
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
@@ -105,6 +106,25 @@ def test_prompted_ssh_passphrase_is_saved_only_after_authentication(monkeypatch)
     credentials.persist_pending()
 
     assert store.values == {"cluster:user:ssh-passphrase": "entered-passphrase"}
+
+
+def test_encrypted_private_key_prompts_for_passphrase(monkeypatch, tmp_path):
+    key_path = tmp_path / "id_rsa"
+    expected_key = RSAKey.generate(1024)
+    expected_key.write_private_key_file(key_path, password="key-passphrase")
+    monkeypatch.delenv("SSH_PASSPHRASE", raising=False)
+    monkeypatch.setattr(
+        "frequensolve.orchestrator.utils.credentials.getpass.getpass",
+        lambda prompt: "key-passphrase",
+    )
+
+    credentials = Credentials(
+        username="user",
+        ssh_key=key_path,
+        credential_store=MemoryCredentialStore(),
+    )
+
+    assert credentials.ssh_key.get_fingerprint() == expected_key.get_fingerprint()
 
 
 def test_two_factor_code_is_hidden_and_never_saved(monkeypatch):

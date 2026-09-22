@@ -4,13 +4,15 @@ import getpass
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import uuid
+import warnings
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, TypeVar, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, TypeVar, Union
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.aws.cache_paths import (
@@ -38,7 +40,18 @@ from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
+from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
+from frequensolve.simulation.artifact_contract import (
+    ArtifactCatalog,
+    ArtifactContractError,
+    ArtifactRequest,
+    OperationResult,
+    operation_result_path,
+)
+from frequensolve.simulation.artifact_transfer import fetch_artifact_payloads
 from frequensolve.simulation.jobs import BaseJob, ImagingJob, SkipPolicy
+from frequensolve.simulation.task_index import TaskIndex
+from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
@@ -670,47 +683,18 @@ class AWSSite(BaseSite):
         return True
 
     def fetch_vtk(self, job: BaseJob, path: Optional[Union[str, Path]] = None) -> None:
-        """Get VTK/visualization files from S3.
-
-        Downloads the results/ParaView/ directory for the job from the
-        project's S3 bucket to the local project path.
-
-        Args:
-            job: A BaseJob object.
-            path: Optional local path to save results. If None, uses
-                job.project_path.
-        """
+        """Fetch exact visualization and companion-data artifacts from S3."""
         job = self._result_job(job)
-        if path is None:
-            path = job.project_path
-        else:
-            path = Path(path)
 
-        vtk_paths: List[str] = []
-        outputs = getattr(getattr(job, "outputs", None), "paraview", None) or []
-        for output in outputs:
-            output_path = getattr(output, "path", None)
-            if output_path is None:
-                continue
-            normalized = self._output_relative_path(str(output_path))
-            if normalized and normalized != "." and normalized not in vtk_paths:
-                vtk_paths.append(normalized)
-        if not vtk_paths:
-            vtk_paths.append("ParaView")
-
-        for vtk_path in vtk_paths:
-            relative = self._output_relative_path(vtk_path)
-            s3_results_path = f"{job._cloud_output_identity}{relative}"
-            local_results_path = (
-                path / job._result_path.relative_to(job.project_path) / relative
-            )
-
-            try:
-                logger.info("Fetching configured VTK outputs from AWS storage")
-                self.get(s3_results_path, local_results_path)
-            except Exception as e:
-                logger.exception("Error downloading VTK outputs: %s", str(e))
-                raise
+        self.fetch_artifacts(
+            job,
+            requests=(
+                ArtifactRequest(role="visualization"),
+                ArtifactRequest(role="visualization_data"),
+            ),
+            include_defaults=False,
+            project_path=path,
+        )
 
     def fetch_paraview(
         self, job: BaseJob, path: Optional[Union[str, Path]] = None
@@ -1082,12 +1066,18 @@ class AWSSite(BaseSite):
             self._sync_loaded_job_inputs(job, project)
 
         try:
+            # Validate result paths before staging or admitting remote work.
+            self._prepare_run_snapshot(job)
             # Sync job file to S3
             local_job, remote_job = job.save_for_remote(
                 self.__class__.__name__, project
             )
             s3_job_key = self.sync_s3(local_job, remote_job)
             self._emit(f"Synced job file to S3: {s3_job_key}")
+            local_simulation, remote_simulation = job.save_simulation_for_remote(
+                self.__class__.__name__, project
+            )
+            self.sync_s3(local_simulation, remote_simulation)
 
             # Check if using Cognito/GraphQL authentication
             self._emit(f"Submitting {job.name} via AWS GraphQL API")
@@ -1198,6 +1188,14 @@ class AWSSite(BaseSite):
                 raise ValueError(
                     "Cloud imaging output path must be inside the job result directory"
                 ) from exc
+        outputs = getattr(job, "outputs", None)
+        for output in [
+            *(getattr(outputs, "paraview", None) or []),
+            *(getattr(outputs, "wavefields", None) or []),
+        ]:
+            path = getattr(output, "path", None)
+            if path is not None:
+                AWSSite._output_relative_path(str(path))
         # Project ownership is navigation, not result interpretation. Avoid
         # copying every simulation in the project through this back-reference.
         project = getattr(job.simulation, "_project", None)
@@ -1205,7 +1203,12 @@ class AWSSite(BaseSite):
         # Subclasses carry result metadata too (for example imaging grids,
         # weights and regularization). Copy the complete job graph with one
         # memo so later authoring edits cannot alter an earlier run's reader.
-        return deepcopy(job, memo)
+        snapshot = deepcopy(job, memo)
+        if hasattr(job, "_read_staged_provenance"):
+            snapshot._frozen_staged_provenance = {
+                "AWSSite": deepcopy(job._read_staged_provenance("AWSSite"))
+            }
+        return snapshot
 
     @staticmethod
     def _bind_run_snapshot(result: _JobT, simulation_id: str) -> _JobT:
@@ -1307,39 +1310,44 @@ class AWSSite(BaseSite):
         path: Optional[Union[str, Path]] = None,
         upscale: int = 1,
     ) -> Union[TraceDataset, Dict[str, TraceDataset]]:
-        """Download the selected Cloud run's receiver traces.
+        """Fetch exact durable trace artifacts from AWS storage.
 
         Args:
             job: A BaseJob object.
             path: The path to save the results to.
         """
 
-        jobs = [
-            self._result_job(item) for item in (job if isinstance(job, list) else [job])
-        ]
-
-        if path is None:
-            path = jobs[0].project_path
+        if isinstance(job, BaseJob):
+            jobs = [job]
         else:
-            path = Path(path)
+            jobs = job
 
         db_map = {}
 
         for job in jobs:
+            job = self._result_job(job)
             try:
-                relative = self._output_relative_path(
-                    Path(job.trace_outputs.path).relative_to(job._result_path)
+                self.fetch_artifacts(
+                    job,
+                    requests=(
+                        ArtifactRequest(
+                            role="simulated_traces",
+                            representations=(
+                                "hdf5_shard",
+                                "packed_trace",
+                                "packed_manifest",
+                                "packed_hdf5",
+                                "collection_manifest",
+                            ),
+                            retention="durable",
+                        ),
+                    ),
+                    include_defaults=False,
+                    project_path=path,
+                    operations=("pack",),
                 )
-                s3_results_path = f"{job._cloud_output_identity}{relative}"
-                local_results_path = (
-                    path / job._result_path.relative_to(job.project_path) / relative
-                )
-                self.get(s3_results_path, local_results_path)
-                self._emit(f"Fetched AWS traces from {s3_results_path}")
-
-                # TODO: Copy job, simulation file to database so that it can be read independently.
-
-                db = TraceDataset.from_job(job, upscale, project_path=path.resolve())
+                project = Path(path).resolve() if path is not None else job.project_path
+                db = TraceDataset.from_job(job, upscale, project_path=project)
                 db_map[job.name] = db
 
             except Exception as e:
@@ -1368,36 +1376,39 @@ class AWSSite(BaseSite):
             Wavefield dataset for one job, or a mapping keyed by job name.
         """
 
-        jobs = [
-            self._result_job(item) for item in (job if isinstance(job, list) else [job])
-        ]
-
-        if path is None:
-            path = jobs[0].project_path
+        if isinstance(job, BaseJob):
+            jobs = [job]
         else:
-            path = Path(path)
+            jobs = job
 
         db_map = {}
 
         for item in jobs:
+            item = self._result_job(item)
             try:
                 wavefield_outputs = item.wavefield_trace_outputs
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
 
-                relative = self._output_relative_path(
-                    Path(wavefield_outputs.path).relative_to(item._result_path)
+                fetched = self.fetch_artifacts(
+                    item,
+                    requests=tuple(
+                        ArtifactRequest(role=role)
+                        for role in ("wavefield", "wavefields")
+                    ),
+                    include_defaults=False,
+                    project_path=path,
                 )
-                s3_results_path = f"{item._cloud_output_identity}{relative}"
-                local_results_path = (
-                    path / item._result_path.relative_to(item.project_path) / relative
-                )
-                self.get(s3_results_path, local_results_path)
-                self._emit(f"Fetched AWS wavefields from {s3_results_path}")
+                if not fetched:
+                    raise FileNotFoundError(
+                        "No retained wavefield artifact was published for this job"
+                    )
 
                 db_map[item.name] = item.wavefields.open(
                     upscale=upscale,
-                    project_path=path.resolve(),
+                    project_path=(
+                        Path(path).resolve() if path is not None else item.project_path
+                    ),
                 )
 
             except Exception as e:
@@ -1409,86 +1420,59 @@ class AWSSite(BaseSite):
         return db_map
 
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
-        """Fetch ``_fs_run`` metadata and aggregate task manifests locally."""
-
+        """Fetch and validate the authoritative result catalog."""
         job = self._result_job(job)
-        s3_results_path = f"{job._cloud_output_identity}_fs_run"
-        local_run_path = job._result_path / "_fs_run"
-        self.get(s3_results_path, local_run_path)
-        self._emit(f"Fetched AWS run metadata from {s3_results_path}")
-        return job.collect_task_run_manifests()
+        self.fetch_artifact_catalog(job)
+        return job._result_path / "_fs_run"
 
     def fetch_image(self, job: ImagingJob) -> Any:
-        """Download and open the aggregate image for one imaging job."""
-
+        """Fetch the declared aggregate image and its exact dependencies."""
+        job = self._result_job(job)
         if not isinstance(job, ImagingJob):
             raise TypeError("fetch_image expects an ImagingJob")
-
-        job = self._result_job(job)
-        local_image_file = Path(job.image_file()).resolve()
         try:
-            relative_image_file = local_image_file.relative_to(job._result_path)
+            job.save_path.resolve().relative_to(job.project_path.resolve())
         except ValueError as exc:
-            raise ValueError(
-                "Imaging output path is outside the run result directory"
-            ) from exc
-
-        bucket = self.config.s3_bucket
-        key = (
-            job._cloud_output_identity.removeprefix(f"s3://{bucket}/")
-            + relative_image_file.as_posix()
+            raise ValueError("Image output is outside project root") from exc
+        self.fetch_artifacts(
+            job,
+            requests=(ArtifactRequest(role="image"),),
+            include_defaults=False,
+            operations=("smooth",),
         )
-        local_image_file.parent.mkdir(parents=True, exist_ok=True)
-
-        refreshed_credentials = False
-        while True:
-            try:
-                self.s3_client.download_file(bucket, key, str(local_image_file))
-                break
-            except ClientError as exc:
-                if (
-                    self._s3_error_requires_credential_refresh(exc)
-                    and not refreshed_credentials
-                    and hasattr(self, "cognito_auth")
-                ):
-                    refreshed_credentials = True
-                    self._refresh_s3_credentials()
-                    continue
-                error_code = exc.response.get("Error", {}).get("Code", "")
-                if error_code in ("404", "NoSuchKey", "NotFound"):
-                    raise FileNotFoundError(
-                        f"AWS imaging output s3://{bucket}/{key} is missing"
-                    ) from exc
-                raise RuntimeError(f"S3 image download failed: {exc}") from exc
-
-        self._emit(f"Fetched AWS image from s3://{bucket}/{key}")
         return job.load_images()
 
-    def fetch_outputs(self, job: BaseJob):
-        """Fetch common AWS result artifacts for a completed job.
-
-        Args:
-            job: Completed job whose S3 artifacts should be downloaded.
-
-        Returns:
-            Trace dataset, or a mapping containing traces and wavefields when
-            wavefield outputs exist. Run metadata and configured ParaView
-            outputs are downloaded as side effects.
-        """
-
+    def fetch_outputs(
+        self,
+        job: BaseJob,
+        *,
+        requests: Sequence[ArtifactRequest] = (),
+    ) -> Any:
+        """Fetch durable final products, plus explicit auxiliary selectors."""
         job = self._result_job(job)
-        self.fetch_run_metadata(job)
-        traces = self.fetch_traces(job)
-        wavefields = None
-        if getattr(job.outputs, "wavefields", None):
-            wavefields = self.fetch_wavefields(job)
-        if getattr(job.outputs, "paraview", None):
-            self.fetch_paraview(job)
+
+        requires_postprocess = getattr(job, "requires_postprocess", None)
+        if (
+            callable(requires_postprocess)
+            and requires_postprocess()
+            and not isinstance(job, ImagingJob)
+        ):
+            return self.fetch_postprocess(job, requests=requests)
+
+        self.fetch_artifacts(
+            job,
+            requests=requests,
+            include_defaults=True,
+            operations=("smooth",) if isinstance(job, ImagingJob) else (),
+        )
+        if hasattr(job, "result_manifest_file"):
+            return job.results
+        traces = job.traces.open()
         if isinstance(job, ImagingJob):
-            self.fetch_image(job)
-        if wavefields is None:
-            return traces
-        return {"traces": traces, "wavefields": wavefields}
+            job.load_images()
+        if getattr(job.outputs, "wavefields", None):
+            return {"traces": traces, "wavefields": job.wavefields.open()}
+        return traces
 
     def fetch_logs(
         self,
@@ -1549,11 +1533,14 @@ class AWSSite(BaseSite):
                 prefix=".slurm-logs-", dir=log_dir.parent
             ) as folder:
                 staged = Path(folder)
-                if selected_task is None:
-                    self.get(remote, staged)
-                else:
-                    name = f"task_{selected_task}.log"
-                    self.get(remote + name, staged / name)
+                try:
+                    if selected_task is None:
+                        self.get(remote, staged)
+                    else:
+                        name = f"task_{selected_task}.log"
+                        self.get(remote + name, staged / name)
+                except FileNotFoundError:
+                    self._fetch_cloudwatch_logs(run_id, staged, task=selected_task)
                 files = [
                     path
                     for path in staged.iterdir()
@@ -1827,8 +1814,417 @@ class AWSSite(BaseSite):
                     f"S3 transfer failed ({type(exc).__name__})"
                 ) from None
 
+    # if __name__ == "__main__":
+    #     # Example usage
+    #     config = AWSSiteConfig.from_domain('app.frequensol.com')
+    #     site = AWSSite(domain='app.frequensol.com')
 
-# if __name__ == "__main__":
-#     # Example usage
-#     config = AWSSiteConfig.from_domain('app.frequensol.com')
-#     site = AWSSite(domain='app.frequensol.com')
+    @staticmethod
+    def _exact_s3_paths(values: Iterable[Union[str, Path]]) -> tuple[str, ...]:
+        """Validate and deduplicate portable result-relative object paths."""
+
+        result = []
+        seen = set()
+        for value in values:
+            raw = str(value)
+            path = PurePosixPath(raw)
+            if (
+                not raw
+                or "\\" in raw
+                or "\0" in raw
+                or re.match(r"^[A-Za-z]:", raw)
+                or path.is_absolute()
+                or "." in path.parts
+                or ".." in path.parts
+                or path.as_posix() != raw
+            ):
+                raise ValueError("S3 artifact paths must be normalized relative paths")
+            if raw not in seen:
+                seen.add(raw)
+                result.append(raw)
+        return tuple(result)
+
+    def _s3_result_prefix(self, job: BaseJob) -> str:
+        """Return the exact object prefix containing one job's result tree."""
+
+        job = self._result_job(job)
+        return job._cloud_output_identity.removeprefix(
+            f"s3://{self.config.s3_bucket}/"
+        ).rstrip("/")
+
+    @staticmethod
+    def _local_result_path(
+        job: BaseJob,
+        project_path: Optional[Union[str, Path]] = None,
+    ) -> Path:
+        """Map a job result directory beneath an optional relocated project."""
+
+        if project_path is None:
+            return job._result_path
+        relative = job._result_path.resolve().relative_to(
+            Path(job.project_path).resolve()
+        )
+        return Path(project_path).resolve() / relative
+
+    def _download_s3_files(
+        self,
+        prefix: str,
+        local_root: Path,
+        relative_paths: Iterable[Union[str, Path]],
+        *,
+        missing_ok: bool = False,
+    ) -> list[Path]:
+        """Download only explicit S3 keys; never list an object prefix."""
+
+        paths = self._exact_s3_paths(relative_paths)
+        local_root.mkdir(parents=True, exist_ok=True)
+        fetched = []
+        for relative in paths:
+            key = f"{prefix.rstrip('/')}/{relative}"
+            local = local_root / Path(*PurePosixPath(relative).parts)
+
+            def download() -> None:
+                with atomic_output_path(local) as temporary:
+                    self.s3_client.download_file(
+                        self.config.s3_bucket,
+                        key,
+                        str(temporary),
+                    )
+
+            downloaded = False
+            for attempt in range(2):
+                try:
+                    download()
+                    downloaded = True
+                    break
+                except ClientError as exc:
+                    code = str(exc.response.get("Error", {}).get("Code", ""))
+                    if (
+                        attempt == 0
+                        and self._s3_error_requires_credential_refresh(exc)
+                        and hasattr(self, "cognito_auth")
+                    ):
+                        self._refresh_s3_credentials()
+                        continue
+                    if code in {"404", "NoSuchKey", "NotFound"}:
+                        if missing_ok:
+                            break
+                        raise FileNotFoundError(
+                            f"S3 artifact is missing: {key}"
+                        ) from exc
+                    raise
+            if not downloaded:
+                continue
+            fetched.append(local)
+        return fetched
+
+    def fetch_artifact_catalog(
+        self,
+        job: BaseJob,
+        *,
+        project_path: Optional[Union[str, Path]] = None,
+        operations: Sequence[str] = (),
+    ) -> Union[TaskIndex, ArtifactCatalog, CombinedArtifactCatalog]:
+        """Fetch authoritative task metadata and named operation results."""
+        job = self._result_job(job)
+
+        tasks = tuple(range(1, job.n_tasks + 1))
+        requested_operations = tuple(dict.fromkeys(operations))
+        local_root = self._local_result_path(job, project_path)
+        prefix = self._s3_result_prefix(job)
+        local_root.parent.mkdir(parents=True, exist_ok=True)
+        if job.staged_artifact_fingerprints(self.__class__.__name__) is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
+            )
+        index_path = "_fs_run/tasks.h5"
+        result_paths = tuple(
+            f"_fs_run/tasks/task_{task:06d}/result.json" for task in tasks
+        )
+        operation_paths = {
+            operation: operation_result_path(Path(), operation).as_posix()
+            for operation in requested_operations
+        }
+        with tempfile.TemporaryDirectory(
+            prefix=".fs-catalog-", dir=local_root.parent
+        ) as temporary:
+            stage = Path(temporary)
+            self._download_s3_files(
+                prefix,
+                stage,
+                (index_path,),
+                missing_ok=True,
+            )
+            use_index = False
+            try:
+                catalog: Union[TaskIndex, ArtifactCatalog] = TaskIndex.read(stage)
+                self._validate_remote_catalog(job, catalog, tasks)
+                use_index = True
+            except (ArtifactContractError, OSError, RuntimeError):
+                self._download_s3_files(
+                    prefix,
+                    stage,
+                    result_paths,
+                    missing_ok=True,
+                )
+                catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
+                self._validate_remote_catalog(job, catalog, tasks)
+
+            if operation_paths:
+                self._download_s3_files(
+                    prefix,
+                    stage,
+                    tuple(operation_paths.values()),
+                    missing_ok=True,
+                )
+            operation_results = {}
+            for operation, relative in operation_paths.items():
+                path = stage / relative
+                if not path.is_file():
+                    continue
+                result = OperationResult.read(
+                    path,
+                    result_path=stage,
+                    workflow=operation,
+                )
+                self._validate_remote_operation(job, result)
+                operation_results[operation] = result
+
+            candidates = (index_path,) if use_index else result_paths
+            publish = [path for path in candidates if (stage / path).is_file()]
+            publish.extend(
+                relative
+                for operation, relative in operation_paths.items()
+                if operation in operation_results
+            )
+            for relative in publish:
+                target = local_root / relative
+                with atomic_output_path(target) as temporary_path:
+                    shutil.copyfile(stage / relative, temporary_path)
+            if not use_index:
+                (local_root / index_path).unlink(missing_ok=True)
+            for operation, relative in operation_paths.items():
+                if operation not in operation_results:
+                    (local_root / relative).unlink(missing_ok=True)
+
+        task_catalog = (
+            TaskIndex.read(local_root)
+            if use_index
+            else ArtifactCatalog.read_task_results(local_root, tasks=tasks)
+        )
+        if not requested_operations:
+            return task_catalog
+        return CombinedArtifactCatalog(
+            result_path=local_root.resolve(strict=False),
+            task_catalog=task_catalog,
+            operations={
+                operation: OperationResult.read(
+                    local_root / relative,
+                    result_path=local_root,
+                    workflow=operation,
+                )
+                for operation, relative in operation_paths.items()
+                if (local_root / relative).is_file()
+            },
+        )
+
+    def _validate_remote_catalog(
+        self,
+        job: BaseJob,
+        catalog: Union[TaskIndex, ArtifactCatalog],
+        tasks: Sequence[int],
+    ) -> None:
+        """Require exact task partitions and current staged provenance."""
+
+        fingerprints = getattr(
+            job, "staged_task_fingerprints", job.staged_artifact_fingerprints
+        )(self.__class__.__name__)
+        if fingerprints is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
+            )
+        for task in tasks:
+            frequency = complex(job.f_list[task - 1])
+            if isinstance(catalog, TaskIndex):
+                current = catalog.is_task_current(
+                    task,
+                    frequency=frequency,
+                    fingerprints=fingerprints,
+                )
+            else:
+                result = catalog.results.get(task)
+                current = bool(
+                    result is not None
+                    and result.successful
+                    and result.partition.frequency == frequency
+                    and all(
+                        result.fingerprints.get(key) == value
+                        for key, value in fingerprints.items()
+                    )
+                )
+            if not current:
+                raise RuntimeError(
+                    f"Remote task {task} does not match the current staged job"
+                )
+
+    def _validate_remote_operation(self, job: BaseJob, result: OperationResult) -> None:
+        """Require a successful operation from the current staged generation."""
+
+        fingerprints = job.staged_artifact_fingerprints(self.__class__.__name__)
+        if (
+            fingerprints is None
+            or not result.successful
+            or any(
+                result.fingerprints.get(key) != value
+                for key, value in fingerprints.items()
+            )
+        ):
+            raise RuntimeError(
+                f"Remote operation {result.name!r} does not match the current "
+                "staged job"
+            )
+
+    def fetch_artifacts(
+        self,
+        job: BaseJob,
+        *,
+        requests: Sequence[ArtifactRequest] = (),
+        include_defaults: bool = True,
+        project_path: Optional[Union[str, Path]] = None,
+        operations: Sequence[str] = (),
+    ) -> list[Path]:
+        """Fetch exact catalog-selected S3 objects and collection parts."""
+        job = self._result_job(job)
+
+        local_root = self._local_result_path(job, project_path)
+        prefix = self._s3_result_prefix(job)
+        catalog = (
+            self.fetch_artifact_catalog(
+                job,
+                project_path=project_path,
+                operations=operations,
+            )
+            if operations
+            else self.fetch_artifact_catalog(job, project_path=project_path)
+        )
+        return fetch_artifact_payloads(
+            catalog,
+            fetch_files=lambda paths: self._download_s3_files(
+                prefix,
+                local_root,
+                paths,
+            ),
+            requests=requests,
+            include_defaults=include_defaults,
+        )
+
+    def fetch_postprocess(
+        self,
+        job: BaseJob,
+        *,
+        requests: Sequence[ArtifactRequest] = (),
+    ) -> list[Path]:
+        """Fetch required control products through their operation catalog."""
+        job = self._result_job(job)
+
+        fetched = self.fetch_artifacts(
+            job,
+            requests=(
+                *(
+                    ArtifactRequest(role=role)
+                    for role in ("gradient", "objective", "focus_objective")
+                ),
+                *requests,
+            ),
+            include_defaults=False,
+            operations=("smooth",),
+        )
+        if not fetched:
+            raise FileNotFoundError("No postprocess artifact was published")
+        return fetched
+
+    def _fetch_cloudwatch_logs(
+        self,
+        simulation_id: str,
+        log_dir: Path,
+        *,
+        task: Optional[int],
+    ) -> None:
+        """Materialize Cloud task logs when the runtime has no S3 log prefix."""
+
+        if self.graphql_client is None or not simulation_id:
+            raise FileNotFoundError(
+                "Cloud task logs are unavailable from storage or the Cloud API"
+            )
+        rows = self.graphql_client.list_simulation_frequency_jobs(str(simulation_id))
+        indexed: dict[int, str] = {}
+        for row in rows:
+            frequency_index = row.get("frequencyIndex")
+            batch_job_id = row.get("batchJobId")
+            if not isinstance(frequency_index, int) or not isinstance(
+                batch_job_id, str
+            ):
+                continue
+            task_number = frequency_index + 1
+            if task_number in indexed:
+                raise RuntimeError(
+                    f"Cloud returned duplicate logs for task {task_number}"
+                )
+            indexed[task_number] = batch_job_id
+
+        requested_tasks = [task] if task is not None else sorted(indexed)
+        if not requested_tasks or any(
+            number not in indexed for number in requested_tasks
+        ):
+            raise FileNotFoundError("Cloud returned no Batch task logs for this run")
+
+        log_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=log_dir.parent,
+            prefix=f".{log_dir.name}-",
+        ) as staging_dir:
+            staged = Path(staging_dir)
+            for task_number in requested_tasks:
+                events = self.graphql_client.get_job_logs(indexed[task_number])
+                (staged / f"task_{task_number}.log").write_text(
+                    "".join(event["message"].rstrip("\n") + "\n" for event in events),
+                    encoding="utf-8",
+                )
+
+            log_dir.mkdir(parents=True, exist_ok=True)
+            staged_names = {path.name for path in staged.iterdir()}
+            for path in staged.iterdir():
+                path.replace(log_dir / path.name)
+            if task is None:
+                for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
+                    for stale in log_dir.glob(pattern):
+                        if stale.name not in staged_names:
+                            stale.unlink()
+
+    def get_job_status_from_api(self, job_id: str) -> Dict[str, Any]:
+        """Return cloud job status through the authenticated GraphQL client.
+
+        This compatibility method preserves the former public entry point while
+        the cloud transport moves from REST to GraphQL.
+        """
+
+        warnings.warn(
+            "AWSSite.get_job_status_from_api() is deprecated; use RunHandle status APIs",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.graphql_client is None:
+            return {}
+        try:
+            details_getter = getattr(
+                self.graphql_client, "get_simulation_status_details", None
+            )
+            if callable(details_getter):
+                return dict(details_getter(job_id))
+            return {"status": self.graphql_client.get_simulation_status(job_id)}
+        except Exception as exc:
+            logger.warning(
+                "GraphQL status lookup failed (%s)",
+                type(exc).__name__,
+            )
+            return {}

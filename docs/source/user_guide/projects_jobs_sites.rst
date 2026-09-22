@@ -6,20 +6,21 @@ The high-level workflow is:
 1. Create a ``Project``.
 2. Create a project-owned :term:`simulation` with ``project.new_simulation(...)``.
 3. Add model, mesh, boundary conditions, acquisition, and numerics.
-4. Create a ``TimeDomainJob`` or ``FrequencyDomainJob``.
+4. Create a wave job such as ``TimeDomainJob`` / ``FrequencyDomainJob``, or a
+   frequency-independent ``EikonalJob``.
 5. Submit the job to a :term:`site` and read the :term:`run result`.
 
 Related tutorials:
 
-- :download:`Acoustic modeling <../../../examples/tutorials/01_modeling_basics/01_acoustic.ipynb>`
+- :download:`Acoustic modeling <../../../tutorials/01_modeling_basics/01_acoustic.ipynb>`
   for the first complete :term:`project` and job workflow.
-- :download:`AWS site <../../../examples/tutorials/02_sites/01_aws_site.ipynb>`
+- :download:`AWS site <../../../tutorials/02_sites/01_aws_site.ipynb>`
   for FrequenSol Cloud authentication and result fetching.
-- :download:`HPC sites <../../../examples/tutorials/02_sites/02_hpc_sites.ipynb>`
+- :download:`HPC sites <../../../tutorials/02_sites/02_hpc_sites.ipynb>`
   for :term:`SSH`/:term:`SLURM` execution.
-- :download:`Local site <../../../examples/tutorials/02_sites/03_local_site.ipynb>`
+- :download:`Local site <../../../tutorials/02_sites/03_local_site.ipynb>`
   for local :term:`Dask`-backed execution with an installed solver.
-- :download:`Saving and loading projects/jobs <../../../examples/tutorials/02_sites/04_save_load_projects_jobs.ipynb>`
+- :download:`Saving and loading projects/jobs <../../../tutorials/02_sites/04_save_load_projects_jobs.ipynb>`
   for reopening saved projects, simulations, jobs, and results.
 
 Project Layout
