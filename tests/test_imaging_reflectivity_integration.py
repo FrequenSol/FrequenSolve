@@ -107,10 +107,11 @@ def _simulation(project: Project, name: str, vp_lower: float):
     return simulation
 
 
-def test_joint_reflectivity_linearizes_against_sauce(tmp_path):
+@pytest.mark.parametrize("threads", [1, 16])
+def test_joint_reflectivity_linearizes_against_sauce(tmp_path, threads):
     from frequensolve.orchestrator.sites.local import LocalSite
 
-    site = LocalSite(solver=_executable(), n_workers=1)
+    site = LocalSite(solver=_executable(), n_workers=1, threads_per_worker=threads)
     project = Project(name="imaging", path=tmp_path / "project", load_if_exists=False)
     truth = _simulation(project, "truth", TRUTH_VP)
     initial = _simulation(project, "initial", START_VP)

@@ -1299,9 +1299,8 @@ class DataVector:
     ) -> Path:
         """Write this vector as an ``fs-objective-vector-3`` manifest and shard.
 
-        Every row of every term is written into one shard
-        (``<stem>_rank_0.h5``); the manifest still declares ``n_ranks`` so a
-        multi-rank Sauce partition can consume it after redistribution.
+        Rows are partitioned uniquely across ``n_ranks`` shards, including empty
+        shards. Sauce redistributes them to the saved mesh owners.
 
         Args:
             path: Manifest JSON path.
@@ -1331,30 +1330,39 @@ class DataVector:
 
         manifest_path = Path(path)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        shard = self.shard_path(manifest_path, 0)
-        with h5py.File(shard, "w") as h5:
-            for index, layout in enumerate(layouts):
-                if layout.indices is None:
-                    raise ValueError(
-                        f"term {layout.id!r} has no data-space indices; build it "
-                        "from DataSpace.term_layout"
-                    )
-                if not layout.complete:
-                    raise ValueError(
-                        f"term {layout.id!r} does not cover all "
-                        f"{layout.n_global_rows} rows"
-                    )
-                values = self.values[layout.indices]
-                group = h5.create_group(f"/terms/{index}")
-                group.create_dataset("row_ids", data=layout.row_ids.astype(np.int32))
-                group.create_dataset(
-                    "coordinate_keys",
-                    data=layout.coordinate_keys.astype(np.int32),
+        if isinstance(n_ranks, bool) or int(n_ranks) != n_ranks or n_ranks < 1:
+            raise ValueError("n_ranks must be a positive integer")
+        for layout in layouts:
+            if layout.indices is None or not layout.complete:
+                raise ValueError(
+                    f"term {layout.id!r} needs complete data-space indices"
                 )
-                packed = np.empty((values.size, 2), dtype=np.float64)
-                packed[:, 0] = np.real(values)
-                packed[:, 1] = np.imag(values)
-                group.create_dataset("values", data=packed)
+        shards = []
+        for rank in range(int(n_ranks)):
+            shard = self.shard_path(manifest_path, rank)
+            with h5py.File(shard, "w") as h5:
+                for index, layout in enumerate(layouts):
+                    assert (
+                        layout.indices is not None
+                    )  # Validated before opening shards.
+                    # Sauce routes these unique rows to the saved mesh owners.
+                    selection = slice(rank, layout.n_global_rows, int(n_ranks))
+                    values = self.values[layout.indices[selection]]
+                    group = h5.create_group(f"/terms/{index}")
+                    group.create_dataset(
+                        "row_ids", data=layout.row_ids[selection].astype(np.int32)
+                    )
+                    group.create_dataset(
+                        "coordinate_keys",
+                        data=layout.coordinate_keys[selection].astype(np.int32),
+                    )
+                    group.create_dataset(
+                        "values",
+                        data=np.column_stack((values.real, values.imag)).astype(
+                            np.float64
+                        ),
+                    )
+            shards.append({"file": str(shard.resolve()), "sha256": file_sha256(shard)})
 
         manifest: Dict[str, Any] = {
             "schema": _OBJECTIVE_VECTOR_SCHEMA,
@@ -1363,7 +1371,7 @@ class DataVector:
                 "n_ranks": int(n_ranks),
                 "compatibility": "same_mesh_partition",
             },
-            "shards": [{"file": str(shard.resolve()), "sha256": file_sha256(shard)}],
+            "shards": shards,
             "terms": [layout.manifest_entry() for layout in layouts],
         }
         manifest["manifest_fingerprint"] = canonical_json_sha256(manifest)

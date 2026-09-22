@@ -766,11 +766,22 @@ class RunHandle:
 
     def _make_result(self, status: JobStatus) -> RunResult:
         fetch_logs = getattr(self.site, "fetch_logs", None)
+        summary = status.raw.get("task_summary", {})
+        failed_tasks = (
+            _int_count(summary.get("failed")) if isinstance(summary, Mapping) else 0
+        )
+        # A failed task may commit diagnostics without any receiver output.
+        # Preserve its result even when the site's failure tolerance allows it.
+        trace_manifest = (
+            getattr(self.job, "trace_manifest", None)
+            if status.is_successful and not failed_tasks
+            else None
+        )
         return RunResult(
             job=self.job,
             status=status,
             site=self.site,
-            trace_manifest=getattr(self.job, "trace_manifest", None),
+            trace_manifest=trace_manifest,
             logs_path=(
                 None
                 if callable(fetch_logs)

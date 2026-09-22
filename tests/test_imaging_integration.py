@@ -147,6 +147,10 @@ def test_imaging_problem_linearizes_against_sauce(tmp_path):
     assert lin.space.size == int(lin.support["vp"].sum())
 
     # <J dv, r>_Re == <dv, J^H r> through Sauce's jvp / vjp
+    objective_gradient = lin.vjp(lin.objective_residual()).values
+    np.testing.assert_allclose(
+        objective_gradient, lin.gradient.values, rtol=2e-3, atol=1e-6
+    )
     report = lin.jacobian.dot_test(seed=1, tolerance=1.0e-3)
     assert report["passed"], report
     assert report["relative_error"] < 1.0e-3
@@ -295,9 +299,17 @@ def test_source_positions_are_metres_in_sauce_and_km_in_the_simulation(tmp_path)
     )
     # the staged candidate is metres; Sauce accepts it (a km reading would
     # put the source 500 km outside the model)
-    lin = problem.linearize(values, gradient=False)
+    lin = problem.linearize(values)
     staged = ControlStateFile.read(lin.job.control_state)
     np.testing.assert_allclose(staged["source.1.position"], [510.0, 85.0])
+    assert lin.jacobian.dot_test(seed=1, tolerance=3e-3)["passed"]
+    direction = lin.space.random(4)
+    np.testing.assert_allclose(
+        lin.apply_normal(direction).values,
+        lin.vjp(lin.jvp(direction)).values,
+        rtol=3e-3,
+        atol=1e-5,
+    )
     assert np.isfinite(lin.value) and lin.value > 0.0
 
 
@@ -392,3 +404,61 @@ def test_extended_problem_solves_against_sauce(tmp_path):
     left = float(np.dot(ha.values, b.values))
     right = float(np.dot(a.values, hb.values))
     assert abs(left - right) <= 1.0e-2 * max(abs(left), abs(right)), (left, right)
+
+    # An intentionally under-iterated solve must expose the failed task, even
+    # though LocalSite's default policy tolerates a small number of failures.
+    unfinished = problem.extend(
+        Extension(
+            [Lags("vp", count=5, origin=-20 * u.ms, spacing=10 * u.ms)],
+            damping=0.1,
+            lag_penalty=1.0,
+            lag_scale=20 * u.ms,
+            tolerance=1.0e-5,
+            max_iterations=1,
+        )
+    )
+    with pytest.raises(RuntimeError, match="has failed task"):
+        unfinished.solve()
+
+
+def test_named_terms_and_normalized_residual_on_two_mpi_ranks(tmp_path):
+    """Saved term rows feed VJP under the baseline MPI partition."""
+    import shutil
+
+    from frequensolve.imaging import Misfit, Normalization, ObjectiveTerm
+    from frequensolve.orchestrator.sites.local import LocalSite
+
+    if shutil.which("mpirun") is None:
+        pytest.skip("MPI launcher unavailable")
+    site = LocalSite(solver=_executable(), n_workers=1)
+    project = Project(name="terms", path=tmp_path / "project", load_if_exists=False)
+    truth = _simulation(project, "truth", TRUTH_VP)
+    initial = _simulation(project, "initial", START_VP)
+    observed = FrequencyDomainJob("observed", truth, [FREQUENCY])
+    assert site.run(observed, check=True).successful
+    problem = ImagingProblem(
+        initial,
+        controls=DepthProfile("vp", "layer_2", count=4),
+        observed=ObservedData(observed),
+        site=site,
+        name="terms",
+        submit_options={"procs_per_job": 2},
+        misfit=Misfit.terms(
+            ObjectiveTerm("surface", id="amplitude", weight=0.3),
+            ObjectiveTerm(
+                "surface",
+                id="energy",
+                weight=2.0,
+                normalization=Normalization(reduction="sum"),
+            ),
+        ),
+    )
+    lin = problem.linearize()
+    assert lin.data_space.groups == ("amplitude", "energy")
+    assert lin.objective_states[0].n_ranks == 2
+    residual = lin.objective_residual()
+    np.testing.assert_allclose(0.5 * residual.dot(residual), lin.value, rtol=1e-5)
+    np.testing.assert_allclose(
+        lin.vjp(residual).values, lin.gradient.values, rtol=3e-3, atol=1e-6
+    )
+    assert lin.jacobian.dot_test(seed=3, tolerance=3e-3)["passed"]

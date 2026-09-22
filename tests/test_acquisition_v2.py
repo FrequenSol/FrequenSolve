@@ -24,6 +24,7 @@ from frequensolve import (
 from frequensolve.seismic.receivers import ReceiverDevice, ReceiverNode
 from frequensolve.seismic.sparse_survey import (
     SparseSurvey,
+    SparseTrace,
     SparseTraceTable,
 )
 from frequensolve.units import ureg
@@ -1619,3 +1620,20 @@ def test_external_physical_source_names_are_validated(tmp_path, names):
     )
     with pytest.raises(ValueError):
         geometry.point_names()
+
+
+@pytest.mark.parametrize("points", [(1, 1), (2, 5)])
+def test_sparse_trace_round_trip_consumes_derived_point_count(points):
+    trace = SparseTrace(
+        source=1,
+        receiver=2,
+        component=1,
+        trace_id=1,
+        points=points,
+        extra={"vendor_metadata": "retained"},
+    )
+    payload = trace.to_fs()
+    restored = SparseTrace.from_fs(payload)
+    assert restored.to_fs() == payload
+    assert "n_points" not in restored.extra
+    assert payload["n_points"] == points[1] - points[0] + 1

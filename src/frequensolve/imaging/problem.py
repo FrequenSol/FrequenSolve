@@ -90,6 +90,11 @@ from frequensolve.imaging._backend import (
     task_inputs,
     total_value,
 )
+from frequensolve.imaging._objective import (
+    ObjectiveState,
+    objective_residual,
+    objective_space,
+)
 from frequensolve.imaging.controls import (
     BoundControlSpace,
     ControlSpace,
@@ -1491,7 +1496,11 @@ class ImagingProblem:
         cached = shared.linearizations.get(key)
         if cached is not None and (cached.gradient is not None or not gradient):
             shared.cache.get(key)
-            return cached
+            self._adopt_masks(cached.support_masks)
+            if self.space.equivalent(cached.space):
+                return cached
+            # A view may have inherited a different fixed support mask.
+            # Recompute on its effective space below.
         discover = shared.baseline is None
         if discover and not self._is_authored(state):
             # A point away from the authored one needs the complete registry
@@ -1505,7 +1514,9 @@ class ImagingProblem:
                 cached = shared.linearizations.get(key)
                 if cached is not None and (cached.gradient is not None or not gradient):
                     shared.cache.get(key)
-                    return cached
+                    self._adopt_masks(cached.support_masks)
+                    if self.space.equivalent(cached.space):
+                        return cached
         space = self.space
         self._sync_simulation(state)
         stage, control_state = self._stage_state(key, state)
@@ -2495,6 +2506,7 @@ class Linearization:
         ]
         if len(self.task_factors) != len(self.frequencies):
             raise ValueError("task_factors needs one table per frequency task")
+        self._objective_states: Optional[List[ObjectiveState]] = None
         self._data_space: Optional[DataSpace] = None
         self._jacobian: Optional[Jacobian] = None
         self._normal: Optional[Normal] = None
@@ -2516,10 +2528,23 @@ class Linearization:
         return self.space.support
 
     @property
+    def objective_states(self) -> List[ObjectiveState]:
+        if self._objective_states is None:
+            self._objective_states = [
+                ObjectiveState(self.job.state_file(task))
+                for task in range(1, len(self.frequencies) + 1)
+            ]
+        return self._objective_states
+
+    def objective_residual(self) -> DataVector:
+        """Return the frozen, weighted comparison residual used by the Jacobian."""
+        return objective_residual(self.data_space, self.objective_states)
+
+    @property
     def data_space(self) -> DataSpace:
         if self._data_space is None:
-            self._data_space = DataSpace.from_simulation(
-                self.problem.simulation, frequencies=self.frequencies
+            self._data_space = objective_space(
+                self.problem.simulation, self.frequencies, self.objective_states
             )
         return self._data_space
 
@@ -2625,7 +2650,7 @@ class Linearization:
                 term_layout=self.data_space.term_layouts(
                     frequency=self.frequencies[task - 1]
                 ),
-                n_ranks=1,
+                n_ranks=self.objective_states[task - 1].n_ranks,
             )
         return stem
 
@@ -2662,6 +2687,7 @@ class Linearization:
             action,
             frequencies=self.frequencies,
             state=self._state_input(),
+            control_state=self.job.control_state,
             **options,
         )
 

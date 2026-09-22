@@ -378,8 +378,14 @@ A :class:`~frequensolve.imaging.DataVector` is a complex vector over the
 :class:`~frequensolve.imaging.DataSpace` of the acquisition, ordered by
 receiver group and then ``(frequency, source, component, receiver)`` with the
 receiver varying fastest. ``problem.forward(v)``, ``problem.residual(v)``,
-``J @ dv`` and ``problem.observed_vector()`` return one;
+and ``problem.observed_vector()`` return one;
 ``vector.to_dataset()`` renders it as an xarray dataset by receiver group.
+Operator vectors (``J @ dv`` and VJP inputs) instead use ``lin.data_space``,
+whose segments are objective term IDs and whose coordinates come from the
+saved state. Dense terms preserve source/component/receiver axes; sparse or
+projected terms expose an objective-row axis. Multiple terms can share one
+receiver group. ``lin.objective_residual()`` returns the frozen residual in
+these same weighted comparison coordinates.
 
 The problem, linearizations and operators
 -----------------------------------------
@@ -762,11 +768,13 @@ misfit with respect to the active blocks (negate it for the classic
 once and solves :math:`\min_{dm}\ \tfrac12\lVert J\,dm + r\rVert_W^2 +
 \tfrac12\,\mathrm{damping}\,\lVert dm\rVert^2 + P(dm)` with everything frozen
 at the linearization point, either by LSQR on the real-stacked Jacobian
-(``method="lsqr"``, needs the data residual and therefore one forward
-solve) or by conjugate gradients on the Gauss-Newton normal equations
+(``method="lsqr"``, uses ``lin.objective_residual()`` from the saved Sauce
+state) or by conjugate gradients on the Gauss-Newton normal equations
 (``method="cg"``, uses ``lin.normal`` and ``lin.gradient`` only). It is
 typically run over :class:`~frequensolve.imaging.GridParameters` or
-reflectivity blocks.
+reflectivity blocks. Older saved states without an objective residual must
+be regenerated before LSQR; CG can still use them. Quadratic penalties keep
+their reference model in both solvers.
 
 :func:`~frequensolve.imaging.sensitivity_kernel` images on a Cartesian grid
 (``Imaging.grid``) and returns an :class:`~frequensolve.imaging.ImageSet` with

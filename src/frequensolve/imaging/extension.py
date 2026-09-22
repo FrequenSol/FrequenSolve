@@ -74,6 +74,11 @@ from frequensolve.imaging._backend import (
     task_inputs,
     total_value,
 )
+from frequensolve.imaging._objective import (
+    ObjectiveState,
+    objective_residual,
+    objective_space,
+)
 from frequensolve.imaging.controls import (
     ControlSpace,
     ControlState,
@@ -1122,6 +1127,7 @@ class ExtensionLinearization:
         reports: Sequence[ObjectiveReport],
         manifests: Sequence[ExtensionManifest],
         covector: ExtensionVector,
+        support_masks: Mapping[str, np.ndarray],
     ) -> None:
         self.problem = problem
         self.space = space
@@ -1153,7 +1159,11 @@ class ExtensionLinearization:
         self.extension_fingerprints: List[Tuple[str, str]] = [
             (manifest.fingerprint, manifest.baseline) for manifest in self.manifests
         ]
+        self.support_masks = {
+            name: np.array(mask, dtype=bool) for name, mask in support_masks.items()
+        }
         self.covector = covector
+        self._objective_states: Optional[List[ObjectiveState]] = None
         self._data_space: Optional[DataSpace] = None
         self._solutions: Optional[
             List[Tuple[ExtensionVector, ExtensionSolveReport]]
@@ -1178,10 +1188,23 @@ class ExtensionLinearization:
         return self.problem.problem
 
     @property
+    def objective_states(self) -> List[ObjectiveState]:
+        if self._objective_states is None:
+            self._objective_states = [
+                ObjectiveState(self.job.state_file(task))
+                for task in range(1, len(self.frequencies) + 1)
+            ]
+        return self._objective_states
+
+    def objective_residual(self) -> DataVector:
+        """Return the frozen, weighted comparison residual used by the Jacobian."""
+        return objective_residual(self.data_space, self.objective_states)
+
+    @property
     def data_space(self) -> DataSpace:
         if self._data_space is None:
-            self._data_space = DataSpace.from_simulation(
-                self.view.simulation, frequencies=self.frequencies
+            self._data_space = objective_space(
+                self.view.simulation, self.frequencies, self.objective_states
             )
         return self._data_space
 
@@ -1368,7 +1391,12 @@ class ExtensionLinearization:
             else self.job.state_file()
         )
         return view._operator_job(
-            self.space, action, frequencies=self.frequencies, state=state, **options
+            self.space,
+            action,
+            frequencies=self.frequencies,
+            state=state,
+            control_state=self.job.control_state,
+            **options,
         )
 
     def _tap_stem(self, taps: ExtensionVector, directory: Path) -> Path:
@@ -1457,7 +1485,7 @@ class ExtensionLinearization:
                     term_layout=self.data_space.term_layouts(
                         frequency=self.frequencies[task - 1]
                     ),
-                    n_ranks=1,
+                    n_ranks=self.objective_states[task - 1].n_ranks,
                 )
             job = self._action_job(
                 "vjp",
@@ -1812,7 +1840,9 @@ class ExtendedProblem:
         cached = self._cache.get(key)
         if cached is not None:
             shared.cache.get(key)
-            return cached
+            problem._adopt_masks(cached.support_masks)
+            if problem.space.equivalent(cached.space):
+                return cached
         discover = shared.baseline is None
         if discover and not problem._is_authored(state):
             # A non-authored point needs the complete registry baseline for
@@ -1824,7 +1854,9 @@ class ExtendedProblem:
                 key = self._fingerprint(state)
                 cached = self._cache.get(key)
                 if cached is not None:
-                    return cached
+                    problem._adopt_masks(cached.support_masks)
+                    if problem.space.equivalent(cached.space):
+                        return cached
         problem._sync_simulation(state)
         stage, control_state = problem._stage_state(key, state)
         job = self._linearize_job(control_state, discover=discover)
@@ -1890,6 +1922,7 @@ class ExtendedProblem:
             reports=reports,
             manifests=manifests,
             covector=covector,
+            support_masks=masks,
         )
         evicted = shared.cache.put(entry)
         shared.forget(evicted)

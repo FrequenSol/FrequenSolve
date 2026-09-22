@@ -286,6 +286,8 @@ class SparseTrace(ExtraFieldsMixin):
         """Deserialize a sparse trace row."""
 
         payload = copy.deepcopy(dict(data))
+        # Derived from the point range on export, never an extension field.
+        payload.pop("n_points", None)
         if "recv_pos_id" in payload and "receiver_position_id" not in payload:
             payload["receiver_position_id"] = payload.pop("recv_pos_id")
         return cls(**payload)

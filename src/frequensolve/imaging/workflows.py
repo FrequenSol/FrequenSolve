@@ -1975,11 +1975,11 @@ class LSRTM:
         self, lin: Linearization, space: ControlSpace, bound: Any
     ) -> ControlVector:
         try:
-            residual = self.problem.residual(lin.state)
+            residual = lin.objective_residual()
         except NotImplementedError as exc:
             raise NotImplementedError(
-                "LSRTM with method='lsqr' needs the data-space residual "
-                "(problem.residual); this problem cannot supply it, use "
+                "LSRTM with method='lsqr' needs the saved objective-space residual; "
+                "regenerate the linearization with a current Sauce build or use "
                 "method='cg' which works from lin.normal and lin.gradient"
             ) from exc
         penalty_operator = None
@@ -1998,7 +1998,11 @@ class LSRTM:
         b = np.concatenate(
             [
                 -operator.pack(residual.values),
-                np.zeros(operator.shape[0] - operator.data_rows, dtype=np.float64),
+                (
+                    np.zeros(0, dtype=np.float64)
+                    if bound is None
+                    else -np.asarray(bound.residual(space.zeros()))
+                ),
             ]
         )
         solution, istop, itn, r1norm, r2norm, *_ = scipy_lsqr(
@@ -2032,10 +2036,9 @@ class LSRTM:
 def rtm(problem: ImagingProblem, v: Any = None) -> ControlVector:
     """Return the misfit gradient (RTM image on the control space) at ``v``.
 
-    Equals ``problem.gradient(v)``: the real covector ``Re J^H W (F(v) - d)``
-    (smoothed when the problem smooths gradients).  Sauce's convention is
-    ``simulated - observed``; negate the result for the classic RTM image in
-    the ``observed - simulated`` convention.
+    Equals ``problem.gradient(v)``: the objective's real control covector
+    (smoothed when the problem smooths gradients). The Jacobian and its frozen
+    comparison residual carry Sauce's objective-space sign and normalization.
     """
 
     lin = problem.linearize(v, gradient=True)

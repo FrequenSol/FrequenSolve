@@ -390,3 +390,42 @@ def test_failed_run_result_traces_raise_before_fetching_outputs():
         result.traces(upscale=4)
 
     assert site.fetch_traces_called is False
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "timeout", "completed"])
+def test_result_preserves_failures_without_requiring_trace_outputs(state):
+    class FailedOutputJob(DummyJob):
+        @property
+        def trace_manifest(self):
+            pytest.fail("Failed jobs must not require complete trace artifacts")
+
+    run = failed_run()
+    run.job = FailedOutputJob()
+    status = JobStatus(
+        state=state,
+        return_code=0 if state == "completed" else 1,
+        message="Extension inner solve did not reach stationarity",
+        raw={"task_summary": {"failed": 1}},
+    )
+    run._status_fn = lambda _: status
+    result = run.wait(check=False)
+    assert result.status is status
+    assert result.trace_manifest is None
+    if state != "completed":
+        with pytest.raises(RunFailedError, match="did not reach stationarity") as exc:
+            result.raise_for_status()
+        assert exc.value.result is result
+
+
+def test_successful_result_still_validates_trace_manifest():
+    from frequensolve.simulation.artifact_contract import ArtifactContractError
+
+    class BrokenOutputJob(DummyJob):
+        @property
+        def trace_manifest(self):
+            raise ArtifactContractError("missing committed trace artifact")
+
+    run = successful_run()
+    run.job = BrokenOutputJob()
+    with pytest.raises(ArtifactContractError, match="missing committed trace artifact"):
+        run.wait()

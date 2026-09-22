@@ -500,3 +500,25 @@ def test_objective_vector_reader_requires_matching_layout(tmp_path, space):
         vector.write_objective_vector(
             tmp_path / "bad.json", state_fingerprint="abc", term_layout=layout
         )
+
+
+@pytest.mark.parametrize("n_ranks", [2, 31])
+def test_objective_vector_writer_covers_every_rank_including_empty(
+    tmp_path, space, n_ranks
+):
+    vector = space.random(4)
+    path = vector.write_objective_vector(
+        tmp_path / "dual.json",
+        state_fingerprint=STATE,
+        term_layout=space.term_layouts(frequency=space.frequencies[0]),
+        n_ranks=n_ranks,
+    )
+    manifest = DataVector.read_objective_manifest(path)
+    assert len(manifest["shards"]) == manifest["partition"]["n_ranks"] == n_ranks
+    restored = DataVector.read_objective_vector(
+        path, space, frequency=space.frequencies[0]
+    )
+    for layout in space.term_layouts(frequency=space.frequencies[0]):
+        np.testing.assert_array_equal(
+            restored.values[layout.indices], vector.values[layout.indices]
+        )

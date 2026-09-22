@@ -1597,6 +1597,43 @@ class FakeImagingSite(BaseSite):
             "sizes": dict(lin.sizes),
             "m": lin.m.tolist(),
         }
+        from frequensolve.imaging.data import file_sha256
+
+        payload["partition"] = {
+            "n_ranks": self.n_ranks,
+            "compatibility": "same_mesh_partition",
+        }
+        payload["shards"] = []
+        residual = lin.J @ lin.m - lin.d
+        for rank in range(self.n_ranks):
+            shard = path.with_name(f"{path.stem}_rank_{rank}.json")
+            cache = shard.with_suffix(".h5")
+            terms = []
+            with h5py.File(cache, "w") as h5:
+                for index, layout in enumerate(
+                    lin.space.term_layouts(frequency=frequency)
+                ):
+                    select = slice(rank, layout.n_global_rows, self.n_ranks)
+                    group = h5.create_group(f"terms/{index}")
+                    group["row_ids"] = layout.row_ids[select]
+                    group["coordinate_keys"] = layout.coordinate_keys[select]
+                    group["n_global_rows"] = layout.n_global_rows
+                    values = residual[layout.indices[select]]
+                    group["objective_residual"] = np.column_stack(
+                        (values.real, values.imag)
+                    )
+                    terms.append(
+                        {
+                            "id": layout.id,
+                            "receiver_group": layout.id,
+                            "cache": {"file": str(cache), "group": f"/terms/{index}"},
+                            "runtime": {},
+                        }
+                    )
+            for term in terms:
+                term["runtime"]["cache_fingerprint"] = file_sha256(cache)
+            shard.write_text(json.dumps({"terms": terms}))
+            payload["shards"].append({"file": str(shard), "sha256": file_sha256(shard)})
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
     def _load_state(

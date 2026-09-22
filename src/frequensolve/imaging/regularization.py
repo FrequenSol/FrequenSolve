@@ -666,6 +666,11 @@ class BoundPenalty:
 
         return None
 
+    def residual(self, v: Any) -> np.ndarray:
+        """Return the affine least-squares residual, when an operator exists."""
+
+        raise NotImplementedError("penalty does not expose a least-squares residual")
+
     def __call__(self, v: Any) -> float:
         return self.value(v)
 
@@ -696,8 +701,11 @@ class _BoundQuadraticForm(BoundPenalty):
         values = self._values(v)
         return values if self.reference is None else values - self.reference
 
+    def residual(self, v: Any) -> np.ndarray:
+        return np.asarray(self.matrix @ self._shift(v))
+
     def value(self, v: Any) -> float:
-        residual = self.matrix @ self._shift(v)
+        residual = self.residual(v)
         return 0.5 * float(np.dot(residual, residual))
 
     def gradient(self, v: Any) -> ControlVector:
@@ -1059,6 +1067,9 @@ class Sum(Penalty):
 
 
 class _BoundSum(BoundPenalty):
+    def residual(self, v: Any) -> np.ndarray:
+        return np.concatenate([term.residual(v) for term in self.terms])
+
     def __init__(
         self, penalty: Penalty, space: ControlSpace, terms: Sequence[BoundPenalty]
     ) -> None:
@@ -1118,6 +1129,9 @@ class Scaled(Penalty):
 
 
 class _BoundScaled(BoundPenalty):
+    def residual(self, v: Any) -> np.ndarray:
+        return math.sqrt(self.factor) * self.inner.residual(v)
+
     def __init__(
         self, penalty: Penalty, space: ControlSpace, inner: BoundPenalty, factor: float
     ) -> None:
