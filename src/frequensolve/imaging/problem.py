@@ -25,12 +25,20 @@ Conventions
   exact so adjoint identities hold.
 - Support masks (§4.1.1) are taken from the first ``linearize`` of a problem
   view and held fixed for that view; a view created by :meth:`restrict`
-  inherits the masks its parent already adopted.
+  inherits the masks its parent already adopted unless it asks for
+  ``support="refresh"`` (stage transitions).
+- A view may override the misfit (or just its loss), the smoothing, the
+  support threshold and the per-frequency objective weights of the shared
+  problem (:meth:`restrict`); overrides are part of the linearization
+  fingerprint, so stage views never share cache entries with the base
+  problem when they differ.  Frequency weights scale the objective side
+  (value, gradient, normal operator); the Jacobian ``J`` stays unweighted.
 """
 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import itertools
 import math
@@ -64,6 +72,7 @@ from frequensolve.imaging._backend import (
     LinearizationEntry,
     content_fingerprint,
     fingerprint,
+    frequency_weights,
     read_manifest,
     read_report,
     read_smoothed_covector,
@@ -87,7 +96,7 @@ from frequensolve.imaging.data import (
     TraceStoreRef,
 )
 from frequensolve.imaging.jobs import FWIOperatorJob
-from frequensolve.imaging.misfit import Misfit
+from frequensolve.imaging.misfit import Loss, Misfit
 from frequensolve.imaging.operators import Jacobian, Normal
 from frequensolve.inversion.validation import gradient_taylor_test, real_adjoint_test
 from frequensolve.orchestrator.sites.base import BaseSite
@@ -95,6 +104,16 @@ from frequensolve.orchestrator.sites.base import BaseSite
 __all__ = ["ImagingProblem", "Linearization"]
 
 _VectorLike = Union[ControlVector, np.ndarray, Sequence[float]]
+
+
+class _Unset:
+    """Sentinel type for keyword arguments where ``None`` is a valid value."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unset>"
+
+
+_UNSET: Any = _Unset()
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +186,32 @@ def _observed_descriptor(group: ObservedGroup) -> Dict[str, Any]:
     if hashes:
         payload["content"] = hashes
     return payload
+
+
+def _misfit_with_loss(misfit: Misfit, loss: Any) -> Misfit:
+    """Return ``misfit`` with every objective term's loss replaced by ``loss``."""
+
+    loss = Loss.from_value(loss)
+    explicit = misfit.explicit_terms
+    if explicit is not None:
+        terms = [dataclasses.replace(term, loss=loss) for term in explicit]
+        return Misfit(
+            terms=terms,
+            preprocess=misfit.preprocess,
+            projection=misfit.projection,
+            group_preprocess=misfit.group_preprocess,
+            include_default_preprocess=misfit.include_default_preprocess,
+        )
+    return Misfit(
+        loss=loss,
+        comparison=misfit.comparison,
+        normalization=misfit.normalization,
+        weights=misfit.weights,
+        preprocess=misfit.preprocess,
+        projection=misfit.projection,
+        group_preprocess=misfit.group_preprocess,
+        include_default_preprocess=misfit.include_default_preprocess,
+    )
 
 
 class _MisfitPayload:
@@ -400,6 +445,10 @@ class ImagingProblem:
         self._masks: Dict[str, np.ndarray] = {}
         self._masks_adopted = False
         self._data_space: Optional[DataSpace] = None
+        # View-level overrides of shared settings (``restrict``); absent keys
+        # fall through to ``_shared``.
+        self._overrides: Dict[str, Any] = {}
+        self._misfit_payload_cache: Optional[_MisfitPayload] = None
         report = self.capabilities()
         if report["errors"]:
             raise ValueError(
@@ -447,15 +496,78 @@ class ImagingProblem:
 
     @property
     def misfit(self) -> Misfit:
-        return self._shared.misfit
+        """Return this view's misfit (a :meth:`restrict` override or the shared one)."""
+
+        misfit = self._overrides.get("misfit")
+        return self._shared.misfit if misfit is None else misfit
+
+    @property
+    def _misfit_payload(self) -> _MisfitPayload:
+        if "misfit" not in self._overrides:
+            return self._shared.misfit_payload
+        if self._misfit_payload_cache is None:
+            self._misfit_payload_cache = _MisfitPayload(
+                self.misfit, self._shared.groups
+            )
+        return self._misfit_payload_cache
 
     @property
     def smoothing(self) -> Optional[SmoothingConfig]:
+        """Return this view's gradient smoothing (override or shared)."""
+
+        if "smoothing" in self._overrides:
+            return self._overrides["smoothing"]
         return self._shared.smoothing
 
     @property
     def min_support(self) -> Optional[float]:
+        """Return this view's relative support threshold (override or shared)."""
+
+        if "min_support" in self._overrides:
+            return self._overrides["min_support"]
         return self._shared.min_support
+
+    @property
+    def weights(self) -> Optional[Tuple[float, ...]]:
+        """Return this view's per-frequency objective weights (``None`` = unit)."""
+
+        return self._overrides.get("weights")
+
+    def identity(self) -> Dict[str, Any]:
+        """Return the state-independent identity of this view.
+
+        The mapping combines the shared problem identity (simulation, misfit,
+        observed data, smoothing, support threshold) with this view's active
+        blocks, frequencies and overrides.  Workflows fingerprint it to reject
+        checkpoints that belong to a different problem.
+        """
+
+        return {
+            **self._shared.identity(),
+            "active": list(self.space.blocks),
+            "frequencies": list(self._frequencies),
+            **self._override_identity(),
+        }
+
+    def _override_identity(self) -> Dict[str, Any]:
+        """Return the fingerprint contribution of this view's overrides."""
+
+        parts: Dict[str, Any] = {}
+        if "misfit" in self._overrides:
+            try:
+                parts["misfit_override"] = self._misfit_payload.to_fs()
+            except ValueError:  # large trace weights need an export context
+                parts["misfit_override"] = repr(self.misfit)
+        if "smoothing" in self._overrides:
+            smoothing = self._overrides["smoothing"]
+            parts["smoothing_override"] = (
+                None if smoothing is None else smoothing.to_control_fs()
+            )
+        if "min_support" in self._overrides:
+            parts["min_support_override"] = self._overrides["min_support"]
+        if "weights" in self._overrides:
+            parts["weights_override"] = list(self._overrides["weights"])
+        return parts
 
     @property
     def frequencies(self) -> List[Any]:
@@ -477,7 +589,7 @@ class ImagingProblem:
         if self._active is not None:
             space = space.restrict(list(self._active))
         if self._masks:
-            space = space.with_support(self._masks, self._shared.min_support)
+            space = space.with_support(self._masks, self.min_support)
         return space
 
     @property
@@ -510,6 +622,13 @@ class ImagingProblem:
         self,
         frequencies: Optional[Iterable[Any]] = None,
         active: Optional[Union[str, Sequence[str]]] = None,
+        *,
+        misfit: Optional[Misfit] = None,
+        loss: Any = None,
+        smoothing: Any = _UNSET,
+        min_support: Any = _UNSET,
+        weights: Any = _UNSET,
+        support: str = "inherit",
     ) -> "ImagingProblem":
         """Return a stage view sharing state, cache, backend and simulation.
 
@@ -518,19 +637,58 @@ class ImagingProblem:
                 ``numpy.isclose``).
             active: Block keys, addresses or qualified names selecting the
                 active subspace, in order.
+            misfit: Replace the misfit for this view (stage-level objective).
+            loss: Keep this view's misfit but swap the loss of every term
+                (``"huber"``, :class:`~frequensolve.imaging.misfit.Loss`, ...).
+                Cannot be combined with ``misfit``.
+            smoothing: Replace the gradient smoothing for this view
+                (``None`` switches it off; omit to inherit).
+            min_support: Replace the relative support threshold for this
+                view (``None`` restores Sauce's default; omit to inherit).
+            weights: One nonnegative objective weight per frequency of the
+                new view (``None`` restores unit weights; omit to inherit,
+                in which case an inherited table is sliced with
+                ``frequencies``).  Weights scale value, gradient and normal
+                operator; ``J`` stays unweighted.
+            support: ``"inherit"`` reuses the support masks this view already
+                adopted; ``"refresh"`` makes the new view adopt masks from its
+                own first ``linearize`` (stage transitions, spec §4.1.1).
         """
 
+        if support not in {"inherit", "refresh"}:
+            raise ValueError("support must be 'inherit' or 'refresh'")
+        if misfit is not None and loss is not None:
+            raise ValueError("pass either misfit or loss, not both")
         view = object.__new__(ImagingProblem)
         view._shared = self._shared
         view._data_space = None
+        view._overrides = dict(self._overrides)
+        view._misfit_payload_cache = None
+        if misfit is not None:
+            if not isinstance(misfit, Misfit):
+                raise TypeError("misfit must be a Misfit")
+            view._overrides["misfit"] = misfit
+        elif loss is not None:
+            view._overrides["misfit"] = _misfit_with_loss(self.misfit, loss)
+        if smoothing is not _UNSET:
+            view._overrides["smoothing"] = SmoothingConfig.from_value(smoothing)
+        if min_support is not _UNSET:
+            if min_support is not None:
+                threshold = float(min_support)
+                if not math.isfinite(threshold) or threshold < 0.0:
+                    raise ValueError("min_support must be finite and non-negative")
+                min_support = threshold
+            view._overrides["min_support"] = min_support
         if active is None:
             view._active = self._active
         else:
             view._active = tuple(self.space.restrict(active).blocks)
+        inherited = self._overrides.get("weights")
         if frequencies is None:
             view._frequencies = self._frequencies
         else:
             selected: List[Any] = []
+            positions: List[int] = []
             available = np.asarray(self._frequencies, dtype=complex)
             for value in _normalize_frequencies(frequencies):
                 matches = np.flatnonzero(np.isclose(available, complex(value)))
@@ -542,11 +700,44 @@ class ImagingProblem:
                 if canonical in selected:
                     raise ValueError(f"frequency {value!r} selected twice")
                 selected.append(canonical)
+                positions.append(int(matches[0]))
             view._frequencies = tuple(selected)
+            if inherited is not None:
+                view._overrides["weights"] = tuple(inherited[i] for i in positions)
+        if weights is not _UNSET:
+            if weights is None:
+                view._overrides.pop("weights", None)
+            else:
+                table = np.asarray(weights, dtype=np.float64).reshape(-1)
+                if table.size != len(view._frequencies):
+                    raise ValueError(
+                        f"expected {len(view._frequencies)} frequency weights, "
+                        f"received {table.size}"
+                    )
+                if not np.all(np.isfinite(table)) or np.any(table < 0.0):
+                    raise ValueError("frequency weights must be finite and nonnegative")
+                view._overrides["weights"] = tuple(float(w) for w in table)
         names = set(view._active or self._shared.space.blocks)
-        view._masks = {n: m for n, m in self._masks.items() if n in names}
-        view._masks_adopted = self._masks_adopted
+        if support == "refresh":
+            view._masks = {}
+            view._masks_adopted = False
+        else:
+            view._masks = {n: m for n, m in self._masks.items() if n in names}
+            view._masks_adopted = self._masks_adopted
+        report = view.capabilities()
+        if report["errors"]:
+            raise ValueError(
+                "restricted imaging problem is not supported by Sauce: "
+                + "; ".join(report["errors"])
+            )
         return view
+
+    def with_misfit(
+        self, misfit: Optional[Misfit] = None, *, loss: Any = None
+    ) -> "ImagingProblem":
+        """Return this view with another misfit (or loss); see :meth:`restrict`."""
+
+        return self.restrict(misfit=misfit, loss=loss)
 
     # -- states and vectors ---------------------------------------------------
 
@@ -586,9 +777,7 @@ class ImagingProblem:
 
     def _fingerprint(self, state: Optional[ControlState]) -> str:
         return fingerprint(
-            **self._shared.identity(),
-            active=list(self.space.blocks),
-            frequencies=list(self._frequencies),
+            **self.identity(),
             state=None if state is None else state.values,
         )
 
@@ -612,7 +801,7 @@ class ImagingProblem:
         gradient: bool,
     ) -> FWIOperatorJob:
         shared = self._shared
-        smoothing = shared.smoothing if gradient else None
+        smoothing = self.smoothing if gradient else None
         return FWIOperatorJob(
             shared.backend.job_name("linearize"),
             shared.simulation,
@@ -625,10 +814,16 @@ class ImagingProblem:
             control_state=control_state,
             state_output="baseline.h5",
             manifest="registry.json",
-            min_support=shared.min_support,
-            misfit=shared.misfit_payload,
+            min_support=self.min_support,
+            misfit=self._misfit_payload,
             reflectivity=self._reflectivity(space),
             source_controls=self._source_controls(space),
+            # Sauce only accepts weights on covector-carrying jobs (they drive
+            # the --smooth aggregation); value-only linearizations weight the
+            # reports on the FrequenSolve side (Linearization.frequency_weights).
+            weights=(
+                None if self.weights is None or not gradient else list(self.weights)
+            ),
             smoothing=smoothing,
             control_active=(
                 self._control_active(space) if smoothing is not None else None
@@ -700,7 +895,7 @@ class ImagingProblem:
             list(frequencies),
             action=action,
             active=list(space.blocks),
-            misfit=shared.misfit_payload,
+            misfit=self._misfit_payload,
             reflectivity=self._reflectivity(space),
             source_controls=self._source_controls(space),
             **kwargs,
@@ -713,6 +908,11 @@ class ImagingProblem:
             or authored is None
             or np.array_equal(state.values, authored.values)
         )
+
+    def is_authored(self, state: Optional[ControlState] = None) -> bool:
+        """Return whether ``state`` (default: the current one) is the authored baseline."""
+
+        return self._is_authored(self._shared.state if state is None else state)
 
     def _stage_state(
         self, key: str, state: Optional[ControlState]
@@ -1041,18 +1241,18 @@ class ImagingProblem:
         kinds = {block.kind for block in blocks}
         errors: List[str] = []
         warnings: List[str] = []
+        misfit = self.misfit
+        smoothing = self.smoothing
         comparisons = {
             term.comparison.kind
-            for term in shared.misfit.objective_terms(
-                [group.name for group in shared.groups]
-            )
+            for term in misfit.objective_terms([group.name for group in shared.groups])
         }
         if "source" in kinds and comparisons - {"waveform"}:
             errors.append(
                 "source controls require waveform comparisons "
                 f"(misfit uses {sorted(comparisons)})"
             )
-        if shared.smoothing is not None:
+        if smoothing is not None:
             if not any(b.name.startswith("model.") for b in blocks):
                 errors.append("smoothing requires at least one model.* block")
             if "grid" in kinds:
@@ -1073,7 +1273,7 @@ class ImagingProblem:
             "kinds": sorted(kinds),
             "comparisons": sorted(comparisons),
             "frequencies": self.frequencies,
-            "smoothing": None if shared.smoothing is None else shared.smoothing.kind,
+            "smoothing": None if smoothing is None else smoothing.kind,
         }
 
     def clear_cache(self) -> None:
@@ -1094,7 +1294,7 @@ class ImagingProblem:
         """Run adjoint, normal-consistency and Taylor tests at ``v``.
 
         Returns a mapping with ``adjoint`` (``<J dv, r>_Re`` versus
-        ``<dv, J^H r>``), ``normal`` (``H dv`` versus ``J^H J dv``), optionally
+        ``<dv, J^H r>``), ``normal`` (``H dv`` versus ``J^H W J dv``), optionally
         ``taylor`` (:func:`~frequensolve.inversion.validation.gradient_taylor_test`
         on ``value``/``gradient``), and ``passed``.
         """
@@ -1111,7 +1311,7 @@ class ImagingProblem:
             relative_tolerance=tolerance,
         )
         h_dv = np.asarray(lin.normal @ dv)
-        jhj_dv = np.asarray(J.H @ (J @ dv))
+        jhj_dv = np.asarray(J.H @ lin.weight_data(J @ dv))
         scale = max(float(np.linalg.norm(jhj_dv)), float(np.finfo(np.float64).tiny))
         normal_error = float(np.linalg.norm(h_dv - jhj_dv) / scale)
         normal = {"relative_error": normal_error, "passed": normal_error <= tolerance}
@@ -1185,7 +1385,8 @@ class Linearization:
         job: The ``linearize`` job.
         manifest: The ``fs-control-registry-1`` manifest.
         reports: Per-task objective reports.
-        value: Total misfit value (sum over tasks).
+        frequency_weights: One objective weight per task (unit by default).
+        value: Total misfit value (weighted sum over tasks).
         report: ``term id -> weighted value`` summed over tasks.
         gradient: Real covector on ``space`` (smoothed when the problem has a
             smoothing), or ``None`` for a value-only linearization.
@@ -1217,11 +1418,14 @@ class Linearization:
         self.registry_fingerprint: str = entry.control_registry_fingerprint
         self.manifest = manifest
         self.reports: List[ObjectiveReport] = list(reports)
-        self.value: float = total_value(self.reports)
+        self.frequency_weights: np.ndarray = frequency_weights(
+            self.job, problem.weights
+        )
+        self.value: float = total_value(self.reports, self.frequency_weights.tolist())
         merged: Dict[str, float] = {}
-        for report in self.reports:
+        for weight, report in zip(self.frequency_weights, self.reports):
             for term, weighted in report.weighted_values.items():
-                merged[term] = merged.get(term, 0.0) + weighted
+                merged[term] = merged.get(term, 0.0) + float(weight) * weighted
         self.report: Dict[str, float] = merged
         self.gradient: Optional[ControlVector] = (
             None if gradient_file is None else _vector_from_file(gradient_file, space)
@@ -1324,11 +1528,33 @@ class Linearization:
             for task, frequency in enumerate(self.frequencies, start=1)
         ]
 
-    def _reduce(self, jobs: Sequence[FWIOperatorJob]) -> ControlVector:
+    def _reduce(
+        self, jobs: Sequence[FWIOperatorJob], *, weighted: bool
+    ) -> ControlVector:
         total = self.space.zeros()
-        for job in jobs:
-            total = total + _vector_from_file(reduce_covectors(job), self.space)
+        for task, job in enumerate(jobs, start=1):
+            part = _vector_from_file(reduce_covectors(job), self.space)
+            if weighted:
+                part = part * float(self.frequency_weights[task - 1])
+            total = total + part
         return total
+
+    def weight_data(self, r: Any) -> DataVector:
+        """Return ``W r``: the data vector scaled by the per-frequency weights.
+
+        ``W`` is the objective-side frequency weighting this linearization
+        carries (unit unless the view set ``weights``); ``J.H @ W (J dv)``
+        equals ``normal @ dv``.
+        """
+
+        dual = self._data_vector(r)
+        values = np.array(dual.values, copy=True)
+        for weight, frequency in zip(self.frequency_weights, self.frequencies):
+            if weight == 1.0:
+                continue
+            for layout in self.data_space.term_layouts(frequency=frequency):
+                values[layout.indices] *= float(weight)
+        return DataVector(values, self.data_space)
 
     def jvp(self, dv: Any) -> DataVector:
         """Return ``J @ dv`` (memoized per direction)."""
@@ -1376,7 +1602,7 @@ class Linearization:
                     n_ranks=1,
                 )
             self.problem._run_jobs(jobs)
-            return self._reduce(jobs)
+            return self._reduce(jobs, weighted=False)
 
         return self._memo("vjp", _digest(dual.values), compute)
 
@@ -1392,6 +1618,6 @@ class Linearization:
                 "normal", lambda task: {"direction": path, "covector": "normal.h5"}
             )
             self.problem._run_jobs(jobs)
-            return self._reduce(jobs)
+            return self._reduce(jobs, weighted=True)
 
         return self._memo("normal", _digest(direction.values), compute)
