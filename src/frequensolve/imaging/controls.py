@@ -103,6 +103,46 @@ _LATERAL_SAMPLES = {2: 33, 3: 9}
 _DEPTH_SAMPLES = 33
 
 
+def source_metres_per_unit(simulation: Any) -> Optional[np.ndarray]:
+    """Return metres per authored coordinate unit of every inline source point.
+
+    Sauce's ``source.<i>.position`` coordinates are metres; the inline source
+    geometry is authored in its declared units (a point's coordinate units,
+    else the simulation's default length units, else Sauce's default ``km``).
+    Returns ``None`` when the physical sources are not known locally.
+    """
+
+    from frequensolve.units import ureg
+
+    acquisition = getattr(simulation, "acquisition", None)
+    geometry = getattr(acquisition, "source_geometry", None)
+    if geometry is None or getattr(geometry, "geometry_type", None) != "Inline":
+        return None
+    count = int(getattr(geometry, "point_count", 0) or 0)
+    defaults = getattr(getattr(simulation, "units", None), "defaults", {}) or {}
+    fallback = defaults.get("length") if isinstance(defaults, Mapping) else None
+    factors = np.ones(count, dtype=np.float64)
+    cache: Dict[str, float] = {}
+    for index in range(count):
+        coordinates = geometry.point(index).coordinates
+        units = getattr(coordinates, "units", None)
+        if units is None and is_quantity(getattr(coordinates, "value", None)):
+            units = coordinates.value.units
+        expression = unit_expression(units or fallback or _DEFAULT_LENGTH_UNITS)
+        if expression not in cache:
+            try:
+                cache[expression] = float(
+                    ureg.Quantity(1.0, expression).to("m").magnitude
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"source point {index + 1} coordinate units {expression!r} are "
+                    "not a length"
+                ) from exc
+        factors[index] = cache[expression]
+    return factors
+
+
 class UnresolvedControlError(RuntimeError):
     """Raised when a space needs a simulation or manifest to know its layout."""
 
@@ -1109,12 +1149,19 @@ class _BindContext:
         return str(geometry.kind)
 
     def source_coordinates(self) -> Optional[np.ndarray]:
+        """Return the inline source coordinates in metres (Sauce's frame)."""
+
         try:
             coords = self.simulation.acquisition.source_point_coords()
+            factors = source_metres_per_unit(self.simulation)
         except Exception:
             return None
         coords = np.asarray(coords, dtype=np.float64)
-        return coords if coords.ndim == 2 and coords.size else None
+        if coords.ndim != 2 or not coords.size:
+            return None
+        if factors is not None and factors.size == coords.shape[0]:
+            coords = coords * factors[:, None]
+        return coords
 
     def material_control(self, basis: str) -> Any:
         for subdomain in self.model.subdomains:

@@ -26,7 +26,7 @@ from frequensolve.imaging import (
     ObservedData,
     SourceParameters,
 )
-from frequensolve.imaging._artifacts import ControlStateFile
+from frequensolve.imaging._artifacts import ControlStateFile, ControlVectorFile
 from frequensolve.imaging.extension import Extension, ExtensionVector, Lags
 from frequensolve.mesh import BoundaryCondition
 from frequensolve.model.layered import LayeredModel
@@ -59,8 +59,13 @@ def _executable() -> Path:
     )
 
 
-def _simulation(project: Project, name: str, vp_lower: float):
+def _simulation(project: Project, name: str, vp_lower: float, *, robust=False):
     simulation = project.new_simulation(name=name, physics="acoustic", dimension=2)
+    if robust:
+        # Robust runtime scaling derives its unit scales from the task
+        # frequency (at least Mesh/adapt/f_low), so nondimensional mechanism
+        # coordinates differ between the tasks of a multi-frequency job.
+        simulation.units.extra["scaling"] = "robust"
     model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
     model.add_surface(name="top", depth=0.0)
     model.add_layer(name="layer_1", properties={"vp": 1.5, "rho": 1.0})
@@ -70,7 +75,11 @@ def _simulation(project: Project, name: str, vp_lower: float):
     simulation += model
     simulation += model.hex_mesh_generator(n=[8, 6])
     simulation.mesh.set_adapt(
-        elems_per_wave=2.0, order=4, f_low=FREQUENCY, f_high=FREQUENCY, adapt_order=True
+        elems_per_wave=2.0,
+        order=4,
+        f_low=FREQUENCY - 1.0 if robust else FREQUENCY,
+        f_high=FREQUENCY,
+        adapt_order=True,
     )
     simulation += BoundaryCondition(conditions=["free"], boundaries=["z_min"])
     simulation += BoundaryCondition(
@@ -155,8 +164,8 @@ def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
 
     site = LocalSite(solver=_executable(), n_workers=1)
     project = Project(name="multi", path=tmp_path / "project", load_if_exists=False)
-    truth = _simulation(project, "truth", TRUTH_VP)
-    initial = _simulation(project, "initial", START_VP)
+    truth = _simulation(project, "truth", TRUTH_VP, robust=True)
+    initial = _simulation(project, "initial", START_VP, robust=True)
     frequencies = [FREQUENCY - 1.0, FREQUENCY]
 
     observed_job = FrequencyDomainJob("observed", truth, frequencies)
@@ -210,6 +219,86 @@ def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
     staged = ControlStateFile.read(moved.job.control_state)
     assert staged.scaling == {"source.1.mechanism": state.scaling["source.1.mechanism"]}
     assert np.isfinite(moved.value) and moved.value != lin.value
+
+    # The mechanism gradient against a central difference of the objective.
+    # Each task stores the mechanism in its own nondimensional units
+    # (robust scaling depends on the task frequency), so the covector parts
+    # must be converted to the reference coordinate (s_ref = task 1's scale)
+    # before they are summed; the dot tests above cannot see a missing
+    # conversion.  The objective is quadratic in the (linear) source, so the
+    # central difference is exact up to single-precision noise.
+    name = "source.1.mechanism"
+    s_ref = problem.mechanism_scaling[name]
+    assert s_ref == state.scaling[name]
+    scales = [
+        ControlStateFile.read(lin.job.state_output_file(task)).scaling[name]
+        for task in (1, 2)
+    ]
+    assert scales[0] == s_ref and abs(scales[1] - scales[0]) > 1e-3 * s_ref, scales
+    index = lin.space.slices[name].start  # Re of the first component
+    x = problem.vector().values
+    h = 0.05 * max(abs(float(x[index])), 1.0e-12)
+    e = np.zeros_like(x)
+    e[index] = h
+    fd = (problem.value(x + e) - problem.value(x - e)) / (2.0 * h)
+    converted = float(lin.gradient.values[index])
+    # the pre-fix reduction: task parts summed in their own coordinates
+    raw = sum(
+        float(
+            ControlVectorFile.read(lin.job.covector_file(task), native=False)[name][0]
+        )
+        for task in (1, 2)
+    )
+    print(
+        f"mechanism FD check: fd={fd:.6e} converted={converted:.6e} "
+        f"(rel {abs(converted - fd) / abs(fd):.2e}) unconverted={raw:.6e} "
+        f"(rel {abs(raw - fd) / abs(fd):.2e}); s_task={scales}"
+    )
+    assert abs(converted - fd) <= 3.0e-2 * abs(fd), (fd, converted, raw)
+    assert abs(raw - fd) > 3.0e-2 * abs(fd), (fd, converted, raw)
+
+
+def test_source_positions_are_metres_in_sauce_and_km_in_the_simulation(tmp_path):
+    """The fixture authors the source at (0.5, 0.08) km (Sauce's default unit)."""
+
+    from frequensolve.orchestrator.sites.local import LocalSite
+
+    site = LocalSite(solver=_executable(), n_workers=1)
+    project = Project(name="units", path=tmp_path / "project", load_if_exists=False)
+    truth = _simulation(project, "truth", TRUTH_VP)
+    initial = _simulation(project, "initial", START_VP)
+    observed_job = FrequencyDomainJob("observed", truth, [FREQUENCY])
+    assert site.run(observed_job, check=True).successful
+
+    problem = ImagingProblem(
+        initial,
+        controls=ControlSpace(
+            vp=DepthProfile("vp", "layer_2", count=4),
+            src=SourceParameters(position=True, signature=False),
+        ),
+        observed=ObservedData(observed_job),
+        site=site,
+        name="units",
+    )
+    # Sauce's registry baseline (the state) is in metres
+    np.testing.assert_allclose(problem.state["source.1.position"], [500.0, 80.0])
+    assert problem.simulation_at().acquisition.to_fs() == (
+        problem.simulation.acquisition.to_fs()
+    )
+
+    values = problem.vector().values.copy()
+    sl = problem.space.slices["source.1.position"]
+    values[sl] += [10.0, 5.0]  # metres
+    moved = problem.simulation_at(values)
+    np.testing.assert_allclose(
+        moved.acquisition.source_point_coords(), [[0.51, 0.085]], rtol=1e-12
+    )
+    # the staged candidate is metres; Sauce accepts it (a km reading would
+    # put the source 500 km outside the model)
+    lin = problem.linearize(values, gradient=False)
+    staged = ControlStateFile.read(lin.job.control_state)
+    np.testing.assert_allclose(staged["source.1.position"], [510.0, 85.0])
+    assert np.isfinite(lin.value) and lin.value > 0.0
 
 
 # ---------------------------------------------------------------------------

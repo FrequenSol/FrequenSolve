@@ -1389,3 +1389,71 @@ def test_stage_controls_validation():
         Stage(FREQUENCIES, 2, controls={})
     with pytest.raises(TypeError, match="ControlSpace"):
         Stage(FREQUENCIES, 2, controls=[1, 2])
+
+
+def test_fwi_resume_keeps_the_mechanism_reference_scale(tmp_path):
+    """A resumed run reads its checkpoint in the same mechanism coordinates.
+
+    The first problem discovers its registry in a 6 Hz exploration view
+    (``s_ref = s(6 Hz)``); a fresh process would discover it over both
+    frequencies (``s(4 Hz)``) and read the checkpointed model in other units.
+    """
+
+    class Interrupt(RuntimeError):
+        pass
+
+    def interrupt(event):
+        if event.stage_index == 1 and event.stage_iteration == 1:
+            raise Interrupt("simulated crash")
+
+    def make(site, subdir="mechanism"):
+        return _problem(
+            tmp_path,
+            site,
+            subdir=subdir,
+            controls=ControlSpace(
+                vp=DepthProfile("vp", "sediment", count=5),
+                src=SourceParameters(mechanism=True, signature=False),
+            ),
+        )
+
+    def stages():
+        return [
+            Stage([4.0, 6.0], 2, active=["vp", "src"], name="joint"),
+            Stage([6.0], 4, active=["vp", "src"], name="high"),
+        ]
+
+    def fake():
+        return FakeImagingSite(seed=11, mechanism_reference_frequency=5.0)
+
+    site = fake()
+    problem = make(site)
+    problem.restrict(frequencies=[6.0]).value()  # exploration: s_ref = s(6 Hz)
+    checkpoint = tmp_path / "run" / "fwi.ckpt.h5"
+    options = dict(optimizer=LBFGS(**TIGHT), checkpoint=checkpoint)
+    with pytest.raises(Interrupt):
+        FWI(problem, stages(), callback=interrupt, **options).run()
+    s_ref = site.mechanism_scale(6.0)
+    names = ["source.1.mechanism", "source.2.mechanism"]
+    assert problem.mechanism_scaling == {name: s_ref for name in names}
+    saved = OptimizationCheckpoint.load(checkpoint)
+    assert json.loads(saved.metadata["mechanism_scaling"]) == {
+        name: s_ref for name in names
+    }
+    assert ControlState.load(
+        FWI(problem, stages(), **options).state_path,
+        problem.full_space.without_support(),
+    ).scaling == {name: s_ref for name in names}
+
+    # a fresh problem (new process) resumes in the 6 Hz stage with s_ref pinned
+    resumed_problem = make(fake())
+    resumed = FWI(resumed_problem, stages(), **options).run(resume=True)
+    assert resumed.stages[1].resumed and resumed.stages[1].stage_iteration == 4
+    assert resumed_problem.mechanism_scaling == {name: s_ref for name in names}
+
+    # a problem that already fixed another reference refuses the checkpoint
+    other = make(fake())
+    other.linearize(gradient=False)
+    assert other.mechanism_scaling != problem.mechanism_scaling
+    with pytest.raises(ValueError, match="mechanism reference scales"):
+        FWI(other, stages(), **options).run(resume=True)

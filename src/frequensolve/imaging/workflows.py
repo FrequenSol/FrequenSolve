@@ -136,6 +136,13 @@ def _stage_frequencies(values: Any) -> Tuple[Any, ...]:
     return tuple(out)
 
 
+def _mechanism_scaling(problem: Any) -> Dict[str, float]:
+    """Return a problem's mechanism reference scales (``{}`` when none)."""
+
+    scaling = getattr(problem, "mechanism_scaling", None)
+    return dict(scaling) if isinstance(scaling, Mapping) else {}
+
+
 def _frequency_pairs(values: Sequence[Any]) -> List[List[float]]:
     return [[complex(v).real, complex(v).imag] for v in values]
 
@@ -1260,6 +1267,12 @@ class FWI:
             "support": support,
             "state_path": str(self.state_path),
             "history_iteration": history.iteration_count,
+            # The optimizer coordinates of mechanism blocks are physical /
+            # s_ref; the checkpointed model is only meaningful under the same
+            # reference scales (resume pins or checks them).
+            "mechanism_scaling": json.dumps(
+                dict(sorted(_mechanism_scaling(problem).items()))
+            ),
         }
 
     def _write_checkpoint(
@@ -1354,6 +1367,18 @@ class FWI:
                 f"checkpoint {path} references a missing control state {state_path}"
             )
         state = ControlState.load(state_path, problem.full_space.without_support())
+        recorded = meta.get("mechanism_scaling")
+        if recorded:
+            scaling = {str(k): float(v) for k, v in json.loads(recorded).items()}
+            pin = getattr(problem, "_pin_mechanism_scaling", None)
+            if scaling and callable(pin):
+                try:
+                    pin(scaling, state.scaling_units)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"checkpoint {path} was written with other mechanism "
+                        f"reference scales: {exc}"
+                    ) from exc
         stage_iteration = int(meta.get("stage_iteration", 0))
         if bool(meta.get("stage_completed")) or stage_iteration >= stage.iterations:
             return _ResumePlan(state, index + 1, 0, checkpoint, index)

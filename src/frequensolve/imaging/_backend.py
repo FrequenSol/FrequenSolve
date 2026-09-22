@@ -169,18 +169,34 @@ def _require_file(path: Path, what: str) -> Path:
 
 
 def reduce_covectors(
-    job: FWIOperatorJob, weights: Optional[Sequence[float]] = None
+    job: FWIOperatorJob,
+    weights: Optional[Sequence[float]] = None,
+    factors: Optional[Sequence[Mapping[str, float]]] = None,
 ) -> ControlVectorFile:
     """Reduce the per-task covector parts of ``job`` with frequency weights.
 
     Blocks are summed with ``weights`` (default: the job weights, then ones)
-    and support masks are combined by AND across tasks.  Sauce fingerprints
-    every task's saved state on its own (per-frequency mesh adaptation makes
-    them differ), so only the block layout must agree; the reduced file
-    carries task 1's fingerprints.
+    and support masks are combined by AND across tasks.  ``factors`` (one
+    ``block -> factor`` mapping per task) additionally multiplies a task's
+    block before summation: Sauce writes mechanism covectors in the executing
+    task's coordinates, and FrequenSolve converts each task's part to its
+    reference coordinates with ``s_ref / s_task``.  Sauce fingerprints every
+    task's saved state on its own (per-frequency mesh adaptation makes them
+    differ), so only the block layout must agree; the reduced file carries
+    task 1's fingerprints.
     """
 
-    scale = frequency_weights(job, weights)
+    weight = frequency_weights(job, weights)
+    if factors is not None and len(factors) != job.n_tasks:
+        raise ValueError(
+            f"expected {job.n_tasks} per-task block factor tables, "
+            f"received {len(factors)}"
+        )
+
+    def scale(task: int, name: str) -> float:
+        factor = 1.0 if factors is None else float(factors[task - 1].get(name, 1.0))
+        return float(weight[task - 1]) * factor
+
     first: Optional[ControlVectorFile] = None
     blocks: Dict[str, np.ndarray] = {}
     support: Dict[str, np.ndarray] = {}
@@ -190,14 +206,14 @@ def reduce_covectors(
         if first is None:
             first = part
             blocks = {
-                name: scale[task - 1] * values for name, values in part.blocks.items()
+                name: scale(task, name) * values for name, values in part.blocks.items()
             }
             support = {name: part.support_mask(name) for name in part.blocks}
             continue
         if part.names != first.names or part.sizes != first.sizes:
             raise ValueError(f"{path} has a different block layout than task 1")
         for name, values in part.blocks.items():
-            blocks[name] = blocks[name] + scale[task - 1] * values
+            blocks[name] = blocks[name] + scale(task, name) * values
             support[name] = support[name] & part.support_mask(name)
     assert first is not None
     return ControlVectorFile(
@@ -365,8 +381,9 @@ def read_task_objective_vectors(
 def read_state_output(job: FWIOperatorJob, task: int = 1) -> ControlStateFile:
     """Read the ``fs-control-state-1`` baseline exported by ``task`` of ``job``.
 
-    Every task exports the complete baseline; mechanism blocks carry
-    ``/scaling`` so the baseline of any task replays in every other one.
+    Every task exports the complete baseline in its own mechanism
+    coordinates; ``/scaling/<block>`` is that task's scale ``s_t`` (the
+    baseline of any task replays in every other one).
     """
 
     return ControlStateFile.read(

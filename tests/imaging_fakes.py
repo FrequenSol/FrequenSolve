@@ -25,8 +25,20 @@ Per action (``task`` is one-based; ``f`` its frequency; ``R`` the rows of
     (``fs-control-state-1``) and ``manifest`` (``fs-control-registry-1``) when
     requested: exact paths in a single-task job, ``<stem>_<task><ext>`` per
     task otherwise.  The authored registry baseline covers every physical
-    source (positions, a nonzero mechanism with ``/scaling``, unit signatures)
-    like Sauce's; see :meth:`FakeImagingSite._source_baselines`.
+    source (positions in metres, a nonzero mechanism with ``/scaling``, unit
+    signatures) like Sauce's; see :meth:`FakeImagingSite._source_baselines`.
+
+Mechanism coordinates follow Sauce's per-task nondimensionalization: task
+``t`` (frequency ``f``) stores ``source.<i>.mechanism`` as ``physical /
+s(f)`` with ``s(f) = mechanism_scaling * (mechanism_reference_frequency /
+|f|) ** mechanism_scaling_exponent`` (``/scaling`` of its ``state_output``;
+imports rescale by ``stored / s(f)``).  The surrogate acts on the normalized
+physical coordinate ``m = physical / mechanism_scaling``, so in task
+coordinates its mechanism columns carry ``c_t = s(f) / mechanism_scaling``:
+directions are read and covectors written in the executing task's
+coordinates (``J[R] (c_t dv)`` and ``c_t Re(J[R]^H r)``), exactly like Sauce.
+:attr:`FakeLinearization.m` and :attr:`FakeLinearization.gradient` are in
+the normalized physical coordinate.
 ``jvp``
     reads ``direction`` and writes ``<objective_vector stem>_<task>.json`` with
     ``J[R] dv`` (``fs-objective-vector-3``).
@@ -370,11 +382,19 @@ class FakeImagingSite(BaseSite):
         support_masks: Optional ``qualified block -> bool mask`` written to
             ``/support/<block>`` of every state output and covector (blocks
             not listed are fully supported).  Emulates Sauce freezing DOFs.
-        mechanism_baseline: Task coordinate of every component of source
-            ``i``'s authored mechanism is ``mechanism_baseline * i`` (Sauce's
-            baseline, known to FrequenSolve only through ``state_output``).
+        mechanism_baseline: Every component of source ``i``'s authored
+            mechanism is ``mechanism_baseline * i`` in the normalized physical
+            coordinate (its task coordinate at the reference frequency;
+            Sauce's baseline, known to FrequenSolve only through
+            ``state_output``).
         mechanism_scaling: ``/scaling/<block>`` of exported mechanism blocks
-            (physical strength of one coordinate; frequency independent here).
+            at ``mechanism_reference_frequency`` (physical strength of one
+            coordinate).
+        mechanism_reference_frequency: Frequency (Hz) of ``mechanism_scaling``.
+        mechanism_scaling_exponent: ``s(f) = mechanism_scaling *
+            (reference / |f|) ** exponent``; ``0`` makes the scaling
+            frequency independent (default ``2``: a force scale under
+            frequency-derived robust scaling).
         mechanism_units: ``/scaling_units/<block>`` of exported mechanisms.
         verbose: Print status messages like other sites.
 
@@ -391,12 +411,16 @@ class FakeImagingSite(BaseSite):
         support_masks: Optional[Mapping[str, Any]] = None,
         mechanism_baseline: float = 0.75,
         mechanism_scaling: float = 2.0e9,
+        mechanism_reference_frequency: float = 4.0,
+        mechanism_scaling_exponent: float = 2.0,
         mechanism_units: str = "N*m",
         verbose: bool = False,
     ) -> None:
         super().__init__(verbose=verbose)
         self.mechanism_baseline = float(mechanism_baseline)
         self.mechanism_scaling = float(mechanism_scaling)
+        self.mechanism_reference_frequency = float(mechanism_reference_frequency)
+        self.mechanism_scaling_exponent = float(mechanism_scaling_exponent)
         self.mechanism_units = str(mechanism_units)
         self.block_sizes: Dict[str, int] = {
             qualified_block_name(name): int(size)
@@ -404,23 +428,80 @@ class FakeImagingSite(BaseSite):
         }
         self.seed = int(seed)
         self.n_ranks = int(n_ranks)
-        self.support_masks: Dict[str, np.ndarray] = {
-            qualified_block_name(name): np.asarray(mask, dtype=bool).reshape(-1)
+        self.support_masks: Dict[str, Any] = {
+            qualified_block_name(name): (
+                mask if callable(mask) else np.asarray(mask, dtype=bool).reshape(-1)
+            )
             for name, mask in dict(support_masks or {}).items()
         }
         self.submissions: List[Dict[str, Any]] = []
         self.jobs: List[Any] = []
         self.linearizations: Dict[str, FakeLinearization] = {}
 
-    def support_mask(self, name: str, size: int) -> np.ndarray:
-        """Return the configured support mask of ``name`` (all true by default)."""
+    def support_mask(self, name: str, size: int, frequency: Any = None) -> np.ndarray:
+        """Return the configured support mask of ``name`` (all true by default).
+
+        A configured mask may be a callable ``frequency -> mask`` (task
+        dependent support, like Sauce's per-task measures).
+        """
 
         mask = self.support_masks.get(qualified_block_name(name))
         if mask is None:
             return np.ones(int(size), dtype=bool)
+        if callable(mask):
+            mask = np.asarray(mask(frequency), dtype=bool).reshape(-1)
         if mask.size != int(size):
             raise ValueError(f"support mask for {name!r} needs {size} flags")
         return np.array(mask, copy=True)
+
+    def mechanism_scale(self, frequency: Any) -> float:
+        """Return ``s(f)``: the ``/scaling`` of mechanism blocks in a task at ``f``."""
+
+        f = abs(complex(frequency))
+        if self.mechanism_scaling_exponent == 0.0:
+            return self.mechanism_scaling
+        return (
+            self.mechanism_scaling
+            * (self.mechanism_reference_frequency / f)
+            ** self.mechanism_scaling_exponent
+        )
+
+    def column_scale(
+        self, active: Sequence[str], sizes: Mapping[str, int], frequency: Any
+    ) -> np.ndarray:
+        """Return ``c_t``: task coordinate -> normalized physical, per active DOF."""
+
+        factor = self.mechanism_scale(frequency) / self.mechanism_scaling
+        return np.concatenate(
+            [
+                np.full(
+                    int(sizes[name]),
+                    factor if str(name).endswith(".mechanism") else 1.0,
+                )
+                for name in active
+            ]
+            or [np.zeros(0)]
+        )
+
+    def task_export(
+        self, baseline: ControlStateFile, frequency: Any, **support: Any
+    ) -> ControlStateFile:
+        """Return ``baseline`` (normalized coordinates) in the task at ``frequency``."""
+
+        scale = self.mechanism_scale(frequency)
+        blocks = dict(baseline.blocks)
+        mechanisms = [n for n in blocks if n.endswith(".mechanism")]
+        for name in mechanisms:
+            blocks[name] = blocks[name] * (self.mechanism_scaling / scale)
+        return ControlStateFile(
+            blocks,
+            scaling={n: scale for n in mechanisms},
+            scaling_units={
+                n: baseline.scaling_units.get(n, self.mechanism_units)
+                for n in mechanisms
+            },
+            **support,
+        )
 
     # -- surrogate ------------------------------------------------------------
 
@@ -785,7 +866,9 @@ class FakeImagingSite(BaseSite):
         }
         if job.model_gradient:
             gradient = np.real(G.conj().T @ (residual + Bs @ z))
-            self._write_covector(job.covector_file(task), lin, gradient)
+            self._write_covector(
+                job.covector_file(task), lin, gradient, frequency=frequency
+            )
             report["background_gradient_stationary"] = True
         if job.reduced_normal is not None:
             dv = self._direction(job, lin, task)
@@ -793,7 +876,9 @@ class FakeImagingSite(BaseSite):
             response_converged = int(options.get("max_iterations", 50)) > 0
             action = ext.reduced_normal_matrix(rows, G, solver) @ dv
             w = np.real(Bs.conj().T @ (G @ dv))
-            self._write_covector(job.covector_file(task), lin, action)
+            self._write_covector(
+                job.covector_file(task), lin, action, frequency=frequency
+            )
             report["reduced_normal"] = {
                 "method": "gauss_newton_schur",
                 "iterations": 1 if response_converged else 0,
@@ -904,33 +989,43 @@ class FakeImagingSite(BaseSite):
             if job.objective is not None:
                 self._write_report(job, task, lin, frequency, residual)
             if job.covector is not None:
-                gradient = np.real(J[rows].conj().T @ residual)
-                self._write_covector(job.covector_file(task), lin, gradient)
-        # Every task exports the complete baseline and registry, at the exact
-        # path in a single-task job and task-suffixed otherwise (like Sauce).
+                # the covector of task t is in its own coordinates: c_t * g
+                gradient = self.column_scale(active, sizes, frequency) * np.real(
+                    J[rows].conj().T @ residual
+                )
+                self._write_covector(
+                    job.covector_file(task), lin, gradient, frequency=frequency
+                )
+        # Every task exports the complete baseline (in its own mechanism
+        # coordinates, with its /scaling) and registry, at the exact path in a
+        # single-task job and task-suffixed otherwise (like Sauce).
         for task in range(1, job.n_tasks + 1):
+            frequency = job.f_list[task - 1]
+            export = self.task_export(
+                baseline,
+                frequency,
+                support={
+                    name: self.support_mask(name, sizes[name], frequency)
+                    for name in active
+                },
+                support_min_support=job.min_support,
+            )
             if job.state_output is not None:
-                ControlStateFile(
-                    dict(baseline.blocks),
-                    support={
-                        name: self.support_mask(name, sizes[name]) for name in active
-                    },
-                    support_min_support=job.min_support,
-                    scaling=dict(baseline.scaling),
-                    scaling_units=dict(baseline.scaling_units),
-                ).write(job.state_output_file(task))
+                export.write(job.state_output_file(task))
             if job.manifest is not None:
-                self._write_manifest(job, lin, baseline, job.manifest_file(task))
+                self._write_manifest(job, lin, export, job.manifest_file(task))
 
     def _apply(self, job: FWIOperatorJob) -> None:
         for task in range(1, job.n_tasks + 1):
             lin, frequency = self._load_state(job, task)
             rows = lin.rows(frequency)
             J = lin.J[rows]
+            # directions and covectors are in the executing task's coordinates
+            c = self.column_scale(lin.active, lin.sizes, frequency)
             if job.action == "jvp":
                 dv = self._direction(job, lin, task)
                 values = np.zeros(lin.space.size, dtype=np.complex128)
-                values[rows] = J @ dv
+                values[rows] = J @ (c * dv)
                 DataVector(values, lin.space).write_objective_vector(
                     job.objective_vector_file(task),
                     state_fingerprint=lin.state_fingerprint,
@@ -940,12 +1035,18 @@ class FakeImagingSite(BaseSite):
             elif job.action == "vjp":
                 r = self._objective_vector(job, task, lin, frequency)
                 self._write_covector(
-                    job.covector_file(task), lin, np.real(J.conj().T @ r[rows])
+                    job.covector_file(task),
+                    lin,
+                    c * np.real(J.conj().T @ r[rows]),
+                    frequency=frequency,
                 )
             else:  # normal
                 dv = self._direction(job, lin, task)
                 self._write_covector(
-                    job.covector_file(task), lin, np.real(J.conj().T @ (J @ dv))
+                    job.covector_file(task),
+                    lin,
+                    c * np.real(J.conj().T @ (J @ (c * dv))),
+                    frequency=frequency,
                 )
             if job.objective is not None:
                 residual = J @ lin.m - lin.d[rows]
@@ -987,7 +1088,10 @@ class FakeImagingSite(BaseSite):
             state_fingerprint=total.state_fingerprint,
             control_registry_fingerprint=total.control_registry_fingerprint,
             support={
-                name: self.support_mask(name, v.size) for name, v in blocks.items()
+                name: np.logical_and.reduce(
+                    [self.support_mask(name, v.size, f) for f in job.f_list]
+                )
+                for name, v in blocks.items()
             },
         )
         aggregate.write(job.covector_file(raw=True))
@@ -1272,7 +1376,17 @@ class FakeImagingSite(BaseSite):
                 raise ValueError("forward with a control state requires active")
             names = list(active)
             table = {qualified_block_name(n): int(vector[n].size) for n in names}
-            return names, table, np.concatenate([vector[n] for n in names])
+            # mechanism blocks with /scaling become the normalized coordinate
+            parts = [
+                vector[n]
+                * (
+                    vector.scaling[qualified_block_name(n)] / self.mechanism_scaling
+                    if qualified_block_name(n) in vector.scaling
+                    else 1.0
+                )
+                for n in names
+            ]
+            return names, table, np.concatenate(parts)
         if active is None:
             raise ValueError("forward with a packed array requires active")
         names = list(active)
@@ -1285,10 +1399,12 @@ class FakeImagingSite(BaseSite):
     def _baseline(self, job: FWIOperatorJob) -> ControlStateFile:
         """Return the registry baseline a job runs at (``controls.state`` or authored).
 
-        Like Sauce, mechanism blocks are exported in task coordinates with
-        ``/scaling`` (:attr:`mechanism_scaling`, frequency independent in the
-        fake); an imported block with ``/scaling`` is rescaled by
-        ``stored / current`` and one without is read in task coordinates.
+        Mechanism blocks are returned in the normalized physical coordinate
+        (``physical / mechanism_scaling``, ``/scaling = mechanism_scaling``);
+        :meth:`task_export` gives a task's coordinates.  Like Sauce, an
+        imported block with ``/scaling`` keeps its physical strength
+        (``stored * scaling``) and one without is read in the executing
+        task's coordinates (which must then agree across the job's tasks).
         """
 
         active = [qualified_block_name(name) for name in job.active or ()]
@@ -1310,8 +1426,15 @@ class FakeImagingSite(BaseSite):
             mechanisms = [n for n in blocks if n.endswith(".mechanism")]
             for name in mechanisms:
                 stored = state.scaling.get(name)
-                if stored is not None:
-                    blocks[name] = blocks[name] * (stored / self.mechanism_scaling)
+                if stored is None:
+                    scales = {self.mechanism_scale(f) for f in job.f_list}
+                    if len(scales) != 1:
+                        raise ValueError(
+                            f"controls.state block {name!r} has no /scaling; its "
+                            "coordinates differ between the job's tasks"
+                        )
+                    stored = scales.pop()
+                blocks[name] = blocks[name] * (stored / self.mechanism_scaling)
             return ControlStateFile(
                 blocks,
                 scaling={n: self.mechanism_scaling for n in mechanisms},
@@ -1341,22 +1464,29 @@ class FakeImagingSite(BaseSite):
     def _source_baselines(self, simulation: Any) -> Dict[str, np.ndarray]:
         """Return Sauce's registry baseline of every physical source's blocks.
 
-        Positions are the acquisition coordinates (metres), signatures
-        ``1 + 0j``, ``signature_df`` zero and mechanisms the nonzero task
+        Positions are the acquisition coordinates converted to metres (from
+        the points' authored units, like Sauce), signatures ``1 + 0j``,
+        ``signature_df`` zero and mechanisms the nonzero normalized
         coordinates ``mechanism_baseline * source_id`` per component (real, so
         one phase), which only a ``state_output`` reveals.
         """
 
-        from frequensolve.imaging.controls import _mechanism_components
+        from frequensolve.imaging.controls import (
+            _mechanism_components,
+            source_metres_per_unit,
+        )
 
         acquisition = getattr(simulation, "acquisition", None)
         try:
             coords = np.asarray(acquisition.source_point_coords(), dtype=np.float64)
             kind = str(acquisition.source_geometry.kind)
+            factors = source_metres_per_unit(simulation)
         except Exception:  # no locally known point sources
             return {}
         if coords.ndim != 2 or not coords.size:
             return {}
+        if factors is not None and factors.size == coords.shape[0]:
+            coords = coords * factors[:, None]
         dimension = int(getattr(simulation, "dimension", coords.shape[1]))
         try:
             components = _mechanism_components(kind, dimension)
@@ -1558,7 +1688,12 @@ class FakeImagingSite(BaseSite):
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
     def _write_covector(
-        self, path: Path, lin: FakeLinearization, packed: np.ndarray
+        self,
+        path: Path,
+        lin: FakeLinearization,
+        packed: np.ndarray,
+        *,
+        frequency: Any = None,
     ) -> None:
         vector = ControlVectorFile.from_packed(
             packed,
@@ -1567,7 +1702,8 @@ class FakeImagingSite(BaseSite):
             control_registry_fingerprint=lin.control_registry_fingerprint,
         )
         vector.support = {
-            name: self.support_mask(name, size) for name, size in lin.sizes.items()
+            name: self.support_mask(name, size, frequency)
+            for name, size in lin.sizes.items()
         }
         vector.write(path)
 
@@ -1637,13 +1773,15 @@ def layered_simulation(
     receivers: int = 3,
     groups: Sequence[str] = ("surface",),
     save: bool = True,
+    source_units: Optional[str] = "m",
 ) -> Any:
     """Return a saved 2D acoustic layered ``SeismicSimulation`` for imaging tests.
 
     The model has a ``water`` layer over a ``sediment`` layer (named
     subdomains for :class:`~frequensolve.imaging.controls.DepthProfile`), an
     rbf ``salt_top`` surface, ``sources`` scalar point sources and one
-    hydrophone receiver group per name in ``groups``.
+    hydrophone receiver group per name in ``groups``.  The source points
+    declare ``source_units`` (``None``: Sauce's default ``km``).
     """
 
     from frequensolve.model import LayeredModel
@@ -1672,7 +1810,9 @@ def layered_simulation(
     )
     coords = [[1000.0 * (i + 1), 10.0] for i in range(sources)]
     acquisition = Acquisition(
-        source_geometry=SourceGeometry.points(kind="scalar", coords=coords)
+        source_geometry=SourceGeometry.points(
+            kind="scalar", coords=coords, units=source_units
+        )
     )
     for group in groups:
         device = ReceiverNode(

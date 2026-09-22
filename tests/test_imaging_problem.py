@@ -867,6 +867,278 @@ def test_simulation_at_moves_changed_source_positions(tmp_path, fake):
 
 
 # ---------------------------------------------------------------------------
+# mechanism coordinates across frequency tasks, source position units, masks
+# ---------------------------------------------------------------------------
+
+MECHANISMS = ["source.1.mechanism", "source.2.mechanism"]
+TAYLOR_STEPS = (1.0e-1, 5.0e-2, 2.5e-2)
+
+
+def _mechanism_problem(tmp_path, **options):
+    # s(f) = 2e9 * (5 / f)^2: the tasks at 4 and 6 Hz store mechanisms in
+    # different nondimensional units, and neither equals the fake's
+    # normalized physical coordinate
+    fake = FakeImagingSite(seed=7, mechanism_reference_frequency=5.0)
+    _sim, problem = _source_problem(
+        tmp_path, fake, mechanism=True, signature=False, **options
+    )
+    return fake, problem
+
+
+def _reference_jacobian(fake, problem, lin):
+    """Return the surrogate's Jacobian in FrequenSolve's reference coordinates.
+
+    The fake acts on ``m = physical / S`` (``S = fake.mechanism_scaling``);
+    FrequenSolve's coordinate is ``y = physical / s_ref``, so ``dm/dy =
+    s_ref / S`` on mechanism DOFs.
+    """
+
+    surrogate = _surrogate(fake, lin)
+    columns = np.ones(surrogate.J.shape[1])
+    for name, sl in lin.space.full_slices.items():
+        if name.endswith(".mechanism"):
+            columns[sl] = problem.mechanism_scaling[name] / fake.mechanism_scaling
+    return surrogate, surrogate.J * columns
+
+
+def _mechanism_index(space, name="source.2.mechanism"):
+    return space.full_slices[name].start
+
+
+def test_mechanism_vectors_are_converted_between_frequency_tasks(tmp_path):
+    fake, problem = _mechanism_problem(tmp_path)
+    assert fake.mechanism_scale(4.0) != fake.mechanism_scale(6.0)
+
+    lin = problem.linearize()
+
+    # s_ref is task 1's /scaling of the first discovered baseline
+    s_ref = fake.mechanism_scale(4.0)
+    assert problem.mechanism_scaling == {name: s_ref for name in MECHANISMS}
+    assert lin.state.scaling == problem.mechanism_scaling
+    # every linearize of a mechanism space exports each task's /scaling
+    for task, frequency in enumerate(FREQUENCIES, start=1):
+        exported = ControlStateFile.read(lin.job.state_output_file(task))
+        assert exported.scaling == {
+            name: fake.mechanism_scale(frequency) for name in MECHANISMS
+        }
+        assert lin.task_factors[task - 1] == pytest.approx(
+            {name: s_ref / fake.mechanism_scale(frequency) for name in MECHANISMS}
+        )
+
+    # gradient, J, J^H and the normal equal the surrogate in reference
+    # coordinates (the gradient of 0.5 ||J m - d||^2 with m = y s_ref / S)
+    surrogate, J = _reference_jacobian(fake, problem, lin)
+    residual = surrogate.J @ surrogate.m - surrogate.d
+    np.testing.assert_allclose(
+        lin.gradient.values, np.real(J.conj().T @ residual), rtol=1e-10, atol=1e-10
+    )
+    dv = lin.space.random(3)
+    r = lin.data_space.random(4)
+    np.testing.assert_allclose(np.asarray(lin.jacobian @ dv), J @ dv.values)
+    np.testing.assert_allclose(
+        np.asarray(lin.jacobian.H @ r), np.real(J.conj().T @ r.values), atol=1e-10
+    )
+    np.testing.assert_allclose(
+        np.asarray(lin.normal @ dv),
+        np.real(J.conj().T @ (J @ dv.values)),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+    # value-vs-gradient: Taylor test and a central difference on one
+    # mechanism coordinate through problem.value
+    report = problem.check(seed=5, steps=TAYLOR_STEPS)
+    assert report["passed"], report
+    assert report["taylor"]["first_order_rates"][-1] == pytest.approx(2.0, abs=1e-6)
+    index = _mechanism_index(lin.space)
+    h = 1.0e-3
+    e = np.zeros(lin.space.size)
+    e[index] = h
+    x = problem.vector().values
+    fd = (problem.value(x + e) - problem.value(x - e)) / (2.0 * h)
+    assert fd == pytest.approx(lin.gradient.values[index], rel=1e-8)
+
+
+def test_unconverted_mechanism_vectors_fail_the_taylor_test(tmp_path, monkeypatch):
+    """The bug this conversion fixes: per-task mechanism vectors summed as is.
+
+    The dot test cannot see it (J and J^H stay mutually adjoint), but the
+    gradient no longer matches the objective.
+    """
+
+    monkeypatch.setattr(
+        ImagingProblem,
+        "_task_factors",
+        lambda self, job, space: [{} for _ in range(job.n_tasks)],
+    )
+    _fake, problem = _mechanism_problem(tmp_path)
+
+    report = problem.check(seed=5, steps=TAYLOR_STEPS)
+
+    assert report["adjoint"]["passed"] and report["normal"]["passed"]
+    assert not report["taylor"]["passed"]
+    assert not report["passed"]
+
+
+def test_mechanism_reference_scale_is_fixed_across_stages_and_layouts(tmp_path):
+    fake, problem = _mechanism_problem(tmp_path)
+    x0 = problem.vector()  # discovery over [4, 6] Hz: s_ref = s(4 Hz)
+    s_ref = dict(problem.mechanism_scaling)
+    S = fake.mechanism_scaling
+
+    # a stage over 6 Hz only: its one task stores mechanisms with s(6 Hz)
+    view = problem.restrict(frequencies=[6.0])
+    lin = view.linearize()
+    assert problem.mechanism_scaling == s_ref
+    exported = ControlStateFile.read(lin.job.state_output_file(1))
+    assert exported.scaling["source.1.mechanism"] == fake.mechanism_scale(6.0)
+    assert lin.task_factors == [
+        pytest.approx({n: s_ref[n] / fake.mechanism_scale(6.0) for n in MECHANISMS})
+    ]
+    np.testing.assert_array_equal(view.vector().values, x0.values)
+    surrogate, J = _reference_jacobian(fake, view, lin)
+    np.testing.assert_allclose(
+        lin.gradient.values,
+        np.real(J.conj().T @ (surrogate.J @ surrogate.m - surrogate.d)),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert view.check(seed=6, steps=TAYLOR_STEPS)["passed"]
+
+    # staged states carry /scaling = s_ref; the fake replays physical =
+    # coordinate * s_ref in the 6 Hz task
+    step = np.full(view.space.size, 0.1)
+    moved = view.linearize(x0.values + step, gradient=False)
+    staged = ControlStateFile.read(moved.job.control_state)
+    assert {n: staged.scaling[n] for n in MECHANISMS} == s_ref
+    index = _mechanism_index(view.space)
+    assert _surrogate(fake, moved).m[index] == pytest.approx(
+        (x0.values[index] + 0.1) * s_ref["source.2.mechanism"] / S
+    )
+
+    # a layout change keeps s_ref, even when the new problem's own
+    # discovery runs in a 6 Hz stage
+    finer = problem.with_controls({"vp": DepthProfile("vp", "sediment", count=6)})
+    assert finer.mechanism_scaling == s_ref
+    finer.restrict(frequencies=[6.0]).linearize(gradient=False)
+    assert finer.mechanism_scaling == s_ref
+    for name in MECHANISMS:
+        np.testing.assert_allclose(finer.state[name], problem.state[name])
+    assert finer.state.scaling == problem.state.scaling
+
+    # a state written with another scaling is converted, not reinterpreted
+    other = ControlState(
+        problem.state.space,
+        problem.state.values,
+        scaling={n: 2.0 * s_ref[n] for n in MECHANISMS},
+    )
+    problem.state = other
+    np.testing.assert_allclose(
+        problem.state["source.2.mechanism"], 2.0 * other["source.2.mechanism"]
+    )
+    assert problem.state.scaling == s_ref
+
+
+def test_first_discovery_in_a_stage_fixes_that_stages_task_scale(tmp_path):
+    fake, problem = _mechanism_problem(tmp_path)
+    problem.restrict(frequencies=[6.0]).linearize(gradient=False)
+    s_ref = fake.mechanism_scale(6.0)
+    assert problem.mechanism_scaling == {n: s_ref for n in MECHANISMS}
+
+    lin = problem.linearize()
+    assert lin.task_factors[0] == pytest.approx(
+        {n: s_ref / fake.mechanism_scale(4.0) for n in MECHANISMS}
+    )
+    assert lin.task_factors[1] == pytest.approx({n: 1.0 for n in MECHANISMS})
+    assert problem.check(seed=7, steps=TAYLOR_STEPS)["passed"]
+
+
+def test_simulation_at_installs_mechanisms_from_reference_coordinates(tmp_path):
+    fake, problem = _mechanism_problem(tmp_path)
+    state = problem.state
+    s_ref = problem.mechanism_scaling["source.2.mechanism"]
+    values = state.vector(problem.space).values.copy()
+    index = _mechanism_index(problem.space)
+    values[index] = 3.0
+
+    installed = problem.simulation_at(values)
+
+    point = installed.acquisition.source_geometry.sources[1]
+    assert point.amplitude["value"] == pytest.approx(3.0 * s_ref)
+
+
+def test_source_positions_convert_between_metres_and_authored_km(tmp_path):
+    fake = FakeImagingSite(seed=7)
+    sim = layered_simulation(tmp_path / "km", source_units=None)  # Sauce: km
+    problem = ImagingProblem(
+        sim,
+        controls=ControlSpace(
+            vp=DepthProfile("vp", "sediment", count=4),
+            src=SourceParameters(position=True, signature=False),
+        ),
+        observed={"surface": tmp_path / "observed.h5"},
+        frequencies=FREQUENCIES,
+        site=fake,
+        name="km",
+    )
+    authored = _source_coordinates(sim)
+    np.testing.assert_array_equal(authored, [[1000.0, 10.0], [2000.0, 10.0]])
+
+    # Sauce's export (and so the state) is in metres
+    state = problem.state
+    np.testing.assert_allclose(state["source.2.position"], [2.0e6, 1.0e4])
+    assert problem.simulation_at().acquisition.to_fs() == sim.acquisition.to_fs()
+
+    # move source 2 by (+100 m, +5 m): the authored km coordinate follows
+    values = problem.vector().values.copy()
+    sl = problem.space.full_slices["source.2.position"]
+    values[sl] += [100.0, 5.0]
+    moved = problem.simulation_at(values)
+    np.testing.assert_allclose(
+        _source_coordinates(moved), [[1000.0, 10.0], [2000.1, 10.005]]
+    )
+    assert moved.acquisition.source_geometry.units is None  # still km by default
+
+    # the staged controls.state carries metres
+    lin = problem.linearize(values, gradient=False)
+    staged = ControlStateFile.read(lin.job.control_state)
+    np.testing.assert_allclose(staged["source.2.position"], [2.0001e6, 1.0005e4])
+
+    # explicitly authored units are honoured as well
+    metres = layered_simulation(tmp_path / "m", source_units="m")
+    geometry = metres.acquisition.source_geometry
+    km = layered_simulation(tmp_path / "k", source_units="km")
+    from frequensolve.imaging.controls import source_metres_per_unit
+
+    np.testing.assert_array_equal(source_metres_per_unit(metres), [1.0, 1.0])
+    np.testing.assert_array_equal(source_metres_per_unit(km), [1000.0, 1000.0])
+    assert geometry.units == "m"
+
+
+def test_support_masks_combine_every_frequency_task(tmp_path):
+    masks = {
+        4.0: np.array([True, True, False, True, True]),
+        6.0: np.array([True, False, True, True, True]),
+    }
+    fake = FakeImagingSite(
+        seed=7,
+        support_masks={"model.vp": lambda f: masks[float(np.real(complex(f)))]},
+    )
+    _sim, problem = _problem(tmp_path, fake)
+
+    lin = problem.linearize()
+
+    combined = masks[4.0] & masks[6.0]
+    np.testing.assert_array_equal(lin.support_masks["model.vp"], combined)
+    np.testing.assert_array_equal(problem.space.support["vp"], combined)
+    assert lin.space.size == 8 - 2
+    # a single-frequency stage that refreshes its support sees its own task
+    low = problem.restrict(frequencies=[4.0], support="refresh")
+    low.linearize(gradient=False)
+    np.testing.assert_array_equal(low.space.support["vp"], masks[4.0])
+
+
+# ---------------------------------------------------------------------------
 # dry run and checks
 # ---------------------------------------------------------------------------
 

@@ -210,6 +210,13 @@ FrequenSolve applies the mask: frozen coefficients are excluded from the
 optimizer vector, written as zeros in Sauce vectors and states, and dropped
 from read-back gradients.
 
+Every frequency task of a multi-frequency linearize measures support on its
+own mesh, but the optimizer vector is shared by all tasks, so a coefficient is
+supported only if every task supports it (logical AND of the per-task masks).
+A coefficient that one task cannot resolve would otherwise be moved by the
+other tasks' gradients alone, and the frozen set would depend on which
+frequency happens to be task 1.
+
 .. code-block:: python
 
    problem.space.support["vp"]          # boolean mask, False = frozen
@@ -259,6 +266,53 @@ blocks, asking for ``problem.state``, ``problem.vector()`` or
 discovery linearize first, so an optimizer never starts (or steps) from a
 placeholder mechanism. Material/interface-only spaces are known locally and
 submit nothing; ``problem.dry_run()`` never submits.
+
+.. _imaging-source-coordinates:
+
+Source control coordinates
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``source.<i>.position`` is in metres, as Sauce exports it, whatever units the
+simulation authors its source points in: FrequenSolve converts to and from
+the points' coordinate units (a point's own units, else the simulation's
+default length units, else Sauce's default ``km``) when it builds placeholder
+baselines and when :meth:`~frequensolve.imaging.ImagingProblem.simulation_at`
+moves a source. Signatures are dimensionless multipliers.
+
+``source.<i>.mechanism`` needs more care. Sauce stores mechanisms in the
+nondimensional units of the task that writes them, and with robust runtime
+scaling those units depend on the task frequency: one physical source has
+different coordinates in the 5 Hz and 6 Hz tasks of one job. State exports
+record ``/scaling/<block>``, the physical strength of one stored coordinate
+(:math:`s_t` in task :math:`t`), but direction and covector vectors stay in
+the executing task's coordinates. FrequenSolve therefore fixes one reference
+scale :math:`s_\mathrm{ref}` per mechanism block and uses
+:math:`y = \text{physical} / s_\mathrm{ref}` as the optimizer coordinate:
+
+- :math:`s_\mathrm{ref}` is task 1's ``/scaling`` of the first discovered
+  registry baseline (``problem.mechanism_scaling``). It is fixed for the
+  problem's lifetime: :meth:`~frequensolve.imaging.ImagingProblem.restrict`
+  views and stages with other frequencies,
+  :meth:`~frequensolve.imaging.ImagingProblem.with_controls` and checkpoint
+  resume keep it (checkpoints record it, and a resume under another reference
+  is rejected).
+- Every linearize of a space with active mechanism blocks requests each
+  task's ``state_output`` and reads :math:`s_t` from it.
+- A direction enters task :math:`t` as :math:`y\,s_\mathrm{ref}/s_t`; task
+  covectors are converted back and summed,
+  :math:`g = \sum_t g_t\,s_\mathrm{ref}/s_t`, for the gradient, ``J.H`` and
+  the Gauss-Newton normal
+  :math:`\sum_t (s_\mathrm{ref}/s_t)^2 J_t^{\mathsf T} W J_t`.
+- States carry ``/scaling`` = :math:`s_\mathrm{ref}`, so Sauce rescales staged
+  ``controls.state`` values into each task's units. A state written with
+  another ``/scaling`` is converted on assignment; a mechanism block without
+  one is taken as reference coordinates.
+- ``simulation_at`` installs the physical source :math:`y\,s_\mathrm{ref}`.
+
+Without the conversion the per-task pieces stay mutually adjoint (dot tests
+pass) while the gradient of a multi-frequency objective is wrong by the
+factors :math:`s_\mathrm{ref}/s_t`; ``problem.check()`` includes a Taylor test
+that detects it.
 
 Observed data and misfit
 ------------------------
@@ -726,14 +780,16 @@ simulation copy with the current state installed
 <frequensolve.imaging.FWIResult.simulation>`). It installs material and
 interface coefficients and every changed source block it can represent:
 
-- ``source.<i>.position`` moves the inline source point;
+- ``source.<i>.position`` (metres) moves the inline source point, converted to
+  the point's authored coordinate units;
 - ``source.<i>.signature`` :math:`q` multiplies source :math:`i`'s column of
   the source encoding (:math:`C = E\,\operatorname{diag}(q)`; an identity
   encoding is written out explicitly). :math:`q` is frequency independent, so
   a complex :math:`q` applies a frequency-independent gain :math:`|q|` and
   phase :math:`\arg q`;
-- ``source.<i>.mechanism`` needs Sauce's ``/scaling/<block>`` (the physical
-  strength of one stored coordinate, in ``/scaling_units/<block>``), which a
+- ``source.<i>.mechanism`` needs a coordinate scale (the state's
+  ``/scaling/<block>``, normally the reference :math:`s_\mathrm{ref}` of
+  :ref:`imaging-source-coordinates`, in ``/scaling_units/<block>``), which a
   state export from a current Sauce records; the physical components become
   the inline source's ``amplitude`` (scalar kinds), unit ``direction`` and
   ``amplitude`` (vector and dipole kinds) or a ``moment_tensor`` mechanism

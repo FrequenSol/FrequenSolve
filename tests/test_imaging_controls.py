@@ -1117,9 +1117,11 @@ def test_control_state_from_simulation_carries_authored_baselines(simulation):
     assert state.size == bound.full_size
     np.testing.assert_array_equal(state["vp"], 0.0)
     np.testing.assert_array_equal(state["salt"], [-100.0, -200.0, -100.0])
+    # position placeholders are in Sauce's frame (metres); the fixture's
+    # source points declare no units, i.e. Sauce's default km
     positions = state["src.position"]
-    np.testing.assert_array_equal(positions["source.1.position"], [1000.0, 10.0])
-    np.testing.assert_array_equal(positions["source.2.position"], [2000.0, 10.0])
+    np.testing.assert_array_equal(positions["source.1.position"], [1.0e6, 1.0e4])
+    np.testing.assert_array_equal(positions["source.2.position"], [2.0e6, 1.0e4])
     np.testing.assert_array_equal(state["source.1.signature"], [1.0 + 0.0j])
     np.testing.assert_array_equal(state["refl.ip"], 0.0)
     with pytest.raises(ValueError, match="finite"):

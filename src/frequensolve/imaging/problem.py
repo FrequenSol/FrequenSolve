@@ -24,15 +24,23 @@ Conventions
   :attr:`Linearization.gradient` only; the Jacobian and normal operators stay
   exact so adjoint identities hold.
 - Support masks (§4.1.1) are taken from the first ``linearize`` of a problem
-  view and held fixed for that view; a view created by :meth:`restrict`
-  inherits the masks its parent already adopted unless it asks for
-  ``support="refresh"`` (stage transitions).
+  view (the AND of every frequency task's masks) and held fixed for that
+  view; a view created by :meth:`restrict` inherits the masks its parent
+  already adopted unless it asks for ``support="refresh"`` (stage
+  transitions).
 - A view may override the misfit (or just its loss), the smoothing, the
   support threshold and the per-frequency objective weights of the shared
   problem (:meth:`restrict`); overrides are part of the linearization
   fingerprint, so stage views never share cache entries with the base
   problem when they differ.  Frequency weights scale the objective side
   (value, gradient, normal operator); the Jacobian ``J`` stays unweighted.
+- ``source.<i>.position`` coordinates are metres (Sauce's frame).
+  ``source.<i>.mechanism`` coordinates are ``physical / s_ref`` with one
+  reference scale per block fixed for the problem's lifetime
+  (:attr:`ImagingProblem.mechanism_scaling`).  Sauce keeps mechanism
+  directions and covectors in each executing task's nondimensional units
+  (``/scaling`` = ``s_t``), so directions enter task ``t`` as ``y * s_ref /
+  s_t`` and covector parts are summed as ``g_t * s_ref / s_t``.
 """
 
 from __future__ import annotations
@@ -89,6 +97,7 @@ from frequensolve.imaging.controls import (
     ControlVector,
     ResolvedBlock,
     SupportMask,
+    source_metres_per_unit,
 )
 from frequensolve.imaging.data import (
     DataSpace,
@@ -132,6 +141,16 @@ def _digest(values: Any) -> str:
 
     array = np.ascontiguousarray(np.asarray(values))
     return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _mechanism_blocks(space: ControlSpace) -> List[str]:
+    """Return the qualified ``source.<i>.mechanism`` blocks of ``space``."""
+
+    return [
+        block.name
+        for block in space.resolved_blocks
+        if block.kind == "source" and block.quantity == "mechanism"
+    ]
 
 
 def _normalize_frequencies(values: Iterable[Any]) -> List[Any]:
@@ -355,6 +374,21 @@ class _Shared:
         # simulation (material/interface-only spaces, see ``_sync_simulation``).
         self.installed: Optional[str] = None
         self._identity: Optional[Dict[str, Any]] = None
+        # Optimizer coordinate of every ``source.<i>.mechanism`` block:
+        # ``physical / s_ref`` with one reference scale per block, fixed for
+        # the problem's lifetime (``_Shared.pin_reference``).  Sauce stores
+        # mechanisms in the writing task's nondimensional units (``/scaling``
+        # is task dependent under robust scaling); states carry
+        # ``/scaling = s_ref`` and direction/covector vectors are converted
+        # per task with ``s_ref / s_task`` (:class:`Linearization`).
+        self.reference_scaling: Optional[Dict[str, float]] = (
+            None
+            if parent is None or parent.reference_scaling is None
+            else dict(parent.reference_scaling)
+        )
+        self.reference_units: Dict[str, str] = (
+            {} if parent is None else dict(parent.reference_units)
+        )
 
     @property
     def site(self) -> BaseSite:
@@ -399,6 +433,75 @@ class _Shared:
             }
         return self._identity
 
+    def pin_reference(
+        self,
+        scaling: Mapping[str, float],
+        units: Optional[Mapping[str, str]] = None,
+        *,
+        strict: bool = False,
+    ) -> None:
+        """Fix the mechanism reference scales ``s_ref`` (first come, kept after).
+
+        Blocks without a reference take ``scaling``'s value.  A block whose
+        reference is already fixed keeps it; with ``strict`` a different
+        value raises ``ValueError`` (checkpoint resume).
+        """
+
+        table = dict(self.reference_scaling or {})
+        for name, value in scaling.items():
+            number = float(value)
+            if not math.isfinite(number) or number <= 0.0:
+                raise ValueError(f"mechanism scaling of {name!r} must be positive")
+            mine = table.get(name)
+            if mine is None:
+                table[name] = number
+                if units is not None and name in units:
+                    self.reference_units[name] = str(units[name])
+            elif strict and not math.isclose(mine, number, rel_tol=1.0e-12):
+                raise ValueError(
+                    f"mechanism block {name!r} uses reference scaling {mine!r}; "
+                    f"expected {number!r} (the optimizer coordinates of "
+                    "source mechanisms are physical / s_ref with s_ref fixed "
+                    "for the problem's lifetime)"
+                )
+        self.reference_scaling = table
+
+    def normalize(self, state: ControlState) -> ControlState:
+        """Return ``state`` with its mechanism blocks in reference coordinates.
+
+        A mechanism block whose ``/scaling`` differs from ``s_ref`` is
+        rescaled by ``scaling / s_ref`` (the physical source is unchanged); a
+        block without scaling is taken as reference coordinates.  Every
+        mechanism block of the result carries ``/scaling = s_ref``.
+        """
+
+        reference = self.reference_scaling
+        if not reference:
+            return state
+        slices = state.space.full_slices
+        values: Optional[np.ndarray] = None
+        scaling = dict(state.scaling)
+        units = dict(state.scaling_units)
+        for name, s_ref in reference.items():
+            if name not in slices:
+                continue
+            stored = scaling.get(name)
+            if stored is not None and stored != s_ref:
+                if values is None:
+                    values = np.array(state.values, copy=True)
+                values[slices[name]] *= stored / s_ref
+            scaling[name] = s_ref
+            if name in self.reference_units:
+                units[name] = self.reference_units[name]
+        if values is None and scaling == state.scaling and units == state.scaling_units:
+            return state
+        return ControlState(
+            state.space,
+            state.values if values is None else values,
+            scaling=scaling,
+            scaling_units=units,
+        )
+
     def set_state(self, state: ControlState) -> None:
         if not isinstance(state, ControlState):
             raise TypeError("problem.state must be a ControlState")
@@ -412,11 +515,13 @@ class _Shared:
             or state.size != self.space.full_size
         ):
             raise ValueError("state does not cover the problem's control blocks")
-        self.state = ControlState(
-            self.space.without_support(),
-            state.values,
-            scaling=state.scaling,
-            scaling_units=state.scaling_units,
+        self.state = self.normalize(
+            ControlState(
+                self.space.without_support(),
+                state.values,
+                scaling=state.scaling,
+                scaling_units=state.scaling_units,
+            )
         )
         self.state_provisional = False
 
@@ -428,8 +533,12 @@ class _Shared:
         Sauce-owned blocks (every kind but material profiles/lattices and
         interfaces) take their values, ``/scaling`` and ``/scaling_units``
         from ``baseline``; material and interface blocks keep FrequenSolve's
-        authored values.  A still-provisional :attr:`state` becomes the new
-        authored state; a state the caller set explicitly is kept.
+        authored values.  The first adopted baseline fixes the mechanism
+        reference scales (its task's ``/scaling``) unless they are already
+        pinned (``with_controls``, checkpoint resume); mechanism values are
+        then converted to reference coordinates.  A still-provisional
+        :attr:`state` becomes the new authored state; a state the caller set
+        explicitly is kept (in reference coordinates).
         """
 
         self.manifest = manifest
@@ -464,9 +573,14 @@ class _Shared:
                 scaling[block.name] = baseline.scaling[block.name]
                 if block.name in baseline.scaling_units:
                     units[block.name] = baseline.scaling_units[block.name]
-        self.authored = ControlState(full, values, scaling=scaling, scaling_units=units)
+        self.pin_reference(scaling, units)
+        self.authored = self.normalize(
+            ControlState(full, values, scaling=scaling, scaling_units=units)
+        )
         if self.state_provisional:
             self.state = self.authored
+        elif self.state is not None:
+            self.state = self.normalize(self.state)
 
     def forget(self, entries: Iterable[LinearizationEntry]) -> None:
         for entry in entries:
@@ -719,6 +833,32 @@ class ImagingProblem:
     def state(self, value: ControlState) -> None:
         self._shared.set_state(value)
 
+    @property
+    def mechanism_scaling(self) -> Dict[str, float]:
+        """Return the reference scale ``s_ref`` of every mechanism block.
+
+        The optimizer coordinate of ``source.<i>.mechanism`` is ``physical /
+        s_ref``: one reference per block, taken from the first discovered
+        registry baseline (task 1 of that linearize) and kept for the
+        problem's lifetime -- across :meth:`restrict` views with other
+        frequencies, :meth:`with_controls` and checkpoint resume.  Empty until
+        a baseline with mechanism blocks is known.
+        """
+
+        return dict(self._shared.reference_scaling or {})
+
+    def _pin_mechanism_scaling(
+        self,
+        scaling: Mapping[str, float],
+        units: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        """Fix ``s_ref`` (checkpoint resume); a different fixed value raises."""
+
+        self._shared.pin_reference(scaling, units, strict=True)
+        state = self._shared.state
+        if state is not None and not self._shared.state_provisional:
+            self._shared.state = self._shared.normalize(state)
+
     def __repr__(self) -> str:
         return (
             f"ImagingProblem(name={self.name!r}, blocks={list(self.space.blocks)}, "
@@ -933,6 +1073,10 @@ class ImagingProblem:
         new_full = derived.space.without_support()
         if state is None:
             state = self._require_state()
+        # The mechanism reference scales outlive the layout change: the new
+        # problem's coordinates are the same ``physical / s_ref``.
+        if shared.reference_scaling:
+            derived.pin_reference(shared.reference_scaling, shared.reference_units)
         if state.space.blocks == new_full.blocks and state.size == new_full.full_size:
             derived.set_state(state)
         else:
@@ -975,7 +1119,7 @@ class ImagingProblem:
         if isinstance(v, ControlState):
             if v.space.blocks != self._shared.space.blocks:
                 raise ValueError("state does not cover the problem's control blocks")
-            return v
+            return self._shared.normalize(v)
         state = self._require_state(discover=discover) if base is None else base
         if v is None:
             return state
@@ -1038,8 +1182,12 @@ class ImagingProblem:
     ) -> FWIOperatorJob:
         shared = self._shared
         smoothing = self.smoothing if gradient else None
-        # Only the registry discovery linearize asks for ``state_output`` and
-        # ``manifest`` (task-suffixed when the job has several tasks).
+        # The registry discovery linearize asks for ``state_output`` and
+        # ``manifest`` (task-suffixed when the job has several tasks); a
+        # space with active mechanism blocks asks for ``state_output`` on
+        # every linearize, whose ``/scaling`` gives each task's mechanism
+        # coordinate scale ``s_task`` (see :class:`Linearization`).
+        wants_scaling = bool(_mechanism_blocks(space))
         return FWIOperatorJob(
             shared.backend.job_name("linearize"),
             shared.simulation,
@@ -1050,7 +1198,7 @@ class ImagingProblem:
             covector="gradient.h5" if gradient else None,
             objective="report.json",
             control_state=control_state,
-            state_output="baseline.h5" if discover else None,
+            state_output="baseline.h5" if discover or wants_scaling else None,
             manifest="registry.json" if discover else None,
             min_support=self.min_support,
             misfit=self._misfit_payload,
@@ -1235,22 +1383,85 @@ class ImagingProblem:
     def _read_masks(
         self, job: FWIOperatorJob, space: ControlSpace
     ) -> Optional[Dict[str, np.ndarray]]:
-        """Return Sauce's support masks for ``space`` or ``None`` when absent."""
+        """Return Sauce's support masks for ``space`` or ``None`` when absent.
 
-        file: Any = None
-        if job.state_output is not None and job.state_output_file(1).is_file():
-            file = read_state_output(job)
-        elif job.covector is not None and job.covector_file(1).is_file():
-            file = ControlVectorFile.read(job.covector_file(1), native=False)
+        Every task of a multi-frequency job measures support on its own
+        (per-frequency mesh adaptation and quadrature), but the optimizer
+        coordinate is shared by all tasks: a DOF is supported only if every
+        task supports it (logical AND).  A DOF that some task cannot resolve
+        would otherwise be moved by the gradient of the tasks that can, with
+        no data constraint from the others, and the freeze would depend on
+        which frequency happens to be task 1.  The AND matches the reduction
+        of the covector parts' masks (:func:`reduce_covectors`).
+        """
+
+        files: List[Any] = []
+        tasks = range(1, job.n_tasks + 1)
+        if job.state_output is not None and all(
+            job.state_output_file(task).is_file() for task in tasks
+        ):
+            files = [read_state_output(job, task) for task in tasks]
+        elif job.covector is not None and all(
+            job.covector_file(task).is_file() for task in tasks
+        ):
+            files = [
+                ControlVectorFile.read(job.covector_file(task), native=False)
+                for task in tasks
+            ]
         elif self._shared.baseline is not None:
-            file = self._shared.baseline
-        if file is None or not file.support:
+            files = [self._shared.baseline]
+        files = [file for file in files if file.support]
+        if not files:
             return None
-        return {
-            name: file.support_mask(name)
-            for name in space.blocks
-            if name in file.blocks
-        }
+        masks: Dict[str, np.ndarray] = {}
+        for name in space.blocks:
+            for file in files:
+                if name not in file.blocks:
+                    continue
+                mask = np.asarray(file.support_mask(name), dtype=bool)
+                masks[name] = mask if name not in masks else masks[name] & mask
+        return masks
+
+    def _task_factors(
+        self, job: FWIOperatorJob, space: ControlSpace
+    ) -> List[Dict[str, float]]:
+        """Return ``s_ref / s_task`` of every active mechanism block per task.
+
+        ``s_task`` is the ``/scaling/<block>`` of task ``task``'s
+        ``state_output`` (requested on every linearize of a space with
+        mechanism blocks); ``s_ref`` is the problem's fixed reference.
+        Without ``/scaling`` (older Sauce builds) the coordinates of a
+        single-task job are used as they are; a multi-task job cannot convert
+        them and raises.
+        """
+
+        names = _mechanism_blocks(space)
+        tables: List[Dict[str, float]] = [{} for _ in range(job.n_tasks)]
+        if not names:
+            return tables
+        reference = self._shared.reference_scaling or {}
+        for task in range(1, job.n_tasks + 1):
+            exported = (
+                read_state_output(job, task).scaling
+                if job.state_output is not None
+                else {}
+            )
+            for name in names:
+                s_ref = reference.get(name)
+                s_task = exported.get(name)
+                if s_ref is None or s_task is None:
+                    if job.n_tasks == 1 and s_ref is None and s_task is None:
+                        continue
+                    raise ValueError(
+                        f"linearize job {job.name!r} task {task}: no /scaling for "
+                        f"mechanism block {name!r} (reference {s_ref!r}, task "
+                        f"{s_task!r}); Sauce writes mechanisms in each task's "
+                        "nondimensional units and FrequenSolve needs "
+                        "/scaling/<block> in every task's state_output to "
+                        "convert multi-frequency mechanism vectors"
+                    )
+                tables[task - 1][name] = s_ref / s_task
+        return tables
 
     def _fallback_masks(self, space: ControlSpace) -> Dict[str, np.ndarray]:
         bound = self._shared.space
@@ -1345,13 +1556,26 @@ class ImagingProblem:
             control_registry_fingerprint=registry_fp,
             extra={"active": list(space.blocks), "frequencies": list(job.f_list)},
         )
+        factors = self._task_factors(job, space)
+        entry.extra["mechanism_factors"] = factors
         gradient_file: Optional[ControlVectorFile] = None
         if gradient:
-            gradient_file = (
-                read_smoothed_covector(job)
-                if job.requires_postprocess()
-                else reduce_covectors(job)
-            )
+            if job.requires_postprocess():
+                gradient_file = read_smoothed_covector(job)
+                # Sauce's ``--smooth`` aggregate sums the mechanism parts in
+                # each task's own coordinates (they are not smoothed): replace
+                # them with the converted reduction.
+                mechanisms = [
+                    name
+                    for name in _mechanism_blocks(space)
+                    if name in gradient_file.blocks
+                ]
+                if mechanisms:
+                    converted = reduce_covectors(job, factors=factors)
+                    for name in mechanisms:
+                        gradient_file.blocks[name] = converted.blocks[name]
+            else:
+                gradient_file = reduce_covectors(job, factors=factors)
         linearization = Linearization(
             self,
             space=space,
@@ -1361,6 +1585,7 @@ class ImagingProblem:
             reports=reports,
             gradient_file=gradient_file,
             support_masks=masks,
+            task_factors=factors,
         )
         shared.forget(shared.cache.put(entry))
         shared.linearizations[key] = linearization
@@ -1445,7 +1670,11 @@ class ImagingProblem:
         if callable(hook):
             data = hook(
                 self.simulation,
-                ControlStateFile(state.blocks()),
+                ControlStateFile(
+                    state.blocks(),
+                    scaling=state.scaling,
+                    scaling_units=state.scaling_units,
+                ),
                 list(self._frequencies),
                 active=list(self.space.blocks),
             )
@@ -1509,9 +1738,12 @@ class ImagingProblem:
         Every other block of the full space is compared with its authored
         baseline and skipped when unchanged.  Changed source blocks:
 
-        - ``source.<i>.position`` moves the (inline) physical source point.
+        - ``source.<i>.position`` (metres) moves the (inline) physical source
+          point, converted to the point's authored coordinate units (its own
+          units, else the simulation's default length units, else ``km``).
         - ``source.<i>.mechanism`` is installed when its coordinate scale is
-          known (``/scaling/<block>`` of the state or of Sauce's registry
+          known (``/scaling/<block>`` of the state, else the problem's
+          reference :attr:`mechanism_scaling`, else Sauce's registry
           baseline): the physical components ``coordinate * scaling`` in
           ``/scaling_units/<block>`` become the inline source's basis --
           ``amplitude`` for scalar/monopole kinds, unit ``direction`` plus
@@ -1576,10 +1808,18 @@ class ImagingProblem:
     def _mechanism_scaling(
         self, state: ControlState, name: str
     ) -> Tuple[Optional[float], Optional[str]]:
-        """Return ``(scaling, units)`` of a mechanism block (state, then baseline)."""
+        """Return ``(scaling, units)`` of a mechanism block.
+
+        The state's ``/scaling`` wins; a block without one is in reference
+        coordinates (``s_ref``), and before a reference is fixed Sauce's
+        registry baseline supplies it.
+        """
 
         if name in state.scaling:
             return state.scaling[name], state.scaling_units.get(name)
+        reference = self._shared.reference_scaling or {}
+        if name in reference:
+            return reference[name], self._shared.reference_units.get(name)
         baseline = self._shared.baseline
         if baseline is not None and name in baseline.scaling:
             return baseline.scaling[name], baseline.scaling_units.get(name)
@@ -1863,7 +2103,9 @@ def _transfer_state(
     for target, sl in zip(
         target_space.resolved_blocks, target_space.full_slices.values()
     ):
-        source = by_key.get((target.key, target.address)) or by_name.get(target.name)
+        # Qualified names first: the blocks of one ``SourceParameters`` share
+        # their key and address (``src.mechanism`` of every source).
+        source = by_name.get(target.name) or by_key.get((target.key, target.address))
         if source is None:
             if authored is None:
                 raise ValueError(
@@ -1893,7 +2135,7 @@ def _transfer_state(
         # restrict both to the blocks that actually change.
         mine = source_space.restrict(
             [
-                (by_key.get((b.key, b.address)) or by_name[b.name]).name
+                (by_name.get(b.name) or by_key[(b.key, b.address)]).name
                 for b in target_space.resolved_blocks
                 if b.name in transfers
             ]
@@ -1941,7 +2183,12 @@ def _install_interface(simulation: Any, block_id: str, values: np.ndarray) -> No
 def _install_source_position(
     simulation: Any, block: ResolvedBlock, values: np.ndarray
 ) -> None:
-    """Move physical source ``block.source_id`` to ``values`` (authored frame)."""
+    """Move physical source ``block.source_id`` to ``values`` (metres).
+
+    Sauce's position coordinates are metres; the inline point is authored in
+    its own coordinate units (see :func:`source_metres_per_unit`), so the
+    values are converted before they replace the point's leading coordinates.
+    """
 
     geometry = getattr(simulation.acquisition, "source_geometry", None)
     source_id = int(block.source_id or 0)
@@ -1953,7 +2200,12 @@ def _install_source_position(
             "points can be moved by simulation_at"
         )
     try:
-        geometry.set_point_coordinates(source_id - 1, values)
+        factors = source_metres_per_unit(simulation)
+        if factors is None or not 0 < source_id <= factors.size:
+            raise IndexError("source point index is out of range")
+        geometry.set_point_coordinates(
+            source_id - 1, np.asarray(values, dtype=np.float64) / factors[source_id - 1]
+        )
     except (IndexError, ValueError) as exc:
         raise NotImplementedError(
             f"source block {block.name!r}: cannot move physical source "
@@ -2198,6 +2450,7 @@ class Linearization:
         reports: Sequence[ObjectiveReport],
         gradient_file: Optional[ControlVectorFile],
         support_masks: Mapping[str, np.ndarray],
+        task_factors: Optional[Sequence[Mapping[str, float]]] = None,
     ) -> None:
         self.problem = problem
         self.space = space
@@ -2233,6 +2486,15 @@ class Linearization:
         self.support_masks: Dict[str, np.ndarray] = {
             name: np.array(mask, dtype=bool) for name, mask in support_masks.items()
         }
+        # ``s_ref / s_task`` per task and active mechanism block: directions
+        # enter task ``t`` as ``y * s_ref / s_t`` and its covector parts leave
+        # as ``g_t * s_ref / s_t`` (empty tables: no conversion).
+        self.task_factors: List[Dict[str, float]] = [
+            {name: float(value) for name, value in dict(table).items()}
+            for table in (task_factors or [{} for _ in self.frequencies])
+        ]
+        if len(self.task_factors) != len(self.frequencies):
+            raise ValueError("task_factors needs one table per frequency task")
         self._data_space: Optional[DataSpace] = None
         self._jacobian: Optional[Jacobian] = None
         self._normal: Optional[Normal] = None
@@ -2341,9 +2603,15 @@ class Linearization:
         stem = directory / "direction.h5"
         for task, path in task_inputs(stem, len(self.frequencies)):
             state_fp, registry_fp = self.task_fingerprints[task - 1]
-            dv.to_file(
+            file = dv.to_file(
                 state_fingerprint=state_fp, registry_fingerprint=registry_fp
-            ).write(path)
+            )
+            # Mechanism directions are read in the executing task's
+            # coordinates: y * s_ref / s_task.
+            for name, factor in self.task_factors[task - 1].items():
+                if factor != 1.0 and name in file.blocks:
+                    file.blocks[name] = file.blocks[name] * factor
+            file.write(path)
         return stem
 
     def _objective_vector_stem(self, dual: DataVector, directory: Path) -> Path:
@@ -2449,7 +2717,8 @@ class Linearization:
             )
             self.problem._run_job(job)
             return _vector_from_file(
-                reduce_covectors(job, [1.0] * job.n_tasks), self.space
+                reduce_covectors(job, [1.0] * job.n_tasks, self.task_factors),
+                self.space,
             )
 
         return self._memo("vjp", _digest(dual.values), compute)
@@ -2468,7 +2737,10 @@ class Linearization:
             )
             self.problem._run_job(job)
             return _vector_from_file(
-                reduce_covectors(job, self.frequency_weights.tolist()), self.space
+                reduce_covectors(
+                    job, self.frequency_weights.tolist(), self.task_factors
+                ),
+                self.space,
             )
 
         return self._memo("normal", _digest(direction.values), compute)
