@@ -26,11 +26,31 @@ from frequensolve.imaging.data import DataSpace, DataVector
 from frequensolve.inversion.validation import real_adjoint_test
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from frequensolve.imaging.extension import (
+        ExtendedProblem,
+        ExtensionLinearization,
+        ExtensionSpace,
+    )
     from frequensolve.imaging.problem import Linearization
 
-__all__ = ["Jacobian", "ModelOperator", "Normal"]
+__all__ = [
+    "ExtensionJacobian",
+    "ExtensionNormal",
+    "Jacobian",
+    "ModelOperator",
+    "Normal",
+    "ReducedNormal",
+]
 
-Descriptor = Union[ControlSpace, DataSpace, None]
+Descriptor = Union[ControlSpace, DataSpace, "ExtensionSpace", None]
+
+
+def _extension_types() -> Any:
+    """Return ``(ExtensionSpace, ExtensionVector)`` (imported lazily: no cycle)."""
+
+    from frequensolve.imaging.extension import ExtensionSpace, ExtensionVector
+
+    return ExtensionSpace, ExtensionVector
 
 
 def _size(descriptor: Descriptor, fallback: Optional[int] = None) -> int:
@@ -54,6 +74,14 @@ def _values(x: Any, descriptor: Descriptor) -> np.ndarray:
         if isinstance(descriptor, DataSpace) and x.space != descriptor:
             raise ValueError("data vector belongs to a different data space")
         return x.values
+    if _is_typed_vector(x):
+        ExtensionSpace, ExtensionVector = _extension_types()
+        if isinstance(x, ExtensionVector):
+            if isinstance(descriptor, ExtensionSpace) and not (
+                x.space is descriptor or x.space.equivalent(descriptor)
+            ):
+                raise ValueError("tap vector belongs to a different extension space")
+            return x.values
     return np.asarray(x)
 
 
@@ -68,11 +96,28 @@ def _wrap(values: np.ndarray, descriptor: Descriptor) -> Any:
         return ControlVector(values, descriptor)
     if isinstance(descriptor, DataSpace):
         return DataVector(np.asarray(values, dtype=descriptor.dtype), descriptor)
+    if descriptor is not None:
+        ExtensionSpace, _ExtensionVector = _extension_types()
+        if isinstance(descriptor, ExtensionSpace):
+            if np.iscomplexobj(values):
+                if np.max(np.abs(values.imag), initial=0.0) > 0.0:
+                    raise ValueError("tap-side operator output must be real")
+                values = values.real
+            return descriptor.vector(values)
     return np.asarray(values)
 
 
 def _is_operator_like(x: Any) -> bool:
     return isinstance(x, LinearOperator) or issparse(x)
+
+
+def _is_typed_vector(x: Any) -> bool:
+    """Return whether ``x`` is a space-bound vector (control, data or tap)."""
+
+    return (
+        isinstance(x, (ControlVector, DataVector))
+        or (hasattr(x, "space") and hasattr(x, "values"))
+    ) and not isinstance(x, np.ndarray)
 
 
 class ModelOperator(LinearOperator):
@@ -127,7 +172,7 @@ class ModelOperator(LinearOperator):
     def dot(self, x: Any) -> Any:
         """Apply to a vector, or compose with a scalar, operator or matrix."""
 
-        if isinstance(x, (ControlVector, DataVector)):
+        if _is_typed_vector(x):
             return self.matvec(x)
         if np.isscalar(x):
             return self._scaled(x)
@@ -215,6 +260,8 @@ def _describe(descriptor: Descriptor) -> str:
         return f"ControlSpace[{descriptor.size}]"
     if isinstance(descriptor, DataSpace):
         return f"DataSpace[{descriptor.size}]"
+    if descriptor is not None:
+        return f"{type(descriptor).__name__}[{descriptor.size}]"
     return "ndarray"
 
 
@@ -350,6 +397,115 @@ class Normal(ModelOperator):
 
     def _matvec(self, x: np.ndarray) -> np.ndarray:
         return self.linearization.apply_normal(_real_direction(x)).values
+
+    _rmatvec = _matvec
+
+    def _adjoint(self) -> ModelOperator:
+        return self
+
+    def _transpose(self) -> ModelOperator:
+        return self
+
+
+# ---------------------------------------------------------------------------
+# extension (FWIME) operators
+# ---------------------------------------------------------------------------
+
+
+class ExtensionJacobian(ModelOperator):
+    """Tap-space Jacobian ``B`` of an extension linearization.
+
+    ``B @ t`` (extension ``jvp``) maps a real
+    :class:`~frequensolve.imaging.extension.ExtensionVector` to a complex
+    :class:`DataVector`; ``B.H @ r`` (extension ``vjp``) returns the real tap
+    covector ``Re(B^H r)``.
+    """
+
+    def __init__(self, linearization: "ExtensionLinearization") -> None:
+        self.linearization = linearization
+        super().__init__(
+            linearization.extension_space,
+            linearization.data_space,
+            dtype=np.complex128,
+        )
+
+    def _matvec(self, x: np.ndarray) -> np.ndarray:
+        return self.linearization.jvp(_real_direction(x)).values
+
+    def _rmatvec(self, x: np.ndarray) -> np.ndarray:
+        dual = np.asarray(x, dtype=np.complex128).reshape(-1)
+        return self.linearization.vjp(dual).values
+
+    def dot_test(self, seed: int = 0, *, tolerance: float = 1.0e-8) -> Dict[str, Any]:
+        """Check ``<B t, r>_Re == <t, B^H r>`` on random vectors."""
+
+        t = self.linearization.extension_space.random(seed)
+        r = self.linearization.data_space.random(seed + 1)
+        return real_adjoint_test(
+            lambda p: np.asarray(self @ p),
+            lambda y: np.asarray(self.H @ y),
+            t.values,
+            r.values,
+            relative_tolerance=tolerance,
+        )
+
+
+class ExtensionNormal(ModelOperator):
+    """Unregularized tap-space normal ``Re(B^H W B)`` (extension ``normal``).
+
+    Self-adjoint on the extension space; ``.H`` returns the operator itself.
+    """
+
+    def __init__(self, linearization: "ExtensionLinearization") -> None:
+        self.linearization = linearization
+        space = linearization.extension_space
+        super().__init__(space, space, dtype=np.float64)
+
+    def _matvec(self, x: np.ndarray) -> np.ndarray:
+        return self.linearization.apply_tap_normal(_real_direction(x)).values
+
+    _rmatvec = _matvec
+
+    def _adjoint(self) -> ModelOperator:
+        return self
+
+    def _transpose(self) -> ModelOperator:
+        return self
+
+
+class ReducedNormal(ModelOperator):
+    """Reduced Gauss-Newton Schur operator of an extended problem at a point.
+
+    ``H @ dv = G*WG dv - G*WB (B*WB + D)^-1 B*WG dv`` (Sauce ``solve`` with
+    ``reduced_normal``), self-adjoint on the active control space; actions
+    are memoized per direction digest on the linearization.
+
+    Args:
+        problem: The :class:`~frequensolve.imaging.extension.ExtendedProblem`.
+        point: Linearization point (``None`` for the current state).
+        linearization: Optional already-computed linearization of ``point``.
+    """
+
+    def __init__(
+        self,
+        problem: "ExtendedProblem",
+        point: Any = None,
+        *,
+        linearization: Optional["ExtensionLinearization"] = None,
+    ) -> None:
+        self.problem = problem
+        self.linearization = (
+            problem.linearize(point) if linearization is None else linearization
+        )
+        space = self.linearization.space
+        super().__init__(space, space, dtype=np.float64)
+
+    @property
+    def point(self) -> ControlVector:
+        return self.linearization.point
+
+    def _matvec(self, x: np.ndarray) -> np.ndarray:
+        return self.linearization.apply_reduced_normal(_real_direction(x)).values
 
     _rmatvec = _matvec
 

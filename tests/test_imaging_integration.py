@@ -21,11 +21,13 @@ import pytest
 
 from frequensolve.imaging import DepthProfile, ImagingProblem, ObservedData
 from frequensolve.imaging._artifacts import ControlStateFile
+from frequensolve.imaging.extension import Extension, ExtensionVector, Lags
 from frequensolve.mesh import BoundaryCondition
 from frequensolve.model.layered import LayeredModel
 from frequensolve.project import Project
 from frequensolve.seismic import Acquisition, ReceiverNode
 from frequensolve.simulation import Discretization, FrequencyDomainJob, SolverConfig
+from frequensolve.units import ureg as u
 
 pytestmark = pytest.mark.integration
 
@@ -138,3 +140,99 @@ def test_imaging_problem_linearizes_against_sauce(tmp_path):
     assert problem.value() == lin.value
     moved = problem.value(problem.vector() + 0.01)
     assert np.isfinite(moved) and moved != lin.value
+
+
+# ---------------------------------------------------------------------------
+# auxiliary model extension (FWIME)
+# ---------------------------------------------------------------------------
+
+
+def _extension_simulation(project: Project, name: str, vp_lower: float):
+    """Return the layered case configured for Sauce's extension actions.
+
+    Mirrors ``test/e2e/model_extension_case.py`` (``control_sensitivity_case
+    .prepare(..., accurate_condensation=True)``): compiled Forms, unrelaxed
+    assembly with fp64 Schur condensation; Galerkin is the e2e default.
+    """
+
+    simulation = _simulation(project, name, vp_lower)
+    simulation += Discretization(form_execution="compiled")
+    simulation += SolverConfig(
+        solve_on="final",
+        max_iter=600,
+        tolerance=1.0e-4,
+        relaxed_assembly=False,
+        schur_precision="fp64",
+    )
+    simulation.save()
+    return simulation
+
+
+def test_extended_problem_solves_against_sauce(tmp_path):
+    from frequensolve.orchestrator.sites.local import LocalSite
+
+    site = LocalSite(solver=_executable(), n_workers=1)
+    project = Project(name="fwime", path=tmp_path / "project", load_if_exists=False)
+    truth = _extension_simulation(project, "truth", TRUTH_VP)
+    initial = _extension_simulation(project, "initial", START_VP)
+
+    observed_job = FrequencyDomainJob("observed", truth, [FREQUENCY])
+    result = site.run(observed_job, check=True)
+    assert result.successful
+
+    # Sauce's extension actions evaluate the borrowed control map without a
+    # surface context ("Surface-coordinate control map has no evaluation
+    # context" for the default ``axis="below"`` profile), so the profile
+    # lives on the global depth axis.
+    problem = ImagingProblem(
+        initial,
+        controls=DepthProfile("vp", "layer_2", count=4, axis="z"),
+        observed=ObservedData(observed_job),
+        site=site,
+        name="fwime",
+    )
+    xp = problem.extend(
+        Extension(
+            [Lags("vp", count=5, origin=-20 * u.ms, spacing=10 * u.ms)],
+            damping=0.1,
+            lag_penalty=1.0,
+            lag_scale=20 * u.ms,
+            tolerance=1.0e-5,
+            max_iterations=200,
+        )
+    )
+    report = xp.capabilities()
+    assert report["ok"], report
+    assert xp.extension_space.size == 4 * 5
+
+    lin = xp.linearize()
+    assert lin.frequencies == [FREQUENCY]
+    assert len(lin.manifests) == 1
+    assert lin.manifests[0].baseline == lin.state_fingerprint
+    assert np.isfinite(lin.baseline_value) and lin.baseline_value > 0.0
+    assert lin.covector.size == 20 and np.all(np.isfinite(lin.covector.values))
+
+    taps, solve_report = xp.solve()
+    assert isinstance(taps, ExtensionVector) and taps.size == 20
+    assert solve_report.converged, solve_report.raw
+    assert solve_report.baseline == lin.state_fingerprint
+    assert np.all(np.isfinite(taps.values)) and taps.norm() > 0.0
+    assert solve_report.lag_scale_seconds == pytest.approx(0.02)
+
+    value = xp.value()
+    assert np.isfinite(value) and value > 0.0
+
+    gradient = xp.gradient()
+    assert gradient.size == lin.space.size
+    assert np.all(np.isfinite(gradient.values))
+    assert np.linalg.norm(gradient.values) > 0.0
+
+    H = xp.normal()
+    a = lin.space.random(11)
+    b = lin.space.random(12)
+    ha = H @ a
+    hb = H @ b
+    assert np.all(np.isfinite(ha.values)) and np.all(np.isfinite(hb.values))
+    left = float(np.dot(ha.values, b.values))
+    right = float(np.dot(a.values, hb.values))
+    assert abs(left - right) <= 1.0e-2 * max(abs(left), abs(right)), (left, right)

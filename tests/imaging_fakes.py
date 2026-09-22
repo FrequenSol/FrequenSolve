@@ -39,6 +39,25 @@ the unsuffixed covector receives the frequency-weighted sum of the parts and
 identity).  Every direction and objective vector must carry the state and
 registry fingerprints of the state it is applied to, as Sauce requires.
 
+Auxiliary model extension (``fwi_operator.extension``): a second seeded
+complex matrix ``B`` of shape ``(data_space.size, n_taps)`` per linearization
+(see :class:`FakeExtension`) makes the extended forward ``J m + B t``:
+
+``linearize``
+    as above, plus ``<manifest>_<task>.json`` (``fs-model-extension-1``) and
+    the residual extension covector ``Re(B[R]^H (J[R] m - d[R]))`` as
+    ``<extension covector>_<task>.h5`` (``fs-extension-vector-1``).
+``jvp`` / ``vjp`` / ``normal``
+    ``B[R] t``, ``Re(B[R]^H r[R])`` and ``Re(B[R]^H B[R] t)`` in the tap
+    space (``extension.direction`` / ``extension.covector``).
+``solve``
+    the closed-form minimizer of ``0.5 ||r + B S z||^2 + 0.5 z^T D z`` with
+    ``S`` the per-field scales, ``D = damping^2 + (axis penalty)^2`` and
+    ``taps = S z`` (``fs-extension-solve-1`` report beside it); with
+    ``model_gradient`` the physical covector ``Re(J[R]^H (r + B taps))``;
+    with ``reduced_normal`` the Schur action ``G*G dv - G*B_S (B_S*B_S +
+    D)^-1 B_S*G dv`` on the physical ``direction``.
+
 Three more job kinds run on the same surrogate:
 
 ``ControlGradientJob(kind="focus")``
@@ -78,7 +97,10 @@ from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging._artifacts import (
     ControlStateFile,
     ControlVectorFile,
+    ExtensionVectorField,
+    ExtensionVectorFile,
     qualified_block_name,
+    unqualified_block_name,
 )
 from frequensolve.imaging.data import DataSpace, DataVector
 from frequensolve.imaging.jobs import (
@@ -86,6 +108,7 @@ from frequensolve.imaging.jobs import (
     FWIOperatorJob,
     ImageKernelJob,
     SmoothJob,
+    _task_path,
 )
 from frequensolve.orchestrator.sites.base import (
     BaseSite,
@@ -152,6 +175,168 @@ def _rows(space: DataSpace, frequency: Any) -> np.ndarray:
     return np.concatenate(
         [layout.indices for layout in space.term_layouts(frequency=frequency)]
     )
+
+
+def _seconds(value: float, units: str) -> float:
+    from frequensolve.units import ureg
+
+    return float(ureg.Quantity(float(value), units).to("s").magnitude)
+
+
+def _meters(values: Any, units: str) -> np.ndarray:
+    from frequensolve.units import ureg
+
+    return np.asarray(
+        ureg.Quantity(np.asarray(values, dtype=np.float64), units).to("m").magnitude,
+        dtype=np.float64,
+    )
+
+
+def extension_descriptor(
+    fields: Sequence[Mapping[str, Any]], sizes: Mapping[str, int]
+) -> List[Dict[str, Any]]:
+    """Return the fake's per-field descriptor of ``fwi_operator.extension.fields``.
+
+    ``sizes`` maps qualified block names to spatial DOF counts.  Lag
+    coordinates are seconds, half-offsets meters (one vector per offset).
+    """
+
+    out = []
+    for field in fields:
+        control = unqualified_block_name(str(field["control"]))
+        count = int(sizes[qualified_block_name(control)])
+        if "lags" in field:
+            lags = field["lags"]
+            units = str(lags["units"])
+            coordinates = [
+                _seconds(float(lags["origin"]) + k * float(lags["spacing"]), units)
+                for k in range(int(lags["count"]))
+            ]
+            axis = "lag"
+        else:
+            offsets = field["offsets"]
+            coordinates = _meters(
+                offsets["half_offsets"], str(offsets["units"])
+            ).tolist()
+            axis = "offset"
+        out.append(
+            {
+                "control": control,
+                "axis": axis,
+                "spatial_count": count,
+                "coordinates": coordinates,
+            }
+        )
+    return out
+
+
+@dataclass(frozen=True)
+class FakeExtension:
+    """The tap-space surrogate ``B`` attached to one :class:`FakeLinearization`.
+
+    Taps are packed like ``fs-extension-vector-1``: spatial index fastest,
+    then axis, then field.
+    """
+
+    fingerprint: str
+    baseline: str
+    fields: Tuple[Dict[str, Any], ...]
+    B: np.ndarray
+
+    @property
+    def size(self) -> int:
+        return int(self.B.shape[1])
+
+    @property
+    def shapes(self) -> List[Tuple[int, int]]:
+        return [(int(f["spatial_count"]), len(f["coordinates"])) for f in self.fields]
+
+    def field_scales(self, solver: Mapping[str, Any]) -> np.ndarray:
+        """Return the per-tap scale ``S`` (``field_scales`` expanded, else ones)."""
+
+        scales = solver.get("field_scales")
+        out = np.ones(self.size, dtype=np.float64)
+        if scales is None:
+            return out
+        offset = 0
+        for scale, (count, n_axis) in zip(scales, self.shapes):
+            out[offset : offset + count * n_axis] = float(scale)
+            offset += count * n_axis
+        return out
+
+    def regularizer(self, solver: Mapping[str, Any]) -> np.ndarray:
+        """Return the diagonal ``D = damping^2 + (axis penalty)^2`` per tap."""
+
+        damping = float(solver["damping"])
+        out = np.full(self.size, damping**2, dtype=np.float64)
+        offset = 0
+        for field, (count, n_axis) in zip(self.fields, self.shapes):
+            if field["axis"] == "lag":
+                penalty = float(solver.get("lag_penalty", 0.0))
+                scale = solver.get("lag_scale")
+                if penalty > 0.0 and scale is not None:
+                    seconds = _seconds(scale["value"], scale["units"])
+                    weights = (
+                        penalty * np.abs(np.asarray(field["coordinates"])) / seconds
+                    ) ** 2
+                else:
+                    weights = np.zeros(n_axis)
+            else:
+                penalty = float(solver.get("offset_penalty", 0.0))
+                scale = solver.get("offset_scale")
+                if penalty > 0.0 and scale is not None:
+                    meters = float(_meters([scale["value"]], scale["units"])[0])
+                    weights = (
+                        penalty
+                        * np.linalg.norm(np.asarray(field["coordinates"]), axis=1)
+                        / meters
+                    ) ** 2
+                else:
+                    weights = np.zeros(n_axis)
+            out[offset : offset + count * n_axis] += np.repeat(weights, count)
+            offset += count * n_axis
+        return out
+
+    def normal_matrix(self, rows: np.ndarray, solver: Mapping[str, Any]) -> np.ndarray:
+        """Return ``Re(B_S^H B_S) + D`` over ``rows`` (``B_S = B[rows] S``)."""
+
+        Bs = self.B[rows] * self.field_scales(solver)[None, :]
+        return np.real(Bs.conj().T @ Bs) + np.diag(self.regularizer(solver))
+
+    def solve(
+        self,
+        rows: np.ndarray,
+        residual: np.ndarray,
+        solver: Mapping[str, Any],
+        *,
+        target: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return ``(z, taps)`` minimizing the regularized quadratic.
+
+        Without ``target`` the data term is ``0.5 ||residual + B_S z||^2``
+        (observed-data target); with it ``0.5 ||B_S z - target||^2``.
+        """
+
+        S = self.field_scales(solver)
+        Bs = self.B[rows] * S[None, :]
+        rhs = (
+            -np.real(Bs.conj().T @ residual)
+            if target is None
+            else np.real(Bs.conj().T @ target)
+        )
+        z = np.linalg.solve(self.normal_matrix(rows, solver), rhs)
+        return z, S * z
+
+    def reduced_normal_matrix(
+        self, rows: np.ndarray, G: np.ndarray, solver: Mapping[str, Any]
+    ) -> np.ndarray:
+        """Return the dense Schur complement ``G*G - G*B_S (B_S*B_S + D)^-1 B_S*G``."""
+
+        Bs = self.B[rows] * self.field_scales(solver)[None, :]
+        GG = np.real(G.conj().T @ G)
+        GB = np.real(G.conj().T @ Bs)
+        BG = np.real(Bs.conj().T @ G)
+        return GG - GB @ np.linalg.solve(self.normal_matrix(rows, solver), BG)
 
 
 def _write_scalar(path: Path, value: float) -> None:
@@ -388,18 +573,283 @@ class FakeImagingSite(BaseSite):
         if isinstance(job, ImageKernelJob):
             self._execute_images(job)
             return
-        if job.action not in {"linearize", "jvp", "vjp", "normal"}:
+        if job.action not in {"linearize", "jvp", "vjp", "normal", "solve"}:
             raise NotImplementedError(
                 f"{type(self).__name__} does not execute action {job.action!r}"
             )
-        if job.extension is not None or job.reflectivity is not None:
-            raise NotImplementedError("the fake site has no extension or reflectivity")
+        # Reflectivity blocks are sized from ``block_sizes`` like any other
+        # registry block, so the surrogate treats them as ordinary controls.
+        if job.extension is not None:
+            self._execute_extension(job)
+            return
+        if job.action == "solve":
+            raise ValueError("solve requires an extension")
         if job.action == "linearize":
             self._linearize(job)
         else:
             self._apply(job)
         if job.requires_postprocess():
             self._postprocess(job)
+
+    # -- extension ------------------------------------------------------------
+
+    def extension_surrogate(
+        self,
+        lin: FakeLinearization,
+        fields: Sequence[Mapping[str, Any]],
+        sizes: Mapping[str, int],
+    ) -> FakeExtension:
+        """Return the tap surrogate ``B`` of ``lin`` for ``extension.fields``.
+
+        ``sizes`` maps qualified block names to spatial DOF counts (the
+        registry sizes; fields may borrow inactive blocks).  Rows of one
+        frequency depend only on the seed, the linearization's identity and
+        the field descriptor.
+        """
+
+        descriptor = extension_descriptor(fields, sizes)
+        fingerprint = _sha256(
+            {
+                "kind": "extension",
+                "registry": lin.control_registry_fingerprint,
+                "fields": descriptor,
+            }
+        )
+        n = int(sum(f["spatial_count"] * len(f["coordinates"]) for f in descriptor))
+        B = np.zeros((lin.space.size, n), dtype=np.complex128)
+        key = [self.seed, "extension", list(lin.active), dict(lin.sizes), descriptor]
+        for frequency in lin.space.frequencies:
+            f = complex(frequency)
+            for layout in lin.space.term_layouts(frequency=frequency):
+                rng = np.random.default_rng(_seed(*key, [f.real, f.imag], layout.id))
+                rows = layout.indices
+                B[rows, :] = rng.standard_normal((rows.size, n)) + 1j * (
+                    rng.standard_normal((rows.size, n))
+                )
+        return FakeExtension(
+            fingerprint=fingerprint,
+            baseline=lin.state_fingerprint,
+            fields=tuple(descriptor),
+            B=B,
+        )
+
+    def _registry_sizes(self, job: FWIOperatorJob) -> Dict[str, int]:
+        baseline = self._baseline(job)
+        return {name: int(baseline[name].size) for name in baseline.names}
+
+    def _execute_extension(self, job: FWIOperatorJob) -> None:
+        assert job.extension is not None
+        fields = job.extension["fields"]
+        sizes = self._registry_sizes(job)
+        if job.action == "linearize":
+            self._linearize(job)
+            for task in range(1, job.n_tasks + 1):
+                lin, frequency = self._load_state(job, task)
+                ext = self.extension_surrogate(lin, fields, sizes)
+                if job.extension.get("manifest") is not None:
+                    self._write_extension_manifest(
+                        _task_path(job.extension_manifest_file(), task), ext
+                    )
+                if job.extension.get("covector") is not None:
+                    rows = lin.rows(frequency)
+                    residual = lin.J[rows] @ lin.m - lin.d[rows]
+                    self._write_taps(
+                        job.extension_covector_file(task),
+                        ext,
+                        np.real(ext.B[rows].conj().T @ residual),
+                        role="covector",
+                    )
+            return
+        for task in range(1, job.n_tasks + 1):
+            lin, frequency = self._load_state(job, task)
+            ext = self.extension_surrogate(lin, fields, sizes)
+            rows = lin.rows(frequency)
+            B = ext.B[rows]
+            if job.action == "jvp":
+                t = self._taps(job, ext)
+                values = np.zeros(lin.space.size, dtype=np.complex128)
+                values[rows] = B @ t
+                DataVector(values, lin.space).write_objective_vector(
+                    job.objective_vector_file(task),
+                    state_fingerprint=lin.state_fingerprint,
+                    term_layout=lin.space.term_layouts(frequency=frequency),
+                    n_ranks=self.n_ranks,
+                )
+            elif job.action == "vjp":
+                r = self._objective_vector(job, task, lin, frequency)
+                self._write_taps(
+                    job.extension_covector_file(task),
+                    ext,
+                    np.real(B.conj().T @ r[rows]),
+                    role="covector",
+                )
+            elif job.action == "normal":
+                t = self._taps(job, ext)
+                self._write_taps(
+                    job.extension_covector_file(task),
+                    ext,
+                    np.real(B.conj().T @ (B @ t)),
+                    role="covector",
+                )
+            else:
+                self._solve_extension(job, task, lin, frequency, ext)
+            if job.objective is not None:
+                residual = lin.J[rows] @ lin.m - lin.d[rows]
+                self._write_report(job, task, lin, frequency, residual)
+
+    def _solve_extension(
+        self,
+        job: FWIOperatorJob,
+        task: int,
+        lin: FakeLinearization,
+        frequency: Any,
+        ext: FakeExtension,
+    ) -> None:
+        assert job.extension is not None
+        solver = job.extension["solver"]
+        rows = lin.rows(frequency)
+        G = lin.J[rows]
+        residual = G @ lin.m - lin.d[rows]
+        target: Optional[np.ndarray] = None
+        if job.objective_vector is not None:
+            target = self._objective_vector(job, task, lin, frequency)[rows]
+        z, taps = ext.solve(rows, residual, solver, target=target)
+        S = ext.field_scales(solver)
+        Bs = ext.B[rows] * S[None, :]
+        misfit = residual + Bs @ z if target is None else Bs @ z - target
+        data_objective = 0.5 * float(np.vdot(misfit, misfit).real)
+        regularization = 0.5 * float(z @ (ext.regularizer(solver) * z))
+        rhs = (
+            -np.real(Bs.conj().T @ residual)
+            if target is None
+            else np.real(Bs.conj().T @ target)
+        )
+        converged = int(solver.get("max_iterations", 50)) > 0
+        lag_scale = solver.get("lag_scale")
+        offset_scale = solver.get("offset_scale")
+        report: Dict[str, Any] = {
+            "schema": "fs-extension-solve-1",
+            "baseline": ext.baseline,
+            "fingerprint": ext.fingerprint,
+            "damping": float(solver["damping"]),
+            "lag_penalty": float(solver.get("lag_penalty", 0.0)),
+            "lag_scale_seconds": (
+                0.0
+                if lag_scale is None
+                else _seconds(lag_scale["value"], lag_scale["units"])
+            ),
+            "offset_penalty": float(solver.get("offset_penalty", 0.0)),
+            "offset_scale_meters": (
+                0.0
+                if offset_scale is None
+                else float(_meters([offset_scale["value"]], offset_scale["units"])[0])
+            ),
+            "field_scales": [
+                float(v) for v in solver.get("field_scales", [1.0] * len(ext.fields))
+            ],
+            "background_batches": 1,
+            "resident_background_bytes": int(ext.B.nbytes),
+            "regularization": regularization,
+            "method": "cg",
+            "iterations": 1 if converged else 0,
+            "normal_actions": 2 if converged else 0,
+            "converged": converged,
+            "rhs_norm": float(np.linalg.norm(rhs)),
+            "residual_norm": 0.0 if converged else float(np.linalg.norm(rhs)),
+            "quadratic_change": -0.5 * float(z @ rhs),
+            "quadratic_objective": data_objective + regularization,
+            "data_objective": data_objective,
+            "objective": data_objective + regularization,
+            "reduced_objective": data_objective + regularization,
+            "runtime": {"site": type(self).__name__, "task": task},
+        }
+        if job.model_gradient:
+            gradient = np.real(G.conj().T @ (residual + Bs @ z))
+            self._write_covector(job.covector_file(task), lin, gradient)
+            report["background_gradient_stationary"] = True
+        if job.reduced_normal is not None:
+            dv = self._direction(job, lin)
+            options = job.reduced_normal
+            response_converged = int(options.get("max_iterations", 50)) > 0
+            action = ext.reduced_normal_matrix(rows, G, solver) @ dv
+            w = np.real(Bs.conj().T @ (G @ dv))
+            self._write_covector(job.covector_file(task), lin, action)
+            report["reduced_normal"] = {
+                "method": "gauss_newton_schur",
+                "iterations": 1 if response_converged else 0,
+                "normal_actions": 2 if response_converged else 0,
+                "converged": response_converged,
+                "rhs_norm": float(np.linalg.norm(w)),
+                "residual_norm": (
+                    0.0 if response_converged else float(np.linalg.norm(w))
+                ),
+                "quadratic_change": -0.5
+                * float(w @ np.linalg.solve(ext.normal_matrix(rows, solver), w)),
+            }
+        self._write_taps(job.extension_solution_file(task), ext, taps, role="tangent")
+        path = job.extension_report_file(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+    def _taps(self, job: FWIOperatorJob, ext: FakeExtension) -> np.ndarray:
+        assert job.extension is not None
+        path = job.extension.get("direction")
+        if path is None:
+            raise ValueError(f"extension {job.action!r} requires extension.direction")
+        vector = ExtensionVectorFile.read(path)
+        if vector.fingerprint != ext.fingerprint:
+            raise ValueError(f"{path} belongs to another extension basis")
+        if vector.baseline != ext.baseline:
+            raise ValueError(f"{path} belongs to another objective state")
+        if vector.role != "tangent":
+            raise ValueError(f"{path} is not a tangent extension vector")
+        shapes = [field_.values.shape for field_ in vector.fields]
+        if shapes != ext.shapes:
+            raise ValueError(f"{path} field shapes {shapes} differ from {ext.shapes}")
+        return vector.pack()
+
+    def _write_taps(
+        self, path: Path, ext: FakeExtension, packed: np.ndarray, *, role: str
+    ) -> None:
+        fields = []
+        offset = 0
+        for field, (count, n_axis) in zip(ext.fields, ext.shapes):
+            block = packed[offset : offset + count * n_axis]
+            fields.append(
+                ExtensionVectorField(
+                    block.reshape((count, n_axis), order="F"),
+                    axis=field["axis"],
+                    control=field["control"],
+                )
+            )
+            offset += count * n_axis
+        ExtensionVectorFile(
+            fields, fingerprint=ext.fingerprint, baseline=ext.baseline, role=role
+        ).write(path)
+
+    @staticmethod
+    def _write_extension_manifest(path: Path, ext: FakeExtension) -> None:
+        fields = []
+        for field in ext.fields:
+            entry: Dict[str, Any] = {
+                "control": field["control"],
+                "basis": f"fake:model.{field['control']}",
+                "property": field["control"],
+                "spatial_count": int(field["spatial_count"]),
+            }
+            if field["axis"] == "lag":
+                entry["seconds"] = list(field["coordinates"])
+            else:
+                entry["half_offsets_meters"] = [list(v) for v in field["coordinates"]]
+            fields.append(entry)
+        payload = {
+            "schema": "fs-model-extension-1",
+            "fingerprint": ext.fingerprint,
+            "baseline": ext.baseline,
+            "fields": fields,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
     def _linearize(self, job: FWIOperatorJob) -> None:
         active = list(job.active or [])
@@ -949,8 +1399,11 @@ class FakeImagingSite(BaseSite):
             raise ValueError("job active blocks differ from the state's")
         state_fp = str(data["state_fingerprint"])
         lin = self.linearizations.get(state_fp)
-        if lin is None:
-            frequencies = [complex(*pair) for pair in data["frequencies"]]
+        frequencies = [complex(*pair) for pair in data["frequencies"]]
+        if lin is None or list(lin.frequencies) != frequencies:
+            # The state fingerprint ignores the task frequencies (like Sauce's
+            # per-task fingerprints, one per saved task); rebuild the surrogate
+            # over this state's frequencies when a cached one differs.
             J, d, space = self.surrogate(
                 job.simulation, data["active"], data["sizes"], frequencies
             )
@@ -958,14 +1411,16 @@ class FakeImagingSite(BaseSite):
                 state_fingerprint=state_fp,
                 control_registry_fingerprint=str(data["control_registry_fingerprint"]),
                 active=tuple(data["active"]),
-                sizes={str(k): int(v) for k, v in data["sizes"].items()},
+                # JSON sorted the keys; restore the active block order the
+                # packed covectors are split by.
+                sizes={str(k): int(data["sizes"][k]) for k in data["active"]},
                 frequencies=tuple(frequencies),
                 space=space,
                 J=J,
                 d=d,
                 m=np.asarray(data["m"], dtype=np.float64),
             )
-            self.linearizations[state_fp] = lin
+            self.linearizations.setdefault(state_fp, lin)
         return lin, frequency
 
     def _write_report(

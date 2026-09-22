@@ -1768,7 +1768,9 @@ class LSRTM:
     def run(self, v0: Any = None) -> ControlVector:
         """Return the image ``dm`` on the problem space, linearized at ``v0``."""
 
-        lin = self.problem.linearize(v0, gradient=self.method == "cg")
+        # Operators need the covector parts (per-task registry fingerprints),
+        # so the linearization always carries the gradient.
+        lin = self.problem.linearize(v0, gradient=True)
         self.linearization = lin
         space = lin.space
         bound = None if self.penalty is None else self.penalty.bind(space)

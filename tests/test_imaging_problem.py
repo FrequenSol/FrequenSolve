@@ -17,7 +17,7 @@ from frequensolve.imaging import (
     ObservedData,
     SourceParameters,
 )
-from frequensolve.imaging._artifacts import ControlStateFile, ControlVectorFile
+from frequensolve.imaging._artifacts import ControlVectorFile
 from frequensolve.model.parameterization import ParameterizedProperty
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
@@ -224,12 +224,24 @@ def test_linearize_matches_the_surrogate_value_gradient_and_report(setup, fake):
     assert lin.fingerprint.startswith("sha256:")
     assert lin.support.all() and lin.support_masks.keys() == set(ACTIVE)
     assert lin.job.action == "linearize" and lin.job.active == ACTIVE
-    assert lin.job.control_state == lin.entry.directory / "state.h5"
-    assert lin.job.misfit.to_fs()["objective_terms"][0]["receiver_group"] == "surface"
-    assert ControlStateFile.read(lin.job.control_state).sizes == {
-        "model.vp": 5,
-        "model.rho": 3,
+    # a material-only space authors the point in the working simulation
+    # instead of staging a ``controls.state`` file
+    assert lin.job.control_state is None
+    installed = {
+        prop.id: np.asarray(prop.control.coefficients)
+        for subdomain in problem.simulation.model.subdomains
+        for prop in subdomain.properties.values()
+        if isinstance(prop, ParameterizedProperty)
     }
+    assert {name: values.size for name, values in installed.items()} == {
+        "vp": 5,
+        "rho": 3,
+    }
+    np.testing.assert_allclose(
+        np.concatenate([installed["vp"], installed["rho"]]),
+        np.linspace(-1.0, 1.0, 8),
+    )
+    assert lin.job.misfit.to_fs()["objective_terms"][0]["receiver_group"] == "surface"
     assert lin.entry.state_fingerprint == lin.state_fingerprint
     assert isinstance(lin.jacobian, Jacobian) and lin.jacobian is lin.jacobian
     assert isinstance(lin.normal, Normal) and lin.normal is lin.normal
@@ -239,10 +251,13 @@ def test_linearize_matches_the_surrogate_value_gradient_and_report(setup, fake):
     assert problem.gradient() is lin.gradient
     assert problem.jacobian() is lin.jacobian
     assert problem.normal() is lin.normal
-    # the moved state needed one registry-discovery linearize at the authored point
+    # the moved state needed one single-frequency registry-discovery linearize
+    # at the authored point first; the authored point over every frequency is
+    # a new (value-only, state-less) job
     assert [s["action"] for s in fake.submissions] == ["linearize", "linearize"]
     discovery = problem.linearize(problem.full_space.zeros(), gradient=False)
-    assert discovery.job.control_state is None and len(fake.submissions) == 2
+    assert discovery.job.control_state is None and len(fake.submissions) == 3
+    assert discovery.frequencies == FREQUENCIES
 
 
 def test_linearize_caches_by_fingerprint_and_misses_after_state_updates(setup, fake):
@@ -253,19 +268,22 @@ def test_linearize_caches_by_fingerprint_and_misses_after_state_updates(setup, f
     assert problem.linearize(problem.vector()) is first
     assert problem.linearize(np.zeros(8)) is first
     assert problem.value() == first.value
-    assert len(fake.submissions) == 1
-    assert problem.cache.keys() == [first.fingerprint]
+    # two frequencies: one single-frequency registry discovery, then the job
+    assert len(fake.submissions) == 2
+    assert len(problem.cache.keys()) == 2 and problem.cache.keys()[-1] == (
+        first.fingerprint
+    )
 
     second = problem.linearize(problem.vector() + 1.0)
-    assert second is not first and len(fake.submissions) == 2
+    assert second is not first and len(fake.submissions) == 3
     assert problem.linearize() is first  # the state itself did not move
 
     problem.state = problem.state.with_update(problem.vector() + 1.0)
     assert problem.linearize() is second  # same point: same fingerprint
-    assert len(fake.submissions) == 2
+    assert len(fake.submissions) == 3
 
     third = problem.linearize(problem.vector() + 1.0)
-    assert len(fake.submissions) == 3
+    assert len(fake.submissions) == 4
     assert problem.cache.keys() == [second.fingerprint, third.fingerprint]
     assert not first.entry.directory.exists()  # evicted staging directory
     assert third.entry.directory.exists()
@@ -274,7 +292,7 @@ def test_linearize_caches_by_fingerprint_and_misses_after_state_updates(setup, f
     assert problem.cache.keys() == []
     assert not third.entry.directory.exists()
     assert problem.linearize() is not second
-    assert len(fake.submissions) == 4
+    assert len(fake.submissions) == 5
 
 
 def test_value_only_linearizations_are_upgraded_when_a_gradient_is_needed(setup, fake):
@@ -286,13 +304,14 @@ def test_value_only_linearizations_are_upgraded_when_a_gradient_is_needed(setup,
     assert (
         value_only.state_fingerprint == _surrogate(fake, value_only).state_fingerprint
     )
-    assert problem.value() == value_only.value and len(fake.submissions) == 1
+    assert problem.value() == value_only.value and len(fake.submissions) == 2
 
     with_gradient = problem.linearize()
     assert with_gradient is not value_only and with_gradient.gradient is not None
-    assert len(fake.submissions) == 2
+    assert len(fake.submissions) == 3
     assert problem.linearize(gradient=False) is with_gradient
-    assert problem.cache.keys() == [with_gradient.fingerprint]
+    assert problem.cache.keys()[-1] == with_gradient.fingerprint
+    assert len(problem.cache.keys()) == 2  # plus the registry discovery
 
 
 def test_restricted_views_share_state_and_submit_only_their_tasks(setup, fake):
@@ -373,9 +392,7 @@ def test_frozen_dofs_are_dropped_from_vectors_and_expanded_to_sauce_layout(
 
     assert lin.job.min_support == 0.05
     assert lin.job.to_fs()["fwi_operator"]["controls"]["min_support"] == 0.05
-    assert (
-        ControlStateFile.read(lin.job.state_output_file()).support_min_support == 0.05
-    )
+    assert lin.job.state_output is None  # exports belong to the discovery job
     assert lin.space.size == 6 and lin.space.full_size == 8
     assert lin.space.min_support == 0.05
     np.testing.assert_array_equal(lin.support["vp"], [1, 0, 1, 1, 0])
@@ -395,7 +412,7 @@ def test_frozen_dofs_are_dropped_from_vectors_and_expanded_to_sauce_layout(
     J = lin.jacobian
     np.testing.assert_allclose((J @ dv).values, surrogate.J @ expanded, rtol=1e-12)
     direction = ControlVectorFile.read(
-        lin.entry.directory / "ops" / "0001" / "direction.h5"
+        lin.entry.directory / "ops" / "0001" / "direction_1.h5"
     )
     np.testing.assert_array_equal(direction.pack(ACTIVE), expanded)
     np.testing.assert_array_equal(direction.support_mask("model.vp"), [1, 0, 1, 1, 0])
@@ -504,7 +521,8 @@ def test_dry_run_describes_the_linearize_job_without_submitting(setup, fake):
     }
     assert plan["outputs"]["covector"][0].endswith("gradient_1.h5")
     json.dumps(plan)
-    assert not plan["registry_discovery"]
+    # two frequencies: the registry is discovered by a single-frequency job
+    assert plan["registry_discovery"]
     assert "state" not in plan["job"]["fwi_operator"]["controls"]
     moved = problem.dry_run(np.ones(8))
     assert moved["registry_discovery"] and fake.submissions == []
@@ -512,7 +530,9 @@ def test_dry_run_describes_the_linearize_job_without_submitting(setup, fake):
     assert plan["fingerprint"] != moved["fingerprint"]
     moved = problem.dry_run(np.ones(8))
     assert not moved["registry_discovery"]
-    assert moved["job"]["fwi_operator"]["controls"]["state"].endswith("state.h5")
+    assert not problem.dry_run()["registry_discovery"]
+    # material-only spaces author the point inline: no ``controls.state``
+    assert "state" not in moved["job"]["fwi_operator"]["controls"]
 
 
 def test_check_reports_passing_adjoint_normal_and_taylor_tests(setup):

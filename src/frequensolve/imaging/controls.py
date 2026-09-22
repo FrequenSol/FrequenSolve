@@ -388,6 +388,9 @@ class _BindContext:
         self.property_spaces: Dict[str, MeshPropertySpace] = {}
         self.reflectivity: List[Dict[str, Any]] = []
         self.source_kinds: set = set()
+        # ``user key / address -> unqualified material block id`` of the
+        # material blocks resolved so far (reflectivity bases resolve last).
+        self.material_ids: Dict[str, str] = {}
 
     # -- model geometry -----------------------------------------------------
 
@@ -649,6 +652,35 @@ class _BindContext:
                 if isinstance(prop, ParameterizedProperty) and prop.id == basis:
                     return prop.control
         raise KeyError(f"no parameterized property has block id {basis!r}")
+
+    def resolve_basis(self, basis: str) -> str:
+        """Return the unqualified material block id addressed by ``basis``.
+
+        ``basis`` is a user key or address of a material block in the same
+        space (``vp``, ``grid.vp``), or the id of a material control map that
+        the simulation already carries (``acoustic_vp``).
+        """
+
+        if basis in self.material_ids:
+            return self.material_ids[basis]
+        try:
+            self.material_control(basis)
+        except KeyError:
+            known = sorted(set(self.material_ids) | set(self.material_ids.values()))
+            raise KeyError(
+                f"reflectivity basis {basis!r} names no material block of the "
+                f"space or parameterized property of the simulation; known: {known}"
+            ) from None
+        return basis
+
+    def layer_index(self, name: str) -> int:
+        """Return the one-based ``Model.subdomains`` index of layer ``name``."""
+
+        for index, subdomain in enumerate(self.model.subdomains, start=1):
+            if subdomain.name == name:
+                return index
+        names = [s.name for s in self.model.subdomains]
+        raise KeyError(f"model has no subdomain {name!r}; known: {names}")
 
 
 # ---------------------------------------------------------------------------
@@ -1431,25 +1463,74 @@ class ReflectivityField:
         if (self.basis is None) == (self.control is None):
             raise ValueError("reflectivity fields need exactly one of basis or control")
         if self.basis is not None:
-            object.__setattr__(
-                self,
-                "basis",
-                _hdf5_safe_id(unqualified_block_name(self.basis), "basis id"),
-            )
+            # A user key or address of a material block in the same space
+            # (``vp``, ``grid.vp``) or an unqualified / ``model.``-qualified
+            # material control id; the bind resolves it to the id.
+            basis = str(self.basis).strip()
+            if basis.startswith("model."):
+                basis = unqualified_block_name(basis)
+            if not basis or "/" in basis:
+                raise ValueError(
+                    "reflectivity basis must name a material block (key, address "
+                    "or control id)"
+                )
+            object.__setattr__(self, "basis", basis)
         if self.control is not None:
             control = self.control
             if isinstance(control, Mapping):
                 from frequensolve.model.parameterization import control_from_fs
 
                 control = control_from_fs(control)
-            if not isinstance(control, (HatControl, BSplineControl)):
+            if isinstance(control, DepthProfile):
+                # An own map authored like a material profile: ``subdomain``
+                # fixes the extent and coordinate system, ``spacing`` /
+                # ``count`` / ``nodes`` (and ``degree``) the basis.  Sauce
+                # applies no transform or limits to reflectivity values.
+                if control.transform != "identity":
+                    raise ValueError(
+                        "reflectivity controls carry no transform; use "
+                        "transform='identity' on the DepthProfile"
+                    )
+                if control.limits is not None:
+                    raise ValueError("reflectivity controls carry no limits")
+            elif not isinstance(control, (HatControl, BSplineControl)):
                 raise TypeError(
-                    "reflectivity control must be a hat or B-spline control"
+                    "reflectivity control must be a hat or B-spline control "
+                    "or a DepthProfile"
                 )
             object.__setattr__(self, "control", control)
 
-    def to_fs(self) -> Dict[str, Any]:
-        """Serialize this field for ``fwi_operator.reflectivity.fields``."""
+    def resolve_control(
+        self, ctx: Optional[_BindContext]
+    ) -> Union[HatControl, BSplineControl]:
+        """Return the own hat/B-spline map with zero coefficients.
+
+        A :class:`DepthProfile` own map derives its extent from its subdomain
+        (needs ``ctx``); a concrete control is returned as authored.
+        """
+
+        control = self.control
+        if control is None:
+            raise ValueError(f"reflectivity field {self.name!r} borrows a basis")
+        if isinstance(control, DepthProfile):
+            if ctx is not None and ctx.is_layered:
+                index = ctx.layer_index(control.subdomain)
+                if index != self.layer:
+                    raise ValueError(
+                        f"reflectivity field {self.name!r} applies to layer "
+                        f"{self.layer} but its DepthProfile lives in "
+                        f"{control.subdomain!r} (layer {index})"
+                    )
+            resolved, _system, _extent = control.build_control(ctx)
+            return resolved
+        return control
+
+    def to_fs(self, ctx: Optional[_BindContext] = None) -> Dict[str, Any]:
+        """Serialize this field for ``fwi_operator.reflectivity.fields``.
+
+        With ``ctx`` the basis is resolved to the unqualified material block
+        id and an own :class:`DepthProfile` map to its hat/B-spline map.
+        """
 
         payload: Dict[str, Any] = {
             "name": self.name,
@@ -1457,9 +1538,11 @@ class ReflectivityField:
             "axis": self.axis,
         }
         if self.basis is not None:
-            payload["basis"] = self.basis
+            payload["basis"] = (
+                self.basis if ctx is None else ctx.resolve_basis(self.basis)
+            )
         else:
-            payload["control"] = self.control.to_fs()
+            payload["control"] = self.resolve_control(ctx).to_fs()
         return payload
 
 
@@ -1511,12 +1594,16 @@ class ReflectivityParameters(_BlockSpec):
     def default_key(self) -> str:
         return "reflectivity"
 
-    def to_fs(self) -> Dict[str, Any]:
-        """Serialize the ``fwi_operator.reflectivity`` mapping."""
+    def to_fs(self, ctx: Optional[_BindContext] = None) -> Dict[str, Any]:
+        """Serialize the ``fwi_operator.reflectivity`` mapping.
+
+        With ``ctx`` (a bind) bases resolve to unqualified material block ids
+        and own :class:`DepthProfile` maps to their hat/B-spline maps.
+        """
 
         payload: Dict[str, Any] = {
             "parameterization": self.parameterization,
-            "fields": [f.to_fs() for f in self.fields],
+            "fields": [f.to_fs(ctx) for f in self.fields],
         }
         if self.workspace_mb is not None:
             payload["workspace_mb"] = self.workspace_mb
@@ -1524,15 +1611,19 @@ class ReflectivityParameters(_BlockSpec):
 
     def resolve(self, key: str, ctx: Optional[_BindContext]) -> List[ResolvedBlock]:
         blocks: List[ResolvedBlock] = []
+        subdomains: Dict[str, Optional[str]] = {}
         for f in self.fields:
-            control = f.control
-            if control is None:
+            if f.control is None:
                 if ctx is None:
                     raise UnresolvedControlError(
                         f"reflectivity field {f.name!r} borrows basis {f.basis!r}; "
                         "bind the space to size it"
                     )
-                control = ctx.material_control(f.basis)
+                control = ctx.material_control(ctx.resolve_basis(f.basis))
+            else:
+                control = f.resolve_control(ctx)
+                if isinstance(f.control, DepthProfile):
+                    subdomains[f.name] = f.control.subdomain
             size = control.size
             if size is None:
                 raise UnresolvedControlError(
@@ -1565,10 +1656,11 @@ class ReflectivityParameters(_BlockSpec):
                     units=getattr(control, "units", None),
                     coordinate_system=getattr(control, "coordinate_system", None),
                     baseline=np.zeros(size),
+                    subdomain=subdomains.get(f.name),
                 )
             )
         if ctx is not None:
-            ctx.reflectivity.append(self.to_fs())
+            ctx.reflectivity.append(self.to_fs(ctx))
         return blocks
 
 
@@ -2454,9 +2546,28 @@ class BoundControlSpace(ControlSpace):
     def __init__(self, space: ControlSpace, simulation: Any):
         simulation = copy.deepcopy(simulation)
         ctx = _BindContext(simulation)
-        blocks: List[ResolvedBlock] = []
+        # Reflectivity fields borrow material maps of the same space, so the
+        # material blocks resolve first; block order still follows authoring.
+        resolved: Dict[str, List[ResolvedBlock]] = {}
+        deferred = [
+            key
+            for key, spec in space._specs.items()
+            if isinstance(spec, ReflectivityParameters)
+        ]
         for key, spec in space._specs.items():
-            blocks.extend(spec.resolve(key, ctx))
+            if key in deferred:
+                continue
+            resolved[key] = spec.resolve(key, ctx)
+            material = [b for b in resolved[key] if b.kind in _MATERIAL_KINDS]
+            for block in material:
+                ctx.material_ids[block.address] = unqualified_block_name(block.name)
+            if len(material) == 1:
+                ctx.material_ids[key] = unqualified_block_name(material[0].name)
+        for key in deferred:
+            resolved[key] = space._specs[key].resolve(key, ctx)
+        blocks: List[ResolvedBlock] = []
+        for key in space._specs:
+            blocks.extend(resolved[key])
         self._specs = dict(space._specs)
         self._support = {}
         self._min_support = space._min_support

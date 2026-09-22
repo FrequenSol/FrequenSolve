@@ -161,17 +161,6 @@ def _require_file(path: Path, what: str) -> Path:
     return path
 
 
-def _same_fingerprints(
-    first: ControlVectorFile, other: ControlVectorFile, *, path: Path
-) -> None:
-    for label in ("state_fingerprint", "control_registry_fingerprint"):
-        if getattr(first, label) != getattr(other, label):
-            raise ValueError(
-                f"{path} carries {label}={getattr(other, label)!r}; task 1 has "
-                f"{getattr(first, label)!r}"
-            )
-
-
 # ---------------------------------------------------------------------------
 # Covectors
 # ---------------------------------------------------------------------------
@@ -182,9 +171,11 @@ def reduce_covectors(
 ) -> ControlVectorFile:
     """Reduce the per-task covector parts of ``job`` with frequency weights.
 
-    Blocks are summed with ``weights`` (default: the job weights, then ones);
-    support masks are combined by AND across tasks and the state and registry
-    fingerprints are taken from task 1 after checking every part agrees.
+    Blocks are summed with ``weights`` (default: the job weights, then ones)
+    and support masks are combined by AND across tasks.  Sauce fingerprints
+    every task's saved state on its own (per-frequency mesh adaptation makes
+    them differ), so only the block layout must agree; the reduced file
+    carries task 1's fingerprints.
     """
 
     scale = frequency_weights(job, weights)
@@ -201,7 +192,6 @@ def reduce_covectors(
             }
             support = {name: part.support_mask(name) for name in part.blocks}
             continue
-        _same_fingerprints(first, part, path=path)
         if part.names != first.names or part.sizes != first.sizes:
             raise ValueError(f"{path} has a different block layout than task 1")
         for name, values in part.blocks.items():
@@ -461,12 +451,29 @@ class Backend:
     def run_many(
         self, jobs: Iterable[BaseJob], *, check: bool = True
     ) -> List[RunResult]:
-        """Submit every job before waiting, returning results in input order."""
+        """Submit every job before waiting, returning results in input order.
 
-        handles = [self.submit(job) for job in jobs]
-        if not handles:
+        Siblings of one family run concurrently.  A site that shuts its
+        cluster down when a run completes (``LocalSite`` by default) is asked
+        to keep it for the whole family, and closed once afterwards, so the
+        first sibling to finish cannot cancel the others.
+        """
+
+        jobs = list(jobs)
+        if not jobs:
             return []
-        return self.site.wait_all(handles, check=check)
+        site = self.site
+        keep_cluster = bool(getattr(site, "shutdown_on_completion", False))
+        extra = {"shutdown_on_completion": False} if keep_cluster else {}
+        try:
+            handles = [
+                site.submit(job, **self._options(postprocess_only=False), **extra)
+                for job in jobs
+            ]
+            return site.wait_all(handles, check=check)
+        finally:
+            if keep_cluster:
+                site.close(wait=True, retire=True)
 
     def dry_run(self, job: BaseJob) -> Dict[str, Any]:
         """Describe what :meth:`run` would submit without touching the site.
