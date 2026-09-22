@@ -739,7 +739,7 @@ def test_mesh_parameters_register_property_spaces_and_wait_for_the_manifest(
     vector = sized.ones()
     with pytest.raises(NotImplementedError, match="to_mesh"):
         vector.to_xarray("mesh")
-    with pytest.raises(NotImplementedError, match="Phase 2"):
+    with pytest.raises(ValueError, match="MeshManager configuration"):
         vector.to_mesh()
     wrong = ControlRegistryManifest.from_dict(
         {
@@ -1050,3 +1050,173 @@ def test_source_parameters_resolve_ids_and_component_counts(tmp_path):
         im.ControlSpace(vp=im.DepthProfile("vp", "water", count=2)).bind(
             simulation
         ).zeros().per_source()
+
+
+# ---------------------------------------------------------------------------
+# rendering
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def plt():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as pyplot
+
+    yield pyplot
+    pyplot.close("all")
+
+
+def test_plot_renders_profile_lattice_interface_and_source_blocks(simulation, plt):
+    bound = _full_space().bind(simulation)
+    mask = np.ones(bound.sizes["model.vp"], dtype=bool)
+    mask[3] = False
+    bound = bound.with_support({"vp": mask})
+    vector = bound.random(3)
+
+    ax = vector.plot("vp")
+    assert isinstance(ax, plt.Axes)
+    (line,) = ax.lines
+    assert ax.yaxis_inverted()  # "below" runs downwards
+    ydata = np.asarray(line.get_ydata(), dtype=float)
+    xdata = np.asarray(line.get_xdata(), dtype=float)
+    np.testing.assert_allclose(ydata, bound.block("vp").control.coordinates)
+    assert np.isnan(xdata[3]) and np.count_nonzero(np.isnan(xdata)) == 1
+    np.testing.assert_allclose(np.delete(xdata, 3), vector["vp"][mask])
+    assert ax.get_ylabel().startswith("below")
+
+    ax = vector.plot("grid.vp", cmap="viridis")
+    (mesh,) = ax.collections
+    assert mesh.get_array().size == bound.block("grid.vp").size
+    assert mesh.get_cmap().name == "viridis"
+    assert ax.yaxis_inverted() and len(ax.figure.axes) == 2  # colorbar attached
+    limit = float(np.max(np.abs(vector["grid.vp"])))
+    assert mesh.get_clim() == pytest.approx((-limit, limit))
+
+    ax = vector.plot("salt", color="k")
+    (line,) = ax.lines
+    np.testing.assert_allclose(line.get_ydata(), vector["salt"])
+    np.testing.assert_array_equal(line.get_xdata(), [0, 1, 2])
+
+    ax = vector.plot("src.signature")
+    assert len(ax.patches) == 4  # two sources x (Re, Im)
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["1", "2"]
+    heights = [p.get_height() for p in ax.patches]
+    table = vector.per_source()
+    np.testing.assert_allclose(
+        heights,
+        [
+            table[1]["signature"][0].real,
+            table[2]["signature"][0].real,
+            table[1]["signature"][0].imag,
+            table[2]["signature"][0].imag,
+        ],
+    )
+    ax = vector.plot("src.position")
+    assert len(ax.patches) == 4 and ax.get_legend() is not None
+
+    ax = vector.plot("refl.ip")
+    assert len(ax.lines) == 1
+
+    axes = vector.plot()
+    assert isinstance(axes, list) and len(axes) == 8  # blocks + 2 source groups
+    figure, own = plt.subplots()
+    assert vector.plot("rho", ax=own) is own
+    with pytest.raises(ValueError, match="ax takes one"):
+        vector.plot("src", ax=own)
+    with pytest.raises(KeyError):
+        vector.plot("nope")
+
+
+def test_plot_slices_three_dimensional_lattices(plt):
+    from frequensolve.geometry.grids import CartesianGrid
+
+    grid = CartesianGrid(n=[3, 2, 4], x0=[0.0, 0.0, 0.0], x1=[1.0, 1.0, 2.0])
+    space = im.ControlSpace(g=im.GridParameters("vp", grid=grid))
+    vector = space.random(1)
+    ax = vector.plot("g")
+    (mesh,) = ax.collections
+    assert mesh.get_array().size == 3 * 4  # middle y plane, (x, z)
+    assert ax.yaxis_inverted()
+    lattice = vector["g"].reshape((3, 2, 4), order="F")
+    np.testing.assert_allclose(mesh.get_array().reshape(4, 3), lattice[:, 1, :].T)
+    ax = vector.plot("g", slice={"x": 0})
+    (mesh,) = ax.collections
+    assert mesh.get_array().size == 2 * 4
+    assert ax.get_xlabel() == "y"
+    with pytest.raises(ValueError, match="lattice axes"):
+        vector.plot("g", slice={"t": 0})
+    with pytest.raises(ValueError, match="3-D lattices"):
+        im.ControlSpace(
+            g=im.GridParameters(
+                "vp", grid=CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+            )
+        ).zeros().plot("g", slice={"x": 0})
+
+
+def test_control_state_plot_draws_the_baseline(simulation, plt):
+    bound = _full_space().bind(simulation)
+    state = im.ControlState.from_simulation(bound)
+    ax = state.plot("salt")
+    np.testing.assert_allclose(ax.lines[0].get_ydata(), [-100.0, -200.0, -100.0])
+
+
+def _mesh_space(simulation):
+    bound = im.ControlSpace(
+        mesh=im.MeshParameters("vp", "sediment", frequency=8.0 * u.Hz, epw=2.0),
+        rho=im.DepthProfile("rho", "sediment", count=3),
+    ).bind(simulation)
+    manifest = ControlRegistryManifest.from_dict(
+        {
+            "schema": "fs-control-registry-1",
+            "fingerprint": "sha256:" + "0" * 64,
+            "blocks": [
+                _registry_block(1, "model.mesh", 7),
+                _registry_block(2, "model.rho", 3, offset=8),
+            ],
+            "active_blocks": [1, 2],
+            "active_offsets": [1, 8],
+        }
+    )
+    mask = np.ones(7, dtype=bool)
+    mask[5] = False
+    return bound.with_manifest(manifest).with_support({"mesh": mask})
+
+
+def test_to_mesh_attaches_point_arrays_or_explains_the_missing_geometry(simulation):
+    pv = pytest.importorskip("pyvista")
+    space = _mesh_space(simulation)
+    vector = space.random(2)
+    points = pv.PolyData(np.random.default_rng(0).random((7, 3)))
+
+    grid = vector.to_mesh(points)
+    assert grid is not points and grid.n_points == 7
+    values = np.asarray(grid.point_data["vp"])
+    assert np.isnan(values[5])
+    np.testing.assert_allclose(np.delete(values, 5), vector["mesh"][[0, 1, 2, 3, 4, 6]])
+    assert "rho" not in grid.point_data
+    with pytest.raises(ValueError, match="MeshManager configuration"):
+        vector.to_mesh()
+    with pytest.raises(ValueError, match="7 coefficients but the mesh has 4"):
+        vector.to_mesh(pv.PolyData(np.zeros((4, 3))))
+    with pytest.raises(ValueError, match="does not address a mesh block"):
+        vector.to_mesh(points, key="rho")
+    with pytest.raises(ValueError, match="no mesh blocks"):
+        _full_space().bind(simulation).zeros().to_mesh(points)
+    with pytest.raises(NotImplementedError, match="to_mesh"):
+        vector.to_xarray("mesh")
+    with pytest.raises(ValueError, match="one at a time"):
+        vector.plot("mesh", ax=object())
+
+
+def test_plot_of_mesh_blocks_uses_a_pyvista_plotter(simulation):
+    pv = pytest.importorskip("pyvista")
+    pv.OFF_SCREEN = True
+    vector = _mesh_space(simulation).random(2)
+    points = pv.PolyData(np.random.default_rng(0).random((7, 3)))
+    plotter = vector.plot("mesh", mesh=points, show=False, notebook=False)
+    try:
+        assert isinstance(plotter, pv.Plotter)
+        assert len(plotter.renderer.actors) >= 1
+    finally:
+        plotter.close()

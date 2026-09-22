@@ -48,6 +48,7 @@ import xarray as xr
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import lsqr
 
+from frequensolve._optional import optional_dependency_error
 from frequensolve.imaging._artifacts import (
     ControlRegistryManifest,
     ControlStateFile,
@@ -103,8 +104,6 @@ class UnresolvedControlError(RuntimeError):
 # ---------------------------------------------------------------------------
 # small helpers
 # ---------------------------------------------------------------------------
-
-
 def _hdf5_safe_id(value: Any, label: str) -> str:
     text = str(value).strip()
     if not text or "/" in text or "." in text or text in {".", ".."}:
@@ -2610,6 +2609,215 @@ def _lattice_support(
 
 
 # ---------------------------------------------------------------------------
+# rendering helpers
+# ---------------------------------------------------------------------------
+
+_VERTICAL_AXES = {"z", "below", "depth"}
+
+
+def _matplotlib() -> Any:
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise optional_dependency_error(
+            "ControlVector.plot",
+            extra="visual",
+            dependencies=("matplotlib",),
+            error=exc,
+        ) from exc
+    return plt
+
+
+def _pyvista() -> Any:
+    try:
+        import pyvista as pv
+    except ModuleNotFoundError as exc:
+        raise optional_dependency_error(
+            "ControlVector.to_mesh",
+            extra="visual",
+            dependencies=("pyvista",),
+            error=exc,
+        ) from exc
+    return pv
+
+
+def _resolve_mesh_dataset(
+    mesh: Any, space: ControlSpace, blocks: Sequence[ResolvedBlock]
+) -> Any:
+    """Return a PyVista dataset for ``mesh`` (or the simulation's) or raise."""
+
+    if isinstance(mesh, (str, Path)):
+        return _pyvista().read(str(mesh))
+    if mesh is None:
+        mesh = getattr(getattr(space, "simulation", None), "mesh", None)
+    if mesh is not None and hasattr(mesh, "n_points") and hasattr(mesh, "point_data"):
+        return mesh
+    names = ", ".join(b.name for b in blocks)
+    artifacts = ", ".join(str(getattr(b.control, "space", b.address)) for b in blocks)
+    hint = (
+        "the bound simulation's mesh is a MeshManager configuration"
+        if mesh is not None
+        else "no mesh is available on the space"
+    )
+    raise ValueError(
+        f"mesh block(s) {names} carry nodal coefficients on Sauce's frozen "
+        f"property space(s) ({artifacts}); {hint}, not node geometry. Pass "
+        "mesh= a PyVista dataset (or a readable mesh path) whose points follow "
+        "the property-space node order"
+    )
+
+
+def _plot_mesh_block(
+    vector: "ControlVector", block: ResolvedBlock, **kwargs: Any
+) -> Any:
+    pv = _pyvista()
+    grid = vector.to_mesh(kwargs.pop("mesh", None), block.address)
+    plotter = kwargs.pop("plotter", None) or pv.Plotter(
+        window_size=kwargs.pop("window_size", None),
+        notebook=kwargs.pop("notebook", True),
+    )
+    show = kwargs.pop("show", True)
+    plotter.set_background(kwargs.pop("background", "white"))
+    kwargs.setdefault("cmap", "RdBu_r")
+    plotter.add_mesh(grid, scalars=list(grid.point_data.keys())[0], **kwargs)
+    if show:
+        plotter.show()
+    return plotter
+
+
+def _plot_groups(blocks: Sequence[ResolvedBlock]) -> List[List[ResolvedBlock]]:
+    """Group source blocks by quantity; every other block plots alone."""
+
+    groups: List[List[ResolvedBlock]] = []
+    sources: Dict[Tuple[str, Optional[str]], List[ResolvedBlock]] = {}
+    for block in blocks:
+        if block.kind == "source":
+            group = sources.setdefault((block.key, block.quantity), [])
+            if not group:
+                groups.append(group)
+            group.append(block)
+        else:
+            groups.append([block])
+    return groups
+
+
+def _axis_label(name: str, block: ResolvedBlock) -> str:
+    return f"{name} [{block.units}]" if block.units else name
+
+
+def _draw_block_group(
+    vector: "ControlVector",
+    ax: Any,
+    group: Sequence[ResolvedBlock],
+    kwargs: Dict[str, Any],
+) -> Any:
+    block = group[0]
+    if block.kind == "source":
+        return _draw_source_bars(vector, ax, group, kwargs)
+    values = vector._block_values(block)
+    if block.complex:
+        values = _deinterleave(values).real
+    if block.coords and len(block.dims) >= 2:
+        return _draw_lattice(vector, ax, block, values, kwargs)
+    if block.coords and len(block.dims) == 1 and block.kind != "interface":
+        coords = np.asarray(block.coords[block.dims[0]], dtype=np.float64)
+        axis = block.dims[0]
+        if axis in _VERTICAL_AXES:
+            (line,) = ax.plot(values, coords, **kwargs)
+            ax.set_ylabel(_axis_label(axis, block))
+            ax.set_xlabel(block.address)
+            if not ax.yaxis_inverted():
+                ax.invert_yaxis()
+        else:
+            (line,) = ax.plot(coords, values, **kwargs)
+            ax.set_xlabel(_axis_label(axis, block))
+            ax.set_ylabel(block.address)
+        ax.set_title(block.name)
+        return line
+    kwargs.setdefault("marker", "o")
+    (line,) = ax.plot(np.arange(values.size), values, **kwargs)
+    ax.set_xlabel("center" if block.kind == "interface" else "coefficient")
+    ax.set_ylabel(block.address)
+    ax.set_title(block.name)
+    return line
+
+
+def _draw_lattice(
+    vector: "ControlVector",
+    ax: Any,
+    block: ResolvedBlock,
+    values: np.ndarray,
+    kwargs: Dict[str, Any],
+) -> Any:
+    data = values.reshape(block.shape, order="F")
+    dims = list(block.dims)
+    selection = dict(kwargs.pop("slice", None) or {})
+    if len(dims) == 3:
+        if not selection:
+            selection = {dims[1]: block.shape[1] // 2}
+        if len(selection) != 1 or next(iter(selection)) not in dims:
+            raise ValueError(f"slice must name one of the lattice axes {dims}")
+        axis_name, index = next(iter(selection.items()))
+        position = dims.index(axis_name)
+        data = np.take(data, int(index), axis=position)
+        dims.pop(position)
+    elif selection:
+        raise ValueError("slice applies to 3-D lattices only")
+    horizontal, vertical = dims
+    coords = block.coords or {}
+    x = np.asarray(coords[horizontal], dtype=np.float64)
+    y = np.asarray(coords[vertical], dtype=np.float64)
+    finite = data[np.isfinite(data)]
+    limit = float(np.max(np.abs(finite))) if finite.size else 1.0
+    kwargs.setdefault("cmap", "RdBu_r")
+    kwargs.setdefault("vmin", -limit if limit > 0 else -1.0)
+    kwargs.setdefault("vmax", limit if limit > 0 else 1.0)
+    kwargs.setdefault("shading", "nearest")
+    mesh = ax.pcolormesh(x, y, data.T, **kwargs)
+    ax.set_xlabel(_axis_label(horizontal, block))
+    ax.set_ylabel(_axis_label(vertical, block))
+    if vertical in _VERTICAL_AXES and not ax.yaxis_inverted():
+        ax.invert_yaxis()
+    ax.set_title(block.name)
+    ax.figure.colorbar(mesh, ax=ax, label=block.address)
+    return mesh
+
+
+def _draw_source_bars(
+    vector: "ControlVector",
+    ax: Any,
+    group: Sequence[ResolvedBlock],
+    kwargs: Dict[str, Any],
+) -> Any:
+    ids = [int(b.source_id or 0) for b in group]
+    series: Dict[str, List[float]] = {}
+    for block in group:
+        values = vector._block_values(block)
+        if block.complex:
+            complex_values = _deinterleave(values)
+            for label, part in zip(block.components, complex_values):
+                series.setdefault(f"{label} Re", []).append(float(part.real))
+                series.setdefault(f"{label} Im", []).append(float(part.imag))
+        else:
+            for label, part in zip(block.components, values):
+                series.setdefault(label, []).append(float(part))
+    positions = np.arange(len(ids), dtype=np.float64)
+    width = 0.8 / max(1, len(series))
+    bars = []
+    for k, (label, heights) in enumerate(series.items()):
+        offset = (k - (len(series) - 1) / 2.0) * width
+        bars.append(ax.bar(positions + offset, heights, width, label=label, **kwargs))
+    ax.set_xticks(positions)
+    ax.set_xticklabels([str(i) for i in ids])
+    ax.set_xlabel("source")
+    ax.set_ylabel(group[0].address)
+    ax.set_title(group[0].address)
+    if len(series) > 1:
+        ax.legend()
+    return bars
+
+
+# ---------------------------------------------------------------------------
 # control vector
 # ---------------------------------------------------------------------------
 
@@ -2825,10 +3033,120 @@ class ControlVector:
             attrs=attrs,
         )
 
-    def to_mesh(self, *args: Any, **kwargs: Any) -> Any:
-        """Render mesh blocks on the property-space mesh (Phase 2)."""
+    def _block_values(self, block: ResolvedBlock, frozen: Any = np.nan) -> np.ndarray:
+        """Return one block in the Sauce layout with frozen DOFs set to ``frozen``."""
 
-        raise NotImplementedError("ControlVector.to_mesh arrives in Phase 2")
+        full = self.space.to_sauce_vector(self)
+        values = np.array(full[self.space.full_slices[block.name]], copy=True)
+        values[~self.space._mask_of(block)] = frozen
+        return values
+
+    def to_mesh(self, mesh: Any = None, key: Optional[str] = None) -> Any:
+        """Render mesh blocks as point data on a PyVista dataset.
+
+        Mesh blocks carry one coefficient per node of the property space Sauce
+        freezes in its artifact, so the node geometry must come from outside
+        the vector: ``mesh`` is a PyVista dataset (or a path PyVista can read)
+        whose points follow the property-space node order.  When ``mesh`` is
+        omitted the bound simulation's ``mesh`` attribute is used if it is a
+        PyVista dataset; a mesh *configuration*
+        (:class:`~frequensolve.mesh.mesh_manager.MeshManager`) carries no
+        nodes and raises.
+
+        Args:
+            mesh: PyVista dataset or readable mesh path with one point per
+                mesh-block coefficient.
+            key: Restrict to one mesh block; ``None`` renders every mesh block
+                as its own point array (named by property, or by address when
+                properties repeat).
+
+        Returns:
+            A deep copy of ``mesh`` with one point array per block; frozen
+            DOFs are ``NaN``.
+        """
+
+        blocks = [
+            b
+            for b in (
+                self.space._select(key)
+                if key is not None
+                else self.space.resolved_blocks
+            )
+            if b.kind == "mesh"
+        ]
+        if not blocks:
+            raise ValueError(
+                "the space has no mesh blocks"
+                if key is None
+                else f"{key!r} does not address a mesh block"
+            )
+        dataset = _resolve_mesh_dataset(mesh, self.space, blocks)
+        grid = dataset.copy(deep=True)
+        props = [b.prop or b.address for b in blocks]
+        unique = len(set(props)) == len(props)
+        for block in blocks:
+            if block.size != int(dataset.n_points):
+                raise ValueError(
+                    f"mesh block {block.name!r} has {block.size} coefficients but the "
+                    f"mesh has {int(dataset.n_points)} points"
+                )
+            name = (block.prop or block.address) if unique else block.address
+            grid.point_data[name] = self._block_values(block)
+        return grid
+
+    def plot(self, key: Optional[str] = None, ax: Any = None, **kwargs: Any) -> Any:
+        """Plot blocks with matplotlib (PyVista for mesh blocks).
+
+        Depth profiles are drawn as lines against their axis coordinate
+        (vertical axes ``z``/``below``/``depth`` run downwards); lattices as a
+        ``pcolormesh`` over the physical extent (``z`` downwards; 3-D lattices
+        take a ``slice={axis: index}`` keyword, default the middle ``y``
+        plane); interface blocks as coefficients against the center index;
+        source blocks as grouped bars per source id (real and imaginary parts
+        for complex quantities); mesh blocks through :meth:`to_mesh` on a
+        PyVista plotter (``mesh=`` and ``plotter=`` keywords).  Frozen DOFs
+        appear as gaps.
+
+        Args:
+            key: Block key, address or qualified name; ``None`` draws every
+                non-mesh block on its own axes of a new figure.
+            ax: Existing matplotlib axes (single-block plots only).
+            **kwargs: Forwarded to the matplotlib artist (``cmap``, ``vmin``,
+                ``vmax``, ``color`` ...).
+
+        Returns:
+            The matplotlib ``Axes`` (one block or one source quantity), a list
+            of axes (several blocks), or the PyVista plotter (mesh blocks).
+        """
+
+        if key is None:
+            blocks = [b for b in self.space.resolved_blocks if b.kind != "mesh"]
+            if not blocks:
+                raise ValueError("the space has only mesh blocks; plot(key=...)")
+        else:
+            blocks = list(self.space._select(key))
+        if any(b.kind == "mesh" for b in blocks):
+            if len(blocks) != 1 or ax is not None:
+                raise ValueError("mesh blocks are plotted one at a time without ax")
+            return _plot_mesh_block(self, blocks[0], **kwargs)
+        groups = _plot_groups(blocks)
+        plt = _matplotlib()
+        if ax is None:
+            figure, axes = plt.subplots(
+                len(groups),
+                1,
+                figsize=kwargs.pop("figsize", (6.0, 3.2 * len(groups))),
+                squeeze=False,
+            )
+            axes = list(axes[:, 0])
+            figure.tight_layout()
+        else:
+            if len(groups) != 1:
+                raise ValueError(f"{key!r} addresses {len(groups)} plots; ax takes one")
+            axes = [ax]
+        for axis, group in zip(axes, groups):
+            _draw_block_group(self, axis, group, dict(kwargs))
+        return axes[0] if len(axes) == 1 else axes
 
     # -- files --------------------------------------------------------------------
 
@@ -3131,6 +3449,11 @@ class ControlState:
         """Render material blocks as xarray (see :meth:`ControlVector.to_xarray`)."""
 
         return self.vector(self.space.without_support()).to_xarray(key)
+
+    def plot(self, key: Optional[str] = None, ax: Any = None, **kwargs: Any) -> Any:
+        """Plot the baseline (see :meth:`ControlVector.plot`; nothing is frozen)."""
+
+        return self.vector(self.space.without_support()).plot(key, ax, **kwargs)
 
     def __eq__(self, other: object) -> bool:  # type: ignore[override]
         if not isinstance(other, ControlState):
