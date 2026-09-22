@@ -118,6 +118,8 @@ def _free_interval(intervals, offset: int, ranks: int):
 
 class AdaptiveScheduler:
     def __init__(self, config, *, job_file: str, output: str, status: str):
+        if config.get("version", "adaptive-scheduler.v1") != "adaptive-scheduler.v1":
+            raise ValueError("Unsupported adaptive scheduler version")
         self.config = config
         self.job_file = job_file
         self.output = Path(output)

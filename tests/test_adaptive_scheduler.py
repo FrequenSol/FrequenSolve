@@ -259,3 +259,97 @@ def test_adaptive_scheduler_mpirun_uses_full_allocation_without_ibrun_flags(
 
     with pytest.raises(SystemExit, match="requires exclusive use"):
         instance._launch_command(task_id=1, offset=1, ranks=3)
+
+
+def test_supported_engine_envelope_keeps_site_limits_outside_generic_scheduler():
+    from frequensolve.adaptive import AdaptivePool
+
+    pool = AdaptivePool.from_mapping(
+        dict(
+            nodes=4,
+            ranks_per_node=16,
+            threads_per_rank=2,
+            memory_mib_per_node=65536,
+            wall_time_seconds=3610,
+            partition="science",
+        )
+    )
+    assert pool.memory_per_rank_gib == 4
+    assert pool.sbatch_arguments() == [
+        "--nodes",
+        "4",
+        "--ntasks-per-node",
+        "16",
+        "--cpus-per-task",
+        "2",
+        "--mem",
+        "65536M",
+        "--partition",
+        "science",
+        "--time",
+        "61",
+    ]
+    for update in [
+        {"nodes": True},
+        {"memory_mib_per_node": 0},
+        {"partition": "x\n#SBATCH --exclusive"},
+        {"unexpected": 1},
+    ]:
+        with pytest.raises(ValueError):
+            AdaptivePool.from_mapping({**pool.__dict__, **update})
+
+
+def test_supported_engine_refuses_unknown_version(tmp_path):
+    from frequensolve.adaptive import render_sweep
+
+    with pytest.raises(ValueError, match="Unsupported"):
+        render_sweep(scheduler_version="adaptive-scheduler.v999")
+    scheduler = _load_scheduler_module()
+    with pytest.raises(ValueError, match="Unsupported"):
+        scheduler.AdaptiveScheduler(
+            {"version": "v999"},
+            job_file="job.json",
+            output=str(tmp_path),
+            status=str(tmp_path / "status.json"),
+        )
+
+
+def test_supported_scheduler_import_does_not_load_ssh_or_numerical_backends():
+    code = "import sys; import frequensolve.adaptive; assert not {'paramiko', 'numpy', 'pyvista'} & sys.modules.keys()"
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_render_allocation_uses_direct_template_defaults_and_explicit_pool(tmp_path):
+    import json
+    import shlex
+    import subprocess
+
+    from frequensolve.adaptive import AdaptivePool, render_allocation
+
+    pool = AdaptivePool(1, 4, 2, 15360, 900, "cpu-single")
+    script = render_allocation(
+        pool=pool,
+        job_file="example/job.json",
+        run_path=str(tmp_path),
+        output=str(tmp_path / "run-logs"),
+        executable="/native/fs2d",
+        mpi="/adapter/srun",
+        mpi_args=["--mpi=pmix"],
+        task_count=3,
+        imaging=True,
+    )
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+    config_line = script[
+        script.index("printf '%s") : script.index(' > "$scheduler_config"')
+    ]
+    config = json.loads(shlex.split(config_line)[2])
+    assert config["version"] == "adaptive-scheduler.v1"
+    assert config["total_ranks"] == 4
+    assert config["omp_threads"] == 2
+    assert config["mem_per_rank_gib"] == 3.75
+    assert config["failure_tolerance"] == 4
+    assert config["mem_cushion"] == 1.5
+    assert config["boost_max_factor"] == 8
+    assert config["task_indices"] == [1, 2, 3]
+    assert config["skip_sizing"] is False
+    assert config["sizing_json"] == str(tmp_path / "example" / "FS_sizing.json")
