@@ -78,12 +78,10 @@
         "SLURM_PACKER_FAILED"
       ],
       "expectedFailure": {
-        "phase": "execution",
-        "type": "RunFailedError",
-        "messageContains": "job=rtm_from_true_data; state=failed"
+        "phase": "execution"
       },
       "issueUrl": "https://github.com/FrequenSol/Sauce/issues/92",
-      "reason": "The supported RTM tutorial input reaches a native imaging failure after its observed-data dependency succeeds."
+      "reason": "The imaging tutorial now drives the frequensolve.imaging fwi_operator workflow (linearize, jvp/vjp/normal, sensitivity kernel, staged FWI) after its observed-data dependency; the Cloud runtime has not been qualified on that workflow and the expected submission count (21) was measured on the solver-free fake site, so the case stays skipped until it is re-triaged."
     }
   ]
 }

@@ -45,6 +45,10 @@ PRESENTATION_METHODS = {
 }
 EXPECTED_SUBMISSION_OVERRIDES = {
     "01_modeling_basics/06_laplace_time_domain": 3,
+    # observed forward job + the imaging jobs submitted by ``frequensolve.imaging``
+    # (registry discovery, linearize, jvp/vjp/normal per frequency, one
+    # sensitivity-kernel job and the staged FWI), counted on the fake site.
+    "06_outputs/03_imaging": 21,
     "07_performance/01_performance": 9,
 }
 

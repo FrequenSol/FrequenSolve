@@ -99,8 +99,12 @@ standard capitalization.
       borehole geometry.
 
    FWI
-      Full waveform inversion workflow. FWI-gradient image requests produce
-      property-gradient imaging outputs.
+      Full waveform inversion: iteratively updating a model so that simulated
+      data match observed data. In FrequenSolve an ``ImagingProblem`` binds
+      the simulation, control space, observed data and misfit once, and the
+      ``FWI`` workflow runs staged continuation over it with penalties,
+      preconditioners, checkpoints and history owned by FrequenSolve while
+      Sauce evaluates the physics.
 
    gauge length
       Length interval over which a DAS channel measures strain.
@@ -130,9 +134,10 @@ standard capitalization.
 
    JVP
       Jacobian-vector product. It applies a model-to-data linearization to one
-      model-space direction without constructing the full Jacobian matrix. In
-      control-sensitivity Born jobs, the vector contains ordered property-control
-      coefficients.
+      control-space direction without constructing the full Jacobian matrix.
+      In FrequenSolve it is ``J @ dv`` on a linearization's ``jacobian``
+      (Sauce's ``jvp`` action); the direction is a ``ControlVector`` over the
+      active control blocks and the result is a complex ``DataVector``.
 
    JSON
       Text data format used by FrequenSolve for solver contracts, manifests,
@@ -238,7 +243,11 @@ standard capitalization.
       Common zero-phase source wavelet used in seismic examples and tutorials.
 
    RTM
-      Reverse time migration imaging workflow.
+      Reverse time migration. In FrequenSolve ``rtm(problem)`` returns the
+      misfit gradient on the active control blocks (Sauce's covector in the
+      ``simulated - observed`` convention; its negative is the classic
+      image), and ``sensitivity_kernel`` produces the Cartesian-grid image
+      kernels.
 
    run manifest
       Manifest written for a solver run. It records the run directory,
@@ -357,9 +366,54 @@ standard capitalization.
       vertical symmetry axis.
 
    VJP
-      Vector-Jacobian product. It applies the transpose of a model-to-data
-      linearization to a data-space vector. In control-sensitivity RTM jobs, it
-      accumulates a gradient in the ordered property-control coefficients.
+      Vector-Jacobian product. It applies the adjoint of a model-to-data
+      linearization to a data-space vector and returns a real covector on the
+      active control blocks (the real part of the Hermitian pairing, no
+      factor two). In FrequenSolve it is ``J.H @ r`` on a linearization's
+      ``jacobian`` (Sauce's ``vjp`` action); misfit gradients are VJPs of the
+      weighted residual.
+
+   control block
+      One named Sauce control registry block, such as a depth profile of a
+      material property, a lattice, an implicit-surface control, one source
+      quantity, or a reflectivity field. A ``ControlSpace`` is an ordered
+      collection of blocks that fixes the optimizer vector, its transforms,
+      bounds, coordinates and support mask.
+
+   support mask
+      Per-coefficient boolean mask exported by Sauce for every control block
+      from the derivative measure of each coefficient at the baseline.
+      Coefficients whose basis support does not reach their subdomain,
+      feasibility band or level set are frozen: excluded from the optimizer
+      vector, written as zeros, and dropped from gradients.
+
+   linearization
+      One saved Sauce state at a control vector (one task per frequency).
+      ``problem.linearize(v)`` returns it; the misfit value, gradient,
+      Jacobian and Gauss-Newton normal operator at that point hang off it and
+      are cached by fingerprint.
+
+   LSRTM
+      Least-squares reverse time migration: the linear least-squares problem
+      on the Jacobian of one linearization, solved by LSQR or conjugate
+      gradients on the normal equations.
+
+   sensitivity kernel
+      Cartesian-grid image of the derivative of the misfit (or of the data,
+      with zero observed data) with respect to a material property, produced
+      by ``sensitivity_kernel`` and returned as an ``ImageSet``.
+
+   extension
+      Auxiliary model extension (FWIME): a tap space of time lags or spatial
+      half-offsets attached to material control blocks, with its own
+      regularized inner solve. ``problem.extend(...)`` returns an extended
+      problem that ``FWI`` accepts unchanged.
+
+   reflectivity
+      Joint reflectivity fields (``reflectivity.<name>`` blocks) inverted
+      together with the background model. ``ReflectivityParameters`` is an
+      ordinary control block; extension and reflectivity are mutually
+      exclusive in one problem.
 
    VTK
       Visualization Toolkit file family used by ParaView and PyVista for mesh

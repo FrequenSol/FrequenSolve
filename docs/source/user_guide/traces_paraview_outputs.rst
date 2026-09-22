@@ -295,68 +295,34 @@ figures and saved screenshots.
 Imaging Output
 --------------
 
-Imaging jobs use the :term:`RTM` workflow and are usually created with
-``simulation.imaging(...)``:
+Imaging and inversion outputs are produced by ``frequensolve.imaging`` (see
+:doc:`imaging`). Sensitivity kernels and :term:`RTM` images on a Cartesian
+grid come back as an :class:`~frequensolve.imaging.ImageSet` whose ``raw``,
+``smoothed`` and ``incremental`` datasets are :term:`xarray` ``Dataset``
+objects on the requested grid with ``(z, x)`` dimensions:
 
 .. code-block:: python
 
-   image_grid = fs.CartesianGrid(
-       n=[161, 81],
-       x0=[0.0, 0.0],
-       x1=[1.2, 0.5],
-   )
+   from frequensolve import imaging as im
 
-   job = sim.imaging(
-       name="rtm",
-       observed=observed_job_or_trace_path,
-       grid=image_grid,
-       parameters=["vp", "vs", "rho"],
-       fields=["velocity"],
-       condition="up_down",
-       weights=[1.0, 0.8, 0.45],
-       misfit_norm="L2",
-   )
+   grid = fs.CartesianGrid(n=[161, 81], x0=[0.0, 0.0], x1=[1.2, 0.5])
+   kernels = im.sensitivity_kernel(problem, grid, properties=["vp", "rho"], condition="fwi")
+   kernels.raw["vp"].plot.imshow(x="x", y="z", yincrease=False)
+   kernels.image_file()                     # the aggregate image.h5
+   kernels.read_images("raw", part=1)       # one per-frequency part
 
-``parameters`` request :term:`FWI`-gradient image conditions. The public names
-``"vp"``, ``"vs"``, and ``"rho"`` serialize to solver properties ``Vp``,
-``Vs``, and ``Rho``. ``fields`` and ``condition`` request diagnostic image
-conditions. For exact solver-condition names, pass ``images={...}``; values of
-the form ``"FWI:Vp"`` request property-gradient images, while other strings are
-passed as image-condition names.
+Observed data may be supplied as a trace-producing job, a
+:term:`TraceDataset <trace dataset>`, or a filesystem path. Receiver-group
+names in the observed data must match the :term:`simulation` acquisition,
+because the misfit pairs observed and simulated receiver groups by name.
+Residual weights, tapers, masks and receiver filters are
+:class:`~frequensolve.imaging.Preprocess` hooks attached to the
+:class:`~frequensolve.imaging.Misfit`.
 
-Observed data may be supplied as a trace-producing job, a :term:`TraceDataset <trace dataset>`, or a
-filesystem path. Receiver-group names in the observed data must match the
-:term:`simulation` acquisition, because the imaging misfit pairs observed and simulated
-receiver groups by name.
-
-Arbitrary nonnegative residual weights can be attached to a misfit receiver
-group. The array shape determines whether weights vary by receiver,
-component/receiver, or source/component/receiver; sparse trace-catalog weights
-use an explicit ``layout="sparse_trace"``. Saved jobs put production arrays in
-a job-owned HDF5 file and retain only its reference in job JSON and provenance:
-
-.. code-block:: python
-
-   group = job.misfit.receiver_groups[0]
-   group.add_trace_weights(
-       quality_weights,  # shape: (source, component, receiver)
-       name="data_quality",
-   )
-
-Successful imaging runs can be opened directly from local files with
-``job.load_images()``. This does not contact an execution site:
-
-.. code-block:: python
-
-   job = fs.load(job_file)
-   image_db = job.load_images()
-   raw = image_db.raw_images
-   smoothed = image_db.smoothed_images
-
-For a remote run, call ``site.fetch_image(job)`` once to copy the image files
-locally. Subsequent sessions can reload the job and use ``job.load_images()``
-without reconnecting to the site.
-
-Both properties return :term:`xarray` ``Dataset`` objects on the requested image grid.
-The raw dataset reads the solver ``image/raw`` group; the smoothed dataset reads
-``image/smoothed`` when the solver writes that group.
+Gradients and inversion results are control-space objects rather than
+grids: a :class:`~frequensolve.imaging.ControlVector` renders with
+``to_xarray()`` and ``plot()``, and an :class:`~frequensolve.imaging.FWIResult`
+saves its final state, history and stage summaries to a directory with
+``save()``. An :class:`~frequensolve.imaging.ImageKernelJob` that has already
+run can be reopened from local files with ``job.load_images()`` without
+contacting an execution site.

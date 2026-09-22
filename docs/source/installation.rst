@@ -59,6 +59,11 @@ Choose the smallest install that matches the workflow you need:
    * - Read or write :term:`SEG-Y`/:term:`ASDF` data
      - ``python -m pip install "frequensolve[seismic-io]"``
      - For seismic file import and export workflows.
+   * - Use imaging operators with PyLops
+     - ``python -m pip install "frequensolve[inversion]"``
+     - Optional. ``frequensolve.imaging`` (FWI, LSRTM, RTM, sensitivity
+       kernels) works with the base install; the extra adds ``to_pylops()``
+       on its operators. See :doc:`user_guide/imaging`.
 
 All available user extras are:
 
@@ -71,7 +76,7 @@ All available user extras are:
    python -m pip install "frequensolve[mcp]"         # local simulation-assistant MCP
    python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF export helpers
    python -m pip install "frequensolve[fast-fft]"     # pyFFTW acceleration
-   python -m pip install "frequensolve[inversion]"    # PyLops-compatible operators
+   python -m pip install "frequensolve[inversion]"   # PyLops adapters for imaging operators
    python -m pip install "frequensolve[dev,docs]"    # tests and documentation builds
 
 Extras can be combined:

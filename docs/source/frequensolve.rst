@@ -32,6 +32,26 @@ a class by task, start here:
      - :doc:`frequensolve.util`
    * - Validate simulations and jobs before export
      - :doc:`frequensolve.validation`
+   * - Declare an imaging problem: control spaces, observed data, misfit
+     - :doc:`frequensolve.imaging` (``ControlSpace``, ``DepthProfile``,
+       ``GridParameters``, ``ObservedData``, ``Misfit``, ``ImagingProblem``)
+   * - Run FWI, LSRTM, RTM, sensitivity kernels, or focusing
+     - :doc:`frequensolve.imaging` (``FWI``, ``Stage``, ``LSRTM``, ``rtm``,
+       ``sensitivity_kernel``, ``TimeReversalFocus``)
+   * - Work with Jacobian and normal operators, penalties, smoothing
+     - :doc:`frequensolve.imaging` (``Jacobian``, ``Normal``, ``Tikhonov``,
+       ``TV``, ``Smoothing``, ``Diagonal``)
+   * - Model extension (FWIME) and reflectivity
+     - :doc:`frequensolve.imaging` (``Extension``, ``Lags``, ``HalfOffsets``,
+       ``ReflectivityParameters``)
+   * - Author low-level Sauce imaging jobs and read their artifacts
+     - :doc:`frequensolve.imaging` (``FWIOperatorJob``, ``ControlGradientJob``,
+       ``ImageKernelJob``, ``SmoothJob``, ``ImageSet``)
+   * - Generic optimizers, continuation, history, derivative checks
+     - :doc:`frequensolve.inversion`
+   * - Parameterized properties and implicit surfaces
+     - :doc:`frequensolve.model` (``model.parameterization``,
+       ``model.implicit_geometry``)
 
 The conceptual user guide explains how these pieces fit together. Use this
 reference when you need constructor arguments, method names, or class members.
@@ -40,6 +60,8 @@ reference when you need constructor arguments, method names, or class members.
    :maxdepth: 4
 
    frequensolve.geometry
+   frequensolve.imaging
+   frequensolve.inversion
    frequensolve.knowledge
    frequensolve.mesh
    frequensolve.model

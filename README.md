@@ -38,7 +38,7 @@ python -m pip install "frequensolve[hpc]"         # SSH and SLURM site support
 python -m pip install "frequensolve[cloud]"       # FrequenSol Cloud API and S3 access
 python -m pip install "frequensolve[seismic-io]"  # SEG-Y/ASDF IO helpers
 python -m pip install "frequensolve[fast-fft]"    # pyFFTW acceleration
-python -m pip install "frequensolve[inversion]"   # PyLops-compatible FWI operators
+python -m pip install "frequensolve[inversion]"   # PyLops adapters for imaging operators
 ```
 
 ## Quickstart
@@ -70,6 +70,31 @@ project.save()
 ```
 
 The FrequenSolve Python API exports JSON/HDF5 contracts consumed by fast solver builds. Solver execution requires a licensed solver binary or an enabled FrequenSol execution backend.
+
+Imaging and inversion use the same objects. `frequensolve.imaging` declares
+the inverse problem once and derives gradients, SciPy-style Jacobian and
+normal operators, and the FWI, LSRTM, RTM, sensitivity-kernel and focusing
+workflows from it:
+
+```python
+from frequensolve import imaging as im
+
+problem = im.ImagingProblem(
+    sim,
+    controls=im.DepthProfile("vp", "sediment", spacing=0.05, transform="log"),
+    observed=observed_job,
+    misfit=im.Misfit.huber(delta=1.345),
+    frequencies=[4.0, 6.0, 8.0],
+    site=fs.Site(),
+)
+lin = problem.linearize()          # value, gradient, jacobian, normal
+result = im.FWI(
+    problem,
+    stages=im.Stage.bands([[4.0], [4.0, 6.0, 8.0]], iterations=[10, 15]),
+    penalty=im.Tikhonov(alpha=1e-2),
+    checkpoint="checkpoint.h5",
+).run()
+```
 
 ## Sites And Tutorials
 

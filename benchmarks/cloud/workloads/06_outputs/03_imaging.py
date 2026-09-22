@@ -1,17 +1,18 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/03_imaging.ipynb
-Source SHA-256: b1dcf384350c83c4d01a689829fec57b55845d2ecc36b73e660b8515d5d496eb
+Source SHA-256: 3ed0f94bf19216647fd89a15ab40f436fff3a9b58b866ac67324200f72f97cca
 """
 
 # %% source cell 5
 from pathlib import Path
 from pprint import pprint
 
-import h5py
 import numpy as np
+import xarray as xr
 
 import frequensolve as fs
+from frequensolve import imaging as im
 
 u = fs.ureg
 
@@ -25,190 +26,168 @@ project = fs.Project(
 )
 project.path
 
-
 # %% source cell 8
-def build_elastic_simulation(project, *, name, interface_depth_km):
+WATER_DEPTH = 0.1
+MODEL_DEPTH = 0.6
+
+
+def sediment_truth(below):
+    below = np.asarray(below, dtype=float)
+    vp = np.full_like(below, 2.4)
+    vp[below < 0.35] = 2.2
+    vp[below < 0.25] = 1.8
+    vp[below < 0.15] = 2.0
+    vp[below < 0.05] = 1.7
+    return vp
+
+
+def sediment_start(below):
+    below = np.asarray(below, dtype=float)
+    return 1.7 + (2.4 - 1.7) * below / (MODEL_DEPTH - WATER_DEPTH)
+
+
+def build_simulation(project, *, name, sediment_vp):
     sim = project.new_simulation(
         name=name,
-        physics="elastic",
+        physics="acoustic",
         dimension=2,
         units={"length": "km", "velocity": "km/s", "density": "g/cm^3"},
+    )
+    below = np.linspace(0.0, MODEL_DEPTH - WATER_DEPTH, 201)
+    vp_column = xr.DataArray(
+        sediment_vp(below), dims=["z"], coords={"z": WATER_DEPTH + below}
     )
     model = fs.LayeredModel(name="model", dimension=2, x_limits=[0.0, 1.2])
     model.add_surface(name="top", depth=0.0 * u.km)
     model.add_layer(
-        name="upper_layer",
-        properties={
-            "Vp": 2.0 * u.km / u.s,
-            "Vs": 1.0 * u.km / u.s,
-            "Rho": 2.2 * u.g / u.cm**3,
-        },
+        name="water", properties={"Vp": 1.5 * u.km / u.s, "Rho": 1.0 * u.g / u.cm**3}
     )
-    model.add_surface(name="interface", depth=interface_depth_km * u.km)
+    model.add_surface(name="seabed", depth=WATER_DEPTH * u.km)
     model.add_layer(
-        name="lower_layer",
-        properties={
-            "Vp": 2.8 * u.km / u.s,
-            "Vs": 1.5 * u.km / u.s,
-            "Rho": 2.4 * u.g / u.cm**3,
-        },
+        name="sediment", properties={"Vp": vp_column, "Rho": 2.0 * u.g / u.cm**3}
     )
-    model.add_surface(name="bottom", depth=0.5 * u.km)
+    model.add_surface(name="bottom", depth=MODEL_DEPTH * u.km)
     sim += model
-    sim += model.hex_mesh_generator([12, 5])
-    sim.mesh.set_adapt(elems_per_wave=2.0, order=4, f_low=5.0, f_high=25.0)
-    sim.mesh.set_source_grading(d1=0.05, factor=2.0)
+    sim += model.hex_mesh_generator([12, 6])
+    sim.mesh.set_adapt(elems_per_wave=2.0, order=4, f_low=3.0, f_high=10.0)
     sim += fs.BoundaryCondition(conditions=["free"], boundaries=["z_min"])
     sim += fs.BoundaryCondition(
         conditions=["pml"], boundaries=["x_min", "x_max", "z_max"], pml_wavelengths=0.75
     )
     acq = fs.Acquisition()
     acq.add_sources(
-        kind="vector",
-        coords=fs.Q_([[0.25, 0.02], [0.6, 0.02], [0.95, 0.02]], "km"),
-        direction=[0.0, 1.0],
+        kind="scalar", coords=fs.Q_([[0.2, 0.02], [0.6, 0.02], [1.0, 0.02]], "km")
     )
-    geophone = fs.ReceiverNode(name="surface_geophone")
-    geophone.add_component(name="v_z", field="velocity", direction=[0.0, 1.0])
-    receiver_coords = [fs.Q_([x, 0.0], "km") for x in np.linspace(0.05, 1.15, 121)]
-    acq.add_receiver_group(name="surface", device=geophone, coords=receiver_coords)
+    hydrophone = fs.ReceiverNode(name="hydrophone")
+    hydrophone.add_component(name="p", field="pressure")
+    receiver_coords = [fs.Q_([x, 0.05], "km") for x in np.linspace(0.1, 1.1, 51)]
+    acq.add_receiver_group(name="surface", device=hydrophone, coords=receiver_coords)
     sim += acq
-    sim += fs.SolverConfig(ptol=1e-10)
+    sim += fs.SolverConfig(tolerance=0.0001)
     return sim
 
 
-smooth_sim = build_elastic_simulation(
-    project, name="imaging_smooth", interface_depth_km=0.25
-)
-true_sim = build_elastic_simulation(
-    project, name="imaging_true", interface_depth_km=0.3
-)
+true_sim = build_simulation(project, name="imaging_true", sediment_vp=sediment_truth)
+start_sim = build_simulation(project, name="imaging_start", sediment_vp=sediment_start)
+
+# %% source cell 10
+below = np.linspace(0.0, MODEL_DEPTH - WATER_DEPTH, 201)
 
 # %% source cell 12
-frequencies = [8.0, 12.0, 18.0]
-frequency_weights = [1.0, 0.8, 0.45]
-image_grid = fs.CartesianGrid(n=[161, 81], x0=[0.0, 0.0], x1=[1.2, 0.5])
-image_grid.as_xarray()
+frequencies = [4.0, 6.0, 8.0]
 
 # %% source cell 14
-observed_root = Path(project.path) / "observed_frequency_data"
-(observed_root / "surface").mkdir(parents=True, exist_ok=True)
-imaging_job = smooth_sim.imaging_job(
-    name="rtm_elastic",
-    observed=observed_root,
-    frequencies=frequencies,
-    grid=image_grid,
-    parameters=["vp", "vs", "rho"],
-    fields=["velocity"],
-    condition="up_down",
-    weights=frequency_weights,
-    misfit_norm="L2",
-    keep_forward=False,
-    keep_adjoint=False,
-    keep_unstacked=False,
+controls = im.ControlSpace(
+    vp=im.DepthProfile("vp", "sediment", spacing=0.05 * u.km, transform="log")
 )
-imaging_job_file = imaging_job.save()
-loaded_imaging_job = fs.BaseJob.load(imaging_job_file)
-(imaging_job_file, type(loaded_imaging_job).__name__, loaded_imaging_job.images)
-
-# %% source cell 16
-image_contract = imaging_job.to_fs()["Image"]
-pprint(image_contract)
-
-# %% source cell 18
-focused_job = smooth_sim.imaging_job(
-    name="rtm_focused",
-    observed=observed_root,
-    frequencies=[12.0],
-    grid=image_grid,
-    images={"dVp": "FWI:Vp", "dRho": "FWI:Rho", "vz_image": "velocity"},
-    weights=[1.0],
-)
-focused_job.to_fs()["Image"]["images"]
-
-
-# %% source cell 20
-def write_synthetic_image_database(path, *, grid, frequency):
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
-    nx = int(grid.n[0])
-    nz = int(grid.n[1])
-    x = np.linspace(grid.x0[0], grid.x1[0], nx)[None, :]
-    z = np.linspace(grid.x0[1], grid.x1[1], nz)[:, None]
-    reflector = np.exp(-((z - 0.3) ** 2) / (2.0 * 0.015**2))
-    aperture = np.cos(np.pi * (x - 0.6) / 1.2) ** 2
-    dip = np.sin(2.0 * np.pi * (x / 1.2 + 0.8 * z))
-    raw_vp = reflector * aperture * (1.0 + 0.25 * dip)
-    raw_vs = 0.55 * reflector * aperture * (1.0 - 0.15 * dip)
-    raw_rho = -0.35 * reflector * aperture
-    smoothed = {
-        "FWI_Vp": 0.72 * raw_vp,
-        "FWI_Vs": 0.72 * raw_vs,
-        "FWI_Rho": 0.72 * raw_rho,
-    }
-    raw = {"FWI_Vp": raw_vp, "FWI_Vs": raw_vs, "FWI_Rho": raw_rho}
-    string_dtype = h5py.string_dtype(encoding="utf-8")
-    with h5py.File(path / "image.h5", "w") as h5:
-        for group_name, images in {"raw": raw, "smoothed": smoothed}.items():
-            group = h5.create_group(f"image/{group_name}")
-            group.create_dataset(
-                "properties", data=np.array(list(images), dtype=string_dtype)
-            )
-            for name, values in images.items():
-                dataset = group.create_dataset(name, data=values.reshape(-1))
-                dataset.attrs["x0"] = np.array([grid.x0[0], grid.x0[1]])
-                dataset.attrs["x1"] = np.array([grid.x1[0], grid.x1[1]])
-                dataset.attrs["n_grid"] = np.array([nx, nz])
-                dataset.attrs["dims"] = np.array(["x", "z"], dtype=string_dtype)
-    with h5py.File(path / "image_1.h5", "w") as h5:
-        h5.create_dataset("frequency", data=float(frequency))
-
-
-preview_path = Path(project.path) / "synthetic_image_preview"
-write_synthetic_image_database(preview_path, grid=image_grid, frequency=12.0)
-image_db = fs.ImageDatabase(path=preview_path, parts=1, shape=image_grid.shape)
-raw_images = image_db.raw_images
-smoothed_images = image_db.smoothed_images
-
-# %% source cell 23
-fwi_problem = smooth_sim.fwi(
-    observed=observed_root,
-    frequencies=frequencies,
-    parameters=["vp", "vs", "rho"],
-    grid=image_grid,
-)
-summary = {
-    "model_parameters": fwi_problem.model_space.parameters,
-    "model_vector_size": fwi_problem.model_space.size,
-    "data_vector_size": fwi_problem.data_space.size,
-    "image_grid_dims": fwi_problem.model_space.dims,
-    "image_grid_shape": fwi_problem.grid.shape,
+bound = controls.bind(start_sim)
+{
+    "keys": controls.keys,
+    "blocks": bound.qualified_names,
+    "payload": bound.controls_payload(),
 }
 
-# %% source cell 25
-site = fs.Site()
+# %% source cell 16
 observed_job = fs.FrequencyDomainJob(
-    name="observed_true_data", simulation=true_sim, f_list=frequencies
+    name="observed_true", simulation=true_sim, f_list=frequencies
 )
+observed = im.ObservedData(observed_job)
+misfit = im.Misfit.huber(
+    delta=1.345, preprocess=[im.Preprocess.offset_taper(d0=0.1 * u.km, d1=0.25 * u.km)]
+)
+print("observed frequencies:", observed.frequencies)
+pprint(misfit.to_fs(observed.resolve(start_sim)))
+
+# %% source cell 18
+site = fs.Site()
 observed_result = site.submit(observed_job).wait()
 observed_traces = observed_result.traces()
 observed_traces.summary
 
-# %% source cell 27
-rtm_job = smooth_sim.imaging_job(
-    name="rtm_from_true_data",
-    observed=observed_job,
-    grid=image_grid,
-    parameters=["vp", "vs", "rho"],
-    fields=["velocity"],
-    condition="up_down",
-    weights=frequency_weights,
-    misfit_norm="L2",
+# %% source cell 20
+problem = im.ImagingProblem(
+    start_sim,
+    controls=controls,
+    observed=observed,
+    misfit=misfit,
+    frequencies=frequencies,
+    site=site,
+    workdir=Path(project.path) / "fwi",
+    name="fwi_tutorial",
 )
-rtm_result = site.submit(rtm_job).wait()
-solver_images = site.fetch_image(rtm_job)
-solver_images.raw_images
+print("blocks:", problem.space.blocks, "size:", problem.space.size)
+print("capabilities:", problem.capabilities())
 
-# %% source cell 28
-solver_raw = solver_images.raw_images
-image_names = list(solver_raw.data_vars)
+# %% source cell 22
+lin = problem.linearize()
+gradient = lin.gradient
+print("misfit value:", lin.value)
+print("per term:", lin.report)
+
+# %% source cell 23
+image = im.rtm(problem)
+np.allclose(np.asarray(image), np.asarray(gradient))
+
+# %% source cell 25
+J = lin.jacobian
+H = lin.normal
+dv = problem.space.random(seed=1)
+d_lin = J @ dv
+g_gn = J.H @ d_lin
+h_dv = H @ dv
+print("J @ dv:", d_lin.shape, "as dataset:")
+print(
+    "max |J.H (J dv) - H dv|:",
+    float(np.max(np.abs(np.asarray(g_gn) - np.asarray(h_dv)))),
+)
+
+# %% source cell 27
+grid = fs.CartesianGrid(n=[121, 61], x0=[0.0, 0.0], x1=[1.2, 0.6])
+kernels = im.sensitivity_kernel(
+    problem, grid, properties=["vp"], condition="fwi", frequencies=[6.0]
+)
+raw = kernels.raw
+
+# %% source cell 29
+stages = im.Stage.bands([[4.0], [4.0, 6.0]], iterations=[3, 3], active=["vp"])
+fwi = im.FWI(
+    problem,
+    stages=stages,
+    optimizer=im.LBFGS(memory=5, step_limit=0.05),
+    penalty=im.Tikhonov(alpha=0.01, order=1),
+    checkpoint="checkpoint.h5",
+    history="history.json",
+)
+result = fwi.run(resume=True)
+for stage in result.stages:
+    print(
+        f"{stage.name}: frequencies={stage.frequencies} iterations={stage.iterations} linearizations={stage.linearizations} data loss {stage.initial_loss.data:.4g} -> {stage.final_loss.data:.4g} ({stage.message})"
+    )
+print("success:", result.success, "checkpoint:", result.checkpoint)
+
+# %% source cell 31
+final = result.vector()
+nodes = final.to_xarray("vp")
+node_depths = np.asarray(nodes.coords[nodes.dims[0]])
+recovered = sediment_start(node_depths) * np.exp(np.asarray(nodes.values))
+below = np.linspace(0.0, MODEL_DEPTH - WATER_DEPTH, 201)

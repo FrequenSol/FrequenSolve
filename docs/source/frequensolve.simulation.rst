@@ -49,21 +49,7 @@ Eikonal Jobs
    :show-inheritance:
    :noindex:
 
-Imaging Jobs
-------------
-
-.. automodule:: frequensolve.simulation.jobs.imaging
-   :members:
-   :show-inheritance:
-   :noindex:
-
-FWI Jobs
---------
-
-.. automodule:: frequensolve.simulation.jobs.fwi
-   :members:
-   :show-inheritance:
-   :noindex:
+Imaging jobs live in :doc:`frequensolve.imaging`.
 
 Artifacts
 ---------
