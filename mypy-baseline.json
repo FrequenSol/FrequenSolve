@@ -31,9 +31,109 @@
       "file": "src/frequensolve/commands/site.py"
     },
     {
+      "code": "no-untyped-def",
+      "count": 4,
+      "file": "src/frequensolve/imaging/_artifacts.py"
+    },
+    {
       "code": "unused-ignore",
       "count": 1,
-      "file": "src/frequensolve/solver.py"
+      "file": "src/frequensolve/imaging/_artifacts.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/imaging/_backend.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 4,
+      "file": "src/frequensolve/imaging/controls.py"
+    },
+    {
+      "code": "assignment",
+      "count": 4,
+      "file": "src/frequensolve/imaging/controls.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/imaging/controls.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 3,
+      "file": "src/frequensolve/imaging/controls.py"
+    },
+    {
+      "code": "unused-ignore",
+      "count": 2,
+      "file": "src/frequensolve/imaging/controls.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 8,
+      "file": "src/frequensolve/imaging/data.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/imaging/data.py"
+    },
+    {
+      "code": "index",
+      "count": 1,
+      "file": "src/frequensolve/imaging/data.py"
+    },
+    {
+      "code": "no-redef",
+      "count": 1,
+      "file": "src/frequensolve/imaging/data.py"
+    },
+    {
+      "code": "unused-ignore",
+      "count": 1,
+      "file": "src/frequensolve/imaging/data.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/imaging/jobs.py"
+    },
+    {
+      "code": "assignment",
+      "count": 3,
+      "file": "src/frequensolve/imaging/jobs.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/imaging/jobs.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 3,
+      "file": "src/frequensolve/imaging/misfit.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/imaging/misfit.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 3,
+      "file": "src/frequensolve/imaging/misfit.py"
+    },
+    {
+      "code": "assignment",
+      "count": 3,
+      "file": "src/frequensolve/imaging/regularization.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
+      "file": "src/frequensolve/imaging/workflows.py"
     },
     {
       "code": "call-arg",
@@ -116,6 +216,11 @@
       "file": "src/frequensolve/mesh/mesh_manager.py"
     },
     {
+      "code": "union-attr",
+      "count": 11,
+      "file": "src/frequensolve/model/implicit_geometry.py"
+    },
+    {
       "code": "arg-type",
       "count": 7,
       "file": "src/frequensolve/model/layered/authoring.py"
@@ -127,12 +232,17 @@
     },
     {
       "code": "attr-defined",
-      "count": 40,
+      "count": 41,
       "file": "src/frequensolve/model/layered/authoring.py"
     },
     {
       "code": "has-type",
       "count": 24,
+      "file": "src/frequensolve/model/layered/authoring.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
       "file": "src/frequensolve/model/layered/authoring.py"
     },
     {
@@ -164,6 +274,21 @@
       "code": "no-untyped-def",
       "count": 10,
       "file": "src/frequensolve/model/layered/sampling.py"
+    },
+    {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/model/parameterization.py"
+    },
+    {
+      "code": "attr-defined",
+      "count": 1,
+      "file": "src/frequensolve/model/parameterization.py"
+    },
+    {
+      "code": "operator",
+      "count": 1,
+      "file": "src/frequensolve/model/parameterization.py"
     },
     {
       "code": "arg-type",
@@ -211,8 +336,18 @@
       "file": "src/frequensolve/model/property.py"
     },
     {
+      "code": "assignment",
+      "count": 2,
+      "file": "src/frequensolve/model/representation.py"
+    },
+    {
       "code": "arg-type",
       "count": 9,
+      "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
+    },
+    {
+      "code": "assignment",
+      "count": 1,
       "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
     },
     {
@@ -222,7 +357,7 @@
     },
     {
       "code": "no-untyped-def",
-      "count": 14,
+      "count": 16,
       "file": "src/frequensolve/orchestrator/sites/aws/aws.py"
     },
     {
@@ -277,12 +412,12 @@
     },
     {
       "code": "assignment",
-      "count": 5,
+      "count": 6,
       "file": "src/frequensolve/orchestrator/sites/hpc/site.py"
     },
     {
       "code": "no-untyped-def",
-      "count": 49,
+      "count": 51,
       "file": "src/frequensolve/orchestrator/sites/hpc/site.py"
     },
     {
@@ -344,6 +479,11 @@
       "code": "no-untyped-def",
       "count": 13,
       "file": "src/frequensolve/plotting/animate.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 1,
+      "file": "src/frequensolve/plotting/eikonal.py"
     },
     {
       "code": "no-untyped-def",
@@ -566,13 +706,23 @@
       "file": "src/frequensolve/seismic/survey.py"
     },
     {
+      "code": "no-untyped-def",
+      "count": 1,
+      "file": "src/frequensolve/seismic/trace_pack.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 1,
+      "file": "src/frequensolve/seismic/trace_pack.py"
+    },
+    {
       "code": "arg-type",
       "count": 1,
       "file": "src/frequensolve/seismic/trace_store.py"
     },
     {
       "code": "assignment",
-      "count": 1,
+      "count": 3,
       "file": "src/frequensolve/seismic/trace_store.py"
     },
     {
@@ -592,12 +742,12 @@
     },
     {
       "code": "misc",
-      "count": 2,
+      "count": 3,
       "file": "src/frequensolve/seismic/trace_store.py"
     },
     {
       "code": "no-untyped-def",
-      "count": 33,
+      "count": 34,
       "file": "src/frequensolve/seismic/trace_store.py"
     },
     {
@@ -607,12 +757,12 @@
     },
     {
       "code": "return-value",
-      "count": 8,
+      "count": 9,
       "file": "src/frequensolve/seismic/trace_store.py"
     },
     {
       "code": "arg-type",
-      "count": 1,
+      "count": 2,
       "file": "src/frequensolve/seismic/traces.py"
     },
     {
@@ -671,6 +821,21 @@
       "file": "src/frequensolve/seismic/wavelet.py"
     },
     {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/simulation/artifact_catalog.py"
+    },
+    {
+      "code": "return-value",
+      "count": 1,
+      "file": "src/frequensolve/simulation/artifact_catalog.py"
+    },
+    {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/simulation/artifact_contract.py"
+    },
+    {
       "code": "arg-type",
       "count": 3,
       "file": "src/frequensolve/simulation/config.py"
@@ -712,7 +877,12 @@
     },
     {
       "code": "no-untyped-def",
-      "count": 6,
+      "count": 9,
+      "file": "src/frequensolve/simulation/jobs/artifacts.py"
+    },
+    {
+      "code": "union-attr",
+      "count": 12,
       "file": "src/frequensolve/simulation/jobs/artifacts.py"
     },
     {
@@ -817,7 +987,12 @@
     },
     {
       "code": "attr-defined",
-      "count": 13,
+      "count": 24,
+      "file": "src/frequensolve/simulation/jobs/remote.py"
+    },
+    {
+      "code": "dict-item",
+      "count": 1,
       "file": "src/frequensolve/simulation/jobs/remote.py"
     },
     {
@@ -842,7 +1017,7 @@
     },
     {
       "code": "no-untyped-def",
-      "count": 1,
+      "count": 4,
       "file": "src/frequensolve/simulation/jobs/run_state.py"
     },
     {
@@ -852,12 +1027,17 @@
     },
     {
       "code": "arg-type",
+      "count": 2,
+      "file": "src/frequensolve/simulation/jobs/serialization.py"
+    },
+    {
+      "code": "assignment",
       "count": 1,
       "file": "src/frequensolve/simulation/jobs/serialization.py"
     },
     {
       "code": "attr-defined",
-      "count": 25,
+      "count": 28,
       "file": "src/frequensolve/simulation/jobs/serialization.py"
     },
     {
@@ -954,6 +1134,21 @@
       "code": "union-attr",
       "count": 5,
       "file": "src/frequensolve/simulation/simulation.py"
+    },
+    {
+      "code": "index",
+      "count": 11,
+      "file": "src/frequensolve/simulation/task_index.py"
+    },
+    {
+      "code": "operator",
+      "count": 1,
+      "file": "src/frequensolve/simulation/task_index.py"
+    },
+    {
+      "code": "unused-ignore",
+      "count": 1,
+      "file": "src/frequensolve/solver.py"
     },
     {
       "code": "name-defined",
