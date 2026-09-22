@@ -287,8 +287,11 @@ JVP/VJP paths use the same transform. See
 - Blend property object with one named implicit `surface`, a positive `width`,
   and ordinary `inside` and `outside` endpoint providers. Negative surface phi
   selects `inside`; positive phi selects `outside`. A cubic C1 smoothstep spans
-  the centered interval `[-width/2, width/2]`. A blend decorates one property in
-  one material subdomain and does not create or classify material layers.
+  the centered interval `[-width/2, width/2]`. `width` is a length in the
+  model's coordinate units (km by default, or a `{ "value": ..., "units": ... }`
+  object) and is nondimensionalized like the surface field it spans. A blend
+  decorates one property in one material subdomain and does not create or
+  classify material layers.
 
 For a blend weight `w(phi)`, the exact control derivative is
 `dm = (1-w) dm_outside + w dm_inside + (m_inside-m_outside) w'(phi) dphi`.

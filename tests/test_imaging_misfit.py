@@ -22,7 +22,7 @@ from frequensolve.util.mixins import ExportContext
 from frequensolve.util.store import SimulationStore
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-320696f" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-5e07624" / "trunk" / "contracts"
 )
 IMAGING_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-imaging-1" / "schema.json"
 IMAGING_EXAMPLES = sorted((IMAGING_SCHEMA.parent / "examples").glob("*.json"))

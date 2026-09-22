@@ -31,6 +31,32 @@ then bind signed surface ids into pure evaluators for curves and rectangles.
   accessed through pointers. Referenced surfaces must outlive all bound
   `SurfaceRef_t` values.
 
+## Units and Scaling
+
+- Every length in a surface object is authored in the model's length units:
+  the enclosing model's `units` string when present, otherwise km. A surface
+  may carry its own `units` string to override that default for its fields.
+- The registry nondimensionalizes those lengths once, when it is built, with
+  the same runtime length scale that horizons, mesh bounds, and material
+  control maps use. Registered surfaces therefore always evaluate in the mesh
+  (solver) frame under both `scaling: legacy` and `disable_scaling`; the mesh
+  generator and material blends share one scaled registry.
+- `phi` is a solver length for every surface type. Primitive coordinates,
+  radii, half sizes, offsets (`delta`, `eps`), repeat periods and shifts,
+  transform translations `t`, and `rbf` centers, `support_radius`,
+  `maximum_displacement`, and `feasibility_band` scale as lengths. Boolean
+  smoothing `k` is a rate per unit `phi` and scales inversely. Dimensionless
+  fields (`n`, `axis`, `R`, uniform `s`, `sa`/`sb`, `alpha`, angles) do not
+  scale.
+- `rbf` `bias` and `coefficients` are lengths in the model units as well, but
+  they stay in authored units: the surface applies the length scale to its
+  evaluated field, gradient, and coefficient derivatives. A published
+  `control` block, its exported optimizer coordinates, and the covector are
+  therefore in model length units and do not change with the task frequency.
+  Exported center coordinates are likewise in model units.
+- Surfaces generated from runtime data (`append_*`, `init_from_data`) receive
+  solver coordinates directly and are not rescaled.
+
 ## Supported Surface Types
 
 - `simple`: coordinate graph surface `q_axis = function(q_other...)`.
@@ -51,7 +77,8 @@ then bind signed surface ids into pure evaluators for curves and rectangles.
 - `rbf` and `rbf_level_set`: compact Wendland-C2 expansion with
   `support_radius`, one coordinate row per `centers` entry, a matching
   `coefficients` vector, and optional `bias`. The field is
-  `bias + sum_i coefficients[i] psi(||x-centers[i]||/support_radius)`.
+  `bias + sum_i coefficients[i] psi(||x-centers[i]||/support_radius)` in model
+  length units; see [Units and Scaling](#units-and-scaling).
   Compact support makes evaluation sparse after initialization builds a uniform
   bin index. The initialized surface and index are replicated on each rank and
   rejected if their persistent footprint reaches 1 GiB.
@@ -89,7 +116,8 @@ then bind signed surface ids into pure evaluators for curves and rectangles.
   one stable `id`; coefficients remain positional and do not receive individual
   ids. `maximum_displacement` and `feasibility_band` configure the
   representation-owned step cap used to limit sampled normal zero-set motion.
-  Their defaults are `0.25 * support_radius` and `support_radius`.
+  Their defaults are `0.25 * support_radius` and `support_radius`. Both are
+  lengths in the model units, like the coefficients they bound.
 
 ## GMP Binding Semantics
 

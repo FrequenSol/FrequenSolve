@@ -407,8 +407,31 @@
           "minLength": 1
         },
         "width": {
-          "type": "number",
-          "exclusiveMinimum": 0.0
+          "description": "Transition width in model coordinate units (km by default) or a {value, units} length object.",
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0.0
+            },
+            {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": {
+                  "type": "number",
+                  "exclusiveMinimum": 0.0
+                },
+                "units": {
+                  "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+                },
+                "scale": {
+                  "type": "number",
+                  "exclusiveMinimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         },
         "inside": {
           "$ref": "#/$defs/blendEndpoint"
