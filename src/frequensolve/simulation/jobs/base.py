@@ -409,6 +409,9 @@ class BaseJob(
     max_ranks_per_task: ClassVar[Optional[int]] = None
     """Optional solver limit on MPI ranks used by one task."""
 
+    postprocess_only: ClassVar[bool] = False
+    """Whether sites run only the solver postprocess step and no frequency tasks."""
+
     def __post_init__(self) -> None:
         if not isinstance(self.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")

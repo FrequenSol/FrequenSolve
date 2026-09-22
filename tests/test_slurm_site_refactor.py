@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from frequensolve.imaging.jobs import ControlGradientJob
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
 from frequensolve.orchestrator.sites.base import (
@@ -36,11 +37,7 @@ from frequensolve.orchestrator.sites.hpc.stampede3 import (
 from frequensolve.orchestrator.utils.pool import PoolStatus
 from frequensolve.orchestrator.utils.progress import status_table_html, wait_all
 from frequensolve.project.project import Project
-from frequensolve.simulation.jobs import (
-    EikonalJob,
-    FrequencyDomainJob,
-    RTMControlSensitivityJob,
-)
+from frequensolve.simulation.jobs import EikonalJob, FrequencyDomainJob
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
@@ -1278,7 +1275,7 @@ def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
         n_nodes=1,
         stdout="/scratch/user/jobs/simple/rtm/logs",
         duration="00-00:10:00",
-        imaging_job=True,
+        postprocess_job=True,
         smooth_only=True,
     )
 
@@ -1297,10 +1294,11 @@ def test_control_postprocess_artifacts_map_into_remote_project(monkeypatch, tmp_
     project = Project(name="project", path=tmp_path / "project")
     simulation = project.new_simulation(name="simple", physics="acoustic", dimension=2)
     gradient = project.path / "controls" / "gradient.h5"
-    job = RTMControlSensitivityJob(
+    job = ControlGradientJob(
         "rtm",
         simulation,
         [3.0, 5.0],
+        kind="rtm",
         observed=project.path / "observed.h5",
         gradient=gradient,
     )
@@ -1933,7 +1931,6 @@ def test_slurm_batch_poll_ignores_scheduler_status_while_pending(monkeypatch):
 
 def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(hpc, "ImagingJob", DummyJob)
     site = DummySlurmSite("project/run")
     site.pool.nproc = 4
     site.pool.ncore = 8
@@ -1945,7 +1942,7 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
         duration="00-00:30:00",
         ranks_per_node=4,
         tolerate_failures=2,
-        imaging_job=True,
+        postprocess_job=True,
     )
     fresh_batch_script = site._sweep_SLURM_script(
         n_tasks=4,
@@ -1955,7 +1952,12 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
         ranks_per_node=4,
         fresh=True,
     )
-    attached_script = site._sweep_script(DummyJob())
+
+    class PostprocessDummyJob(DummyJob):
+        def requires_postprocess(self):
+            return True
+
+    attached_script = site._sweep_script(PostprocessDummyJob())
     fresh_attached_script = site._sweep_script(DummyJob(), fresh=True)
     attached_disabled_script = site._sweep_script(DummyJob(), pack=False)
     disabled_script = site._sweep_SLURM_script(

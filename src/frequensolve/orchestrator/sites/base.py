@@ -67,7 +67,20 @@ class _ImageFetchingSite(Protocol):
     def fetch_image(self, job: Any) -> Any: ...
 
 
+POSTPROCESS_ARTIFACT_ROLES: tuple[str, ...] = (
+    "image",
+    "gradient",
+    "objective",
+    "focus_objective",
+    "state",
+    "objective_vector",
+    "extension",
+)
+"""Catalog roles a postprocessed imaging job can publish; remote sites fetch them all."""
+
+
 __all__ = [
+    "POSTPROCESS_ARTIFACT_ROLES",
     "BaseSite",
     "JobStatus",
     "RunFailedError",

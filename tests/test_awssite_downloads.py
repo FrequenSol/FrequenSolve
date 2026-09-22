@@ -8,9 +8,8 @@ pytest.importorskip("boto3")
 from botocore.exceptions import ClientError
 
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
-from frequensolve.orchestrator.sites.base import JobStatus
+from frequensolve.orchestrator.sites.base import POSTPROCESS_ARTIFACT_ROLES, JobStatus
 from frequensolve.simulation.artifact_contract import ArtifactRecord, ArtifactRequest
-from frequensolve.simulation.jobs import ImagingJob
 
 
 class FakePaginator:
@@ -216,10 +215,12 @@ def test_fetch_image_downloads_only_the_aggregate_image(tmp_path):
     key = "project/results/opaque-generation/image.h5"
     client = FakeS3Client({key: "image payload", "project/results/unused.h5": "old"})
     site = make_site(client)
-    job = object.__new__(ImagingJob)
-    job.simulation = SimpleNamespace(project_path=project)
-    job.save_path = image.parent
-    job.load_images = lambda: "image reader"
+    job = SimpleNamespace(
+        project_path=project,
+        simulation=SimpleNamespace(project_path=project),
+        save_path=image.parent,
+        load_images=lambda: "image reader",
+    )
 
     def fetch(job, **kwargs):
         assert kwargs["operations"] == ("smooth",)
@@ -241,13 +242,23 @@ def test_fetch_image_rejects_paths_outside_the_project(tmp_path):
     site = make_site(FakeS3Client({}))
     site.config = SimpleNamespace(s3_bucket="bucket")
 
-    job = object.__new__(ImagingJob)
-    job.name = "rtm"
-    job.simulation = SimpleNamespace(project_path=project_path, name="model")
-    job.save_path = tmp_path / "other" / "imaging"
+    job = SimpleNamespace(
+        name="rtm",
+        project_path=project_path,
+        simulation=SimpleNamespace(project_path=project_path, name="model"),
+        save_path=tmp_path / "other" / "imaging",
+        load_images=lambda: None,
+    )
 
     with pytest.raises(ValueError, match="outside project root"):
         site.fetch_image(job)
+
+
+def test_fetch_image_rejects_jobs_without_images():
+    site = make_site(FakeS3Client({}))
+
+    with pytest.raises(TypeError, match="ImageKernelJob"):
+        site.fetch_image(SimpleNamespace(name="forward"))
 
 
 @pytest.mark.parametrize(
@@ -277,10 +288,13 @@ def test_fetch_image_normalizes_missing_output_after_credential_refresh(
     site.cognito_auth = object()
     site._refresh_s3_credentials = lambda: None
 
-    job = object.__new__(ImagingJob)
-    job.name = "rtm"
-    job.simulation = SimpleNamespace(project_path=project_path, name="model")
-    job.save_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
+    job = SimpleNamespace(
+        name="rtm",
+        project_path=project_path,
+        simulation=SimpleNamespace(project_path=project_path, name="model"),
+        save_path=project_path / "jobs" / "model" / "rtm" / "results" / "imaging",
+        load_images=lambda: None,
+    )
 
     site.fetch_artifacts = lambda *_args, **_kwargs: site._download_s3_files(
         "project/results", tmp_path / "downloads", ("opaque/image.h5",)
@@ -489,23 +503,29 @@ def test_fetch_outputs_downloads_complete_configured_artifact_set():
     assert calls == [{"requests": (), "include_defaults": True, "operations": ()}]
 
 
-def test_fetch_outputs_downloads_aggregate_image_for_imaging_job(monkeypatch):
+def test_fetch_outputs_fetches_postprocess_roles_for_postprocessed_jobs():
     site = object.__new__(AWSSite)
     calls = []
-    site.fetch_artifacts = lambda job, **kwargs: calls.append(kwargs)
-    job = object.__new__(ImagingJob)
-    job.outputs = SimpleNamespace(wavefields=[])
-    job.load_images = lambda: calls.append("image")
-    monkeypatch.setattr(
-        ImagingJob,
-        "traces",
-        property(lambda self: SimpleNamespace(open=lambda: "trace-data")),
+    fetched = [Path("/project/results/imaging/image.h5")]
+    site.fetch_artifacts = lambda job, **kwargs: calls.append(kwargs) or fetched
+    job = SimpleNamespace(
+        outputs=SimpleNamespace(wavefields=[]),
+        requires_postprocess=lambda: True,
+        traces=SimpleNamespace(open=lambda: "trace-data"),
     )
-    assert site.fetch_outputs(job) == "trace-data"
+    assert site.fetch_outputs(job) == fetched
     assert calls == [
-        {"requests": (), "include_defaults": True, "operations": ("smooth",)},
-        "image",
+        {
+            "requests": tuple(
+                ArtifactRequest(role=role) for role in POSTPROCESS_ARTIFACT_ROLES
+            ),
+            "include_defaults": False,
+            "operations": ("smooth",),
+        }
     ]
+    assert {"image", "gradient", "objective", "state"} <= set(
+        POSTPROCESS_ARTIFACT_ROLES
+    )
 
 
 def test_aws_run_handle_honors_submit_time_fetch_after_success():
@@ -786,11 +806,9 @@ def test_fetch_outputs_preserves_control_postprocess_with_exact_catalog(tmp_path
     job = SimpleNamespace(requires_postprocess=lambda: True)
     assert site.fetch_outputs(job) == [gradient]
     assert calls[0]["operations"] == ("smooth",)
-    assert {request.role for request in calls[0]["requests"]} == {
-        "gradient",
-        "objective",
-        "focus_objective",
-    }
+    assert {request.role for request in calls[0]["requests"]} == set(
+        POSTPROCESS_ARTIFACT_ROLES
+    )
     site.fetch_artifacts = lambda *args, **kwargs: []
     with pytest.raises(FileNotFoundError, match="No postprocess artifact"):
         site.fetch_outputs(job)

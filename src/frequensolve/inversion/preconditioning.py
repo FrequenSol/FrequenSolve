@@ -7,7 +7,10 @@ from typing import Any, Optional, Sequence, Union
 
 import numpy as np
 
-from frequensolve.inversion.least_squares import ControlLeastSquaresProblem
+from frequensolve.inversion.least_squares import (
+    ControlLeastSquaresProblem,
+    _control_vector,
+)
 
 __all__ = [
     "DiagonalInverseHessian",
@@ -93,7 +96,7 @@ def estimate_gauss_newton_diagonal(
     probes = int(probe_count)
     if probes < 1:
         raise ValueError("probe_count must be positive")
-    vector = problem.control_space.pack(model)
+    vector = _control_vector(problem.control_space, model)
     rng = np.random.default_rng(seed)
     data_diagonal = np.zeros(problem.control_space.size, dtype=np.float64)
     for _ in range(probes):

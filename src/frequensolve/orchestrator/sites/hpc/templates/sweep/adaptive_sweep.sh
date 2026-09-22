@@ -227,7 +227,7 @@ python3 {{ scheduler_runner }} \
 echo "Skipping frequency sweep; running solver postprocess only."
 {% endif %}
 
-{% if imaging_job %}
+{% if postprocess_job %}
 echo "Running solver postprocess step..."
 "$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1
 {% if smooth_only %}

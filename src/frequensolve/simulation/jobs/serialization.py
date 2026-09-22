@@ -131,10 +131,8 @@ class JobSerializationMixin:
         class_name = data.get("_type")
         if class_name not in class_registry:
             import frequensolve.imaging.jobs  # noqa: F401
-            import frequensolve.simulation.jobs.control_sensitivity  # noqa: F401
             import frequensolve.simulation.jobs.eikonal  # noqa: F401
             import frequensolve.simulation.jobs.forward  # noqa: F401
-            import frequensolve.simulation.jobs.imaging  # noqa: F401
 
         if class_name not in class_registry:
             raise ValueError(f"Unknown job class: {class_name}")

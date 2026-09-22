@@ -5,6 +5,34 @@ prepared.
 
 ## Unreleased
 
+- Removed the old imaging/FWI job layer in favour of `frequensolve.imaging`,
+  which is now re-exported from the root namespace (`fs.ImagingProblem`,
+  `fs.Misfit`, `fs.FWI`, ...). Deleted without replacement aliases:
+  `frequensolve.simulation.jobs.imaging` (`ImagingJob`, `LSRTMGradientJob`,
+  `LSRTMNormalJob` -> `ImageKernelJob`; `Misfit`, `MisfitComparison`,
+  `MisfitGroup`, `PreprocessHook` -> `imaging.Misfit`/`imaging.Preprocess`;
+  `HDF5TraceStore`, `ObservedTraceDerivatives` -> `imaging.TraceStoreRef`;
+  `ImageDatabase` -> `imaging.ImageSet`), `frequensolve.simulation.jobs.fwi`
+  (`FWIProblem`, `ModelSpace`, `DataSpace`, `FrequenSolveJacobian`,
+  `ImageSpec`, `build_imaging_job` -> `imaging.ImagingProblem`,
+  `imaging.ControlSpace`, `imaging.DataSpace`, `imaging.Jacobian`,
+  `imaging.ImageSpec`), `frequensolve.simulation.jobs.control_sensitivity`
+  (`ControlBlock`, `ControlSpace` -> `imaging.ControlSpace`;
+  `RTMControlSensitivityJob`, `BornControlSensitivityJob`,
+  `TimeReversalFocusJob` -> `imaging.ControlGradientJob`),
+  `SeismicSimulation.fwi/imaging_job/imaging`, and
+  `frequensolve.model.representation.VariationalSmoothing`
+  (-> `imaging.SmoothingConfig`). Execution sites now drive image and
+  gradient products through the artifact catalog roles (`image`, `gradient`,
+  `objective`, `state`, `objective_vector`, `extension`) and the job
+  postprocess protocol: `site.fetch_image` accepts any job with
+  `load_images()`, `fetch_outputs` fetches every postprocess role, and
+  `site.submit` honours a job's `postprocess_only` class attribute (set on
+  `imaging.SmoothJob`) so smooth jobs run only the `--smooth` step. The
+  SLURM sweep templates take `postprocess_job` instead of `imaging_job`.
+  `frequensolve.inversion` least-squares adapters accept any control space
+  with `size` and `pack` (`ControlSpaceLike`).
+
 - Current development targets the `v2`/`v2_sam` line.
 - Expanded the public authoring API with symbolic property expressions,
   coordinate-aware remapping, attenuation configuration, layered-model and

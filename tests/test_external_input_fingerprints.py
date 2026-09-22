@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
+from frequensolve.imaging.jobs import ControlGradientJob
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
 from frequensolve.simulation.artifact_contract import (
@@ -10,7 +11,7 @@ from frequensolve.simulation.artifact_contract import (
     TaskPartition,
     TaskResult,
 )
-from frequensolve.simulation.jobs import BaseJob, BornControlSensitivityJob
+from frequensolve.simulation.jobs import BaseJob
 from frequensolve.simulation.jobs.serialization import JobSerializationMixin
 from frequensolve.simulation.simulation import SeismicSimulation
 
@@ -24,10 +25,11 @@ def _born_job(tmp_path, *, n_tasks=1):
     )
     direction = tmp_path / "direction.h5"
     direction.write_bytes(b"first direction")
-    job = BornControlSensitivityJob(
+    job = ControlGradientJob(
         "born",
         simulation,
         [float(index + 1) for index in range(n_tasks)],
+        kind="born",
         direction=direction,
     )
     return job, direction

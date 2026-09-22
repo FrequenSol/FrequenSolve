@@ -26,7 +26,21 @@ from frequensolve.inversion import (
     minimize_lbfgs,
     run_continuation,
 )
-from frequensolve.simulation.jobs.control_sensitivity import ControlBlock, ControlSpace
+
+
+class _ControlSpace:
+    """Minimal control space for the toolkit: ``size`` plus mapping ``pack``."""
+
+    def __init__(self, size):
+        self.size = size
+
+    def zeros(self):
+        return np.zeros(self.size, dtype=np.float64)
+
+    def pack(self, values):
+        return np.concatenate(
+            [np.asarray(block, dtype=np.float64).ravel() for block in values.values()]
+        )
 
 
 def test_complex_data_realifier_is_an_isometric_real_layout():
@@ -69,7 +83,7 @@ def test_control_least_squares_drives_scipy_with_real_controls(tmp_path):
     history_path = tmp_path / "loss_history.json"
     history = OptimizationHistory(history_path, metadata={"benchmark": "unit"})
     checkpoints = []
-    controls = ControlSpace([ControlBlock("sediment_sp", 2)])
+    controls = _ControlSpace(2)
     problem = ControlLeastSquaresProblem(
         controls,
         observed,
@@ -109,7 +123,7 @@ def test_control_least_squares_drives_scipy_with_real_controls(tmp_path):
 
 
 def test_native_control_objective_caches_atomic_value_and_gradient(tmp_path):
-    controls = ControlSpace([ControlBlock("block", 2)])
+    controls = _ControlSpace(2)
     history = OptimizationHistory(tmp_path / "native_history.json")
     evaluations = []
     hessian = np.array([[3.0, 0.5], [0.5, 2.0]])
@@ -145,7 +159,7 @@ def test_control_least_squares_native_jvp_vjp_and_gauss_newton_product():
         ]
     )
     weights = np.array([0.5, 2.0, 1.25])
-    controls = ControlSpace([ControlBlock("block", 2)])
+    controls = _ControlSpace(2)
     regularization = QuadraticRegularization([[1.0, -1.0]], weight=0.3)
     problem = ControlLeastSquaresProblem(
         controls,
@@ -284,7 +298,7 @@ def test_lbfgs_uses_inverse_hessian_metric_without_changing_raw_gradients():
 def test_randomized_vjp_diagonal_includes_weights_and_regularization():
     matrix = np.diag([2.0, 3.0]).astype(np.complex128)
     weights = np.array([0.5, 2.0])
-    controls = ControlSpace([ControlBlock("block", 2)])
+    controls = _ControlSpace(2)
     regularization = QuadraticRegularization([[1.0, -1.0]], weight=0.25)
     vjp_calls = []
     problem = ControlLeastSquaresProblem(
@@ -493,7 +507,7 @@ def test_objective_momentum_options_are_validated(options, message):
 def test_inexact_newton_records_line_search_and_inner_solve_history(tmp_path):
     matrix = np.array([[2.0 + 0.5j, -0.25j], [0.5, 1.0 - 0.75j]])
     truth = np.array([0.2, -0.1])
-    controls = ControlSpace([ControlBlock("block", 2)])
+    controls = _ControlSpace(2)
     history = OptimizationHistory(tmp_path / "newton_history.json")
     problem = ControlLeastSquaresProblem(
         controls,
@@ -1102,7 +1116,9 @@ def test_regularization_history_checkpoint_and_result_round_trip(tmp_path):
             evaluations=0,
             loss=LossTerms(0.0),
         ),
-        lambda: ControlSpace([ControlBlock("block", 1)]).pack(np.array([1.0 + 0.0j])),
+        lambda: ControlObjectiveProblem(
+            _ControlSpace(1), value_gradient=lambda model: (0.0, model)
+        ).objective(np.array([1.0 + 0.0j])),
     ],
 )
 def test_optimization_model_vectors_reject_complex_values(factory):

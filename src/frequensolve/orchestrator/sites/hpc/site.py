@@ -33,6 +33,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Tuple,
     Type,
     Union,
     cast,
@@ -55,6 +56,7 @@ except ModuleNotFoundError as exc:
 from jinja2 import Environment, PackageLoader
 
 from frequensolve.orchestrator.sites.base import (
+    POSTPROCESS_ARTIFACT_ROLES,
     BaseSite,
     JobStatus,
     RunHandle,
@@ -127,7 +129,6 @@ from frequensolve.simulation.artifact_transfer import (
     fetch_artifact_payloads,
 )
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
-from frequensolve.simulation.jobs.imaging import ImagingJob
 from frequensolve.simulation.task_index import TaskIndex
 from frequensolve.solver import (
     IDENTITY_QUERY_TIMEOUT_SECONDS,
@@ -168,7 +169,21 @@ def _job_requires_postprocess(job: Any) -> bool:
     requires = getattr(job, "requires_postprocess", None)
     if callable(requires):
         return bool(requires())
-    return isinstance(job, ImagingJob)
+    return False
+
+
+def _image_jobs(job: Any) -> Tuple[List[Any], bool]:
+    """Return ``(jobs, was_single)`` for jobs that expose ``load_images``."""
+
+    if hasattr(job, "load_images"):
+        return [job], True
+    jobs = list(job)
+    for item in jobs:
+        if not hasattr(item, "load_images"):
+            raise TypeError(
+                f"{type(item).__name__} has no images; expected an ImageKernelJob"
+            )
+    return jobs, False
 
 
 def _quote_runtime_environment_value(value: str) -> str:
@@ -962,7 +977,10 @@ class SlurmSite(BaseSite):
                 and the run reaches an unsuccessful terminal status.
             **overrides: Resource-request or site-specific submission
                 overrides. Pass ``validate=False`` to skip SDK pre-run
-                validation.
+                validation, or ``postprocess_only=True`` to run only the
+                solver postprocess step in batch mode; jobs whose class sets
+                ``postprocess_only`` (such as
+                :class:`~frequensolve.imaging.SmoothJob`) do so by default.
 
         Returns:
             ``RunHandle`` for the submitted or attached run.
@@ -982,6 +1000,13 @@ class SlurmSite(BaseSite):
             }
         )
         solver_policy = overrides.pop("solver_policy", self.solver_policy)
+        postprocess_only = bool(overrides.pop("postprocess_only", False)) or bool(
+            getattr(job, "postprocess_only", False)
+        )
+        if postprocess_only and not _job_requires_postprocess(job):
+            raise ValueError(
+                "postprocess_only requires a job with solver postprocessing"
+            )
         fresh_run = bool(force or overrides.pop("rerun", False))
         skip_policy_value = overrides.pop("skip", overrides.pop("skip_policy", None))
         residual = overrides.pop("residual", None)
@@ -1034,7 +1059,16 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        active_allocation = self.provisioned if mode in {"auto", "attached"} else False
+        if postprocess_only and mode == "attached":
+            raise ValueError(
+                "postprocess-only submissions run as batch jobs; use mode='batch' "
+                "or mode='auto'"
+            )
+        active_allocation = (
+            self.provisioned
+            if mode in {"auto", "attached"} and not postprocess_only
+            else False
+        )
         use_attached = mode == "attached" or (mode == "auto" and active_allocation)
         if run_config.mpi_health_check_timeout is not None:
             if use_attached or Path(self.mpi_cmd).name != "srun":
@@ -1130,11 +1164,15 @@ class SlurmSite(BaseSite):
             pending_indices = list(task_plan["pending_indices"])
         else:
             pending_indices = list(range(int(getattr(job, "n_tasks", 0))))
-        smooth_only = (
-            _job_requires_postprocess(job)
-            and not pending_indices
-            and self._remote_job_postprocess_needed(job)
-        )
+        if postprocess_only:
+            pending_indices = []
+            smooth_only = True
+        else:
+            smooth_only = (
+                _job_requires_postprocess(job)
+                and not pending_indices
+                and self._remote_postprocess_needed(job)
+            )
         if task_plan is not None and not pending_indices and not smooth_only:
             job.write_run_state(
                 status="skipped",
@@ -1625,8 +1663,6 @@ class SlurmSite(BaseSite):
         if not self._remote_run_successful(record):
             return False
         if _job_requires_postprocess(job):
-            if isinstance(job, ImagingJob):
-                return self._remote_image_output_exists(job)
             return self._remote_postprocess_output_exists(job)
         return True
 
@@ -1639,9 +1675,6 @@ class SlurmSite(BaseSite):
         except Exception as exc:
             logger.debug("Could not stat remote file %s: %s", path, exc)
             return False
-
-    def _remote_image_file(self, job: ImagingJob, part: Optional[int] = None) -> Path:
-        return self._remote_postprocess_file(job, part)
 
     def _remote_postprocess_file(
         self, job: BaseJob, part: Optional[int] = None
@@ -1683,30 +1716,6 @@ class SlurmSite(BaseSite):
         return self._remote_postprocess_part_outputs_exist(
             job
         ) and not self._remote_postprocess_output_exists(job)
-
-    def _remote_job_postprocess_needed(self, job: BaseJob) -> bool:
-        """Dispatch compatibility image checks or the generic job protocol."""
-
-        if isinstance(job, ImagingJob):
-            return self._remote_image_smoothing_needed(job)
-        return self._remote_postprocess_needed(job)
-
-    def _remote_image_output_exists(self, job: ImagingJob) -> bool:
-        """Return whether the remote aggregate image file exists."""
-
-        return self._remote_postprocess_output_exists(job)
-
-    def _remote_image_part_outputs_exist(self, job: ImagingJob) -> bool:
-        """Return whether all remote per-frequency image shards exist."""
-
-        return self._remote_postprocess_part_outputs_exist(job)
-
-    def _remote_image_smoothing_needed(self, job: ImagingJob) -> bool:
-        """Return whether remote image shards need the final smooth/stack step."""
-
-        return self._remote_image_part_outputs_exist(
-            job
-        ) and not self._remote_image_output_exists(job)
 
     def update_status(self, job_id: Optional[str] = None):
         """Check the status of the resource request."""
@@ -1860,7 +1869,7 @@ class SlurmSite(BaseSite):
         local_results = job._local_path / "results"
         local_results.mkdir(parents=True, exist_ok=True)
         self.fetch_artifacts(job, requests=requests, include_defaults=True)
-        if _job_requires_postprocess(job) and not isinstance(job, ImagingJob):
+        if _job_requires_postprocess(job):
             self.fetch_postprocess(job)
         return local_results
 
@@ -2052,13 +2061,18 @@ class SlurmSite(BaseSite):
             )
 
     def fetch_postprocess(self, job: BaseJob) -> list[Path]:
-        """Fetch typed gradient and objective postprocess products."""
+        """Fetch the job's postprocess products through the operation catalog.
+
+        Every catalog role a postprocessed imaging job can publish is
+        requested (``image``, ``gradient``, ``objective``, ``state``,
+        ``objective_vector``, ``extension``); roles the job did not publish
+        select nothing.
+        """
 
         fetched = self.fetch_artifacts(
             job,
             requests=tuple(
-                ArtifactRequest(role=role)
-                for role in ("gradient", "objective", "focus_objective")
+                ArtifactRequest(role=role) for role in POSTPROCESS_ARTIFACT_ROLES
             ),
             include_defaults=False,
             operations=("smooth",),
@@ -2137,17 +2151,19 @@ class SlurmSite(BaseSite):
             self.fetch_paraview(job)
         return job._result_path
 
-    def fetch_image(
-        self,
-        job: Union[ImagingJob, List[ImagingJob]],
-    ):
-        """Get image files from the remote site.
+    def fetch_image(self, job: Any) -> Any:
+        """Fetch the committed ``image`` artifacts and open them.
 
         Args:
-            job: An ImagingJob object.
+            job: :class:`~frequensolve.imaging.ImageKernelJob` or a list of
+                them.
+
+        Returns:
+            :class:`~frequensolve.imaging.ImageSet` for a single job, or a
+            mapping keyed by job name.
         """
 
-        jobs, single = _as_list(job, ImagingJob)
+        jobs, single = _image_jobs(job)
         images = {}
         for job in jobs:
             try:
@@ -2911,7 +2927,7 @@ class SlurmSite(BaseSite):
             n_nodes=config.nodes,
             stdout=str(job._remote_path(self.work_dir) / "logs"),
             duration=duration,
-            imaging_job=_job_requires_postprocess(job),
+            postprocess_job=_job_requires_postprocess(job),
             mpi_async_progress=config.mpi_async_progress,
             mpi_health_check_timeout=config.mpi_health_check_timeout,
             **(
@@ -3468,7 +3484,7 @@ class SlurmSite(BaseSite):
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
             dir_out_shell=shlex.quote(dir_out),
             executable_shell=shlex.quote(str(self.executable)),
-            imaging_job=_job_requires_postprocess(job),
+            postprocess_job=_job_requires_postprocess(job),
             mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
             pack_job=bool(pack_job),
             runtime_setup=self._runtime_setup_lines(),
@@ -3486,7 +3502,7 @@ class SlurmSite(BaseSite):
         ranks_per_node: Optional[int] = None,
         notify_on: Optional[Literal["begin", "end", "fail", "all", "none"]] = None,
         notify_email: Optional[str] = None,
-        imaging_job: bool = False,
+        postprocess_job: bool = False,
         n_job_tasks: Optional[int] = None,
         task_indices: Optional[List[int]] = None,
         **kwargs,
@@ -3617,7 +3633,7 @@ class SlurmSite(BaseSite):
             duration=duration,
             queue=queue,
             account=account,
-            imaging_job=imaging_job,
+            postprocess_job=postprocess_job,
             pack_job=pack_job,
             mpi_shell=shlex.quote(str(self.mpi_cmd)),
             executable_shell=shlex.quote(str(self.executable)),

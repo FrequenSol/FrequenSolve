@@ -81,7 +81,7 @@ for i in $(seq 1 $n_tasks); do
 done
 wait
 
-{% if imaging_job %}
+{% if postprocess_job %}
 echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth"
 "$mpi_exec" "${mpi_args[@]}" -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth >> $dir_out/smooth.log 2>&1
 {% endif %}

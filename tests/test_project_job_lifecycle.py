@@ -21,7 +21,6 @@ from frequensolve.simulation.artifact_contract import ArtifactRecord, task_resul
 from frequensolve.simulation.jobs import (
     BaseJob,
     FrequencyDomainJob,
-    ImagingJob,
     JobLayout,
     TimeDomainJob,
 )
@@ -192,7 +191,7 @@ def test_generic_load_infers_trace_store(tmp_path):
 
 def test_successful_run_result_opens_images_through_its_site():
     expected = object()
-    job = object.__new__(ImagingJob)
+    job = SimpleNamespace(load_images=lambda: None)
     site = SimpleNamespace(fetch_image=lambda requested: expected)
     result = RunResult(
         job=job,
@@ -1331,3 +1330,22 @@ def test_run_result_logs_delegates_when_local_cache_cannot_answer(
 
     assert result.logs(**kwargs) == fetched
     assert calls == [(job, kwargs)]
+
+
+def test_rebuilt_job_save_keeps_committed_tasks_current(tmp_path):
+    """A fresh job object must save the exact bytes Sauce fingerprinted."""
+
+    project, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0, 12.0])
+    job.save()
+    job.save()
+    committed_bytes = job._file.read_bytes()
+    _commit_task_result(job, 1)
+    _commit_task_result(job, 2)
+    assert job.current_tasks() == [1, 2]
+
+    rebuilt = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0, 12.0])
+    rebuilt.save()
+
+    assert rebuilt._file.read_bytes() == committed_bytes
+    assert rebuilt.current_tasks() == [1, 2]

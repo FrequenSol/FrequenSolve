@@ -56,7 +56,6 @@ from frequensolve.simulation.artifact_contract import (
     task_result_path,
 )
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
-from frequensolve.simulation.jobs.imaging import ImageDatabase, ImagingJob
 from frequensolve.solver import (
     SolverCompatibility,
     check_solver_compatibility,
@@ -287,7 +286,21 @@ def _job_requires_postprocess(job: Any) -> bool:
     requires = getattr(job, "requires_postprocess", None)
     if callable(requires):
         return bool(requires())
-    return isinstance(job, ImagingJob)
+    return False
+
+
+def _image_jobs(job: Any) -> tuple[List[Any], bool]:
+    """Return ``(jobs, was_single)`` for jobs that expose ``load_images``."""
+
+    if hasattr(job, "load_images"):
+        return [job], True
+    jobs = list(job)
+    for item in jobs:
+        if not hasattr(item, "load_images"):
+            raise TypeError(
+                f"{type(item).__name__} has no images; expected an ImageKernelJob"
+            )
+    return jobs, False
 
 
 def _collect_future_results(
@@ -640,12 +653,17 @@ class LocalSite(BaseSite):
             **kwargs: Additional arguments for task configuration. Pass
                 ``check=True`` to make ``wait()`` raise by default for failed
                 runs, or ``validate=False`` to skip SDK pre-run validation.
+                ``postprocess_only=True`` runs only the solver postprocess
+                step; jobs whose class sets ``postprocess_only`` (such as
+                :class:`~frequensolve.imaging.SmoothJob`) do so by default.
 
         Returns:
             RunHandle for the submitted tasks
         """
         check = bool(kwargs.pop("check", False))
-        postprocess_only = bool(kwargs.pop("postprocess_only", False))
+        postprocess_only = bool(kwargs.pop("postprocess_only", False)) or bool(
+            getattr(job, "postprocess_only", False)
+        )
         solver_policy = kwargs.pop("solver_policy", self.solver_policy)
         fresh_run = bool(
             kwargs.pop("force_run", False)
@@ -1602,31 +1620,23 @@ class LocalSite(BaseSite):
             )
         return db_map
 
-    def fetch_image(
-        self,
-        job: Union[ImagingJob, List[ImagingJob]],
-    ) -> Union[ImageDatabase, Dict[str, ImageDatabase]]:
-        """Open and accumulate imaging outputs.
+    def fetch_image(self, job: Any) -> Any:
+        """Open committed image kernels through the job's artifact catalog.
 
         Args:
-            job: Imaging job or list of imaging jobs.
+            job: :class:`~frequensolve.imaging.ImageKernelJob` or a list of
+                them.
 
         Returns:
-            ``ImageDatabase`` for a single job, or a mapping keyed by job name.
+            :class:`~frequensolve.imaging.ImageSet` for a single job, or a
+            mapping keyed by job name.
         """
 
-        if isinstance(job, ImagingJob):
-            jobs = [job]
-        else:
-            jobs = job
-        images: Dict[str, ImageDatabase] = {}
-        for job in jobs:
-            images[job.name] = job.load_images()
-
-        if len(images) == 1:
+        jobs, single = _image_jobs(job)
+        images: Dict[str, Any] = {item.name: item.load_images() for item in jobs}
+        if single:
             return images[jobs[0].name]
-        else:
-            return images
+        return images
 
     def fetch_vtk(
         self, job: BaseJob, path: Optional[Union[str, Path]] = None

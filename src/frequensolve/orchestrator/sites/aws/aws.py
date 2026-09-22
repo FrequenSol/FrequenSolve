@@ -34,7 +34,12 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
+from frequensolve.orchestrator.sites.base import (
+    POSTPROCESS_ARTIFACT_ROLES,
+    BaseSite,
+    JobStatus,
+    RunHandle,
+)
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
@@ -47,7 +52,7 @@ from frequensolve.simulation.artifact_contract import (
     operation_result_path,
 )
 from frequensolve.simulation.artifact_transfer import fetch_artifact_payloads
-from frequensolve.simulation.jobs import BaseJob, ImagingJob, SkipPolicy
+from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.task_index import TaskIndex
 from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.setup_logger import init_logger
@@ -1326,6 +1331,13 @@ class AWSSite(BaseSite):
                 "through a named site.toml profile: "
                 + ", ".join(forbidden_execution_overrides)
             )
+        if bool(kwargs.pop("postprocess_only", False)) or bool(
+            getattr(job, "postprocess_only", False)
+        ):
+            raise NotImplementedError(
+                "Managed Cloud execution cannot run a postprocess-only submission "
+                f"({type(job).__name__}); run it on a local or HPC site"
+            )
         fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
         skip_policy = SkipPolicy.from_value(
             kwargs.pop("skip", kwargs.pop("skip_policy", None))
@@ -1670,10 +1682,19 @@ class AWSSite(BaseSite):
         self.fetch_artifact_catalog(job)
         return job._result_path / "_fs_run"
 
-    def fetch_image(self, job: ImagingJob) -> Any:
-        """Fetch the declared aggregate image and its exact dependencies."""
-        if not isinstance(job, ImagingJob):
-            raise TypeError("fetch_image expects an ImagingJob")
+    def fetch_image(self, job: Any) -> Any:
+        """Fetch the committed ``image`` artifacts and open them.
+
+        Args:
+            job: :class:`~frequensolve.imaging.ImageKernelJob`.
+
+        Returns:
+            :class:`~frequensolve.imaging.ImageSet` for the job.
+        """
+        if not hasattr(job, "load_images"):
+            raise TypeError(
+                f"{type(job).__name__} has no images; expected an ImageKernelJob"
+            )
         try:
             job.save_path.resolve().relative_to(job.project_path.resolve())
         except ValueError as exc:
@@ -1695,24 +1716,15 @@ class AWSSite(BaseSite):
         """Fetch durable final products, plus explicit auxiliary selectors."""
 
         requires_postprocess = getattr(job, "requires_postprocess", None)
-        if (
-            callable(requires_postprocess)
-            and requires_postprocess()
-            and not isinstance(job, ImagingJob)
-        ):
+        if callable(requires_postprocess) and requires_postprocess():
             return self.fetch_postprocess(job, requests=requests)
 
         self.fetch_artifacts(
-            job,
-            requests=requests,
-            include_defaults=True,
-            operations=("smooth",) if isinstance(job, ImagingJob) else (),
+            job, requests=requests, include_defaults=True, operations=()
         )
         if hasattr(job, "result_manifest_file"):
             return job.results
         traces = job.traces.open()
-        if isinstance(job, ImagingJob):
-            job.load_images()
         if getattr(job.outputs, "wavefields", None):
             return {"traces": traces, "wavefields": job.wavefields.open()}
         return traces
@@ -1723,15 +1735,18 @@ class AWSSite(BaseSite):
         *,
         requests: Sequence[ArtifactRequest] = (),
     ) -> list[Path]:
-        """Fetch required control products through their operation catalog."""
+        """Fetch the job's postprocess products through the operation catalog.
+
+        Every catalog role a postprocessed imaging job can publish is
+        requested (``image``, ``gradient``, ``objective``, ``state``,
+        ``objective_vector``, ``extension``); roles the job did not publish
+        select nothing.
+        """
 
         fetched = self.fetch_artifacts(
             job,
             requests=(
-                *(
-                    ArtifactRequest(role=role)
-                    for role in ("gradient", "objective", "focus_objective")
-                ),
+                *(ArtifactRequest(role=role) for role in POSTPROCESS_ARTIFACT_ROLES),
                 *requests,
             ),
             include_defaults=False,

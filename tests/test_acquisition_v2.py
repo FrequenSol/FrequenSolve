@@ -1494,7 +1494,7 @@ def test_materialized_source_counts_survive_round_trip(tmp_path, encoding_kind):
 
 
 def test_external_receiver_names_survive_simulation_load(tmp_path):
-    from frequensolve.simulation.jobs.fwi import DataSpace
+    from frequensolve.imaging.data import DataSpace
     from frequensolve.simulation.simulation import SeismicSimulation
 
     names = [f"channel_{index:03d}" for index in range(65)]

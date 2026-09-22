@@ -729,10 +729,7 @@ def test_site_fetch_image_transfers_no_traces_or_wavefields(monkeypatch, tmp_pat
         _result_path=result_path,
         load_images=lambda: "loaded-image",
     )
-    monkeypatch.setattr(
-        "frequensolve.orchestrator.sites.hpc.site._as_list",
-        lambda value, expected: ([value], True),
-    )
+    del monkeypatch
 
     image = Site().fetch_image(job)
 

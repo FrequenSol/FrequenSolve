@@ -1266,9 +1266,9 @@ def test_local_wait_runs_smooth_after_imaging_frequency_tasks(monkeypatch, tmp_p
             return DummyFuture({"task_id": task_id, "status": "success"})
 
     class FakeImagingJob(DummyJob):
-        pass
+        def requires_postprocess(self):
+            return True
 
-    monkeypatch.setattr(local_module, "ImagingJob", FakeImagingJob)
     monkeypatch.setattr(
         local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
     )
@@ -1305,9 +1305,9 @@ def test_local_watch_runs_smooth_before_yielding_imaging_completion(
             return DummyFuture({"task_id": task_id, "status": "success"})
 
     class FakeImagingJob(DummyJob):
-        pass
+        def requires_postprocess(self):
+            return True
 
-    monkeypatch.setattr(local_module, "ImagingJob", FakeImagingJob)
     monkeypatch.setattr(
         local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
     )
@@ -1355,9 +1355,9 @@ def test_local_watch_reuses_terminal_poll_results_when_finalizing_imaging(
             return smooth_future
 
     class FakeImagingJob(DummyJob):
-        pass
+        def requires_postprocess(self):
+            return True
 
-    monkeypatch.setattr(local_module, "ImagingJob", FakeImagingJob)
     site._dask_client = FakeClient()
     job = FakeImagingJob()
     job._file = tmp_path / "job.json"
