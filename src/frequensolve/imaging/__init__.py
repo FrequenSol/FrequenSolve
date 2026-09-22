@@ -1,13 +1,14 @@
 """Imaging and inversion authoring API built on the Sauce imaging contracts.
 
-Phase 0 exposes the contract layer and Phase 1 the control spaces
-(:mod:`frequensolve.imaging.controls`): observed data and misfit terms
-(:mod:`frequensolve.imaging.data`, :mod:`frequensolve.imaging.misfit`), the
-problem and its linearizations (:mod:`frequensolve.imaging.problem`), the
-Jacobian and normal operators (:mod:`frequensolve.imaging.operators`), the
-solver artifact readers and writers (:mod:`frequensolve.imaging._artifacts`),
-and the four low-level jobs (:mod:`frequensolve.imaging.jobs`). Import it as
-``from frequensolve import imaging as im``.
+Layers, lowest first: the contract layer (:mod:`frequensolve.imaging.data`,
+:mod:`frequensolve.imaging.misfit`, :mod:`frequensolve.imaging._artifacts`,
+:mod:`frequensolve.imaging.jobs`), control spaces
+(:mod:`frequensolve.imaging.controls`), the problem and its linearizations
+(:mod:`frequensolve.imaging.problem`) with Jacobian and normal operators
+(:mod:`frequensolve.imaging.operators`), penalties and preconditioners
+(:mod:`frequensolve.imaging.regularization`), and the workflows
+(:mod:`frequensolve.imaging.workflows`, :mod:`frequensolve.imaging.results`).
+Import it as ``from frequensolve import imaging as im``.
 """
 
 from frequensolve._exports import unique_exports
@@ -25,13 +26,22 @@ from frequensolve.imaging.operators import *  # noqa: F403
 from frequensolve.imaging.operators import __all__ as _operators_all
 from frequensolve.imaging.problem import *  # noqa: F403
 from frequensolve.imaging.problem import __all__ as _problem_all
+from frequensolve.imaging.regularization import *  # noqa: F403
+from frequensolve.imaging.regularization import __all__ as _regularization_all
+from frequensolve.imaging.results import *  # noqa: F403
+from frequensolve.imaging.results import __all__ as _results_all
+from frequensolve.imaging.workflows import *  # noqa: F403
+from frequensolve.imaging.workflows import __all__ as _workflows_all
 
 __all__ = unique_exports(
     _controls_all,
     _data_all,
     _misfit_all,
-    _problem_all,
-    _operators_all,
     _artifacts_all,
     _jobs_all,
+    _problem_all,
+    _operators_all,
+    _regularization_all,
+    _workflows_all,
+    _results_all,
 )
