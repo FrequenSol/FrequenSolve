@@ -29,7 +29,7 @@ from frequensolve.simulation.simulation import SeismicSimulation
 from frequensolve.units import ureg as u
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-5e07624" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-f533e6f" / "trunk" / "contracts"
 )
 MATERIAL_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-material-model-1" / "schema.json"
 

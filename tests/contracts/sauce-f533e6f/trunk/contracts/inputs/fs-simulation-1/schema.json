@@ -1007,6 +1007,24 @@
           "minimum": 0,
           "description": "PCG iterations between freshly recomputing b-Ax while retaining search-direction history. Defaults to 0 for the active Metal solver and 20 for CPU and CUDA; explicit values override these defaults, and CPU fallback retains the CPU default. Positive values also verify candidate convergence and the final residual, including after fallback. Zero disables this policy and its candidate/final verification; stopping then uses the recursive residual. CPU FP32 solves widen fresh residual arithmetic and MPI reductions to FP64 while retaining FP32 operator storage and ordinary iterations. CPU FP64 and Metal retain native arithmetic. CUDA refreshes widen native operator products and segmented sums to FP64, storing vectors and communicating in FP32, and currently require op_max_blocks=1. CUDA TF32 mode also supports intermediate FP32 refreshes through recompute_residual_fp32. Independent of replace_residual and instability recovery."
         },
+        "iterative_refinement": {
+          "type": "boolean",
+          "default": false,
+          "description": "CPU FP32 builds only: verify and repair each iterative solve in FP64 against the ordinary convergence reference. The ordinary solve runs first, stopping at max(tolerance, refinement_inner_tolerance). Its residual is then recomputed in FP64 against the stored FP32 operator and normalized by the same per-RHS reference and active lanes the ordinary solve uses; while that misses tolerance, FP32 correction solves accumulate into an FP64 solution. The tolerance and reported residual apply to that FP64 iterate; the returned solution is its FP32 rounding, whose own residual can sit at the FP32 floor, so the gain is solution accuracy. Refinement stops early on an unstable or non-finite solve or a correction that does not reduce the residual, and reports that status. Costs one saved FP32 load and one FP64 solution per right-hand side (24 bytes per complex, 12 per real unknown and right-hand side) plus the FP64 fresh-residual workspace and one fresh residual per check. Ignored by FP64 builds and rejected for GPU solves and reduced-precision solve grids."
+        },
+        "refinement_max_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10,
+          "description": "Maximum FP32 correction solves after the ordinary solve when iterative_refinement is enabled."
+        },
+        "refinement_inner_tolerance": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.0001,
+          "description": "When iterative_refinement is enabled: the tolerance floor for the ordinary first solve, and the floor on the relative reduction each correction solve requests from its own load. Keep it above the FP32 attainable residual so neither stalls."
+        },
         "recompute_residual_fp32": {
           "type": "integer",
           "minimum": 0,

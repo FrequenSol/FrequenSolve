@@ -205,13 +205,23 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   after aggregation. The parts may be native `/controls/<block>` files or
   `fwi_operator` covectors (`fs-control-vector-1`, qualified
   `/controls/model.<block>` datasets); the reader accepts both layouts, ignores
-  blocks outside `active`, rejects an unsupported `/schema` or `/packing`, and
-  passes the state and registry fingerprints through without re-deriving them.
+  blocks outside `active`, and rejects an unsupported `/schema` or `/packing`.
+  Joint sources produce joint outputs: model blocks are written as
+  `/controls/model.<block>`, the remaining joint blocks (source, reflectivity)
+  are summed with the same weights, the `/support` masks are copied from the
+  first source, and `/schema`, `/packing`, `/state_fingerprint` and
+  `/control_registry_fingerprint` are carried through (every part must share
+  both fingerprints), so the smoothed covector can be used directly as
+  `fwi_operator.direction`. Native sources produce native outputs.
   Optional `input` names one such vector explicitly: the postprocess then reads
   that file instead of the `_<task>` parts, copies it to `raw_gradient`, and
   writes the smoothed `gradient`; `weights` and `objective`/`focus` aggregation
   are ignored. `f_list` remains required because wavelength-relative smoothing
-  scales use its largest frequency.
+  scales use its largest frequency. Relative `gradient`, `raw_gradient` and
+  `objective` paths (and the focus `objective`) resolve under the job's result
+  directory, like the `fwi_operator` outputs, so the same relative string names
+  both the `fwi_operator.covector` parts and the smoothing input; a relative
+  `input` is looked up there first and otherwise like `fwi_operator.direction`.
   `input_role: dual` is the default because a native VJP is already a weak
   coefficient-space load; `primal` mass-weights supplied nodal values before
   solving. `lambda` multiplies the conservative P inverse wavenumber
@@ -420,7 +430,20 @@ The required `fwi_operator/controls/active` list selects ordered blocks named
 Unknown, repeated and unsupported blocks fail. `controls/state` optionally
 applies a complete canonical baseline before assembly; `controls/state_output`
 exports that baseline. `controls/manifest` exports the resolved registry and all
-MPI ownership descriptors. These exact output paths need a unique name per task.
+MPI ownership descriptors. Both output paths are exact in a single-task job and
+receive the `_<task>` suffix before the extension when `f_list` has more than one
+entry. A `state_output` records each mechanism block's physical scaling, so a
+baseline written by one frequency task replays in another
+([fs-control-state-1](../fs-control-state-1/contract.md)).
+
+Operator inputs `state` (jvp, vjp, normal), `direction`, `objective_vector`
+(vjp), `extension/direction` and `model_direction` are resolved per task when
+`f_list` has more than one entry: the task-suffixed sibling `<stem>_<task><ext>`
+is probed first, as an absolute path or as a regular file under the project path
+(and, for inputs that are searched, as given). A missing sibling never fails the
+job: the exact path is then resolved as in a single-task job. Single-task jobs
+use the exact path. `controls/state` is always exact. A saved linearization
+records its `task`; another task index rejects it.
 
 `state_output` and `covector` files also carry one packed support bitmask per
 block, `/support/<qualified block>`, from the frozen-baseline measure
@@ -470,7 +493,9 @@ sum absorbs quadrature weights. Auxiliary inputs and outputs use
 `extension/manifest` exports global spatial counts, physical axis coordinates and
 basis/baseline identities. Linearize may return the residual extension covector.
 Output filenames receive the usual frequency-task suffix; relative paths use
-ResultPath. The ordinary `state` and `objective_vector` formats remain unchanged.
+ResultPath. `extension/direction` follows the per-task input resolution of the
+shared control inputs above. The ordinary `state` and `objective_vector` formats
+remain unchanged.
 
 `solve` requires `extension/solver` with positive `damping`, `solution`, and
 `report` paths. It solves one regularized quadratic shared across source batches

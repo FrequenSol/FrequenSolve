@@ -497,11 +497,11 @@
         },
         "state": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-          "description": "Required output fs-objective-linearization-3 path for linearize, or saved state input for jvp, vjp and normal. Reuse requires the same realized mesh partition."
+          "description": "Required output fs-objective-linearization-3 path for linearize (task-suffixed), or saved state input for jvp, vjp and normal. With several f_list entries the input first tries <stem>_<task><ext>, then the exact path; the saved task index must match. Reuse requires the same realized mesh partition."
         },
         "objective_vector": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-          "description": "Output objective-space vector for jvp, or input objective-space dual for vjp."
+          "description": "Output objective-space vector for jvp (task-suffixed), or input objective-space dual for vjp; with several f_list entries the input first tries <stem>_<task><ext>, then the exact path."
         },
         "model_direction": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
@@ -621,7 +621,7 @@
             },
             "manifest": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-              "description": "Optional task-local resolved fs-control-registry-1 JSON output; relative to ResultPath. Contains registry fingerprint and baseline optimizer coordinates."
+              "description": "Optional task-local resolved fs-control-registry-1 JSON output; relative to ResultPath. Exact in a single-task job; jobs with several f_list entries add the _<task> suffix before the extension. Contains registry fingerprint and baseline optimizer coordinates."
             },
             "state": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
@@ -629,7 +629,7 @@
             },
             "state_output": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-              "description": "Complete fs-control-state-1 HDF5 output baseline; exact ResultPath-relative filename without task suffix."
+              "description": "Complete fs-control-state-1 HDF5 output baseline, relative to ResultPath. Exact filename in a single-task job; jobs with several f_list entries add the _<task> suffix before the extension. Mechanism blocks record /scaling/<block> for replay in other frequency tasks."
             },
             "min_support": {
               "type": "number",
@@ -650,7 +650,7 @@
         },
         "direction": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-          "description": "Input fs-control-vector-1 tangent in the ordered active subspace, bound to the frozen baseline and registry."
+          "description": "Input fs-control-vector-1 tangent in the ordered active subspace, bound to the frozen baseline and registry; with several f_list entries the task-suffixed sibling <stem>_<task><ext> is tried before the exact path."
         },
         "covector": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
@@ -770,7 +770,7 @@
             },
             "direction": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-              "description": "Input fs-extension-vector-1 tangent; required for extension JVP and normal."
+              "description": "Input fs-extension-vector-1 tangent; required for extension JVP and normal. With several f_list entries the task-suffixed sibling is tried before the exact path."
             },
             "covector": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",

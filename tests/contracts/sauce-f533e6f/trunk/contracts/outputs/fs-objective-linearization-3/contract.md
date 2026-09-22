@@ -2,8 +2,11 @@
 
 `linearize` writes one JSON manifest after every MPI rank closes its numerical
 state shard. Every shard is identified by filename and SHA-256. The manifest
-binds the resolved PDE/control context, partition rank count, and all shard
-contents. Every rank receives the same `state_fingerprint`.
+binds the resolved PDE/control context, partition rank count, the writing
+frequency `task` index, and all shard contents. Every rank receives the same
+`state_fingerprint`. A derivative action running under another task index
+rejects the state; in a job with several `f_list` entries the `state` input
+first tries `<stem>_<task><ext>` before the exact path.
 
 The supported reuse policy is `same_mesh_partition`: the realized mesh,
 coefficient/control state, active order, acquisition, observation processing and

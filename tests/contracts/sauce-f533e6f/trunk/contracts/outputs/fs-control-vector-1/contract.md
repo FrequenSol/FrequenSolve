@@ -15,7 +15,9 @@ native control ownership. Do not allreduce the concatenated joint vector again.
 The ordered `controls/active` list is mandatory and authoritative. Empty spaces
 are valid for linearize/VJP; JVP and normal require a nonempty space. The saved
 baseline and registry identities must match exactly. Output filenames receive
-the normal frequency-task suffix.
+the normal frequency-task suffix. In a job with more than one frequency task the
+`direction` input first tries the task-suffixed sibling `<stem>_<task><ext>`,
+then the exact path.
 
 Covectors written by `linearize`, `vjp` and `normal` additionally carry one
 packed support bitmask per active block, `/support/<qualified block ID>` (uint8,
@@ -27,7 +29,9 @@ frozen baseline; DOFs below `controls/min_support` times the block's median
 nonzero measure are unsupported. Direction inputs need none of these datasets.
 The same groups appear in `fs-control-state-1` exports, where inactive blocks
 report full support. See
-[control support](../../../docs/imaging/controls.md#control-support).
+[control support](../../../docs/imaging/controls.md#control-support). State
+exports additionally record `/scaling/<mechanism block>` for cross-task replay;
+vectors carry no scaling and stay in the executing task's coordinates.
 
 `normal` returns the fused joint Gauss-Newton action `J* J direction`, including
 cross terms between active blocks. It is equivalent to JVP followed by VJP under

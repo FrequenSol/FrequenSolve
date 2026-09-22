@@ -297,7 +297,13 @@ For a blend weight `w(phi)`, the exact control derivative is
 `dm = (1-w) dm_outside + w dm_inside + (m_inside-m_outside) w'(phi) dphi`.
 This includes both endpoint-property controls and active implicit-surface
 controls in native Born and RTM sensitivity paths. PML material blending is a
-separate compatibility mechanism and is not applied to blend endpoints.
+separate compatibility mechanism and is not applied to blend endpoints. As for
+every material control, the derivative excludes PML cells, while generated PML
+cells still evaluate their layer's material, so a surface whose transition
+reaches them changes the forward model there without a derivative. Remap those
+PML cells to a fixed subdomain with `BC/domain_extension`, or keep the transition
+outside the PML; control freeze reports each affected block with the
+`FS_CONTROL_PML_FOOTPRINT` warning.
 
 Parameterized controls may use an arbitrary-degree `bspline` map with an
 explicit knot vector. The compact `hat` map represents a uniform nodal grid:
@@ -344,6 +350,11 @@ The artifact freezes topology and coefficient IDs. Later frequencies and materia
 linearizations reuse it. An existing artifact must match the initial topology,
 material groups, and control sizing. Select a new artifact explicitly to start a
 new space; transferring optimization vectors between spaces is not automatic.
+When the generated mesh takes its default element size from the job `f_list`,
+each distinct mesh gets its own artifact: `"artifact": "material-controls.h5"`
+is stored as `material-controls.<key>.h5`, with the same `<key>` as the mesh's
+`mesh_cache/<key>/` directory (see the runtime guide's shared simulation caches).
+Explicitly sized meshes use the literal filename.
 Controls initially vanish, reproducing the ordinary reference property. Named
 coefficient checkpoints carry the frozen basis identity and are read by local
 coefficient slices. Inline global coefficient arrays are not accepted for mesh

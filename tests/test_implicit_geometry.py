@@ -19,7 +19,7 @@ from frequensolve.model.implicit_geometry import (
 )
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-5e07624" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-f533e6f" / "trunk" / "contracts"
 )
 IMPLICIT_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-implicit-geometry-1" / "schema.json"
 MATERIAL_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-material-model-1" / "schema.json"

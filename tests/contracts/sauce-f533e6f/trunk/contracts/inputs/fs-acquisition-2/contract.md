@@ -259,6 +259,19 @@ exact modal field `E_Z=J_|n|(omega R/c)` and matching H using the simulation's
 `toroidal_mode`. `amplitude`, `phase`, and `rhs` apply; `direction`, `electric`,
 and `origin` do not alter this fixed verification profile.
 
+
+### Cached receiver maps
+
+Point-to-element root maps are cached beside the simulation mesh and reused only
+when every receiver's final position (after files, grids, array offsets,
+coordinate systems, datums and units) and the initial mesh match the cached ones
+within 1e-9 of the interior domain diagonal (at least 1e-6 m). Tasks that reuse
+trace metadata from their own init skip reading receiver coordinates; that
+shortcut trusts the job and simulation JSON, not the contents of referenced
+coordinate, coordinate-system, surface, datum or elevation files. Re-run init
+after editing such a file in place. See the runtime guide's shared simulation
+caches for details.
+
 ## MT layered-earth excitation
 
 `impedance_sources` also accepts `_type: "MTLayered"`, `background`, and `waves`.

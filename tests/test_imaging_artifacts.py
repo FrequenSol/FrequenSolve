@@ -23,7 +23,7 @@ from frequensolve.imaging._artifacts import (
 )
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-5e07624" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-f533e6f" / "trunk" / "contracts"
 )
 
 

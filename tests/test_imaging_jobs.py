@@ -24,7 +24,7 @@ from frequensolve.simulation.jobs import BaseJob
 from frequensolve.simulation.simulation import SeismicSimulation
 
 CONTRACT_ROOT = (
-    Path(__file__).parent / "contracts" / "sauce-5e07624" / "trunk" / "contracts"
+    Path(__file__).parent / "contracts" / "sauce-f533e6f" / "trunk" / "contracts"
 )
 JOB_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-job-1" / "schema.json"
 JOB_EXAMPLES = CONTRACT_ROOT / "inputs" / "fs-job-1" / "examples"
