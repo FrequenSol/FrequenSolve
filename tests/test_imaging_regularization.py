@@ -191,7 +191,9 @@ def test_penalty_values_converge_under_node_refinement(simulation, penalty):
     def field(xi):
         return np.sin(3.0 * xi) + xi**2
 
-    fine = np.linspace(0.0, 1.0, 200001)
+    # 2001 points put the trapezoid reference within 1e-7 of the closed form,
+    # three orders below the discrete errors it is compared against.
+    fine = np.linspace(0.0, 1.0, 2001)
     first = 3.0 * np.cos(3.0 * fine) + 2.0 * fine
     second = -9.0 * np.sin(3.0 * fine) + 2.0
     integrand = {
