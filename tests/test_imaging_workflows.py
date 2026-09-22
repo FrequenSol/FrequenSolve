@@ -1128,4 +1128,78 @@ def test_time_reversal_focus_builds_schema_valid_focus_jobs(problem, tmp_path, f
         name="src",
     )
     with pytest.raises(ValueError, match="model"):
-        TimeReversalFocus(sources, 1.0).job()
+        TimeReversalFocus(sources.restrict(active=["src"]), 1.0).job()
+
+
+def _source_problem(tmp_path, fake):
+    """Problem over ``vp`` plus per-source signatures (the full bound space)."""
+
+    return _problem(
+        tmp_path,
+        fake,
+        name="src",
+        subdir="sources",
+        controls=ControlSpace(
+            vp=DepthProfile("vp", "sediment", count=5),
+            src=SourceParameters(signature=True),
+        ),
+    )
+
+
+def test_kernel_and_focus_run_on_a_problem_with_source_blocks(tmp_path, fake):
+    problem = _source_problem(tmp_path, fake)
+    assert problem.space.blocks == (
+        "model.vp",
+        "source.1.signature",
+        "source.2.signature",
+    )
+    grid = CartesianGrid(n=[4, 3], x0=[0.0, 0.0], x1=[4000.0, 1500.0])
+    update = problem.vector().values.copy()
+    update[:5] = np.linspace(0.1, 0.5, 5)
+
+    # kernels at the authored point and after a vp update (simulation_at)
+    images = sensitivity_kernel(problem, grid)
+    assert list(images.raw.data_vars) == ["vp"]
+    job = sensitivity_kernel_job(problem, grid, v=update)
+    sediment = next(s for s in job.simulation.model.subdomains if s.name == "sediment")
+    np.testing.assert_allclose(
+        sediment.properties["vp"].control.coefficients, update[:5]
+    )
+    moved = sensitivity_kernel(problem, grid, v=update)
+    assert list(moved.raw.data_vars) == ["vp"]
+
+    # focus differentiates the material blocks only
+    focus = TimeReversalFocus(problem, 5.0)
+    assert focus.active == ["vp"]
+    plan = focus.dry_run()
+    assert plan["workflow"] == "focus"
+    assert _assert_valid(focus.job(update).to_fs())["control_sensitivities"][
+        "active"
+    ] == ["vp"]
+    value, gradient = focus.objective(update)
+    assert np.isfinite(value) and gradient.space is problem.space
+    np.testing.assert_array_equal(gradient["src"]["source.1.signature"], 0.0)
+    assert np.any(gradient["vp"] != 0.0)
+    # a moved source block is not what the authored focus job would image
+    signature = problem.vector().values.copy()
+    signature[5] = 0.5
+    with pytest.raises(NotImplementedError, match=r"'source\.1\.signature'"):
+        focus.job(signature)
+    with pytest.raises(NotImplementedError, match=r"'source\.1\.signature'"):
+        sensitivity_kernel_job(problem, grid, v=signature)
+
+
+def test_fwi_result_simulation_installs_a_state_with_source_blocks(tmp_path, fake):
+    problem = _source_problem(tmp_path, fake)
+    update = problem.vector().values.copy()
+    update[:5] = 0.25
+    result = FWIResult(
+        state=problem.state_from(update),
+        history=OptimizationHistory(),
+        problem=problem,
+    )
+
+    sediment = next(
+        s for s in result.simulation.model.subdomains if s.name == "sediment"
+    )
+    np.testing.assert_allclose(sediment.properties["vp"].control.coefficients, 0.25)

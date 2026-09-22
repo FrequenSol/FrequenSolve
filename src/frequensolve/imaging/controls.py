@@ -28,9 +28,11 @@ caller's simulation is never mutated.
 from __future__ import annotations
 
 import copy
+import itertools
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import (
     Any,
     Dict,
@@ -95,6 +97,10 @@ _SOURCE_QUANTITIES: Tuple[str, ...] = (
 )
 _REFLECTIVITY_PARAMETERIZATIONS = ("vp_ip", "vp_vs_ip", "ip_is_rho")
 _DEFAULT_LENGTH_UNITS = "km"  # Sauce's default model coordinate unit
+# Lateral samples per axis (2D, 3D) and depth samples used to evaluate a
+# varying reference property along the iso-lines of profile nodes.
+_LATERAL_SAMPLES = {2: 33, 3: 9}
+_DEPTH_SAMPLES = 33
 
 
 class UnresolvedControlError(RuntimeError):
@@ -155,55 +161,58 @@ def _validate_limits(limits: Any) -> Optional[Tuple[Any, Any]]:
     return (lower, upper)
 
 
-def _optimizer_bounds(
+def _transform_bounds(
     transform: str,
-    limits: Optional[Tuple[Any, Any]],
-    reference: Optional[float],
-    units: Optional[str],
-) -> Tuple[float, float]:
-    """Map physical value limits to bounds on the control coefficient.
+    low: Optional[float],
+    high: Optional[float],
+    reference: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Map physical limits to coefficient bounds at reference values ``r``.
 
     ``identity`` evaluates ``r + c``, ``log`` evaluates ``r exp(c)``,
     ``inverse`` evaluates ``1 / (1/r + c)`` and ``logit`` evaluates
     ``sigmoid(logit(r) + c)``; the bounds are the images of the limits under
-    the inverse of each map.
+    the inverse of each map, elementwise in ``r``:
+
+    - identity: ``[lo - r, hi - r]``
+    - log: ``[log(lo / r), log(hi / r)]``
+    - inverse: ``[1/hi - 1/r, 1/lo - 1/r]`` (the field decreases in ``c``)
+    - logit: ``[logit(lo) - logit(r), logit(hi) - logit(r)]``
+
+    A missing limit maps to an infinite bound.
     """
 
-    if limits is None:
-        return -math.inf, math.inf
-    if reference is None:
-        raise ValueError(
-            "limits require a constant reference property to express bounds in "
-            "optimizer coordinates"
-        )
-    low = _limit_value(limits[0], units)
-    high = _limit_value(limits[1], units)
-    r = float(reference)
+    r = np.asarray(reference, dtype=np.float64)
+    lower = np.full(r.shape, -math.inf)
+    upper = np.full(r.shape, math.inf)
     if transform == "identity":
-        return (
-            -math.inf if low is None else low - r,
-            math.inf if high is None else high - r,
-        )
+        if low is not None:
+            lower = low - r
+        if high is not None:
+            upper = high - r
+        return lower, upper
     if transform == "log":
-        if r <= 0.0:
+        if np.any(r <= 0.0):
             raise ValueError("log transform bounds require a positive reference")
         if low is not None and low <= 0.0:
             raise ValueError("log transform limits must be positive")
-        return (
-            -math.inf if low is None else math.log(low / r),
-            math.inf if high is None else math.log(high / r),
-        )
+        if low is not None:
+            lower = np.log(low / r)
+        if high is not None:
+            upper = np.log(high / r)
+        return lower, upper
     if transform == "inverse":
-        if r <= 0.0:
+        if np.any(r <= 0.0):
             raise ValueError("inverse transform bounds require a positive reference")
         if low is not None and low <= 0.0:
             raise ValueError("inverse transform limits must be positive")
-        return (
-            -math.inf if high is None else 1.0 / high - 1.0 / r,
-            math.inf if low is None else 1.0 / low - 1.0 / r,
-        )
+        if high is not None:
+            lower = 1.0 / high - 1.0 / r
+        if low is not None:
+            upper = 1.0 / low - 1.0 / r
+        return lower, upper
     if transform == "logit":
-        if not 0.0 < r < 1.0:
+        if np.any((r <= 0.0) | (r >= 1.0)):
             raise ValueError("logit transform bounds require a reference in (0, 1)")
 
         def logit(p: float) -> float:
@@ -211,11 +220,74 @@ def _optimizer_bounds(
                 raise ValueError("logit transform limits must lie in (0, 1)")
             return math.log(p / (1.0 - p))
 
-        return (
-            -math.inf if low is None else logit(low) - logit(r),
-            math.inf if high is None else logit(high) - logit(r),
-        )
+        logit_r = np.log(r / (1.0 - r))
+        if low is not None:
+            lower = logit(low) - logit_r
+        if high is not None:
+            upper = logit(high) - logit_r
+        return lower, upper
     raise ValueError(f"unsupported transform {transform!r}")
+
+
+def _optimizer_bounds(
+    transform: str,
+    limits: Optional[Tuple[Any, Any]],
+    reference: Optional[float],
+    units: Optional[str],
+) -> Tuple[float, float]:
+    """Map physical value limits to scalar bounds for a constant reference.
+
+    See :func:`_transform_bounds` for the per-transform formulas;
+    :func:`_node_bounds` handles references that vary in space.
+    """
+
+    if limits is None:
+        return -math.inf, math.inf
+    if reference is None:
+        raise ValueError(
+            "limits require a constant reference property to express scalar "
+            "bounds in optimizer coordinates"
+        )
+    lower, upper = _transform_bounds(
+        transform,
+        _limit_value(limits[0], units),
+        _limit_value(limits[1], units),
+        np.array([float(reference)]),
+    )
+    return float(lower[0]), float(upper[0])
+
+
+def _node_bounds(
+    block: str,
+    transform: str,
+    limits: Tuple[Any, Any],
+    extrema: Tuple[np.ndarray, np.ndarray],
+    units: Optional[str],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return per-coefficient bounds from the reference range at each node.
+
+    ``extrema`` holds, per coefficient, the minimum and maximum of the
+    reference over the points the coefficient's node stands for (one point
+    for a lattice node; the iso-line of a profile node).  Each bound map is
+    monotone in the reference, so the bounds valid on the whole set are the
+    tightest of the bounds at the two extremes.
+    """
+
+    low = _limit_value(limits[0], units)
+    high = _limit_value(limits[1], units)
+    r_min, r_max = (np.asarray(v, dtype=np.float64) for v in extrema)
+    lo_a, hi_a = _transform_bounds(transform, low, high, r_min)
+    lo_b, hi_b = _transform_bounds(transform, low, high, r_max)
+    lower = np.maximum(lo_a, lo_b)
+    upper = np.minimum(hi_a, hi_b)
+    empty = np.flatnonzero(lower > upper)
+    if empty.size:
+        raise ValueError(
+            f"limits of block {block!r} are infeasible at coefficient(s) "
+            f"{empty.tolist()}: the reference varies by more than the limits "
+            "allow along those control nodes"
+        )
+    return lower, upper
 
 
 def _constant_value(prop: Property) -> Optional[float]:
@@ -291,6 +363,55 @@ def _axis_names(dimension: int) -> Tuple[str, ...]:
     return ("x", "z") if int(dimension) == 2 else ("x", "y", "z")
 
 
+def _sample_grid(coords: Mapping[str, Any]) -> xr.DataArray:
+    """Return an empty (NaN) tensor sample grid over physical coordinates."""
+
+    axes = {
+        name: np.asarray(values, dtype=np.float64).reshape(-1)
+        for name, values in coords.items()
+    }
+    shape = tuple(values.size for values in axes.values())
+    return xr.DataArray(
+        np.full(shape, np.nan),
+        dims=tuple(axes),
+        coords={name: (name, values) for name, values in axes.items()},
+    )
+
+
+def _material_bounds(
+    ctx: "_BindContext",
+    block: str,
+    subdomain: str,
+    prop: str,
+    reference: Property,
+    transform: str,
+    limits: Optional[Tuple[Any, Any]],
+    control: Any,
+) -> Tuple[Any, Any]:
+    """Return a material block's optimizer bounds from its physical ``limits``.
+
+    A constant reference gives scalar bounds; a varying one gives one bound
+    per coefficient from the reference at the coefficient's node
+    (:meth:`_BindContext.reference_extrema`, :func:`_node_bounds`).
+    """
+
+    if limits is None:
+        return -math.inf, math.inf
+    units = reference.units
+    constant = _constant_value(reference)
+    if constant is not None:
+        return _optimizer_bounds(transform, limits, constant, units)
+    try:
+        extrema = ctx.reference_extrema(subdomain, prop, reference, control)
+    except Exception as exc:
+        raise ValueError(
+            f"limits of block {block!r} need the reference {prop!r} of subdomain "
+            f"{subdomain!r} at the control nodes, but it cannot be evaluated "
+            f"there: {exc}"
+        ) from exc
+    return _node_bounds(block, transform, limits, extrema, units)
+
+
 # ---------------------------------------------------------------------------
 # resolved blocks
 # ---------------------------------------------------------------------------
@@ -310,8 +431,9 @@ class ResolvedBlock:
             ``reflectivity`` or ``registry``.
         control: Authoring control object behind the block, when any.
         transform: Sauce transform applied to the coefficients.
-        lower: Scalar lower bound in optimizer coordinates.
-        upper: Scalar upper bound in optimizer coordinates.
+        lower: Lower bound in optimizer coordinates: a scalar, or one value
+            per DOF (Sauce layout) when the limits' reference property varies.
+        upper: Upper bound in optimizer coordinates (scalar or per DOF).
         dims: xarray dimension names for lattice-like blocks.
         coords: xarray coordinates per dimension.
         units: Coordinate units of ``coords`` when known.
@@ -332,8 +454,8 @@ class ResolvedBlock:
     kind: str = "registry"
     control: Any = None
     transform: str = "identity"
-    lower: float = -math.inf
-    upper: float = math.inf
+    lower: Any = -math.inf
+    upper: Any = math.inf
     dims: Tuple[str, ...] = ()
     coords: Optional[Dict[str, np.ndarray]] = None
     units: Optional[str] = None
@@ -357,6 +479,15 @@ class ResolvedBlock:
             if baseline.size != self.size:
                 raise ValueError(f"baseline of {self.name!r} has the wrong size")
             object.__setattr__(self, "baseline", baseline)
+        for label in ("lower", "upper"):
+            bound = getattr(self, label)
+            if np.ndim(bound) == 0:
+                object.__setattr__(self, label, float(bound))
+                continue
+            array = np.asarray(bound, dtype=np.float64).reshape(-1)
+            if array.size != self.size:
+                raise ValueError(f"{label} bounds of {self.name!r} have the wrong size")
+            object.__setattr__(self, label, array)
 
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -590,6 +721,255 @@ class _BindContext:
         target.properties[key] = parameterized
         return existing
 
+    # -- reference evaluation -----------------------------------------------
+
+    def reference_extrema(
+        self, subdomain: str, prop: str, reference: Property, control: Any
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return per-coefficient ``(min, max)`` of ``reference`` at the nodes.
+
+        A tensor-hat coefficient stands for its lattice node.  A profile
+        coefficient stands for the iso-line of its node coordinate (hat node
+        or B-spline Greville abscissa) through the subdomain: the line is
+        sampled laterally (or in depth for a lateral axis) and points outside
+        the subdomain are dropped.
+        """
+
+        reference = self._loaded_reference(reference)
+        if isinstance(control, TensorHatControl):
+            values = self._lattice_reference(subdomain, prop, reference, control)
+            return values, values
+        if isinstance(control, (HatControl, BSplineControl)):
+            return self._profile_reference(subdomain, prop, reference, control)
+        raise ValueError(f"{type(control).__name__} controls have no node coordinates")
+
+    def _loaded_reference(self, reference: Property) -> Property:
+        """Return ``reference`` with its local file (or HDF5 locator) data read.
+
+        Saved simulations reference their properties by project-relative
+        paths; those resolve against the simulation's ``project_path``.
+        Remote paths and expressions are returned unchanged.
+        """
+
+        if (
+            reference.darr is not None
+            or reference.file_path is None
+            or reference.is_remote
+            or reference.expression is not None
+        ):
+            return reference
+        text = str(reference.file_path)
+        file_part, colon, dataset = text.partition(":")
+        if not colon or not file_part.lower().endswith((".h5", ".hdf5")):
+            file_part, colon, dataset = text, "", ""
+        if not colon and reference.extra.get("dataset"):
+            colon, dataset = ":", str(reference.extra["dataset"])
+        path = Path(file_part).expanduser()
+        project = getattr(self.simulation, "project_path", None)
+        if not path.is_absolute() and project is not None:
+            candidate = Path(project).expanduser() / path
+            if candidate.exists() or not path.exists():
+                path = candidate
+        grid = (
+            reference.file_grid
+            if isinstance(reference.file_grid, xr.DataArray)
+            else None
+        )
+        data = Property.read(Path(f"{path.resolve()}{colon}{dataset}"), grid=grid)
+        if reference.scale != 1.0:
+            data = data * reference.scale
+        loaded = copy.copy(reference)
+        loaded.darr = data
+        if loaded.units is None and "units" in data.attrs:
+            loaded.units = data.attrs["units"]
+        if loaded.system is None:
+            loaded.system = data.attrs.get(
+                "system", data.attrs.get("coordinate_system")
+            )
+        return loaded
+
+    def _lattice_reference(
+        self, subdomain: str, prop: str, reference: Property, control: Any
+    ) -> np.ndarray:
+        system = control.coordinate_system or "global"
+        if not self.is_global(system):
+            raise ValueError(
+                f"lattice nodes in coordinate system {system!r} cannot be located "
+                "(global lattices only)"
+            )
+        physical = _axis_names(self.dimension)
+        axes = tuple(control.axes)
+        if sorted(axes) != sorted(physical):
+            raise ValueError(f"lattice axes {axes} do not span {physical}")
+        coords = dict(zip(axes, control.axis_coordinates))
+        samples = _sample_grid({axis: coords[axis] for axis in physical})
+        values = self._reference_on(samples, subdomain, prop, reference)
+        order = [physical.index(axis) for axis in axes]
+        return np.transpose(values, order).reshape(-1, order="F")
+
+    def _profile_reference(
+        self, subdomain: str, prop: str, reference: Property, control: Any
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        nodes = np.asarray(control.coordinates, dtype=np.float64)
+        physical = _axis_names(self.dimension)
+        name = control.coordinate_system or "global"
+        system: Any = None
+        if self.is_global(name):
+            direction = control.axis
+        else:
+            system = self.coordinate_system(name)
+            direction = self._axis_direction(system, control.axis)
+        if direction not in physical:
+            raise ValueError(
+                f"profile axis {control.axis!r} has no physical direction in "
+                f"{self.dimension}D"
+            )
+        count = _LATERAL_SAMPLES.get(self.dimension, 9)
+        samples: Dict[str, np.ndarray] = {}
+        for axis in physical:
+            if axis == direction:
+                continue
+            if axis == "z":
+                low, high = self.depth_extent(subdomain)
+                samples[axis] = np.linspace(low, high, _DEPTH_SAMPLES)
+            else:
+                low, high = self.lateral_extent(axis)
+                samples[axis] = np.linspace(low, high, count)
+        others = [axis for axis in physical if axis != direction]
+        values: List[np.ndarray] = []
+        masks: List[np.ndarray] = []
+        for point in itertools.product(*(samples[axis] for axis in others)):
+            fixed = dict(zip(others, point))
+            positions = self._axis_positions(system, control.axis, direction, fixed)
+            line = _sample_grid(
+                {
+                    axis: (
+                        positions(nodes)
+                        if axis == direction
+                        else np.array([fixed[axis]], dtype=np.float64)
+                    )
+                    for axis in physical
+                }
+            )
+            values.append(
+                self._reference_on(line, subdomain, prop, reference).reshape(-1)
+            )
+            masks.append(self._inside(line, subdomain).reshape(-1))
+        stack = np.array(values)
+        inside = np.array(masks)
+        # Nodes whose iso-line misses the subdomain (extent round-off) use
+        # every sample of the line.
+        inside[:, ~inside.any(axis=0)] = True
+        masked = np.where(inside, stack, np.nan)
+        return np.nanmin(masked, axis=0), np.nanmax(masked, axis=0)
+
+    def _axis_direction(self, system: Any, axis: str) -> str:
+        from frequensolve.geometry.frame import Axis
+
+        for candidate in getattr(system, "axes", None) or []:
+            candidate = (
+                Axis.from_fs(candidate) if isinstance(candidate, Mapping) else candidate
+            )
+            if candidate.name == axis:
+                return str(candidate.direction).strip().lower()
+        if axis in {"x", "y", "z"} and getattr(system, "inherit_axes", False):
+            return axis
+        raise ValueError(
+            f"coordinate system {getattr(system, 'name', system)!r} declares no "
+            f"axis {axis!r}"
+        )
+
+    def _axis_positions(
+        self, system: Any, axis: str, direction: str, fixed: Mapping[str, float]
+    ) -> Any:
+        """Return ``node coordinate -> physical coordinate`` along ``direction``.
+
+        The system coordinate is affine in the physical coordinate along the
+        axis direction at fixed other coordinates (a surface-relative axis is
+        ``+/- (z - surface(x))``), so two probes determine the inverse.
+        """
+
+        if system is None:
+            return lambda nodes: np.asarray(nodes, dtype=np.float64)
+        sampler = getattr(self.model, "_coordinate_system_samples", None)
+        if sampler is None:
+            raise ValueError(
+                f"locating nodes in coordinate system {system.name!r} needs a "
+                "LayeredModel"
+            )
+        physical = _axis_names(self.dimension)
+        probe = _sample_grid(
+            {
+                name: (
+                    np.array([0.0, 1.0])
+                    if name == direction
+                    else np.array([fixed[name]], dtype=np.float64)
+                )
+                for name in physical
+            }
+        )
+        coordinate = sampler(system, probe).coords[axis]
+        c0, c1 = (
+            float(v)
+            for v in np.asarray(
+                coordinate.broadcast_like(probe).values, dtype=np.float64
+            ).reshape(-1)
+        )
+        if c1 == c0:
+            raise ValueError(
+                f"axis {axis!r} of {system.name!r} does not vary along {direction!r}"
+            )
+        return lambda nodes: (np.asarray(nodes, dtype=np.float64) - c0) / (c1 - c0)
+
+    def _inside(self, samples: xr.DataArray, subdomain: str) -> np.ndarray:
+        """Return which samples lie in ``subdomain`` (all when not layered)."""
+
+        mask = getattr(self.model, "_get_layer_mask", None)
+        if not self.is_layered or mask is None:
+            return np.ones(samples.shape, dtype=bool)
+        layer = self.layer(subdomain)
+        return np.asarray(mask(layer, samples).transpose(*samples.dims).values, bool)
+
+    def _reference_on(
+        self, samples: xr.DataArray, subdomain: str, prop: str, reference: Property
+    ) -> np.ndarray:
+        """Evaluate ``reference`` (as ``prop`` of ``subdomain``) on ``samples``."""
+
+        target = self.subdomain(subdomain)
+        key = canonical_property_name(prop)
+        materialize = getattr(self.model, "_materialize_subdomain_property", None)
+        if materialize is None:
+            if reference.expression is not None or reference.system is not None:
+                raise ValueError(
+                    "expression or coordinate-system references need a LayeredModel "
+                    "to be evaluated"
+                )
+            data = reference.get(samples)
+        else:
+            properties = {
+                name: (
+                    value.reference
+                    if isinstance(value, ParameterizedProperty)
+                    else value
+                )
+                for name, value in target.properties.items()
+            }
+            properties[key] = reference
+            proxy = SimpleNamespace(
+                name=target.name,
+                properties=properties,
+                fields=getattr(target, "fields", None),
+                extra=getattr(target, "extra", None) or {},
+                mesh_block_id=getattr(target, "mesh_block_id", None),
+            )
+            data = materialize(proxy, key, samples)
+        if isinstance(data, xr.DataArray):
+            data = data.transpose(*samples.dims).values
+        values = np.broadcast_to(np.asarray(data, dtype=np.float64), samples.shape)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("the reference property is not finite at every node")
+        return np.array(values, copy=True)
+
     def install_surface_control(
         self,
         surface: str,
@@ -719,7 +1099,15 @@ class DepthProfile(_BlockSpec):
         coordinate_system: Coordinate system of ``axis``; ``None`` selects
             ``global`` (or an automatic surface-relative system for ``below``).
         transform: Sauce control transform.
-        limits: Optional ``(lower, upper)`` physical value limits.
+        limits: Optional ``(lower, upper)`` physical value limits.  A constant
+            reference property gives scalar optimizer bounds; a varying one
+            (profile, xarray, readable file, expression) gives one bound per
+            coefficient from the reference at the coefficient's node, taken
+            as the tightest bound along the node's iso-line through the
+            subdomain.  Hat bounds are exact at the nodes; B-spline bounds
+            are evaluated at the Greville abscissae and constrain the
+            coefficients, so the field between nodes honours them only
+            approximately.
         degree: B-spline degree; ``None`` selects the compact ``hat`` map.
         id: Block id (``model.<id>``); defaults to the space key.
     """
@@ -903,22 +1291,25 @@ class DepthProfile(_BlockSpec):
     def resolve(self, key: str, ctx: Optional[_BindContext]) -> List[ResolvedBlock]:
         control, system, _extent = self.build_control(ctx)
         block_id = self.block_id(key)
-        reference: Optional[float] = None
-        units: Optional[str] = None
         if ctx is None and self.limits is not None:
             raise UnresolvedControlError(
                 "limits need the reference property; bind the space to a simulation"
             )
+        lower: Any = -math.inf
+        upper: Any = math.inf
         if ctx is not None:
             existing = ctx.install_property(
                 self.subdomain, self.prop, block_id, control, self.transform
             )
-            reference = _constant_value(existing)
-            units = existing.units
-        lower, upper = (-math.inf, math.inf)
-        if self.limits is not None and ctx is not None:
-            lower, upper = _optimizer_bounds(
-                self.transform, self.limits, reference, units
+            lower, upper = _material_bounds(
+                ctx,
+                f"model.{block_id}",
+                self.subdomain,
+                self.prop,
+                existing,
+                self.transform,
+                self.limits,
+                control,
             )
         coordinates = np.asarray(control.coordinates, dtype=np.float64)
         return [
@@ -955,7 +1346,9 @@ class GridParameters(_BlockSpec):
         shape: Node count per axis.
         grid: Explicit :class:`~frequensolve.geometry.grids.CartesianGrid`.
         transform: Sauce control transform shared by every property.
-        limits: Optional ``(lower, upper)`` physical limits (all properties).
+        limits: Optional ``(lower, upper)`` physical limits (all properties);
+            with a varying reference property the bounds are per lattice node
+            (see :class:`DepthProfile`).
         id: Block id prefix; blocks are ``model.<id>`` for one property and
             ``model.<id>_<prop>`` for several.
     """
@@ -1095,7 +1488,8 @@ class GridParameters(_BlockSpec):
             for axis, values in zip(control.axes, control.axis_coordinates)
         }
         for prop, block_id in ids.items():
-            lower, upper = (-math.inf, math.inf)
+            lower: Any = -math.inf
+            upper: Any = math.inf
             if ctx is not None:
                 targets = (
                     [ctx.subdomain(self.subdomain)]
@@ -1104,8 +1498,6 @@ class GridParameters(_BlockSpec):
                 )
                 if not targets:
                     raise ValueError("model has no subdomains")
-                reference: Optional[float] = None
-                units: Optional[str] = None
                 if self.subdomain is None and len(targets) > 1:
                     # Whole-model lattice: one block per property shared across
                     # subdomains is not expressible; require one subdomain
@@ -1128,12 +1520,16 @@ class GridParameters(_BlockSpec):
                     copy.deepcopy(control),
                     self.transform,
                 )
-                reference = _constant_value(existing)
-                units = existing.units
-                if self.limits is not None:
-                    lower, upper = _optimizer_bounds(
-                        self.transform, self.limits, reference, units
-                    )
+                lower, upper = _material_bounds(
+                    ctx,
+                    f"model.{block_id}",
+                    targets[0].name,
+                    prop,
+                    existing,
+                    self.transform,
+                    self.limits,
+                    control,
+                )
             blocks.append(
                 ResolvedBlock(
                     name=f"model.{block_id}",
@@ -1224,8 +1620,14 @@ class MeshParameters(_BlockSpec):
         )
         lower, upper = (-math.inf, math.inf)
         if self.limits is not None:
+            reference = _constant_value(existing)
+            if reference is None:
+                raise ValueError(
+                    f"limits of mesh block 'model.{block_id}' need a constant "
+                    "reference property: mesh nodes are only known to Sauce"
+                )
             lower, upper = _optimizer_bounds(
-                self.transform, self.limits, _constant_value(existing), existing.units
+                self.transform, self.limits, reference, existing.units
             )
         # Size unknown until Sauce writes the artifact; ``ControlSpace`` keeps
         # the block pending and ``with_manifest`` fills it in.
@@ -2234,8 +2636,9 @@ class ControlSpace:
         lower = np.empty(self.size, dtype=np.float64)
         upper = np.empty(self.size, dtype=np.float64)
         for block, sl in zip(self._resolved(), self.slices.values()):
-            lower[sl] = block.lower
-            upper[sl] = block.upper
+            mask = self._mask_of(block)
+            lower[sl] = np.broadcast_to(block.lower, (block.size,))[mask]
+            upper[sl] = np.broadcast_to(block.upper, (block.size,))[mask]
         return lower, upper
 
     # -- restriction and support --------------------------------------------

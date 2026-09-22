@@ -501,6 +501,94 @@ def test_simulation_at_installs_material_coefficients(setup):
     )
 
 
+def _source_problem(tmp_path, fake, **source):
+    sim = layered_simulation(tmp_path / "sources")
+    controls = ControlSpace(
+        vp=DepthProfile("vp", "sediment", count=4),
+        src=SourceParameters(**source),
+    )
+    problem = ImagingProblem(
+        sim,
+        controls=controls,
+        observed={"surface": tmp_path / "observed.h5"},
+        frequencies=FREQUENCIES,
+        site=fake,
+        name="src",
+    )
+    return sim, problem
+
+
+def _source_coordinates(simulation):
+    return simulation.acquisition.source_point_coords()
+
+
+def test_simulation_at_skips_unchanged_source_blocks(tmp_path, fake):
+    sim, problem = _source_problem(tmp_path, fake, signature=True)
+    assert problem.space.blocks == (
+        "model.vp",
+        "source.1.signature",
+        "source.2.signature",
+    )
+
+    authored = problem.simulation_at()
+    sediment = next(s for s in authored.model.subdomains if s.name == "sediment")
+    np.testing.assert_array_equal(sediment.properties["vp"].control.coefficients, 0.0)
+
+    # a material update installs vp and leaves the (authored) signatures alone
+    update = problem.vector().values.copy()
+    update[:4] = [0.1, 0.2, 0.3, 0.4]
+    moved = problem.simulation_at(update)
+    sediment = next(s for s in moved.model.subdomains if s.name == "sediment")
+    np.testing.assert_allclose(
+        sediment.properties["vp"].control.coefficients, [0.1, 0.2, 0.3, 0.4]
+    )
+    np.testing.assert_array_equal(
+        _source_coordinates(moved), _source_coordinates(problem.simulation)
+    )
+    # a restricted material view installs the full state the same way
+    view = problem.restrict(active=["vp"])
+    installed = view.simulation_at(np.full(4, 0.5))
+    sediment = next(s for s in installed.model.subdomains if s.name == "sediment")
+    np.testing.assert_allclose(sediment.properties["vp"].control.coefficients, 0.5)
+
+
+def test_simulation_at_rejects_a_changed_source_signature(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, signature=True)
+    state = ControlState.from_blocks(
+        problem.full_space,
+        {
+            "model.vp": np.zeros(4),
+            "source.1.signature": np.array([1.0 + 0.0j]),
+            "source.2.signature": np.array([0.5 + 0.25j]),
+        },
+    )
+    with pytest.raises(NotImplementedError, match=r"'source\.2\.signature'"):
+        problem.simulation_at(state)
+
+
+def test_simulation_at_moves_changed_source_positions(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, position=True, signature=False)
+    authored = _source_coordinates(problem.simulation)
+    np.testing.assert_array_equal(authored, [[1000.0, 10.0], [2000.0, 10.0]])
+    state = ControlState.from_blocks(
+        problem.full_space,
+        {
+            "model.vp": np.full(4, 0.2),
+            "source.1.position": authored[0],
+            "source.2.position": np.array([2100.0, 15.0]),
+        },
+    )
+
+    moved = problem.simulation_at(state)
+
+    np.testing.assert_array_equal(
+        _source_coordinates(moved), [[1000.0, 10.0], [2100.0, 15.0]]
+    )
+    np.testing.assert_array_equal(_source_coordinates(problem.simulation), authored)
+    sediment = next(s for s in moved.model.subdomains if s.name == "sediment")
+    np.testing.assert_allclose(sediment.properties["vp"].control.coefficients, 0.2)
+
+
 # ---------------------------------------------------------------------------
 # dry run and checks
 # ---------------------------------------------------------------------------

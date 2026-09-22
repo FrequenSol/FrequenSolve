@@ -528,6 +528,202 @@ def test_pint_limits_convert_to_the_property_units(simulation):
     np.testing.assert_allclose(upper, 2.5 - 1.9)
 
 
+def _depth_reference(simulation, prop, values_at_depth):
+    """Author ``prop`` of the sediment as a vertical profile in global depth."""
+
+    z = np.linspace(SEDIMENT[0], SEDIMENT[1], 27)
+    simulation.model.layers["sediment"].set_property(
+        prop, xr.DataArray(values_at_depth(z), dims=["z"], coords={"z": z})
+    )
+
+
+def _vp_at(z):
+    return 1800.0 + 0.5 * (np.asarray(z) - SEDIMENT[0])  # 1800 .. 2450 m/s
+
+
+def _logit(p):
+    return np.log(p / (1.0 - p))
+
+
+@pytest.mark.parametrize(
+    "prop, transform, limits, expected",
+    [
+        ("vp", "identity", (1700.0, 3000.0), lambda r: (1700.0 - r, 3000.0 - r)),
+        (
+            "vp",
+            "log",
+            (1700.0, 3000.0),
+            lambda r: (np.log(1700.0 / r), np.log(3000.0 / r)),
+        ),
+        (
+            "vp",
+            "inverse",
+            (1700.0, 3000.0),
+            lambda r: (1.0 / 3000.0 - 1.0 / r, 1.0 / 1700.0 - 1.0 / r),
+        ),
+        (
+            "Sp",
+            "logit",
+            (0.2, 0.8),
+            lambda r: (_logit(0.2) - _logit(r), _logit(0.8) - _logit(r)),
+        ),
+        (
+            "vp",
+            "identity",
+            (None, 3000.0),
+            lambda r: (np.full_like(r, -np.inf), 3000.0 - r),
+        ),
+    ],
+)
+def test_varying_reference_gives_per_node_bounds(
+    simulation, prop, transform, limits, expected
+):
+    if prop == "vp":
+        reference = _vp_at
+    else:
+
+        def reference(z):
+            return 0.3 + 0.4 * (np.asarray(z) - SEDIMENT[0]) / 1300.0
+
+    _depth_reference(simulation, prop, reference)
+    bound = im.ControlSpace(
+        p=im.DepthProfile(prop, "sediment", count=5, transform=transform, limits=limits)
+    ).bind(simulation)
+
+    block = bound.block("p")
+    below = np.linspace(0.0, 1300.0, 5)
+    np.testing.assert_allclose(block.coords["below"], below)
+    # hat nodes sit on the reference samples: z = seabed + below
+    r = reference(SEDIMENT[0] + below)
+    lower, upper = expected(r)
+    assert block.lower.shape == block.upper.shape == (5,)
+    np.testing.assert_allclose(block.lower, lower)
+    np.testing.assert_allclose(block.upper, upper)
+    np.testing.assert_allclose(bound.bounds[0], lower)
+    np.testing.assert_allclose(bound.bounds[1], upper)
+
+
+def test_per_node_bounds_are_respected_by_clip_and_support_masks(simulation):
+    _depth_reference(simulation, "vp", _vp_at)
+    bound = im.ControlSpace(
+        vp=im.DepthProfile(
+            "vp", "sediment", count=5, transform="log", limits=(1700.0, 3000.0)
+        ),
+        rho=im.DepthProfile("rho", "sediment", count=3),
+    ).bind(simulation)
+    r = _vp_at(SEDIMENT[0] + np.linspace(0.0, 1300.0, 5))
+    lower, upper = np.log(1700.0 / r), np.log(3000.0 / r)
+
+    high = im.ControlVector(np.full(bound.size, 10.0), bound).clip()
+    low = im.ControlVector(np.full(bound.size, -10.0), bound).clip()
+    np.testing.assert_allclose(high["vp"], upper)
+    np.testing.assert_allclose(low["vp"], lower)
+    np.testing.assert_allclose(high["rho"], 10.0)  # unbounded block
+    # clipped values reproduce the physical limits at every node
+    np.testing.assert_allclose(r * np.exp(high["vp"]), 3000.0)
+    np.testing.assert_allclose(r * np.exp(low["vp"]), 1700.0)
+
+    mask = np.array([True, False, True, True, False])
+    frozen = bound.with_support({"vp": mask})
+    f_lower, f_upper = frozen.bounds
+    np.testing.assert_allclose(f_lower[:3], lower[mask])
+    np.testing.assert_allclose(f_upper[:3], upper[mask])
+    clipped = im.ControlVector(np.full(frozen.size, 10.0), frozen).clip()
+    np.testing.assert_allclose(clipped.values[:3], upper[mask])
+
+
+def test_bspline_bounds_are_enforced_at_the_greville_abscissae(simulation):
+    _depth_reference(simulation, "vp", _vp_at)
+    bound = im.ControlSpace(
+        vp=im.DepthProfile.bspline(
+            "vp", "sediment", axis="z", count=6, limits=(1700.0, 3000.0)
+        )
+    ).bind(simulation)
+
+    block = bound.block("vp")
+    knots = np.asarray(block.control.knots)
+    greville = np.array([knots[i + 1 : i + 4].mean() for i in range(6)])
+    np.testing.assert_allclose(block.coords["z"], greville)
+    assert greville[0] == SEDIMENT[0] and greville[-1] == SEDIMENT[1]
+    np.testing.assert_allclose(block.lower, 1700.0 - _vp_at(greville))
+    np.testing.assert_allclose(block.upper, 3000.0 - _vp_at(greville))
+
+
+def test_lattice_bounds_follow_the_reference_per_lattice_node(simulation):
+    x = np.linspace(*X_LIMITS, 5)
+    z = np.linspace(*SEDIMENT, 6)
+    field = 1800.0 + 0.1 * x[:, None] + 0.5 * (z[None, :] - SEDIMENT[0])
+    simulation.model.layers["sediment"].set_property(
+        "vp", xr.DataArray(field, dims=["x", "z"], coords={"x": x, "z": z})
+    )
+    bound = im.ControlSpace(
+        vp=im.GridParameters("vp", "sediment", shape=[3, 4], limits=(1700.0, 3500.0))
+    ).bind(simulation)
+
+    block = bound.block("vp")
+    nodes = block.control.coordinates  # (size, 2), first axis fastest
+    r = 1800.0 + 0.1 * nodes[:, 0] + 0.5 * (nodes[:, 1] - SEDIMENT[0])
+    np.testing.assert_allclose(block.lower, 1700.0 - r)
+    np.testing.assert_allclose(block.upper, 3500.0 - r)
+
+
+def test_laterally_varying_reference_bounds_hold_along_the_whole_iso_line(
+    simulation,
+):
+    x = np.linspace(*X_LIMITS, 9)
+    z = np.linspace(*SEDIMENT, 3)
+    field = np.repeat((1800.0 + 0.1 * x)[:, None], z.size, axis=1)  # 1800 .. 2200
+    simulation.model.layers["sediment"].set_property(
+        "vp", xr.DataArray(field, dims=["x", "z"], coords={"x": x, "z": z})
+    )
+    bound = im.ControlSpace(
+        vp=im.DepthProfile("vp", "sediment", count=4, limits=(1700.0, 3000.0))
+    ).bind(simulation)
+    block = bound.block("vp")
+    np.testing.assert_allclose(block.lower, 1700.0 - 1800.0)
+    np.testing.assert_allclose(block.upper, 3000.0 - 2200.0)
+
+    with pytest.raises(ValueError, match="infeasible"):
+        im.ControlSpace(
+            vp=im.DepthProfile("vp", "sediment", count=4, limits=(1900.0, 2000.0))
+        ).bind(simulation)
+
+
+def test_saved_file_backed_reference_is_read_from_the_project(simulation):
+    _depth_reference(simulation, "vp", _vp_at)
+    simulation.save()
+    working = simulation.copy("shelf_copy")
+    sediment = next(s for s in working.model.subdomains if s.name == "sediment")
+    assert sediment.properties["vp"].data is None  # a project file reference
+
+    bound = im.ControlSpace(
+        vp=im.DepthProfile(
+            "vp", "sediment", count=5, transform="log", limits=(1700.0, 3000.0)
+        )
+    ).bind(working)
+
+    r = _vp_at(SEDIMENT[0] + np.linspace(0.0, 1300.0, 5))
+    np.testing.assert_allclose(bound.block("vp").lower, np.log(1700.0 / r))
+    np.testing.assert_allclose(bound.block("vp").upper, np.log(3000.0 / r))
+
+
+def test_limits_on_an_unreadable_reference_name_the_block(simulation, tmp_path):
+    from frequensolve.model.property import Property
+
+    simulation.model.layers["sediment"].set_property(
+        "vp", Property(str(tmp_path / "missing.rsf"), read=False)
+    )
+    with pytest.raises(ValueError, match=r"'model\.vp'.*cannot be evaluated"):
+        im.ControlSpace(
+            vp=im.DepthProfile("vp", "sediment", count=3, limits=(1500.0, 3000.0))
+        ).bind(simulation)
+    # without limits the file reference binds as before
+    bound = im.ControlSpace(vp=im.DepthProfile("vp", "sediment", count=3)).bind(
+        simulation
+    )
+    assert np.isneginf(bound.block("vp").lower)
+
+
 # ---------------------------------------------------------------------------
 # support masks
 # ---------------------------------------------------------------------------

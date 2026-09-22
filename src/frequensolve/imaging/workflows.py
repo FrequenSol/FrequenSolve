@@ -2035,6 +2035,9 @@ def sensitivity_kernel(
 class TimeReversalFocus:
     """Time-reversal focusing objective over the problem's material blocks.
 
+    Non-material blocks of the problem view (sources, reflectivity) are held
+    at the current state; their gradient entries are zero.
+
     Wraps ``ControlGradientJob(kind="focus")``: Sauce back-propagates the
     observed data, measures the focusing of the time-reversed wavefield with
     softening length ``softening`` (km) and returns the focusing objective and
@@ -2080,14 +2083,19 @@ class TimeReversalFocus:
 
     @property
     def active(self) -> List[str]:
-        """Return the unqualified material block ids of the problem view."""
+        """Return the unqualified material block ids of the problem view.
+
+        Only ``model.*`` blocks enter Sauce's focus workflow; other blocks of
+        the view (sources, reflectivity) are held at the state and receive a
+        zero gradient.
+        """
 
         blocks = list(self.problem.space.blocks)
         model = [name for name in blocks if name.startswith("model.")]
-        if len(model) != len(blocks):
+        if not model:
             raise ValueError(
-                "time-reversal focusing supports model.* blocks only; restrict "
-                f"the problem (active blocks: {blocks})"
+                "time-reversal focusing needs at least one model.* block "
+                f"(active blocks: {blocks})"
             )
         return [unqualified_block_name(name) for name in model]
 
@@ -2106,6 +2114,16 @@ class TimeReversalFocus:
         if job is not None:
             return job
         active = self.active
+        full = problem.full_space
+        for block, sl in zip(full.resolved_blocks, full.full_slices.values()):
+            if block.name.startswith("model."):
+                continue
+            baseline = problem._authored_block(block.name, sl)
+            if baseline is None or not np.array_equal(state.values[sl], baseline):
+                raise NotImplementedError(
+                    f"time-reversal focusing runs on the authored simulation, but "
+                    f"block {block.name!r} differs from its authored baseline"
+                )
         current: Optional[Path] = None
         if v is not None or not problem.is_authored(state):
             staging = problem.backend.staging_dir("focus", key)
@@ -2159,7 +2177,17 @@ class TimeReversalFocus:
         value = float(job.objective_value)
         file = ControlVectorFile.read(job.gradient_file())
         space = problem.space
-        blocks = {name: file[name] for name in space.blocks}
+        # Non-material blocks do not enter the focus workflow: zero gradient.
+        blocks = {
+            b.name: (
+                file[b.name]
+                if b.name.startswith("model.")
+                else np.zeros(
+                    b.coefficient_count, dtype=complex if b.complex else float
+                )
+            )
+            for b in space.resolved_blocks
+        }
         gradient = space.pack(blocks)
         self._results[key] = (value, gradient)
         return value, gradient

@@ -402,6 +402,33 @@ def _coordinate_array(value: Any) -> np.ndarray:
     return result
 
 
+def _replace_leading_coordinates(value: Any, values: np.ndarray) -> Any:
+    """Return ``value`` with its leading components replaced by ``values``.
+
+    Units (a Pint quantity) and :class:`CoordinateValue` metadata are kept;
+    ``values`` are magnitudes in those units.
+    """
+
+    if isinstance(value, CoordinateValue):
+        return CoordinateValue(
+            _replace_leading_coordinates(value.value, values),
+            units=value.units,
+            system=value.system,
+            extra=copy.deepcopy(value.extra),
+        )
+    units = value.units if is_quantity(value) else None
+    magnitude = value.magnitude if units is not None else value
+    array = np.array(magnitude, dtype=np.float64).reshape(-1)
+    if values.size > array.size:
+        raise ValueError(
+            f"source point has {array.size} coordinates; got {values.size}"
+        )
+    array[: values.size] = values
+    if units is not None:
+        return ureg.Quantity(array, units)
+    return array.tolist()
+
+
 def _coordinate_array_with_metadata(
     value: Any,
 ) -> tuple[np.ndarray, Optional[Any], Optional[str]]:
@@ -1237,6 +1264,42 @@ class SourceGeometry(ExtraFieldsMixin):
                 else None
             ),
         )
+
+    def set_point_coordinates(self, index: int, coordinates: Any) -> None:
+        """Replace the leading coordinate components of one inline point.
+
+        ``coordinates`` are magnitudes in the point's authored units and
+        coordinate system (the layout :meth:`coordinates` returns).  Trailing
+        components that are not given, the units, the coordinate system and
+        every other point attribute are kept.
+
+        Raises:
+            ValueError: For external (HDF5/SPS) geometry, non-finite values or
+                more components than the point has.
+            IndexError: If ``index`` is out of range.
+        """
+
+        if self.geometry_type != "Inline":
+            raise ValueError(
+                "Source coordinates can only be set on inline geometry; this "
+                f"geometry is stored as {self.geometry_type}"
+            )
+        count = int(self.point_count or 0)
+        if index < 0 or index >= count:
+            raise IndexError("source point index is out of range")
+        values = np.asarray(coordinates, dtype=np.float64).reshape(-1)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("source coordinates must be finite")
+        if isinstance(self._storage, _BulkSourceGeometry):
+            row = self._storage.coordinates[index]
+            if values.size > row.size:
+                raise ValueError(
+                    f"source point has {row.size} coordinates; got {values.size}"
+                )
+            self._storage.coordinates[index, : values.size] = values
+            return
+        source = self._storage.sources[index]  # type: ignore[union-attr]
+        source.coordinates = _replace_leading_coordinates(source.coordinates, values)
 
     def extend_inline(self, other: "SourceGeometry") -> None:
         """Append compatible inline geometry while preserving bulk arrays."""

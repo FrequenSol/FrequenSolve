@@ -5,10 +5,10 @@ Port of the TCCS single-source 1-D control benchmark
 essence: a 2-D acoustic water/sediment model whose truth is a layered
 sediment ``vp``/``rho`` column with a low-velocity notch, a smooth starting
 model, one scalar source and a hydrophone line, log-transformed hat profiles
-on the sediment, a Huber misfit with a near-offset taper, a first-order
-Tikhonov penalty, projected L-BFGS with an RMS step cap and a stochastic
-Gauss-Newton diagonal preconditioner, and frequency continuation over a few
-bands.  Acceptance follows the original: the data objective must drop by a
+on the sediment (``vp`` bounded as in TCCS), a Huber misfit with a
+near-offset taper, a first-order Tikhonov penalty, projected L-BFGS with an
+RMS step cap and a stochastic Gauss-Newton diagonal preconditioner, and
+frequency continuation over a few bands.  Acceptance follows the original: the data objective must drop by a
 set ratio and the recovered profile must be closer to the truth than the
 starting model.
 
@@ -28,7 +28,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import xarray as xr
@@ -65,10 +65,13 @@ INITIAL_SMOOTHING = 0.15  # Gaussian sigma (km) that turns the truth into the st
 PROFILE_SAMPLES = 301
 
 # Inversion settings (the TCCS values, except where noted in ``run_fwi``).
-# TCCS bounds the log coefficients to (-0.35, 0.25).  ``DepthProfile(limits=)``
-# expresses bounds in physical units and needs a constant reference property
-# today, so this port (whose reference is the smooth starting profile) relies
-# on the step cap and the penalty instead.
+# TCCS bounds the log ``vp`` coefficients to (-0.35, 0.25) about the starting
+# model (``benchmark_acoustic_pressure_vp_*_seam*.json``).  ``limits=`` takes
+# physical values, so the port uses the envelope of those boxes over the
+# starting profile (:func:`vp_limits`); the per-node log bounds
+# ``log(limit / vp0(node))`` then contain the TCCS box at every node and equal
+# it where ``vp0`` is extreme.
+VP_LOG_BOUNDS = (-0.35, 0.25)
 HUBER_DELTA = 1.345
 OFFSET_TAPER = (0.1, 0.25)  # km, near-offset raised cosine
 TIKHONOV_ALPHA = 1.0e-2
@@ -87,6 +90,7 @@ __all__ = [
     "main",
     "run_fwi",
     "truth_profile",
+    "vp_limits",
 ]
 
 
@@ -117,6 +121,21 @@ def initial_profile(below: Any) -> Dict[str, np.ndarray]:
         key: np.interp(below, dense, gaussian_filter1d(values, sigma, mode="nearest"))
         for key, values in truth.items()
     }
+
+
+def vp_limits() -> Tuple[float, float]:
+    """Return the physical ``vp`` limits (km/s) behind :data:`VP_LOG_BOUNDS`.
+
+    ``(min(vp0) exp(lower), max(vp0) exp(upper))`` over the starting sediment
+    profile ``vp0``.
+    """
+
+    below = np.linspace(0.0, MODEL_DEPTH - WATER_DEPTH, PROFILE_SAMPLES)
+    vp0 = initial_profile(below)["vp"]
+    return (
+        float(vp0.min() * np.exp(VP_LOG_BOUNDS[0])),
+        float(vp0.max() * np.exp(VP_LOG_BOUNDS[1])),
+    )
 
 
 def _column(profile: Dict[str, np.ndarray], below: np.ndarray) -> Dict[str, Any]:
@@ -242,7 +261,9 @@ def build_case(
     timing = {"observed_seconds": time.perf_counter() - started}
 
     controls = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", spacing=0.05, transform="log"),
+        vp=im.DepthProfile(
+            "vp", "sediment", spacing=0.05, transform="log", limits=vp_limits()
+        ),
         rho=im.DepthProfile("rho", "sediment", spacing=0.1, transform="log"),
     )
     misfit = im.Misfit.huber(

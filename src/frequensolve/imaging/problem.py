@@ -86,6 +86,7 @@ from frequensolve.imaging.controls import (
     ControlSpace,
     ControlState,
     ControlVector,
+    ResolvedBlock,
     SupportMask,
 )
 from frequensolve.imaging.data import (
@@ -1277,8 +1278,13 @@ class ImagingProblem:
     def simulation_at(self, v: Any = None) -> Any:
         """Return a simulation copy with the state's coefficients installed.
 
-        Material (profile, lattice) and interface blocks are installed; mesh,
-        source and reflectivity baselines are not yet supported.
+        Material (profile, lattice) and interface blocks are always installed.
+        Every other block of the full space is compared with its authored
+        baseline and skipped when unchanged.  A changed ``source.<i>.position``
+        moves the acquisition's (inline) physical source point; a changed
+        signature, mechanism or signature-derivative block, reflectivity map
+        or mesh block has no representation in the authored simulation and
+        raises :class:`NotImplementedError` naming the block.
         """
 
         state = self._state_at(v)
@@ -1286,22 +1292,39 @@ class ImagingProblem:
         full = self._shared.space
         for block, sl in zip(full.resolved_blocks, full.full_slices.values()):
             values = np.array(state.values[sl], copy=True)
-            block_id = unqualified_block_name(block.name)
             if block.kind in {"profile", "grid"}:
-                _install_material(simulation, block_id, values)
-            elif block.kind == "interface":
-                _install_interface(simulation, block_id, values)
-            elif block.kind == "mesh":
-                raise NotImplementedError(
-                    f"mesh block {block.name!r}: installing mesh control baselines "
-                    "requires a control checkpoint (Phase 2)"
+                _install_material(
+                    simulation, unqualified_block_name(block.name), values
                 )
-            else:
-                raise NotImplementedError(
-                    f"{block.kind} block {block.name!r}: installing source and "
-                    "reflectivity baselines arrives with Phase 3"
+                continue
+            if block.kind == "interface":
+                _install_interface(
+                    simulation, unqualified_block_name(block.name), values
                 )
+                continue
+            baseline = self._authored_block(block.name, sl)
+            if baseline is not None and np.array_equal(values, baseline):
+                continue
+            if block.kind == "source" and block.quantity == "position":
+                _install_source_position(simulation, block, values)
+                continue
+            raise NotImplementedError(_uninstallable_message(block))
         return simulation
+
+    def _authored_block(self, name: str, sl: slice) -> Optional[np.ndarray]:
+        """Return the authored baseline of block ``name`` (Sauce layout), if known.
+
+        The authored state (the bind's baselines) is the reference; before it
+        is known (pending mesh sizes) Sauce's discovered registry baseline is.
+        """
+
+        authored = self._shared.authored
+        if authored is not None:
+            return np.asarray(authored.values[sl])
+        baseline = self._shared.baseline
+        if baseline is not None and name in baseline.names:
+            return np.asarray(baseline[name], dtype=np.float64)
+        return None
 
     # -- diagnostics ----------------------------------------------------------
 
@@ -1571,6 +1594,57 @@ def _install_interface(simulation: Any, block_id: str, values: np.ndarray) -> No
             surfaces[index] = surface.with_coefficients(values)
             return
     raise KeyError(f"no implicit surface carries control id {block_id!r}")
+
+
+def _install_source_position(
+    simulation: Any, block: ResolvedBlock, values: np.ndarray
+) -> None:
+    """Move physical source ``block.source_id`` to ``values`` (authored frame)."""
+
+    geometry = getattr(simulation.acquisition, "source_geometry", None)
+    source_id = int(block.source_id or 0)
+    if geometry is None or geometry.geometry_type != "Inline":
+        kind = "none" if geometry is None else geometry.geometry_type
+        raise NotImplementedError(
+            f"source block {block.name!r} differs from its authored baseline, but "
+            f"the acquisition's source geometry is {kind}; only inline source "
+            "points can be moved by simulation_at"
+        )
+    try:
+        geometry.set_point_coordinates(source_id - 1, values)
+    except (IndexError, ValueError) as exc:
+        raise NotImplementedError(
+            f"source block {block.name!r}: cannot move physical source "
+            f"{source_id}: {exc}"
+        ) from exc
+
+
+def _uninstallable_message(block: ResolvedBlock) -> str:
+    """Return why a changed non-material block cannot be authored."""
+
+    if block.kind == "source":
+        return (
+            f"source block {block.name!r} differs from its authored baseline; "
+            f"Sauce's {block.quantity} coefficients are in the writing task's "
+            "nondimensional units and have no frequency-independent field on the "
+            "authored sources (PointSource.amplitude/mechanism), so "
+            "simulation_at cannot install them"
+        )
+    if block.kind == "mesh":
+        return (
+            f"mesh block {block.name!r} differs from its authored baseline; "
+            "installing mesh control coefficients requires a control checkpoint"
+        )
+    if block.kind == "reflectivity":
+        return (
+            f"reflectivity block {block.name!r} differs from its authored "
+            "baseline; reflectivity maps have no representation in the authored "
+            "simulation"
+        )
+    return (
+        f"{block.kind} block {block.name!r} differs from its authored baseline "
+        "and cannot be installed in the simulation"
+    )
 
 
 # ---------------------------------------------------------------------------
