@@ -46,7 +46,8 @@ class FakeJob:
     def is_run_current(self):
         return False
 
-    def save_for_remote(self, site_name, project):
+    def save_for_remote(self, site_name, project, *, include_job_id=True):
+        assert include_job_id is False
         assert site_name == "AWSSite"
         assert project == "project-a"
         return "local-job.json", "project-a/jobs/job.json"
@@ -257,7 +258,7 @@ def test_graphql_submit_recovers_saved_project_metadata_for_loaded_job(tmp_path)
         f"{project}/simulations/model/model.json",
     )
     job.remote_input_files = lambda project: []
-    job.save_for_remote = lambda site_name, project: (
+    job.save_for_remote = lambda site_name, project, **kwargs: (
         "local-job.json",
         f"{project}/jobs/job.json",
     )
@@ -490,7 +491,10 @@ def test_invalid_imaging_path_is_rejected_before_remote_admission(tmp_path, loca
         else tmp_path / "elsewhere"
     )
     job.is_run_current = lambda: False
-    job.save_for_remote = lambda *_: ("local-job.json", "project-a/jobs/job.json")
+    job.save_for_remote = lambda *_, **kwargs: (
+        "local-job.json",
+        "project-a/jobs/job.json",
+    )
 
     with pytest.raises(RuntimeError, match="imaging output path.*inside"):
         site.submit(job, validate=False)
@@ -547,4 +551,28 @@ def test_cpu_sharing_rejects_distributed_profile():
     )
     with pytest.raises(ValueError, match="single-node"):
         site.submit(FakeJob(), allow_cpu_sharing=True)
+    assert not site.graphql_client.submit_calls
+
+
+def test_explicit_strict_retry_sends_source_id_and_does_not_skip_locally_current_job():
+    site = make_graphql_site()
+    job = FakeJob()
+    job.is_run_current = lambda: True
+    site.submit(job, retry_of="source-run")
+    assert site.graphql_client.submit_calls[0]["retry_of"] == "source-run"
+    assert site.graphql_client.submit_calls[0]["fresh"] is False
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"retry_of": "../foreign"},
+        {"retry_of": "source", "force": True},
+        {"retry_of": "source", "skip": False},
+    ],
+)
+def test_invalid_retry_options_fail_before_staging(options):
+    site = make_graphql_site()
+    with pytest.raises(ValueError):
+        site.submit(FakeJob(), **options)
     assert not site.graphql_client.submit_calls

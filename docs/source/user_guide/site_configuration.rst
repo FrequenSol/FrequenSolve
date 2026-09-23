@@ -767,3 +767,27 @@ with a unique name for every submission. Concurrent submissions no longer share
 an overwriteable ``sweep.slurm`` or ``sweep.sh`` file. This isolates launch
 scripts; concurrent runs writing the same job's simulation or result files still
 require separate job/output directories.
+
+Strict Cloud retries
+~~~~~~~~~~~~~~~~~~~~
+
+On a managed Cloud site with ``strict-partial-retry.v1`` installed, retry a
+terminal run after its Credit settlement completes:
+
+.. code-block:: python
+
+   retry = site.submit(job, retry_of=previous_run.id)
+
+Pass the authored ``job``, not ``previous_run.job`` (the latter is an immutable
+result snapshot). The server verifies completed frequencies and their archived
+artifacts, then creates a separate run for failed, missing or invalid work.
+Unchanged scientific inputs, output requests, frequency ordering, solver/runtime
+version, execution mode and MPI topology are required. Resource budgets such as
+memory and timeout may change through the named execution profile. Both
+independent-frequency and adaptive execution support this strict subset.
+
+Reused frequencies have no new compute usage. New processing uses the ordinary
+rates and run minimum, and the original charge remains unchanged. Older runs
+without verified retry receipts require a full rerun. To explicitly recompute
+all frequencies, use ``site.submit(job, force=True)`` without ``retry_of``.
+Changed scientific inputs or solver versions also require a full rerun.

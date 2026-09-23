@@ -353,3 +353,34 @@ def test_render_allocation_uses_direct_template_defaults_and_explicit_pool(tmp_p
     assert config["task_indices"] == [1, 2, 3]
     assert config["skip_sizing"] is False
     assert config["sizing_json"] == str(tmp_path / "example" / "FS_sizing.json")
+
+
+def test_render_allocation_selects_original_frequency_indices(monkeypatch):
+    import shlex
+
+    from frequensolve import adaptive
+
+    captured = {}
+    monkeypatch.setattr(
+        adaptive, "render_sweep", lambda **context: captured.update(context) or "script"
+    )
+    pool = adaptive.AdaptivePool(1, 4, 1, 8192, 900, "cpu-single")
+    arguments = dict(
+        pool=pool,
+        job_file="job.json",
+        run_path="/work",
+        output="/work/logs",
+        executable="/solver",
+        mpi="srun",
+        mpi_args=[],
+        task_count=4,
+    )
+    adaptive.render_allocation(**arguments, task_indices=[2, 4], fresh=False)
+    config = json.loads(shlex.split(captured["scheduler_config_shell"])[0])
+    assert config["task_indices"] == [2, 4]
+    assert config["job_task_count"] == 4
+    assert not config["fresh"]
+    assert not config["skip_sizing"]
+    for selected in [[], [1, 1], [0], [5], [True]]:
+        with pytest.raises(ValueError, match="task indices"):
+            adaptive.render_allocation(**arguments, task_indices=selected)

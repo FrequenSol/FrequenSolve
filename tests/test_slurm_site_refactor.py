@@ -840,6 +840,26 @@ def test_job_save_for_remote_writes_remote_absolute_result_path(tmp_path):
     assert str(tmp_path) not in json.dumps(payload)
 
 
+def test_remote_staging_can_omit_run_identity_without_changing_authored_history(
+    tmp_path,
+):
+    project = Project(name="project", path=tmp_path / "project")
+    sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
+    sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
+    staged, _ = job.save_for_remote("Cloud", "project", include_job_id=False)
+    before = staged.read_bytes()
+    staged_sim, _ = job.save_simulation_for_remote("Cloud", "project")
+    simulation_before = staged_sim.read_bytes()
+    job._job_id = "completed-cloud-run"
+    staged, _ = job.save_for_remote("Cloud", "project", include_job_id=False)
+    assert staged.read_bytes() == before
+    assert json.loads(job.job_file.read_text())["job_id"] == "completed-cloud-run"
+    staged_sim, _ = job.save_simulation_for_remote("Cloud", "project")
+    assert staged_sim.read_bytes() == simulation_before
+    assert job.staged_artifact_fingerprints("Cloud") is not None
+
+
 def test_project_transfer_keeps_mesh_paths_remote_safe(tmp_path):
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="axisym", physics="acoustic", dimension=2)
