@@ -61,6 +61,36 @@ def _as_vtu_mesh(vtu):
     return vtu
 
 
+def _rasterize_planar_field(mesh, scalar: str, resolution: int = 600):
+    """Sample cell shape functions at pixel centres before applying a colormap.
+
+    Rendering a quad directly triangulates it, changing a bilinear scalar into
+    two linear pieces. Cell-coloured pixels retain the original interpolant at
+    every displayed sample without interpolating vertex colours across leaves.
+    """
+    if not isinstance(resolution, (int, np.integer)) or resolution < 2:
+        raise ValueError("resolution must be an integer of at least 2")
+    lower = mesh.points.min(axis=0)
+    span = np.ptp(mesh.points, axis=0)
+    axes = np.flatnonzero(span > 0)
+    if len(axes) != 2:
+        raise ValueError("Expected an axis-aligned planar mesh")
+    counts = np.ones(3, dtype=int)
+    counts[axes] = np.maximum(1, np.ceil(resolution * span[axes] / span.max())).astype(
+        int
+    )
+    dimensions = np.ones(3, dtype=int)
+    dimensions[axes] = counts[axes] + 1
+    spacing = np.ones(3)
+    spacing[axes] = span[axes] / counts[axes]
+    raster = _pyvista().ImageData(dimensions=dimensions, spacing=spacing, origin=lower)
+    sampled = raster.cell_centers().sample(mesh)
+    values = np.array(sampled.point_data[scalar], dtype=float, copy=True)
+    values[sampled["vtkValidPointMask"] == 0] = np.nan
+    raster.cell_data[scalar] = values
+    return raster
+
+
 def _attach_vtu_metadata(mesh, metadata: Mapping[str, Any] | None):
     try:
         mesh._frequensolve_vtu_metadata = dict(metadata or {})

@@ -1457,3 +1457,34 @@ def test_fwi_resume_keeps_the_mechanism_reference_scale(tmp_path):
     assert other.mechanism_scaling != problem.mechanism_scaling
     with pytest.raises(ValueError, match="mechanism reference scales"):
         FWI(other, stages(), **options).run(resume=True)
+
+
+def test_with_controls_projects_same_count_basis_changes(tmp_path, fake):
+    problem = _problem(tmp_path, fake, subdir="same_count")
+    vector = problem.full_space.pack(
+        {"vp": [0.3, -0.2, 0.5, 0.1, -0.4], "rho": [0.2, 0, -0.1]}
+    )
+    problem.state = problem.state.with_update(vector)
+    spline = {"vp": DepthProfile.bspline("vp", "sediment", count=5)}
+    changed = problem.with_controls(spline)
+    expected = problem.full_space.transfer_to(changed.full_space, vector)
+    np.testing.assert_allclose(changed.state.values, expected.values, atol=1e-10)
+    assert not np.allclose(changed.state["vp"], vector["vp"])
+    # Explicit source-layout and target-layout states are both supported.
+    explicit = problem.with_controls(spline, state=problem.state)
+    adopted = problem.with_controls(spline, state=changed.state)
+    np.testing.assert_allclose(explicit.state.values, expected.values, atol=1e-10)
+    np.testing.assert_array_equal(adopted.state.values, changed.state.values)
+    # Equal total count cannot disguise different per-block counts.
+    repartitioned = problem.with_controls(
+        {
+            "vp": DepthProfile("vp", "sediment", count=4),
+            "rho": DepthProfile("rho", "sediment", count=4),
+        }
+    )
+    moved = problem.full_space.transfer_to(repartitioned.full_space, vector)
+    np.testing.assert_allclose(repartitioned.state.values, moved.values, atol=1e-10)
+    with pytest.raises(ValueError, match="different transform"):
+        problem.with_controls(
+            {"vp": DepthProfile("vp", "sediment", count=5, transform="log")}
+        )

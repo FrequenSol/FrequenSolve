@@ -102,6 +102,7 @@ from frequensolve.imaging.controls import (
     ControlVector,
     ResolvedBlock,
     SupportMask,
+    _same_basis,
     source_metres_per_unit,
 )
 from frequensolve.imaging.data import (
@@ -515,10 +516,7 @@ class _Shared:
                 "the control layout is unknown until the first linearize supplies "
                 "the registry manifest"
             )
-        if (
-            state.space.blocks != self.space.blocks
-            or state.size != self.space.full_size
-        ):
+        if not state.space.without_support().equivalent(self.space.without_support()):
             raise ValueError("state does not cover the problem's control blocks")
         self.state = self.normalize(
             ControlState(
@@ -1082,7 +1080,7 @@ class ImagingProblem:
         # problem's coordinates are the same ``physical / s_ref``.
         if shared.reference_scaling:
             derived.pin_reference(shared.reference_scaling, shared.reference_units)
-        if state.space.blocks == new_full.blocks and state.size == new_full.full_size:
+        if state.space.without_support().equivalent(new_full):
             derived.set_state(state)
         else:
             derived.set_state(_transfer_state(state, old_full, derived))
@@ -1356,6 +1354,28 @@ class ImagingProblem:
             or self._inline_authoring()
         ):
             return stage, None
+        self._complete_state_file(state).write(stage / "state.h5")
+        return stage, stage / "state.h5"
+
+    def save_state(self, path: Union[str, Path], v: Any = None) -> Path:
+        """Save a complete solver control state, including inactive registry blocks.
+
+        Unlike ``problem.state.save``, this includes Sauce-owned source
+        baselines and mesh basis identities needed to replay a standalone job.
+        Registry discovery runs when necessary.
+        """
+        if self._shared.baseline is None:
+            self._discover_registry()
+        state = self._state_at(v)
+        return self._complete_state_file(state).write(path)
+
+    def _complete_state_file(self, state: ControlState) -> ControlStateFile:
+        """Overlay active state values on the complete discovered registry."""
+        baseline = self._shared.baseline
+        if baseline is None:
+            raise RuntimeError(
+                "Complete control-state export requires registry discovery"
+            )
         blocks = dict(baseline.blocks)
         for name, values in state.blocks().items():
             if name not in blocks:
@@ -1381,9 +1401,18 @@ class ImagingProblem:
         }
         scaling.update(state.scaling)
         units.update(state.scaling_units)
-        path = stage / "state.h5"
-        ControlStateFile(blocks, scaling=scaling, scaling_units=units).write(path)
-        return stage, path
+        identities = dict(baseline.control_spaces)
+        if self._shared.manifest is not None:
+            identities.update(
+                {
+                    b.name: b.basis_identity
+                    for b in self._shared.manifest.blocks
+                    if b.basis_identity
+                }
+            )
+        return ControlStateFile(
+            blocks, scaling=scaling, scaling_units=units, control_spaces=identities
+        )
 
     def _read_masks(
         self, job: FWIOperatorJob, space: ControlSpace
@@ -2098,10 +2127,7 @@ def _transfer_state(
     """Transfer a full state on ``old`` to ``shared.space`` block by block."""
 
     source_space = old.without_support()
-    if (
-        state.space.blocks != source_space.blocks
-        or state.size != source_space.full_size
-    ):
+    if not state.space.without_support().equivalent(source_space):
         raise ValueError(
             "with_controls state covers neither the current nor the new layout"
         )
@@ -2162,12 +2188,7 @@ def _transfer_state(
 
 
 def _same_layout(a: ResolvedBlock, b: ResolvedBlock) -> bool:
-    if a.control is None or b.control is None:
-        return a.control is None and b.control is None
-    try:
-        return bool(a.control.to_fs() == b.control.to_fs())
-    except Exception:
-        return False
+    return _same_basis(a, b)
 
 
 def _install_material(simulation: Any, block_id: str, values: np.ndarray) -> None:

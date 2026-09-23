@@ -1143,6 +1143,23 @@ def test_support_masks_combine_every_frequency_task(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_save_complete_state_preserves_inactive_registry_and_basis(setup, tmp_path):
+    _sim, problem = setup
+    state = problem.state
+    baseline = dict(state.blocks())
+    baseline["source.1.position"] = np.array([0.25, 0.5])
+    problem._shared.baseline = ControlStateFile(
+        baseline, control_spaces={"model.vp": "basis"}
+    )
+    problem.state = state.with_update(ControlVector(np.arange(8.0), problem.space))
+    path = problem.save_state(tmp_path / "complete.h5")
+    saved = ControlStateFile.read(path)
+    np.testing.assert_array_equal(saved["source.1.position"], [0.25, 0.5])
+    for name, values in problem.state.blocks().items():
+        np.testing.assert_array_equal(saved[name], values)
+    assert saved.control_spaces == {"model.vp": "basis"}
+
+
 def test_dry_run_describes_the_linearize_job_without_submitting(setup, fake):
     _sim, problem = setup
 

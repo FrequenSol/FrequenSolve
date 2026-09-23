@@ -1524,3 +1524,134 @@ def test_plot_of_mesh_blocks_uses_a_pyvista_plotter(simulation):
         assert len(plotter.renderer.actors) >= 1
     finally:
         plotter.close()
+
+
+def test_equivalent_rejects_different_bases_and_transforms(simulation):
+    hat = im.ControlSpace(
+        vp=im.DepthProfile("vp", "sediment", datum="global", count=5)
+    ).bind(simulation)
+    for spec in (
+        im.DepthProfile.bspline("vp", "sediment", datum="global", count=5),
+        im.DepthProfile("vp", "sediment", datum="top", count=5),
+        im.DepthProfile("vp", "sediment", datum="global", count=5, transform="log"),
+    ):
+        other = im.ControlSpace(vp=spec).bind(simulation)
+        assert not hat.equivalent(other)
+        with pytest.raises(ValueError):
+            _ = hat.ones() + other.ones()
+        with pytest.raises(ValueError):
+            hat.to_sauce_vector(other.ones())
+        state = im.ControlState(hat, np.ones(hat.full_size))
+        with pytest.raises(ValueError, match="differs in basis"):
+            state.vector(other)
+        with pytest.raises(ValueError, match="differs in basis"):
+            state.with_update(other.ones())
+    # Coefficients and bounds can change without changing the basis.
+    altered = copy.deepcopy(hat.simulation)
+    for layer in altered.model.subdomains:
+        prop = layer.properties.get("vp")
+        if isinstance(prop, ParameterizedProperty):
+            layer.properties["vp"] = prop.with_coefficients(np.arange(5.0))
+    bounded = im.ControlSpace(
+        vp=im.DepthProfile(
+            "vp", "sediment", datum="global", count=5, limits=(1500, 4000)
+        )
+    ).bind(altered)
+    assert hat.equivalent(bounded)
+
+
+def test_transfer_matches_each_physical_source_before_family_address(simulation):
+    source = im.ControlSpace(
+        src=im.SourceParameters(sources=[1, 2], position=True, signature=True)
+    ).bind(simulation)
+    vector = source.from_sauce_vector(np.arange(source.size, dtype=float) + 1)
+    np.testing.assert_array_equal(
+        source.transfer_to(source, vector).values, vector.values
+    )
+    reordered = im.ControlSpace(
+        src=im.SourceParameters(sources=[2, 1], position=True, signature=True)
+    ).bind(simulation)
+    moved = source.transfer_to(reordered, vector)
+    for name in source.blocks:
+        np.testing.assert_array_equal(moved[name], vector[name])
+    only_second = reordered.restrict(["source.2.signature"])
+    np.testing.assert_array_equal(
+        source.transfer_to(only_second, vector)["source.2.signature"],
+        vector["source.2.signature"],
+    )
+    with pytest.raises(ValueError, match="no block matching"):
+        only_second.transfer_to(source, only_second.ones())
+
+
+@pytest.mark.parametrize("spline", [False, True])
+def test_profile_to_grid_evaluates_basis_and_masks_other_layers(simulation, spline):
+    from frequensolve.geometry.grids import CartesianGrid
+    from frequensolve.model.representation import (
+        ControlRepresentation,
+        EvaluationContext,
+    )
+
+    spec = im.DepthProfile.bspline if spline else im.DepthProfile
+    space = im.ControlSpace(vp=spec("vp", "sediment", count=5)).bind(simulation)
+    vector = space.pack({"vp": [0.0, 0.3, -0.2, 0.4, 0.1]})
+    grid = CartesianGrid(n=[7, 21], x0=[0, 0], x1=[4000, 1500], dims=["x", "z"])
+    image = vector.to_grid(grid, "vp")
+    assert image.dims == ("z", "x")
+    assert np.isnan(image.sel(z=0)).all()
+    depths = image.z.values - 200
+    expected = ControlRepresentation(space.block("vp").control).evaluate(
+        vector["vp"],
+        EvaluationContext({"depth": depths}, coordinate_system="seabed_depth"),
+    )
+    valid = depths >= 0
+    np.testing.assert_allclose(
+        image.values[valid], np.repeat(expected[valid, None], 7, axis=1)
+    )
+    state = im.ControlState(space, vector.values)
+    np.testing.assert_allclose(state.to_grid(grid, "vp"), image, equal_nan=True)
+
+
+def test_tensor_to_grid_interpolates_between_control_nodes(simulation, plt):
+    from frequensolve.geometry.grids import CartesianGrid
+
+    space = im.ControlSpace(g=im.GridParameters("vp", "water", shape=[3, 3])).bind(
+        simulation
+    )
+    # Only the centre coefficient is nonzero: a separable 2D tent.
+    coefficients = np.zeros(9)
+    coefficients[4] = 1
+    vector = space.pack({"g": coefficients})
+    grid = CartesianGrid(n=[5, 5], x0=[0, 0], x1=[4000, 200], dims=["x", "z"])
+    sampled = vector.to_grid(grid, "g")
+    tent = np.array([0, 0.5, 1, 0.5, 0])
+    np.testing.assert_allclose(sampled.values, np.outer(tent, tent))
+    ax = vector.plot("g", grid=grid)
+    assert ax.yaxis_inverted()
+    assert len(ax.collections) == 1
+    frozen = space.with_support(
+        {"g": [True, True, True, True, False, True, True, True, True]}
+    )
+    masked = frozen.ones().to_grid(grid, "g")
+    assert np.isnan(masked.values[2, 2]) and np.isfinite(masked.values[0, 0])
+
+
+def test_profile_to_grid_follows_sloping_surface_and_converts_units(simulation):
+    from frequensolve.geometry.grids import CartesianGrid
+    from frequensolve.model.property import Property
+    from frequensolve.units import UnitConfig
+
+    simulation.units = UnitConfig(defaults={"length": "m"})
+    simulation.model.surfaces["seabed"].depth = Property(
+        xr.DataArray([100.0, 300.0], dims=["x"], coords={"x": [0.0, 4000.0]})
+    )
+    space = im.ControlSpace(vp=im.DepthProfile("vp", "sediment", count=5)).bind(
+        simulation
+    )
+    # The control field equals distance below the sloping seabed.
+    vector = space.pack({"vp": space.block("vp").control.coordinates})
+    grid = CartesianGrid(n=[5, 4], x0=[0, 0], x1=[4, 1.5], dims=["x", "z"], units="km")
+    sampled = vector.to_grid(grid, "vp")
+    expected = sampled.z.values[:, None] * 1000 - np.linspace(100, 300, 5)
+    expected[expected < 0] = np.nan
+    np.testing.assert_allclose(sampled.values, expected, equal_nan=True)
+    assert sampled.x.attrs["units"] == "km"

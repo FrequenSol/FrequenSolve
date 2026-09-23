@@ -2005,6 +2005,10 @@ class Property:
         if isinstance(value, Mapping):
             payload = dict(value)
             _normalize_system_alias(payload)
+            if "blend" in payload:
+                from frequensolve.model.blend import BlendProperty
+
+                return BlendProperty.from_fs(payload)
             if "parameterized" in payload:
                 from frequensolve.model.parameterization import ParameterizedProperty
 

@@ -749,6 +749,119 @@ projection or clipping error before relying on it. With different references
 or transforms, fit the physical material in the destination parameterization
 instead of interpolating raw coefficients.
 
+Equal coefficient counts do not imply equal bases: changing hats to B-splines
+still projects the state. Vector arithmetic and state updates require matching
+bases, coordinates and transforms. ``transfer_to`` transfers coefficient
+fields; it is not a conversion of raw gradient covectors. If a field transfer
+is ``c_new = T @ c_old``, derivatives pull back with ``T.T``.
+
+Mixed-parameterization plotting example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The runnable :download:`mixed_parameterizations_2d.py
+<../../../examples/mixed_parameterizations_2d.py>` defines initial and truth
+2D acoustic models with a hat velocity profile, B-spline density profile,
+tensor-hat velocity lattice, and a controlled RBF salt boundary. The salt-host
+velocity is a ``BlendProperty(surface, width=..., inside=..., outside=...)``;
+negative level-set values select the inside provider. A numeric width is in
+model length units; a Pint length carries explicit units. Branch properties
+must use the same value units.
+
+.. code-block:: bash
+
+   python examples/mixed_parameterizations_2d.py \
+       --solver /path/to/fs2d_s --output /path/to/new-output-directory
+
+This requires the visual dependencies and a local Sauce imaging build. It
+runs forward models and joint adjoint jobs, plots physical material from
+Sauce's volume VTK output and coefficients/covectors through ``state.plot``
+and ``gradient.plot``, checks each block's adjoint pairing, and verifies
+profile and tensor-grid refinement. Results include figures, HDF5 states/gradients and
+``checks.json``. It uses no synthetic gradient substitute.
+
+Physical material plots and coefficient plots have different meanings:
+B-spline coefficients are not point samples, and material transforms and
+references are applied only in the physical model. For blended material,
+use solver property output; Python ``sample_uniform`` does not evaluate the
+implicit geometry. The example uses volume output because some Sauce builds
+do not implement material properties in the rectangular-grid VTK writer.
+
+To view a depth profile or tensor-hat lattice as an evaluated 2D field, supply
+a Cartesian display grid. This evaluates the actual basis, resolves depth
+relative to layer surfaces, and masks other subdomains:
+
+.. code-block:: python
+
+   grid = fs.CartesianGrid(n=[181, 129], x0=[0, 0], x1=[1.2, 0.85],
+                           dims=["x", "z"], units="km")
+   sampled = problem.state.to_grid(grid, "shallow_vp")  # xarray.DataArray
+   problem.state.plot("shallow_vp", grid=grid)
+   gradient.plot("shallow_vp", grid=grid)
+
+These fields precede the material reference and transform. Expanding a raw
+gradient covector in the control basis is a visualization only, not a
+physical gradient density or a gradient transfer to grid parameters. The
+example labels that distinction and includes a single tensor-hat basis image.
+
+Adapted property meshes
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``PropertyMesh`` reads the actual leaf topology and hanging-node constraint
+matrix from a Sauce property-space artifact. It evaluates display vertices
+as ``geometry.basis @ coefficients``; the number of vertices need not equal
+the number of independent controls. It never infers connectivity from point
+locations or overlays control-node markers.
+
+.. code-block:: python
+
+   geometry = im.PropertyMesh.read("velocity.h5", material=1)
+   controls = problem.state.to_mesh(geometry, "vp", units="km")
+   controls.save("controls.vtu")
+   problem.state.plot("vp", mesh=geometry, units="km")
+   problem.gradient().plot("vp", mesh=geometry, units="km")
+
+``material`` is the one-based material group in the artifact. Registered
+basis identities are checked to reject a different mesh with the same
+coefficient count. As above, plotting a covector in the primal basis is a
+coefficient display, not an L2 gradient density.
+
+Axis-aligned 2D mesh plots sample the original cell shape functions at pixel
+centres before applying the colormap. This preserves bilinear quad fields
+across adapted cells, avoiding the diagonal artifacts caused by rendering
+two linear triangles per quad. ``resolution=600`` controls the number of
+pixels along the longer axis; it does not alter the control mesh. Signed
+fields use a symmetric default color range so zero is the neutral color.
+
+To export physical properties on their own mesh, add this request to the
+job's outputs (``"vp"`` identifies the named property space):
+
+.. code-block:: python
+
+   output = fs.VtkOutput.property_mesh(
+       "vp", subdomain="rock", properties=["vp", "rho"]
+   )
+   state_file = problem.save_state("current-state.h5")
+
+The complete state file includes inactive source baselines and mesh basis
+identities needed by a standalone job's ``control_state``. The native VTU
+writer evaluates the current physical material, including its reference,
+transform and blends. ``VtkOutput.grid`` can instead sample physical
+properties on a Cartesian grid with current Sauce builds.
+
+The runnable :download:`meshed_controls_2d.py
+<../../../examples/meshed_controls_2d.py>` computes a real adjoint gradient
+with ``gram_derivative="total"`` (including the DPG test-map dependence),
+compares Python with native property output and grid sampling, and plots the
+independently adapted solution and property meshes.
+
+These paths require a Sauce build with property-mesh output and optional
+``visualization_kind``/``visualization_points_m`` artifact datasets. Older
+artifacts must be regenerated for Python geometry reading. The artifact
+contains geometry frozen at creation; native VTU uses the live geometry.
+Both display linear cells through leaf vertices, so curved geometry and
+nonlinear interior property variation are approximated between vertices.
+Use solver grid sampling when physical interior values are required.
+
 LSRTM, RTM, kernels and focusing
 --------------------------------
 

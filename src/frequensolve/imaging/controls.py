@@ -511,6 +511,7 @@ class ResolvedBlock:
     subdomain: Optional[str] = None
     axis_label: Optional[str] = None
     downward: bool = True
+    basis_identity: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", qualified_block_name(self.name))
@@ -2435,6 +2436,7 @@ class ControlSpace:
                     source_id=source_id,
                     quantity=quantity,
                     components=tuple(block.components),
+                    basis_identity=block.basis_identity,
                 )
             )
         space = object.__new__(cls)
@@ -2462,7 +2464,10 @@ class ControlSpace:
             if block.kind == "mesh":
                 blocks.append(
                     replace(
-                        block, size=registered.size, baseline=np.zeros(registered.size)
+                        block,
+                        size=registered.size,
+                        baseline=np.zeros(registered.size),
+                        basis_identity=registered.basis_identity,
                     )
                 )
                 continue
@@ -2887,7 +2892,11 @@ class ControlSpace:
         return {name: np.array(mask, copy=True) for name, mask in self._support.items()}
 
     def equivalent(self, other: "ControlSpace") -> bool:
-        """Return whether two spaces share layout, order and support."""
+        """Return whether two spaces share bases, block order and support.
+
+        Authored coefficient values and optimizer bounds do not define a
+        basis; coordinates, transforms and physical block identities do.
+        """
 
         if not isinstance(other, ControlSpace):
             return False
@@ -2901,7 +2910,7 @@ class ControlSpace:
         ]:
             return False
         return all(
-            np.array_equal(self._mask_of(a), other._mask_of(b))
+            _same_basis(a, b) and np.array_equal(self._mask_of(a), other._mask_of(b))
             for a, b in zip(mine, theirs)
         )
 
@@ -2921,17 +2930,18 @@ class ControlSpace:
         my_slices = self.full_slices
         their_slices = other.full_slices
         mine_by_key: Dict[Tuple[str, str], ResolvedBlock] = {}
+        mine_by_name = {block.name: block for block in self._resolved()}
         for block in self._resolved():
             mine_by_key[(block.key, block.address)] = block
         for target in other._resolved():
-            source = mine_by_key.get((target.key, target.address))
+            # A SourceParameters family shares key/address across sources.
+            # Qualified names identify the physical source, including when
+            # the target reorders or restricts that family.
+            source = mine_by_name.get(target.name)
+            if source is None and target.kind != "source":
+                source = mine_by_key.get((target.key, target.address))
             if source is None:
-                candidates = [b for b in self._resolved() if b.name == target.name]
-                if not candidates:
-                    raise ValueError(
-                        f"source space has no block matching {target.name!r}"
-                    )
-                source = candidates[0]
+                raise ValueError(f"source space has no block matching {target.name!r}")
             values = full[my_slices[source.name]]
             if (
                 source.size == target.size
@@ -2940,6 +2950,15 @@ class ControlSpace:
             ):
                 out[their_slices[target.name]] = values
                 continue
+            if (source.transform, source.prop, source.subdomain) != (
+                target.transform,
+                target.prop,
+                target.subdomain,
+            ):
+                raise ValueError(
+                    f"cannot transfer block {source.name!r} to {target.name!r} "
+                    "with a different transform, property or subdomain"
+                )
             if source.kind in {"profile", "reflectivity"} and target.kind in {
                 "profile",
                 "reflectivity",
@@ -2969,11 +2988,48 @@ class ControlSpace:
         return f"ControlSpace(blocks={list(self.blocks)}, size={size})"
 
 
+def _check_artifact_basis(file: Any, space: ControlSpace) -> None:
+    identities = {qualified_block_name(n): v for n, v in file.control_spaces.items()}
+    for block in space.resolved_blocks:
+        identity = identities.get(block.name)
+        if identity and block.basis_identity and identity != block.basis_identity:
+            raise ValueError(f"block {block.name!r} has a different control basis")
+
+
 def _same_basis(a: ResolvedBlock, b: ResolvedBlock) -> bool:
+    """Compare coefficient meaning independently of authored values/bounds."""
+
+    if a.basis_identity and b.basis_identity and a.basis_identity != b.basis_identity:
+        return False
+
+    fields = (
+        "kind",
+        "transform",
+        "dims",
+        "units",
+        "coordinate_system",
+        "source_id",
+        "quantity",
+        "components",
+        "prop",
+        "subdomain",
+    )
+    if any(getattr(a, field) != getattr(b, field) for field in fields):
+        return False
+    ac, bc = a.coords or {}, b.coords or {}
+    if ac.keys() != bc.keys() or any(
+        not np.array_equal(ac[key], bc[key]) for key in ac
+    ):
+        return False
     if a.control is None or b.control is None:
-        return True
+        return a.control is None and b.control is None
     try:
-        return a.control.to_fs() == b.control.to_fs()
+        left, right = dict(a.control.to_fs()), dict(b.control.to_fs())
+        for payload in (left, right):
+            payload.pop("coefficients", None)
+            # RBF displacement limits constrain optimization, not the map.
+            payload.pop("control", None)
+        return left == right
     except Exception:
         return False
 
@@ -3079,6 +3135,8 @@ def _transfer_lattice(
         raise ValueError("lattice transfer requires tensor-hat controls")
     if tuple(source.control.axes) != tuple(target.control.axes):
         raise ValueError("lattice transfer requires the same axes")
+    if source.control.coordinate_system != target.control.coordinate_system:
+        raise ValueError("lattice transfer requires the same coordinate system")
     src = _LatticeRepresentation(source.control)
     dst = _LatticeRepresentation(target.control)
     axes_points: List[np.ndarray] = []
@@ -3350,7 +3408,12 @@ def _plot_mesh_block(
     vector: "ControlVector", block: ResolvedBlock, **kwargs: Any
 ) -> Any:
     pv = _pyvista()
-    grid = vector.to_mesh(kwargs.pop("mesh", None), block.address)
+    grid = vector.to_mesh(
+        kwargs.pop("mesh", None),
+        block.address,
+        material=kwargs.pop("material", None),
+        units=kwargs.pop("units", "m"),
+    )
     plotter = kwargs.pop("plotter", None) or pv.Plotter(
         window_size=kwargs.pop("window_size", None),
         notebook=kwargs.pop("notebook", True),
@@ -3358,7 +3421,31 @@ def _plot_mesh_block(
     show = kwargs.pop("show", True)
     plotter.set_background(kwargs.pop("background", "white"))
     kwargs.setdefault("cmap", "RdBu_r")
-    plotter.add_mesh(grid, scalars=list(grid.point_data.keys())[0], **kwargs)
+    scalar = block.prop or block.address
+    finite = np.asarray(grid[scalar])[np.isfinite(grid[scalar])]
+    if finite.size and finite.min() < 0 < finite.max():
+        limit = float(np.max(np.abs(finite)))
+        kwargs.setdefault("clim", (-limit, limit))
+    display = grid
+    resolution = kwargs.pop("resolution", 600)
+    if (
+        grid.n_cells
+        and grid.get_cell(0).dimension == 2
+        and np.count_nonzero(np.ptp(grid.points, axis=0)) == 2
+    ):
+        from frequensolve.plotting.vtu import _rasterize_planar_field
+
+        display = _rasterize_planar_field(grid, scalar, resolution)
+        kwargs.setdefault("nan_opacity", 0)
+        kwargs.setdefault("lighting", False)
+        if kwargs.pop("show_edges", False):
+            plotter.add_mesh(
+                grid.extract_all_edges(), color=kwargs.pop("edge_color", "black")
+            )
+    plotter.add_mesh(display, scalars=scalar, **kwargs)
+    if np.ptp(grid.points[:, 1]) == 0 and np.ptp(grid.points[:, 2]) > 0:
+        plotter.view_vector((0, 1, 0), viewup=(0, 0, -1))
+        plotter.enable_parallel_projection()
     if show:
         plotter.show()
     return plotter
@@ -3722,11 +3809,162 @@ class ControlVector:
         values[~self.space._mask_of(block)] = frozen
         return values
 
-    def to_mesh(self, mesh: Any = None, key: Optional[str] = None) -> Any:
+    def to_grid(
+        self,
+        grid: Any,
+        key: str,
+        *,
+        context: Optional[EvaluationContext] = None,
+        frozen: Any = np.nan,
+    ) -> xr.DataArray:
+        """Evaluate a profile or tensor-hat coefficient field on a Cartesian grid.
+
+        This evaluates the basis rather than joining coefficients. Bound
+        layered models resolve surface-relative depth and mask other layers.
+        Grid units are converted to model units when declared. An explicit
+        ``context`` can supply other maps in control units, in grid storage
+        order. Samples outside the basis/subdomain or influenced by frozen
+        DOFs use ``frozen``.
+
+        Values precede the material reference/transform. For a raw covector
+        this is a basis-rendered visualization, NOT a physical gradient
+        density or a covector transfer.
+        """
+        from frequensolve.geometry.grids import CartesianGrid
+        from frequensolve.units import ureg
+
+        if not isinstance(grid, CartesianGrid):
+            raise TypeError("to_grid requires a CartesianGrid")
+        block = self.space.block(key)
+        control = block.control
+        if not isinstance(control, (HatControl, BSplineControl, TensorHatControl)):
+            raise NotImplementedError(
+                "to_grid supports hat, B-spline and tensor-hat blocks"
+            )
+        dims = tuple(grid.dims[::-1])
+        coords = {
+            dim: np.linspace(grid.x0[i], grid.x1[i], grid.n[i])
+            for i, dim in enumerate(grid.dims)
+        }
+        result = xr.DataArray(
+            np.zeros(grid.shape), dims=dims, coords=coords, name=block.address
+        )
+        simulation = getattr(self.space, "simulation", None)
+        binding = None if simulation is None else _BindContext(simulation)
+        units = block.units or (binding.length_units if binding else None)
+        factor = 1.0
+        if grid.units and units:
+            factor = float((1.0 * ureg(grid.units)).to(units).magnitude)
+        samples = result.assign_coords(
+            {dim: values * factor for dim, values in coords.items()}
+        )
+        for dim in dims:
+            if grid.units or units:
+                result.coords[dim].attrs["units"] = grid.units or units
+            if units:
+                samples.coords[dim].attrs["units"] = units
+        axes = (
+            control.axes if isinstance(control, TensorHatControl) else (control.axis,)
+        )
+        system_name = control.coordinate_system
+        if context is None:
+            if (grid.system or "global") != "global":
+                raise ValueError(
+                    "non-global grids require an explicit EvaluationContext"
+                )
+            if system_name == "global" or (binding and binding.is_global(system_name)):
+                coordinate_values = {
+                    axis: samples.coords[axis].broadcast_like(samples).values
+                    for axis in axes
+                }
+            elif binding is not None and binding.is_layered:
+                system = binding.coordinate_system(system_name)
+                coordinate_values = {}
+                for name in axes:
+                    axis = binding.model._axis_for_dimension(system, name)
+                    if axis is None:
+                        raise ValueError(
+                            f"coordinate system {system_name!r} has no axis {name!r}"
+                        )
+                    coordinate_values[name] = (
+                        binding.model._axis_coordinate(system, axis, samples)
+                        .broadcast_like(samples)
+                        .values
+                    )
+            else:
+                raise ValueError(
+                    "this coordinate system requires an explicit EvaluationContext"
+                )
+            context = EvaluationContext(
+                coordinate_values,
+                coordinate_system=system_name,
+                shape=grid.shape,
+                dims=dims,
+            )
+        if context.shape != tuple(grid.shape) or (
+            context.dims and context.dims != dims
+        ):
+            raise ValueError(
+                "evaluation context must follow the grid's shape and dimension order"
+            )
+        if isinstance(control, TensorHatControl):
+            operator = _LatticeRepresentation(control).sampling_operator(
+                {axis: context.coordinate(axis, system_name) for axis in axes}
+            )
+        else:
+            operator = ControlRepresentation(control).sampling_operator(context)
+        values = self.space.to_sauce_vector(self)[self.space.full_slices[block.name]]
+        valid = np.asarray(abs(operator).sum(axis=1)).ravel() > 0
+        mask = self.space._mask_of(block)
+        if not mask.all():
+            valid &= np.asarray(abs(operator[:, ~mask]).sum(axis=1)).ravel() == 0
+        sampled = np.asarray(operator @ values).reshape(grid.shape)
+        valid = valid.reshape(grid.shape)
+        if (
+            binding
+            and binding.is_layered
+            and block.subdomain
+            and (grid.system or "global") == "global"
+        ):
+            valid &= (
+                binding.model._get_layer_mask(
+                    binding.subdomain(block.subdomain), samples
+                )
+                .transpose(*dims)
+                .values
+            )
+            for axis, limits in (
+                ("x", binding.model.x_limits),
+                ("y", binding.model.y_limits),
+            ):
+                if limits is not None and axis in samples.coords:
+                    coord = samples.coords[axis].broadcast_like(samples).values
+                    valid &= (coord >= limits[0]) & (coord <= limits[1])
+        result.data = np.where(valid, sampled, frozen)
+        result.attrs.update(
+            block=block.name,
+            transform=block.transform,
+            representation="sampled_control_coefficients",
+        )
+        return result
+
+    def to_mesh(
+        self,
+        mesh: Any = None,
+        key: Optional[str] = None,
+        *,
+        material: Optional[int] = None,
+        units: str = "m",
+    ) -> Any:
         """Render mesh blocks as point data on a PyVista dataset.
 
-        Mesh blocks carry one coefficient per node of the property space Sauce
-        freezes in its artifact, so the node geometry must come from outside
+        Pass a :class:`~frequensolve.imaging.PropertyMesh` or its ``.h5``
+        artifact to reconstruct adapted leaf cells and apply hanging-node
+        constraints. ``material`` is a one-based material group; when omitted
+        it is inferred from the bound block's subdomain. ``units`` selects the
+        displayed geometry units for this artifact path.
+
+        For an explicitly supplied PyVista dataset, node geometry comes from outside
         the vector: ``mesh`` is a PyVista dataset (or a path PyVista can read)
         whose points follow the property-space node order.  When ``mesh`` is
         omitted the bound simulation's ``mesh`` attribute is used if it is a
@@ -3761,6 +3999,38 @@ class ControlVector:
                 if key is None
                 else f"{key!r} does not address a mesh block"
             )
+        from frequensolve.imaging.property_mesh import PropertyMesh
+
+        if isinstance(mesh, (str, Path)) and Path(mesh).suffix.lower() in {
+            ".h5",
+            ".hdf5",
+        }:
+            if len(blocks) != 1:
+                raise ValueError(
+                    "Select one mesh block when reading a property-space artifact"
+                )
+            if material is None:
+                model = getattr(getattr(self.space, "simulation", None), "model", None)
+                names = [layer.name for layer in getattr(model, "subdomains", [])]
+                if blocks[0].subdomain not in names:
+                    raise ValueError(
+                        "Pass material= for an unbound property-space artifact"
+                    )
+                material = names.index(blocks[0].subdomain) + 1
+            mesh = PropertyMesh.read(mesh, material=material)
+        if isinstance(mesh, PropertyMesh):
+            if len(blocks) != 1:
+                raise ValueError("Select one mesh block for a PropertyMesh")
+            block = blocks[0]
+            if block.basis_identity and block.basis_identity != mesh.control_identity(
+                block.transform
+            ):
+                raise ValueError(
+                    "PropertyMesh identity does not match the control basis"
+                )
+            return mesh.to_mesh(
+                self._block_values(block), name=block.prop or block.address, units=units
+            )
         dataset = _resolve_mesh_dataset(mesh, self.space, blocks)
         grid = dataset.copy(deep=True)
         props = [b.prop or b.address for b in blocks]
@@ -3786,8 +4056,15 @@ class ControlVector:
         plane); interface blocks as coefficients against the center index;
         source blocks as grouped bars per source id (real and imaginary parts
         for complex quantities); mesh blocks through :meth:`to_mesh` on a
-        PyVista plotter (``mesh=`` and ``plotter=`` keywords).  Frozen DOFs
-        appear as gaps.
+        PyVista plotter (``mesh=`` and ``plotter=`` keywords). Axis-aligned
+        2D meshes evaluate original cell shape functions at display pixels
+        (``resolution=600`` along the longer axis), avoiding diagonal
+        interpolation artifacts in quads. Frozen DOFs appear as gaps.
+
+        With ``grid=CartesianGrid(...)``, evaluate one profile or tensor-hat
+        block as a 2D image through :meth:`to_grid`. This renders the basis
+        field before material transforms; raw covectors remain coefficient
+        derivatives, not physical gradient densities.
 
         Args:
             key: Block key, address or qualified name; ``None`` draws every
@@ -3801,6 +4078,27 @@ class ControlVector:
             of axes (several blocks), or the PyVista plotter (mesh blocks).
         """
 
+        grid = kwargs.pop("grid", None)
+        if grid is not None:
+            if key is None:
+                raise ValueError("plot(grid=...) requires one block key")
+            sampled = self.to_grid(grid, key, context=kwargs.pop("context", None))
+            if sampled.ndim != 2:
+                raise ValueError(
+                    "plot(grid=...) requires a 2D grid; slice to_grid() for 3D"
+                )
+            if ax is None:
+                _, ax = _matplotlib().subplots()
+            vertical, horizontal = sampled.dims
+            sampled.plot.pcolormesh(
+                ax=ax,
+                x=horizontal,
+                y=vertical,
+                yincrease=vertical not in _VERTICAL_AXES,
+                **kwargs,
+            )
+            ax.set_title(f"{sampled.name}: sampled coefficient field")
+            return ax
         if key is None:
             blocks = [b for b in self.space.resolved_blocks if b.kind != "mesh"]
             if not blocks:
@@ -3853,6 +4151,11 @@ class ControlVector:
             state_fingerprint=state_fingerprint,
             control_registry_fingerprint=registry_fingerprint,
             native=native,
+            control_spaces={
+                b.name: b.basis_identity
+                for b in self.space.resolved_blocks
+                if b.basis_identity
+            },
             support=self.space.support_masks(),
             support_min_support=self.space.min_support,
         )
@@ -3871,6 +4174,7 @@ class ControlVector:
 
         if not isinstance(file, ControlVectorFile):
             file = ControlVectorFile.read(file)
+        _check_artifact_basis(file, space)
         if file.support and not space.support_masks():
             space = space.with_support(
                 {n: m for n, m in file.support.items() if n in space.blocks},
@@ -4040,6 +4344,7 @@ class ControlState:
 
         if not isinstance(file, ControlStateFile):
             file = ControlStateFile.read(file)
+        _check_artifact_basis(file, space)
         if file.support and not space.support_masks():
             space = space.with_support(
                 {n: m for n, m in file.support.items() if n in space.blocks},
@@ -4079,6 +4384,11 @@ class ControlState:
             support_min_support=self.space.min_support,
             scaling=dict(self.scaling),
             scaling_units=dict(self.scaling_units),
+            control_spaces={
+                b.name: b.basis_identity
+                for b in self.space.resolved_blocks
+                if b.basis_identity
+            },
         )
 
     def save(self, path: Union[str, Path]) -> Path:
@@ -4122,6 +4432,8 @@ class ControlState:
                 raise ValueError(f"state has no block {name!r}")
             if mine[name].stop - mine[name].start != sl.stop - sl.start:
                 raise ValueError(f"block {name!r} differs in size between spaces")
+            if not _same_basis(self.space.block(name), subspace.block(name)):
+                raise ValueError(f"block {name!r} differs in basis between spaces")
             full[sl] = self._values[mine[name]]
         return subspace.from_sauce_vector(full)
 
@@ -4157,6 +4469,10 @@ class ControlState:
             target = mine[block.name]
             if target.stop - target.start != block.size:
                 raise ValueError(f"block {block.name!r} differs in size between spaces")
+            if not _same_basis(self.space.block(block.name), block):
+                raise ValueError(
+                    f"block {block.name!r} differs in basis between spaces"
+                )
             mask = sub._mask_of(block)
             segment = values[target]
             segment[mask] = full[sl][mask]
@@ -4167,6 +4483,18 @@ class ControlState:
         """Render material blocks as xarray (see :meth:`ControlVector.to_xarray`)."""
 
         return self.vector(self.space.without_support()).to_xarray(key)
+
+    def to_grid(self, grid: Any, key: str, **kwargs: Any) -> xr.DataArray:
+        """Evaluate the baseline; see :meth:`ControlVector.to_grid`."""
+
+        return self.vector(self.space.without_support()).to_grid(grid, key, **kwargs)
+
+    def to_mesh(
+        self, mesh: Any = None, key: Optional[str] = None, **kwargs: Any
+    ) -> Any:
+        """Render the baseline on its property mesh, including frozen values."""
+
+        return self.vector(self.space.without_support()).to_mesh(mesh, key, **kwargs)
 
     def plot(self, key: Optional[str] = None, ax: Any = None, **kwargs: Any) -> Any:
         """Plot the baseline (see :meth:`ControlVector.plot`; nothing is frozen)."""

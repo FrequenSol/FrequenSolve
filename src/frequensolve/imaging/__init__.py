@@ -29,6 +29,7 @@ from frequensolve.imaging.operators import *  # noqa: F403
 from frequensolve.imaging.operators import __all__ as _operators_all
 from frequensolve.imaging.problem import *  # noqa: F403
 from frequensolve.imaging.problem import __all__ as _problem_all
+from frequensolve.imaging.property_mesh import PropertyMesh as PropertyMesh
 from frequensolve.imaging.regularization import *  # noqa: F403
 from frequensolve.imaging.regularization import __all__ as _regularization_all
 from frequensolve.imaging.results import *  # noqa: F403
@@ -37,6 +38,7 @@ from frequensolve.imaging.workflows import *  # noqa: F403
 from frequensolve.imaging.workflows import __all__ as _workflows_all
 
 __all__ = unique_exports(
+    ["PropertyMesh"],
     _controls_all,
     _data_all,
     _misfit_all,

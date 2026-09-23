@@ -196,6 +196,18 @@ def unpack_support_mask(packed: Any, size: int) -> np.ndarray:
     return np.unpackbits(data, bitorder="little")[:size].astype(bool)
 
 
+def _normalize_control_spaces(blocks, identities, key_fn):
+    result = {}
+    for name, identity in identities.items():
+        key = key_fn(name)
+        if key not in blocks:
+            raise ValueError(f"control space names unknown block {key!r}")
+        if key in result or not isinstance(identity, str) or not identity.strip():
+            raise ValueError(f"invalid or duplicate control space identity for {key!r}")
+        result[key] = identity.rstrip(" \0")
+    return result
+
+
 def _normalize_support(
     blocks: Mapping[str, np.ndarray],
     support: Mapping[str, Any],
@@ -328,6 +340,7 @@ class ControlVectorFile:
     support: Dict[str, np.ndarray] = field(default_factory=dict)
     support_measure: Dict[str, np.ndarray] = field(default_factory=dict)
     support_min_support: Optional[float] = None
+    control_spaces: Dict[str, str] = field(default_factory=dict)
 
     def _block_key(self, name: str) -> str:
         key = _validate_block_name(name)
@@ -341,6 +354,9 @@ class ControlVectorFile:
                 raise ValueError(f"duplicate control block {key!r}")
             ordered[key] = _real_vector(_interleave(values), f"block {key!r}")
         self.blocks = ordered
+        self.control_spaces = _normalize_control_spaces(
+            self.blocks, self.control_spaces, self._block_key
+        )
         self.support, self.support_measure = _normalize_support(
             self.blocks, self.support, self.support_measure, self._block_key
         )
@@ -450,6 +466,8 @@ class ControlVectorFile:
             controls = h5.create_group("controls")
             for name, values in self.blocks.items():
                 controls.create_dataset(name, data=values, dtype=np.float64)
+            for name, identity in self.control_spaces.items():
+                _write_string(h5, "control_spaces/" + self._block_key(name), identity)
             if not self.native:
                 _write_string(h5, "schema", CONTROL_VECTOR_SCHEMA)
                 _write_string(h5, "packing", REAL_INTERLEAVED)
@@ -501,6 +519,10 @@ class ControlVectorFile:
                     None if native else _read_string(h5, "control_registry_fingerprint")
                 ),
                 native=native,
+                control_spaces={
+                    str(n): _read_string(h5["control_spaces"], n)
+                    for n in h5.get("control_spaces", {})
+                },
                 support=support,
                 support_measure=measure,
                 support_min_support=min_support,
@@ -605,6 +627,7 @@ class ControlStateFile:
     support_min_support: Optional[float] = None
     scaling: Dict[str, float] = field(default_factory=dict)
     scaling_units: Dict[str, str] = field(default_factory=dict)
+    control_spaces: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         ordered: Dict[str, np.ndarray] = {}
@@ -614,6 +637,9 @@ class ControlStateFile:
                 raise ValueError(f"duplicate control block {key!r}")
             ordered[key] = _real_vector(_interleave(values), f"block {key!r}")
         self.blocks = ordered
+        self.control_spaces = _normalize_control_spaces(
+            self.blocks, self.control_spaces, qualified_block_name
+        )
         self.support, self.support_measure = _normalize_support(
             self.blocks, self.support, self.support_measure, qualified_block_name
         )
@@ -654,6 +680,11 @@ class ControlStateFile:
         keys = [qualified_block_name(name) for name in names]
         return ControlVectorFile(
             {key: self[key] for key in keys},
+            control_spaces={
+                key: self.control_spaces[key]
+                for key in keys
+                if key in self.control_spaces
+            },
             support={key: self.support[key] for key in keys if key in self.support},
             support_measure={
                 key: self.support_measure[key]
@@ -673,6 +704,12 @@ class ControlStateFile:
                 raise ValueError(f"vector block {key!r} is not in the state")
             if values.size != blocks[key].size:
                 raise ValueError(f"vector block {key!r} has the wrong size")
+            identity = vector.control_spaces.get(name)
+            if identity and key in self.control_spaces:
+                if identity != self.control_spaces[key]:
+                    raise ValueError(
+                        f"vector block {key!r} has a different control basis"
+                    )
             blocks[key] = values
         return ControlStateFile(
             blocks,
@@ -681,6 +718,7 @@ class ControlStateFile:
             support_min_support=self.support_min_support,
             scaling=dict(self.scaling),
             scaling_units=dict(self.scaling_units),
+            control_spaces=dict(self.control_spaces),
         )
 
     def write(self, path: Union[str, Path]) -> Path:
@@ -694,6 +732,10 @@ class ControlStateFile:
             controls = h5.create_group("controls")
             for name, values in self.blocks.items():
                 controls.create_dataset(name, data=values, dtype=np.float64)
+            for name, identity in self.control_spaces.items():
+                _write_string(
+                    h5, "control_spaces/" + qualified_block_name(name), identity
+                )
             _write_support_datasets(
                 h5, self.support, self.support_measure, self.support_min_support
             )
@@ -723,6 +765,10 @@ class ControlStateFile:
             blocks = _read_control_blocks(h5, path)
             support, measure, min_support = _read_support_datasets(h5, blocks, path)
             scaling, units = _read_scaling_datasets(h5, blocks, path)
+            identities = {
+                str(n): _read_string(h5["control_spaces"], n)
+                for n in h5.get("control_spaces", {})
+            }
         return cls(
             blocks,
             support=support,
@@ -730,6 +776,7 @@ class ControlStateFile:
             support_min_support=min_support,
             scaling=scaling,
             scaling_units=units,
+            control_spaces=identities,
         )
 
 
