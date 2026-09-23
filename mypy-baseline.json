@@ -31,8 +31,18 @@
       "file": "src/frequensolve/commands/site.py"
     },
     {
+      "code": "arg-type",
+      "count": 1,
+      "file": "src/frequensolve/imaging/_artifacts.py"
+    },
+    {
+      "code": "misc",
+      "count": 1,
+      "file": "src/frequensolve/imaging/_artifacts.py"
+    },
+    {
       "code": "no-untyped-def",
-      "count": 4,
+      "count": 5,
       "file": "src/frequensolve/imaging/_artifacts.py"
     },
     {
@@ -124,6 +134,16 @@
       "code": "union-attr",
       "count": 3,
       "file": "src/frequensolve/imaging/misfit.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 2,
+      "file": "src/frequensolve/imaging/property_mesh.py"
+    },
+    {
+      "code": "var-annotated",
+      "count": 2,
+      "file": "src/frequensolve/imaging/property_mesh.py"
     },
     {
       "code": "assignment",
@@ -249,6 +269,11 @@
       "code": "no-untyped-def",
       "count": 8,
       "file": "src/frequensolve/model/layered/authoring.py"
+    },
+    {
+      "code": "no-untyped-def",
+      "count": 3,
+      "file": "src/frequensolve/model/blend.py"
     },
     {
       "code": "arg-type",
@@ -512,7 +537,7 @@
     },
     {
       "code": "no-untyped-def",
-      "count": 25,
+      "count": 27,
       "file": "src/frequensolve/plotting/vtu.py"
     },
     {
@@ -1067,7 +1092,7 @@
     },
     {
       "code": "assignment",
-      "count": 10,
+      "count": 11,
       "file": "src/frequensolve/simulation/outputs.py"
     },
     {
@@ -1082,7 +1107,7 @@
     },
     {
       "code": "no-untyped-def",
-      "count": 30,
+      "count": 31,
       "file": "src/frequensolve/simulation/outputs.py"
     },
     {
