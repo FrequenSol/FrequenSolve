@@ -128,13 +128,19 @@ class JobRemoteMixin:
         return file
 
     def save_for_remote(
-        self, site: str, remote_project: Union[Path, str]
+        self,
+        site: str,
+        remote_project: Union[Path, str],
+        *,
+        include_job_id: bool = True,
     ) -> tuple[Path, Path]:
         """Stage a remote job JSON without replacing the local definition.
 
         Args:
             site: Site name used to choose the local staging directory.
             remote_project: Project root visible on the remote site.
+            include_job_id: Include the previous execution id as descriptor metadata.
+                Disable when the transport owns immutable run identity separately.
 
         Returns:
             Tuple ``(staged_file, remote_job_file)`` where ``staged_file`` is
@@ -166,9 +172,15 @@ class JobRemoteMixin:
             payload_name="job JSON",
         )
 
+        if not include_job_id:
+            data.pop("job_id", None)
         stage_dir = self._result_path / "_fs_run" / "remote" / site
         staged_file = stage_dir / Path(local_file).name
-        self._write_json_file(staged_file, data)
+        if include_job_id:
+            self._write_json_file(staged_file, data)
+        else:
+            staged_file.parent.mkdir(parents=True, exist_ok=True)
+            staged_file.write_text(json.dumps(data, sort_keys=True, indent=3))
         self._write_staged_provenance(
             site,
             {

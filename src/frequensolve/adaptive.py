@@ -121,6 +121,7 @@ def render_allocation(
     mpi: str,
     mpi_args: list[str],
     task_count: int,
+    task_indices: list[int] | None = None,
     imaging: bool = False,
     pack: bool = True,
     fresh: bool = True,
@@ -138,6 +139,19 @@ def render_allocation(
 
     if type(task_count) is not int or task_count < 1:
         raise ValueError("Adaptive sweep requires a positive task count")
+    selected = (
+        list(range(1, task_count + 1)) if task_indices is None else list(task_indices)
+    )
+    if (
+        not selected
+        or len(set(selected)) != len(selected)
+        or any(
+            type(task) is not int or not 1 <= task <= task_count for task in selected
+        )
+    ):
+        raise ValueError(
+            "Adaptive task indices must be a nonempty unique subset of the job"
+        )
     ranks = pool.nodes * pool.ranks_per_node
     # Native initialization writes sizing beside the authored job descriptor.
     # Diagnostic logs can live elsewhere under an immutable run output prefix.
@@ -152,7 +166,7 @@ def render_allocation(
         "omp_threads": pool.threads_per_rank,
         "mem_per_rank_gib": pool.memory_per_rank_gib,
         "job_task_count": task_count,
-        "task_indices": list(range(1, task_count + 1)),
+        "task_indices": selected,
         "skip_sizing": task_count == 1,
         "min_ranks": 1,
         "round_to": 1,
@@ -180,7 +194,7 @@ def render_allocation(
         n_procs=ranks,
         init_ranks=ranks,
         n_threads=pool.threads_per_rank,
-        n_tasks=task_count,
+        n_tasks=len(selected),
         n_job_tasks=task_count,
         executable_shell=shlex.quote(executable),
         fresh=fresh,

@@ -312,6 +312,7 @@ class GraphQLClient:
         job_name: Optional[str] = None,
         send_simulation_status_email: Optional[bool] = None,
         fresh: bool = False,
+        retry_of: Optional[str] = None,
         project_name: Optional[str] = None,
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
@@ -339,6 +340,14 @@ class GraphQLClient:
                 }
             }
         """
+        if retry_of is not None:
+            # Ordinary submissions remain compatible with backends predating retries.
+            mutation = mutation.replace(
+                "$forceRun: Boolean", "$forceRun: Boolean, $retryOfSimulationId: String"
+            ).replace(
+                "forceRun: $forceRun)",
+                "forceRun: $forceRun, retryOfSimulationId: $retryOfSimulationId)",
+            )
         variables = {
             "jobFileS3Key": job_file_s3_key,
             "jobName": job_name,
@@ -354,6 +363,7 @@ class GraphQLClient:
                 else None
             ),
             "forceRun": fresh,
+            "retryOfSimulationId": retry_of,
         }
         result = self.execute(
             mutation,
