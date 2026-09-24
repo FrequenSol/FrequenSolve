@@ -436,7 +436,10 @@ class _OpenSSHControlSFTP:
             # Match OpenSSH's missing-file diagnostics to Paramiko's exception.
             if any(
                 (line.startswith('File "') and line.endswith('" not found.'))
-                or line.endswith(": No such file or directory")
+                or (
+                    line.startswith(("stat remote:", "remote open:"))
+                    and line.endswith(": No such file or directory")
+                )
                 for line in detail.splitlines()
             ):
                 raise FileNotFoundError(detail)
