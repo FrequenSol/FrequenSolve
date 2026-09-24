@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -123,6 +124,101 @@ def _read_task_solver_convergence(
     except json.JSONDecodeError:
         return result_path, None
     return result_path, BaseJob.solver_convergence_summary(result)
+
+
+_OPERATION_STEP_NAMES = {
+    MESH_TASK_ID: "init",
+    SMOOTH_TASK_ID: "smooth",
+    PACK_TASK_ID: "pack",
+}
+_FAILURE_REASON_LIMIT = 300
+_LOG_TAIL_BYTES = 64 * 1024
+_LOG_ERROR_LINE = re.compile(r"^\s*(?:Error|Fortran runtime error)\s*:\s*(\S.*)$")
+
+
+def _compact_reason(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) > _FAILURE_REASON_LIMIT:
+        text = text[: _FAILURE_REASON_LIMIT - 3].rstrip() + "..."
+    return text
+
+
+def _step_run_dir(job_file: Union[str, Path], task_id: int) -> Optional[Path]:
+    """Return the solver run directory where one step writes ``error.json``."""
+
+    result_path = _job_result_path(job_file)
+    if result_path is None:
+        return None
+    if task_id >= 0:
+        return result_path / "_fs_run" / "tasks" / f"task_{task_id + 1:06d}"
+    name = _OPERATION_STEP_NAMES.get(task_id)
+    if name is None:
+        return None
+    return result_path / "_fs_run" / "operations" / name
+
+
+def _read_step_error_json(
+    job_file: Union[str, Path], task_id: int, *, not_before: float
+) -> Optional[str]:
+    run_dir = _step_run_dir(job_file, task_id)
+    if run_dir is None:
+        return None
+    error_path = run_dir / "error.json"
+    try:
+        # A diagnostic left by an earlier attempt must not explain this one;
+        # allow for filesystems that store whole-second mtimes.
+        if error_path.stat().st_mtime < not_before - 1.0:
+            return None
+        data = json.loads(error_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    message = str(data.get("message") or "").strip()
+    return message or None
+
+
+def _read_log_error_line(log_file: Optional[str]) -> Optional[str]:
+    """Return the last solver ``Error:`` line from the tail of a step log."""
+
+    if not log_file:
+        return None
+    try:
+        with open(log_file, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - _LOG_TAIL_BYTES))
+            tail = stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        match = _LOG_ERROR_LINE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _step_failure_reason(
+    job_file: Union[str, Path],
+    task_id: int,
+    log_file: Optional[str],
+    *,
+    not_before: float,
+) -> Optional[str]:
+    """Return the solver's compact reason for a failed step, if it left one."""
+
+    reason = _read_step_error_json(
+        job_file, task_id, not_before=not_before
+    ) or _read_log_error_line(log_file)
+    return _compact_reason(reason) if reason else None
+
+
+def _exit_description(return_code: int) -> str:
+    if return_code < 0:
+        try:
+            return f"solver terminated by {signal.Signals(-return_code).name}"
+        except ValueError:
+            pass
+    return f"solver exited with status {return_code}"
 
 
 def _job_task_frequency(job_file: Union[str, Path], task_id: int) -> Optional[complex]:
@@ -280,6 +376,44 @@ def _task_result_successful(result: Mapping[str, Any]) -> bool:
     return _local_task_state(result.get("status")) == "successful"
 
 
+def _step_failed_message(label: str, result: Optional[Mapping[str, Any]]) -> str:
+    """Return ``label`` with the step's reason and log when they are known."""
+
+    if not result:
+        return label
+    message = label
+    if result.get("error"):
+        message = f"{message}: {result['error']}"
+    if result.get("stdout"):
+        message = f"{message}; log: {result['stdout']}"
+    return message
+
+
+def _failed_tasks_message(
+    failed_results: Iterable[Mapping[str, Any]], *, limit: int = 5
+) -> str:
+    """Name failed frequency tasks (one-based) and their reported errors."""
+
+    failed = list(failed_results)
+    parts = []
+    for result in failed[:limit]:
+        task_id = result.get("task_id")
+        label = (
+            f"task {task_id + 1}"
+            if isinstance(task_id, int) and task_id >= 0
+            else "task ?"
+        )
+        error = result.get("error")
+        parts.append(f"{label} ({error})" if error else label)
+    if len(failed) > limit:
+        parts.append(f"{len(failed) - limit} more")
+    message = "failed tasks: " + ", ".join(parts)
+    logs = next((result["stdout"] for result in failed if result.get("stdout")), None)
+    if logs:
+        message = f"{message}; logs: {os.path.dirname(logs)}"
+    return message
+
+
 def _job_requires_postprocess(job: Any) -> bool:
     """Return a job's optional frequency-postprocess capability."""
 
@@ -303,29 +437,69 @@ def _image_jobs(job: Any) -> tuple[List[Any], bool]:
     return jobs, False
 
 
+FutureResultCache = Dict[int, tuple[bool, Dict[str, Any]]]
+
+
+def _resolve_future(
+    index: int, future: Future, cache: Optional[FutureResultCache] = None
+) -> tuple[bool, Dict[str, Any]]:
+    """Return ``(ok, payload)`` for a terminal future, gathering it at most once."""
+
+    if cache is not None and index in cache:
+        return cache[index]
+    resolved: tuple[bool, Dict[str, Any]]
+    try:
+        result = future.result()
+    except Exception as exc:
+        resolved = (
+            False,
+            {
+                "future_index": index,
+                "status": getattr(future, "status", None),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+    else:
+        if isinstance(result, Mapping):
+            resolved = (True, dict(result))
+        else:
+            resolved = (True, {"status": "success", "result": result})
+    if cache is not None:
+        cache[index] = resolved
+    return resolved
+
+
 def _collect_future_results(
-    futures: Iterable[Future],
+    futures: Iterable[Future], cache: Optional[FutureResultCache] = None
 ) -> tuple[List[Mapping[str, Any]], List[Dict[str, Any]]]:
     results: List[Mapping[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     for index, future in enumerate(futures):
-        try:
-            result = future.result()
-        except Exception as exc:
-            errors.append(
-                {
-                    "future_index": index,
-                    "status": getattr(future, "status", None),
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                }
-            )
-        else:
-            if isinstance(result, Mapping):
-                results.append(dict(result))
-            else:
-                results.append({"status": "success", "result": result})
+        ok, payload = _resolve_future(index, future, cache)
+        (results if ok else errors).append(dict(payload))
     return results, errors
+
+
+def _future_task_states(
+    futures: Iterable[Future], cache: FutureResultCache
+) -> List[str]:
+    """Return task states, reading each finished future's task result.
+
+    Dask reports a future ``finished`` whenever ``run_task`` returned, including
+    when the returned record describes a failed solver task.
+    """
+
+    states = []
+    for index, future in enumerate(futures):
+        state = _local_task_state(getattr(future, "status", "unknown"))
+        if state in {"successful", "failed"}:
+            ok, payload = _resolve_future(index, future, cache)
+            state = (
+                "successful" if ok and _task_result_successful(payload) else "failed"
+            )
+        states.append(state)
+    return states
 
 
 def _local_task_status(statuses: Iterable[Any]) -> Dict[str, int]:
@@ -462,6 +636,7 @@ def run_task(
     else:
         stdout_file = None
     started = time.perf_counter()
+    started_at = time.time()
     manifest_path: Optional[Path] = None
     solver_convergence: Optional[Dict[str, object]] = None
     task_result: Optional[TaskResult] = None
@@ -518,6 +693,11 @@ def run_task(
                     f"Sauce task reported {task_result.state} status "
                     f"with code {task_result.code}"
                 )
+                diagnostic = _step_failure_reason(
+                    job_file, task_id, stdout_file, not_before=started_at
+                )
+                if diagnostic:
+                    result["error"] += f": {diagnostic}"
             else:
                 assert solver_convergence is not None
                 residual = solver_convergence.get(
@@ -537,11 +717,25 @@ def run_task(
             manifest_path, solver_convergence = _read_task_solver_convergence(
                 job_file, task_id
             )
+        if isinstance(e, subprocess.CalledProcessError):
+            error = _exit_description(e.returncode)
+            if task_result is not None and not task_result.successful:
+                error += (
+                    f"; Sauce task reported {task_result.state} status "
+                    f"with code {task_result.code}"
+                )
+            diagnostic = _step_failure_reason(
+                job_file, task_id, stdout_file, not_before=started_at
+            )
+            if diagnostic:
+                error += f": {diagnostic}"
+        else:
+            error = str(e)
         result = {
             "task_id": task_id,
             "status": "error",
             "complete": task_result is not None,
-            "error": str(e),
+            "error": error,
             "duration_seconds": time.perf_counter() - started,
             "n_ranks": n_ranks,
             "threads_per_rank": threads_per_rank,
@@ -890,7 +1084,9 @@ class LocalSite(BaseSite):
                     state="failed",
                     return_code=1,
                     job_id=run.id,
-                    message="Solver postprocess task failed",
+                    message=_step_failed_message(
+                        "Solver postprocess task failed", smooth_result
+                    ),
                     raw=raw,
                 )
             return JobStatus(
@@ -913,7 +1109,10 @@ class LocalSite(BaseSite):
                 state="failed",
                 return_code=1,
                 job_id=run.id,
-                message="Solver postprocess task failed",
+                message=_step_failed_message(
+                    "Solver postprocess task failed",
+                    raw.get("smooth") or run.backend.get("smooth_error"),
+                ),
                 raw=raw,
             )
         return JobStatus(
@@ -931,9 +1130,10 @@ class LocalSite(BaseSite):
                 return self._poll_local_smooth_task(run, smooth_future)
             return JobStatus(state="skipped", return_code=0, job_id=run.id)
         statuses = [getattr(future, "status", "unknown") for future in futures]
-        states = [_local_task_state(status) for status in statuses]
+        future_cache = run.backend.setdefault("future_results", {})
+        states = _future_task_states(futures, future_cache)
         task_status = _merge_task_status_with_plan(
-            _local_task_status(statuses),
+            _local_task_status(states),
             run.backend.get("task_plan"),
             job=run.job,
         )
@@ -941,8 +1141,31 @@ class LocalSite(BaseSite):
         if all(state in terminal for state in states) and _job_requires_postprocess(
             run.job
         ):
-            task_results, task_result_errors = _collect_future_results(futures)
+            task_results, task_result_errors = _collect_future_results(
+                futures, future_cache
+            )
             run.backend["task_results"] = task_results
+            failed_tasks = [
+                result for result in task_results if not _task_result_successful(result)
+            ]
+            if failed_tasks and not task_result_errors:
+                return JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message=(
+                        f"{_local_task_status_message(task_status)}; "
+                        f"{_failed_tasks_message(failed_tasks)}; "
+                        "solver postprocess not started"
+                    ),
+                    raw={
+                        "statuses": statuses,
+                        "task_states": states,
+                        "task_status": task_status,
+                        "tasks": task_results,
+                        "errors": failed_tasks,
+                    },
+                )
             if task_result_errors:
                 run.backend["task_result_errors"] = task_result_errors
                 raw = {
@@ -973,7 +1196,9 @@ class LocalSite(BaseSite):
         if all(state in terminal for state in states) and any(
             state == "failed" for state in states
         ):
-            task_results, task_result_errors = _collect_future_results(futures)
+            task_results, task_result_errors = _collect_future_results(
+                futures, future_cache
+            )
             run.backend["task_results"] = task_results
             if task_result_errors:
                 run.backend["task_result_errors"] = task_result_errors
@@ -995,7 +1220,9 @@ class LocalSite(BaseSite):
                 },
             )
         if all(state == "successful" for state in states):
-            task_results, task_result_errors = _collect_future_results(futures)
+            task_results, task_result_errors = _collect_future_results(
+                futures, future_cache
+            )
             run.backend["task_results"] = task_results
             if task_result_errors:
                 run.backend["task_result_errors"] = task_result_errors
@@ -1078,7 +1305,9 @@ class LocalSite(BaseSite):
                     run.job.write_run_state(status="timeout")
                     return run._make_result(status)
 
-                task_results, task_result_errors = _collect_future_results(futures)
+                task_results, task_result_errors = _collect_future_results(
+                    futures, run.backend.setdefault("future_results", {})
+                )
                 run.backend["task_results"] = task_results
                 if task_result_errors:
                     run.backend["task_result_errors"] = task_result_errors
@@ -1130,6 +1359,30 @@ class LocalSite(BaseSite):
             ]
 
             smooth_result = None
+            if _job_requires_postprocess(run.job) and task_errors:
+                # The postprocess consumes every committed frequency product;
+                # running it after a failed task only masks the task failure.
+                run.job.write_run_state(
+                    status="failed", tasks=state_tasks, errors=task_errors
+                )
+                task_summary = _job_task_summary(run.job, state_tasks)
+                status = JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message=(
+                        f"{_task_summary_message(task_summary)}; "
+                        f"{_failed_tasks_message(task_errors)}; "
+                        "solver postprocess not started"
+                    ),
+                    raw={
+                        "tasks": task_results,
+                        "task_summary": task_summary,
+                        "task_status": _summary_task_status(task_summary),
+                        "errors": task_errors,
+                    },
+                )
+                return run._make_result(status)
             if _job_requires_postprocess(run.job):
                 smooth_future = self._submit_local_smooth_task(run, all_futures)
                 cached_smooth_result = run.backend.get("smooth_result")
@@ -1147,7 +1400,9 @@ class LocalSite(BaseSite):
                         state="failed",
                         return_code=1,
                         job_id=run.id,
-                        message="Solver postprocess task failed",
+                        message=_step_failed_message(
+                            "Solver postprocess task failed", smooth_result
+                        ),
                         raw={"smooth": smooth_result, "tasks": task_results},
                     )
                     run.job.write_run_state(
@@ -1227,7 +1482,9 @@ class LocalSite(BaseSite):
                         state="failed",
                         return_code=1,
                         job_id=run.id,
-                        message="Packing task failed",
+                        message=_step_failed_message(
+                            "Packing task failed", pack_result
+                        ),
                         raw=raw,
                     )
                     run.job.write_run_state(
@@ -1353,7 +1610,9 @@ class LocalSite(BaseSite):
                     state="failed",
                     return_code=1,
                     job_id=run.id,
-                    message="Solver postprocess task failed",
+                    message=_step_failed_message(
+                        "Solver postprocess task failed", smooth_result
+                    ),
                     raw={"smooth": smooth_result},
                 )
                 run.job.write_run_state(

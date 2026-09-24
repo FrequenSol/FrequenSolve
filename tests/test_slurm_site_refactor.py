@@ -3,6 +3,7 @@ import inspect
 import json
 import logging
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -1262,6 +1263,188 @@ def test_adaptive_slurm_mpi_health_failure_is_typed_and_stops_before_sizing(
     assert status["phase"] == "mpi_startup"
     assert status["mpi_health_check"] == health
     assert not (output / "init.log").exists()
+
+
+_SWEEP_SOLVER = """\
+#!{python}
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+job = json.loads(Path(args[args.index("--job") + 1]).read_text())
+run_root = Path(job["project_path"], job["result_path"], "_fs_run")
+if "--task" in args:
+    step, run_dir = "task", run_root / "tasks" / "task_{{:06d}}".format(
+        int(args[args.index("--task") + 1])
+    )
+elif "--smooth" in args:
+    step, run_dir = "smooth", run_root / "operations" / "smooth"
+    Path(job["project_path"], "smooth-ran").touch()
+elif "--pack" in args:
+    step, run_dir = "pack", run_root / "operations" / "pack"
+else:
+    step, run_dir = "init", run_root / "operations" / "init"
+if step != os.environ["FAKE_FAIL_STEP"]:
+    sys.exit(0)
+run_dir.mkdir(parents=True, exist_ok=True)
+(run_dir / "error.json").write_text(json.dumps({{
+    "schema": "fs-error-1",
+    "message": step + " cannot continue: " + os.environ["FAKE_REASON"],
+}}))
+print("Error: " + step + " log line")
+print("ERROR STOP Job failed")
+sys.exit(1)
+"""
+
+
+def _run_adaptive_sweep(monkeypatch, tmp_path, *, fail_step, postprocess_job):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    solver = tmp_path / "fake-solver"
+    solver.write_text(_SWEEP_SOLVER.format(python=sys.executable), encoding="utf-8")
+    solver.chmod(0o755)
+    launcher = tmp_path / "srun"
+    launcher.write_text(
+        '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != "$FAKE_SOLVER" ]; do shift; done\n'
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    job_file = tmp_path / "job.json"
+    job_file.write_text(
+        json.dumps({"project_path": str(tmp_path), "result_path": "results"})
+    )
+    monkeypatch.setenv("FAKE_SOLVER", str(solver))
+    monkeypatch.setenv("FAKE_FAIL_STEP", fail_step)
+    monkeypatch.setenv("FAKE_REASON", "observed data missing")
+    config = SlurmSiteConfig(
+        hostname="login.example.edu",
+        queue="debug",
+        mpi_wrapper=str(launcher),
+        # Non-empty so macOS bash 3.2 accepts "${mpi_args[@]}" under set -u.
+        launcher_args=("--wait=30",),
+        max_nodes=1,
+        cores_per_node=2,
+        memory_per_node=1024,
+    )
+    site = DummySlurmSite("project/run", config=config)
+    site._executable = str(solver)
+    scheduler_path = (
+        Path(hpc.__file__).parent / "templates" / "sweep" / "adaptive_scheduler.py"
+    )
+    monkeypatch.setattr(site, "_adaptive_scheduler_remote_path", lambda: scheduler_path)
+    output = tmp_path / "logs"
+    script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        ranks_per_node=1,
+        stdout=str(output),
+        duration="00-00:10:00",
+        run_path=str(tmp_path),
+        postprocess_job=postprocess_job,
+        pack=False,
+        launch_delay_seconds=0,
+    )
+    sweep = tmp_path / "sweep.sh"
+    sweep.write_text(script, encoding="utf-8")
+
+    completed = subprocess.run(
+        ["bash", str(sweep), str(job_file)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    status = json.loads((output / "scheduler_status.json").read_text())
+    return completed, status
+
+
+def test_adaptive_sweep_records_init_failure_reason(monkeypatch, tmp_path):
+    completed, status = _run_adaptive_sweep(
+        monkeypatch, tmp_path, fail_step="init", postprocess_job=False
+    )
+
+    assert completed.returncode == 1
+    assert status["state"] == "failed"
+    assert status["phase"] == "init"
+    assert status["abort_reason"] == (
+        "Mesh preparation failed: solver exited with status 1: "
+        "init cannot continue: observed data missing; see init.log"
+    )
+
+
+def test_adaptive_sweep_stops_postprocess_after_failed_task_and_names_it(
+    monkeypatch, tmp_path
+):
+    completed, status = _run_adaptive_sweep(
+        monkeypatch, tmp_path, fail_step="task", postprocess_job=True
+    )
+
+    assert completed.returncode == 1
+    assert not (tmp_path / "smooth-ran").exists()
+    assert status["state"] == "failed"
+    assert status["phase"] == "tasks"
+    assert status["failed_tasks"] == [1]
+    assert status["failed_reasons"] == {
+        "1": "solver exited with status 1: task cannot continue: observed data missing"
+    }
+    assert status["abort_reason"] == (
+        "1 of 1 tasks failed (tasks 1); solver postprocess not started"
+    )
+
+
+def test_adaptive_sweep_records_postprocess_failure_reason(monkeypatch, tmp_path):
+    completed, status = _run_adaptive_sweep(
+        monkeypatch, tmp_path, fail_step="smooth", postprocess_job=True
+    )
+
+    assert completed.returncode == 1
+    assert (tmp_path / "smooth-ran").exists()
+    assert status["state"] == "failed"
+    assert status["phase"] == "smooth"
+    assert status["abort_reason"] == (
+        "Solver postprocess failed: solver exited with status 1: "
+        "smooth cannot continue: observed data missing; see smooth.log"
+    )
+
+
+def test_slurm_batch_poll_names_failed_task_reasons(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    monkeypatch.setattr(site, "update_status", lambda job_id: "failed")
+    monkeypatch.setattr(
+        site,
+        "_read_scheduler_status",
+        lambda run: {
+            "state": "failed",
+            "phase": "tasks",
+            "abort_reason": "2 of 3 tasks failed (tasks 1, 3); "
+            "solver postprocess not started",
+            "failed_reasons": {
+                "1": "solver exited with status 1: needs observed data",
+                "3": "solver terminated by SIGKILL",
+            },
+            "total": 3,
+            "successful": 1,
+            "failed": 2,
+            "running": 0,
+            "pending": 0,
+        },
+    )
+
+    status = site._poll_run(RunHandle(site=site, job=DummyJob(), id="77", mode="batch"))
+
+    assert status.state == "failed"
+    assert status.message == (
+        "Adaptive scheduler reported failed: 2 of 3 tasks failed (tasks 1, 3); "
+        "solver postprocess not started; failed tasks: "
+        "task 1 (solver exited with status 1: needs observed data), "
+        "task 3 (solver terminated by SIGKILL); "
+        "tasks: 1 successful, 2 failed, 0 running, 0 pending, 3 total"
+    )
+    assert status.raw["scheduler_liveness"]["phase"] == "tasks"
 
 
 def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):

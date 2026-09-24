@@ -8,21 +8,45 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import time
 from collections import deque
 from pathlib import Path
 
+_FAILURE_REASON_LIMIT = 300
+_LOG_TAIL_BYTES = 64 * 1024
+_LOG_ERROR_LINE = re.compile(r"^\s*(?:Error|Fortran runtime error)\s*:\s*(\S.*)$")
+# error.json older than the step (beyond clock skew) belongs to an earlier run.
+_STALE_ERROR_SLACK_SECONDS = 5.0
+_MAX_RECORDED_REASONS = 10
+_STEP_LABELS = {
+    "mpi_startup": "MPI startup check",
+    "init": "Mesh preparation",
+    "tasks": "Adaptive scheduler",
+    "smooth": "Solver postprocess",
+    "pack": "Packing",
+}
+
 
 def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--validate-sizing", nargs=2, metavar=("PATH", "TASKS"))
+    parser.add_argument("--record-failure", action="store_true")
     parser.add_argument("--config")
     parser.add_argument("--job")
     parser.add_argument("--output")
     parser.add_argument("--status")
+    parser.add_argument("--tasks", type=int, default=0)
+    parser.add_argument("--step", default="")
+    parser.add_argument("--log", default="")
+    parser.add_argument("--return-code", type=int, default=1)
+    parser.add_argument("--not-before", type=float, default=0.0)
     args = parser.parse_args()
-    if args.validate_sizing is None:
+    if args.record_failure:
+        if args.status is None:
+            parser.error("--record-failure requires --status")
+    elif args.validate_sizing is None:
         missing = [
             name
             for name in ("config", "job", "output", "status")
@@ -84,6 +108,168 @@ def validate_sizing_checkpoint(path: str, expected_tasks: int):
     return _load_task_memory_file(path, expected_tasks=expected_tasks)
 
 
+def _job_result_path(job_file):
+    try:
+        job_file = Path(job_file)
+        with open(job_file) as file:
+            data = json.load(file)
+    except Exception:
+        return None
+    result_path = data.get("result_path") if isinstance(data, dict) else None
+    if not result_path:
+        return None
+    path = Path(str(result_path))
+    if path.is_absolute():
+        return path
+    project_path = data.get("project_path")
+    if project_path:
+        return Path(str(project_path)) / path
+    return job_file.parent / path
+
+
+def _step_run_dir(job_file, step):
+    """Return the solver run directory where one step writes ``error.json``."""
+
+    result_path = _job_result_path(job_file)
+    if result_path is None:
+        return None
+    if isinstance(step, int):
+        return result_path / "_fs_run" / "tasks" / f"task_{step:06d}"
+    if step in {"init", "smooth", "pack"}:
+        return result_path / "_fs_run" / "operations" / step
+    return None
+
+
+def _read_error_json(run_dir, not_before: float):
+    if run_dir is None:
+        return None
+    path = run_dir / "error.json"
+    try:
+        if path.stat().st_mtime < not_before - _STALE_ERROR_SLACK_SECONDS:
+            return None
+        with open(path, encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return str(data.get("message") or "").strip() or None
+
+
+def _read_log_error_line(log_file):
+    """Return the last solver ``Error:`` line from the tail of a step log."""
+
+    if not log_file:
+        return None
+    try:
+        with open(log_file, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - _LOG_TAIL_BYTES))
+            tail = stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        match = _LOG_ERROR_LINE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _compact_reason(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) > _FAILURE_REASON_LIMIT:
+        text = text[: _FAILURE_REASON_LIMIT - 3].rstrip() + "..."
+    return text
+
+
+def _exit_description(return_code: int) -> str:
+    # Shells report a signal death as 128+N; subprocess reports it as -N.
+    signum = -return_code if return_code < 0 else return_code - 128
+    if return_code < 0 or return_code > 128:
+        try:
+            return f"solver terminated by {signal.Signals(signum).name}"
+        except ValueError:
+            pass
+    return f"solver exited with status {return_code}"
+
+
+def step_failure_reason(job_file, step, log_file, return_code: int, *, not_before):
+    """Return a compact reason for one failed solver step.
+
+    Mirrors the local site: the step's ``error.json`` message, else the last
+    ``Error:`` line in its log, after the exit description.
+    """
+
+    detail = _read_error_json(
+        _step_run_dir(job_file, step), not_before
+    ) or _read_log_error_line(log_file)
+    reason = _exit_description(return_code)
+    if detail:
+        reason = f"{reason}: {detail}"
+    return _compact_reason(reason)
+
+
+def _write_json_atomic(path: Path, payload) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with open(temporary, "w") as file:
+        json.dump(payload, file, separators=(",", ":"))
+        file.write("\n")
+    os.replace(temporary, path)
+
+
+def record_step_failure(
+    status_file,
+    *,
+    job_file,
+    n_tasks: int,
+    step: str,
+    log_file: str,
+    return_code: int,
+    not_before: float,
+):
+    """Mark the sweep failed and name the failing step and its reason.
+
+    A reason already recorded by the scheduler or MPI check is kept.
+    """
+
+    status_file = Path(status_file)
+    try:
+        with open(status_file) as file:
+            payload = json.load(file)
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    for key, value in (
+        ("total", n_tasks),
+        ("successful", 0),
+        ("failed", 0),
+        ("running", 0),
+        ("pending", n_tasks),
+        ("complete", 0),
+    ):
+        payload.setdefault(key, value)
+    payload["state"] = "failed"
+    payload["return_code"] = return_code
+    if step:
+        payload.setdefault("phase", step)
+    if not payload.get("abort_reason") and step:
+        label = _STEP_LABELS.get(step, step)
+        if step == "tasks":
+            reason = f"exited with status {return_code}"
+        elif job_file:
+            reason = step_failure_reason(
+                job_file, step, log_file, return_code, not_before=not_before
+            )
+        else:
+            reason = _exit_description(return_code)
+        payload["abort_reason"] = f"{label} failed: {reason}" + (
+            f"; see {Path(log_file).name}" if log_file else ""
+        )
+    payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _write_json_atomic(status_file, payload)
+
+
 def _round_up(value: int, base: int) -> int:
     return value if base <= 1 else int(math.ceil(value / base) * base)
 
@@ -142,6 +328,8 @@ class AdaptiveScheduler:
         if self.failure_tolerance is not None:
             self.failure_tolerance = int(self.failure_tolerance)
         self.sizing_json = str(config.get("sizing_json", "FS_sizing.json"))
+        # A frequency postprocess consumes every task, so any failure is fatal.
+        self.require_all_tasks = bool(config.get("require_all_tasks", False))
         self.launch_delay = float(config.get("launch_delay_seconds", 0.25))
         self.max_ranks_per_task = (
             self.total_ranks
@@ -158,6 +346,8 @@ class AdaptiveScheduler:
         self.running = []
         self.successful_tasks = []
         self.failed_tasks = []
+        self.failed_reasons = {}
+        self.launched_at = {}
         self.free_intervals = [(0, self.total_ranks)]
         if self.mpi_launcher in {"mpiexec", "mpirun"}:
             self.free_intervals = [(0, self.max_ranks_per_task)]
@@ -196,13 +386,13 @@ class AdaptiveScheduler:
             "tolerate_failures": self.failure_tolerance,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if self.failed_reasons:
+            payload["failed_reasons"] = {
+                str(task): reason for task, reason in self.failed_reasons.items()
+            }
         if reason:
             payload["abort_reason"] = reason
-        temporary = self.status_file.with_suffix(self.status_file.suffix + ".tmp")
-        with open(temporary, "w") as file:
-            json.dump(payload, file, separators=(",", ":"))
-            file.write("\n")
-        os.replace(temporary, self.status_file)
+        _write_json_atomic(self.status_file, payload)
 
     def _launch_command(self, task_id: int, offset: int, ranks: int) -> list[str]:
         if self.mpi_launcher == "ibrun":
@@ -238,7 +428,20 @@ class AdaptiveScheduler:
             str(task_id),
         ]
 
+    def _record_task_failure(self, task: int, return_code: int) -> None:
+        reason = step_failure_reason(
+            self.job_file,
+            task,
+            self.output / f"task_{task}.log",
+            return_code,
+            not_before=self.launched_at.get(task, 0.0),
+        )
+        print(f"[scheduler] task={task} failed: {reason}", flush=True)
+        if len(self.failed_reasons) < _MAX_RECORDED_REASONS:
+            self.failed_reasons[task] = reason
+
     def _launch(self, task_id: int, offset: int, ranks: int, memory: float):
+        self.launched_at[task_id] = time.time()
         output = open(self.output / f"task_{task_id}.log", "ab", buffering=0)
         command = self._launch_command(task_id, offset, ranks)
         try:
@@ -396,6 +599,8 @@ class AdaptiveScheduler:
                         self.successful_tasks if return_code == 0 else self.failed_tasks
                     )
                     target.append(task)
+                    if return_code != 0:
+                        self._record_task_failure(task, return_code)
                     self.free_intervals = _free_interval(
                         self.free_intervals, offset, ranks
                     )
@@ -417,12 +622,31 @@ class AdaptiveScheduler:
                 self._write_status("running")
                 time.sleep(1)
 
+        if self.failed_tasks and self.require_all_tasks:
+            failed = ", ".join(str(task) for task in sorted(self.failed_tasks))
+            reason = (
+                f"{len(self.failed_tasks)} of {len(self.task_indices)} tasks failed "
+                f"(tasks {failed}); solver postprocess not started"
+            )
+            self._write_status("failed", reason=reason)
+            raise SystemExit(reason)
         self._write_status("failed" if self.failed_tasks else "complete")
         print("[scheduler] all tasks done", flush=True)
 
 
 def main():
     args = _parse_args()
+    if args.record_failure:
+        record_step_failure(
+            args.status,
+            job_file=args.job,
+            n_tasks=args.tasks,
+            step=args.step,
+            log_file=args.log,
+            return_code=args.return_code,
+            not_before=args.not_before,
+        )
+        return
     if args.validate_sizing is not None:
         path, expected_tasks = args.validate_sizing
         validate_sizing_checkpoint(path, int(expected_tasks))

@@ -1,11 +1,14 @@
 import io
 import json
 import logging
+import os
+import signal
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
+from frequensolve.orchestrator.sites.base import JobStatus, RunFailedError, RunHandle
 from frequensolve.orchestrator.sites.local import LocalSite, run_task
 from frequensolve.orchestrator.sites.local import site as local_module
 from frequensolve.orchestrator.sites.local.dask_logging import (
@@ -1389,6 +1392,334 @@ def test_local_watch_reuses_terminal_poll_results_when_finalizing_imaging(
         "task_id": local_module.SMOOTH_TASK_ID,
         "status": "success",
     }
+
+
+_FAILING_SOLVER = """\
+#!{python}
+import json
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+job_file = Path(args[args.index("--job") + 1])
+job = json.loads(job_file.read_text())
+if "--task" not in args:
+    Path(job["project_path"], "postprocess-ran").touch()
+    sys.exit(0)
+task = int(args[args.index("--task") + 1])
+real, imag = job["f_list"][task - 1]
+task_dir = Path(job["project_path"], job["result_path"], "_fs_run", "tasks")
+task_dir = task_dir / f"task_{{task:06d}}"
+task_dir.mkdir(parents=True, exist_ok=True)
+(task_dir / "result.json").write_text(json.dumps({{
+    "schema": "fs-task-result-2",
+    "partition": {{
+        "task": task,
+        "task_count": len(job["f_list"]),
+        "frequency": {{"real": real, "imag": imag}},
+    }},
+    "fingerprints": {{
+        "job": "sha256:" + "1" * 64,
+        "simulation": "sha256:" + "2" * 64,
+        "outputs": "sha256:" + "3" * 64,
+    }},
+    "status": {{"state": "failed", "code": 1}},
+    "artifacts": [],
+}}))
+(task_dir / "error.json").write_text(json.dumps({{
+    "schema": "fs-error-1",
+    "message": "Objective-term normalization requires observed data: surface",
+}}))
+print("ERROR STOP Job failed")
+sys.exit({exit_code})
+"""
+
+
+def _write_failing_solver(tmp_path, *, exit_code):
+    solver = tmp_path / "fake_solver"
+    solver.write_text(
+        _FAILING_SOLVER.format(python=sys.executable, exit_code=exit_code)
+    )
+    solver.chmod(0o755)
+    return solver
+
+
+def _write_imaging_job_file(tmp_path, n_tasks):
+    job_file = tmp_path / "job.json"
+    job_file.write_text(
+        json.dumps(
+            {
+                "project_path": str(tmp_path),
+                "result_path": "results",
+                "f_list": [[float(task + 2), 0.0] for task in range(n_tasks)],
+            }
+        )
+    )
+    return job_file
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_run_task_names_failed_solver_task_and_its_diagnostic(tmp_path, exit_code):
+    solver = _write_failing_solver(tmp_path, exit_code=exit_code)
+    job_file = _write_imaging_job_file(tmp_path, 1)
+
+    result = run_task(str(job_file), 0, str(solver), dict(os.environ))
+
+    assert result["status"] == "error"
+    assert result["complete"] is True
+    assert result["returncode"] == exit_code
+    assert result["error"] == (
+        ("solver exited with status 1; " if exit_code else "")
+        + "Sauce task reported failed status with code 1: "
+        "Objective-term normalization requires observed data: surface"
+    )
+
+
+@pytest.mark.parametrize("poll_first", [True, False])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_local_imaging_run_fails_on_failed_tasks_without_postprocess(
+    monkeypatch, tmp_path, exit_code, poll_first
+):
+    """Finished Dask futures carrying failed task results must fail the run."""
+
+    site, _closed = make_site(monkeypatch)
+    site.executable = str(_write_failing_solver(tmp_path, exit_code=exit_code))
+    submitted_task_ids = []
+
+    class InlineClient:
+        def submit(self, func, job_file, task_id, *args, resources=None, **kwargs):
+            submitted_task_ids.append(task_id)
+            return DummyFuture(func(job_file, task_id, *args, **kwargs))
+
+    class FakeImagingJob(DummyJob):
+        name = "contracts_kernel_0007"
+
+        def requires_postprocess(self):
+            return True
+
+    site._dask_client = InlineClient()
+    monkeypatch.setattr(site, "_solver_executable", lambda: site.executable)
+    job = FakeImagingJob()
+    job._file = _write_imaging_job_file(tmp_path, 3)
+    job._stdout_path = tmp_path / "logs"
+    futures = [
+        site._dask_client.submit(
+            run_task,
+            str(job._file),
+            task_id,
+            site.executable,
+            dict(os.environ),
+            stdout_dir=str(job._stdout_path),
+        )
+        for task_id in range(3)
+    ]
+    # Dask marks a future finished whenever run_task returned a record.
+    assert {future.status for future in futures} == {"finished"}
+    run = RunHandle(
+        site=site,
+        job=job,
+        id="local:contracts_kernel_0007",
+        poll_interval=0.0,
+        _status_fn=site._poll_local_run,
+        _wait_fn=site._wait_local_run,
+        _finalize_fn=site._finalize_local_run,
+    )
+    run.backend["futures"] = futures
+    run.backend["pack_after_tasks"] = False
+    run.backend["shutdown_on_completion"] = False
+    site._futures.extend(futures)
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+
+    if poll_first:
+        polled = site._poll_local_run(run)
+        assert polled.state == "failed"
+        assert polled.raw["task_status"]["successful"] == 0
+        assert polled.raw["task_status"]["failed"] == 3
+        assert polled.message.startswith(
+            "tasks: 0 successful, 3 failed, 0 running, 0 pending, 3 total"
+        )
+
+    with pytest.raises(RunFailedError) as excinfo:
+        run.wait(check=True)
+
+    assert submitted_task_ids == [0, 1, 2]
+    assert local_module.SMOOTH_TASK_ID not in submitted_task_ids
+    assert "smooth_future" not in run.backend
+    assert not (tmp_path / "postprocess-ran").exists()
+    message = str(excinfo.value)
+    assert "job=contracts_kernel_0007" in message
+    for task in (1, 2, 3):
+        assert f"task {task} (" in message
+    assert "Objective-term normalization requires observed data: surface" in message
+    assert "solver postprocess not started" in message
+    assert "Solver postprocess task failed" not in message
+    assert job.states[-1][0] == "failed"
+    assert len(job.states[-1][1]["errors"]) == 3
+
+
+_STEP_SOLVER = """\
+#!{python}
+import json
+import os
+import signal
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+job = json.loads(Path(args[args.index("--job") + 1]).read_text())
+step = {{"--init-no-size": "init", "--smooth": "smooth", "--pack": "pack"}}
+name = next(step[arg] for arg in args if arg in step)
+run_dir = Path(job["project_path"], job["result_path"], "_fs_run", "operations", name)
+mode = {mode!r}
+if mode == "error_json":
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "error.json").write_text(json.dumps({{
+        "schema": "fs-error-1",
+        "message": name + " step could not read its inputs",
+    }}))
+print("Error: " + name + " step log fallback")
+print("   at: src/fake.f90:1")
+print("ERROR STOP Job failed")
+sys.stdout.flush()
+if mode == "signal":
+    os.kill(os.getpid(), signal.SIGSEGV)
+sys.exit(1)
+"""
+
+
+def _write_step_solver(tmp_path, mode):
+    solver = tmp_path / "fake_step_solver"
+    solver.write_text(_STEP_SOLVER.format(python=sys.executable, mode=mode))
+    solver.chmod(0o755)
+    return solver
+
+
+_OPERATION_STEPS = [
+    (local_module.MESH_TASK_ID, "init"),
+    (local_module.SMOOTH_TASK_ID, "smooth"),
+    (local_module.PACK_TASK_ID, "pack"),
+]
+
+
+@pytest.mark.parametrize(("task_id", "name"), _OPERATION_STEPS)
+def test_run_task_reports_operation_error_json_reason(tmp_path, task_id, name):
+    solver = _write_step_solver(tmp_path, "error_json")
+    job_file = _write_imaging_job_file(tmp_path, 1)
+
+    result = run_task(
+        str(job_file),
+        task_id,
+        str(solver),
+        dict(os.environ),
+        stdout_dir=str(tmp_path / "logs"),
+    )
+
+    assert result["status"] == "error"
+    assert result["error"] == (
+        f"solver exited with status 1: {name} step could not read its inputs"
+    )
+    assert result["stdout"] == str(
+        tmp_path / "logs" / local_module._task_log_name(task_id)
+    )
+
+
+def test_run_task_falls_back_to_log_error_line_and_ignores_stale_error_json(
+    tmp_path,
+):
+    solver = _write_step_solver(tmp_path, "log_only")
+    job_file = _write_imaging_job_file(tmp_path, 1)
+    stale = tmp_path / "results/_fs_run/operations/smooth/error.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text(json.dumps({"message": "stale failure from an earlier run"}))
+    os.utime(stale, (0, 0))
+
+    result = run_task(
+        str(job_file),
+        local_module.SMOOTH_TASK_ID,
+        str(solver),
+        dict(os.environ),
+        stdout_dir=str(tmp_path / "logs"),
+    )
+
+    assert result["error"] == "solver exited with status 1: smooth step log fallback"
+
+
+def test_run_task_names_signal_that_killed_the_solver(tmp_path):
+    solver = _write_step_solver(tmp_path, "signal")
+    job_file = _write_imaging_job_file(tmp_path, 1)
+
+    result = run_task(
+        str(job_file),
+        local_module.PACK_TASK_ID,
+        str(solver),
+        dict(os.environ),
+        stdout_dir=str(tmp_path / "logs"),
+    )
+
+    assert result["returncode"] == -signal.SIGSEGV
+    assert result["error"] == ("solver terminated by SIGSEGV: pack step log fallback")
+
+
+def test_run_task_caps_long_solver_reasons(tmp_path):
+    log = tmp_path / "step.log"
+    log.write_text("noise\nError: " + "x" * 1000 + "\n   at: f.f90:1\n")
+
+    reason = local_module._step_failure_reason(
+        tmp_path / "missing.json", 0, str(log), not_before=0.0
+    )
+
+    assert reason is not None
+    assert len(reason) == local_module._FAILURE_REASON_LIMIT
+    assert reason.endswith("...")
+
+
+@pytest.mark.parametrize("step", ["postprocess", "pack"])
+def test_local_run_failure_names_operation_reason_and_log(monkeypatch, tmp_path, step):
+    site, _closed = make_site(monkeypatch)
+    site.threads_per_worker = 2
+    step_id = (
+        local_module.SMOOTH_TASK_ID
+        if step == "postprocess"
+        else local_module.PACK_TASK_ID
+    )
+    log = str(tmp_path / "logs" / local_module._task_log_name(step_id))
+    reason = "solver exited with status 1: Committed image is unavailable: kernel"
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            return DummyFuture(
+                {"task_id": task_id, "status": "error", "error": reason, "stdout": log}
+            )
+
+    class FakeJob(DummyJob):
+        def requires_postprocess(self):
+            return step == "postprocess"
+
+    site._dask_client = FakeClient()
+    site.executable = "/solver"
+    job = FakeJob()
+    job.trace_outputs_ok = False
+    job._file = tmp_path / "job.json"
+    job._stdout_path = tmp_path / "logs"
+    run = make_run(site, job, [DummyFuture({"task_id": 0, "status": "success"})])
+    run.backend["pack_after_tasks"] = step == "pack"
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+
+    result = site._wait_local_run(run)
+
+    label = (
+        "Solver postprocess task failed"
+        if step == "postprocess"
+        else ("Packing task failed")
+    )
+    assert result.status.state == "failed"
+    assert result.status.message == f"{label}: {reason}; log: {log}"
+    with pytest.raises(RunFailedError, match="Committed image is unavailable"):
+        result.raise_for_status()
 
 
 def test_local_watch_finalizes_without_zero_timeout_before_packing(

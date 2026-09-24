@@ -73,27 +73,23 @@ cat > "$scheduler_status" <<EOF
 {"state":"pending","total":$n_tasks,"successful":0,"failed":0,"running":0,"pending":$n_tasks,"complete":0}
 EOF
 
+# The EXIT trap names the step that failed and the solver's reason for it.
+current_step=""
+current_log=""
+step_started=$(date +%s)
+begin_step() {
+    current_step=$1
+    current_log=${2:-}
+    step_started=$(date +%s)
+}
+
 mark_scheduler_failed() {
     rc=$?
     if [ "$rc" -ne 0 ]; then
-        python3 - "$scheduler_status" "$n_tasks" <<'PY' || true
-import json, os, sys, time
-
-status_file = sys.argv[1]
-n_tasks = int(sys.argv[2])
-try:
-    with open(status_file, "r") as f:
-        payload = json.load(f)
-except Exception:
-    payload = {"total": n_tasks, "successful": 0, "failed": 0, "running": 0, "pending": n_tasks, "complete": 0}
-payload["state"] = "failed"
-payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-tmp = f"{status_file}.tmp"
-with open(tmp, "w") as f:
-    json.dump(payload, f, separators=(",", ":"))
-    f.write("\n")
-os.replace(tmp, status_file)
-PY
+        python3 {{ scheduler_runner }} --record-failure \
+            --status "$scheduler_status" --job "$job_file" --tasks "$n_tasks" \
+            --step "$current_step" --log "$current_log" \
+            --return-code "$rc" --not-before "$step_started" || true
     fi
 }
 trap mark_scheduler_failed EXIT
@@ -109,6 +105,7 @@ else
     allocation_nodes="$allocation_nodelist"
 fi
 
+begin_step mpi_startup "$mpi_health_log"
 echo "[scheduler] checking MPI startup on ${allocation_nodes} (limit ${mpi_health_timeout})"
 mpi_health_started=$(date +%s)
 set +e
@@ -200,6 +197,7 @@ validate_sizing_checkpoint() {
 start_time=$(date +%s)
 {% if not smooth_only %}
 rm -f "$sizing_json"
+begin_step init "$dir_out/init.log"
 set +e
 if [ "$skip_sizing" = "1" ]; then
     echo "$mpi_exec -n $init_ranks $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
@@ -218,6 +216,7 @@ if [ "$sizing_rc" -ne 0 ]; then
     fi
 fi
 
+begin_step tasks
 python3 {{ scheduler_runner }} \
     --config "$scheduler_config" \
     --job "$job_file" \
@@ -229,6 +228,7 @@ echo "Skipping frequency sweep; running solver postprocess only."
 
 {% if postprocess_job %}
 echo "Running solver postprocess step..."
+begin_step smooth "$dir_out/smooth.log"
 "$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1
 {% if smooth_only %}
 cat > "$scheduler_status" <<EOF
@@ -239,6 +239,7 @@ EOF
 
 {% if pack_job %}
 echo "Running packing step..."
+begin_step pack "$dir_out/pack.log"
 "$executable" -nthreads "$n_threads" --job "$job_file" --fresh --pack >> "$dir_out/pack.log" 2>&1
 {% endif %}
 

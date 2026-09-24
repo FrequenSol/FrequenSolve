@@ -2679,11 +2679,22 @@ class SlurmSite(BaseSite):
         if scheduler_state in {"failed", "cancelled", "canceled", "timeout"}:
             reason = payload.get("abort_reason")
             detail = f": {reason}" if reason else ""
+            message = f"Adaptive scheduler reported {scheduler_state}{detail}"
+            failed_reasons = payload.get("failed_reasons")
+            if isinstance(failed_reasons, Mapping) and failed_reasons:
+                tasks = ", ".join(
+                    f"task {task} ({task_reason})"
+                    for task, task_reason in list(failed_reasons.items())[:5]
+                )
+                message = f"{message}; failed tasks: {tasks}"
+                if len(failed_reasons) > 5:
+                    message = f"{message}, {len(failed_reasons) - 5} more"
             return {
-                "message": f"Adaptive scheduler reported {scheduler_state}{detail}",
+                "message": message,
                 "raw": {
                     "state": scheduler_state,
                     "stale": False,
+                    **({"phase": payload["phase"]} if payload.get("phase") else {}),
                 },
             }
         if slurm_status != "running":
@@ -3604,6 +3615,7 @@ class SlurmSite(BaseSite):
             "mem_cushion": mem_cushion,
             "boost_max_factor": boost_max_factor,
             "failure_tolerance": tolerate_failures,
+            "require_all_tasks": bool(postprocess_job),
             "sizing_json": str(sizing_json),
             "launch_delay_seconds": launch_delay_seconds,
         }
