@@ -12,8 +12,8 @@ This module binds the objective side of an imaging problem:
   trace data and :class:`DataVector` wraps one such vector.
 * :meth:`DataVector.write_objective_vector` and
   :meth:`DataVector.read_objective_vector` implement the
-  ``fs-objective-vector-3`` manifest and shard format used by Sauce's
-  ``fwi_operator`` ``jvp``/``vjp`` actions.
+  ``fs-objective-vector-4`` manifest and canonical-row HDF5 file used by
+  Sauce's ``fwi_operator`` ``jvp``/``vjp`` actions.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ _MISSING_POLICIES = {"error", "zero", "zeros", "warn", "warning"}
 _SOURCE_BASES = {"source_encoding", "source_geometry"}
 _DATA_DIMS = ("frequency", "source", "component", "receiver")
 _PACKED_TRACE_FILE = "traces.h5"
-_OBJECTIVE_VECTOR_SCHEMA = "fs-objective-vector-3"
+_OBJECTIVE_VECTOR_SCHEMA = "fs-objective-vector-4"
 _LAYOUT_CHUNK = 4096
 
 
@@ -399,9 +399,9 @@ def _job_trace_stem(job: Any) -> Path:
     """Return a finished job's packed trace product, else its trace root.
 
     Sauce resolves an observed stem to ``<root>/traces.h5`` or a packed
-    ``.h5`` file; local runs publish their packed product under
-    ``traces/generations/<run>/segment.h5``, which the job's trace manifest
-    names.  Jobs that have not run yet fall back to the trace root.
+    ``.h5`` file; the job's trace manifest names the packed product
+    (``traces/traces.h5``).  Jobs that have not run yet fall back to the
+    trace root, which Sauce resolves to the same file.
     """
 
     try:
@@ -1282,25 +1282,17 @@ class DataVector:
 
     # -- objective-vector format -------------------------------------------
 
-    @staticmethod
-    def shard_path(manifest_path: Union[str, Path], rank: int = 0) -> Path:
-        """Return Sauce's shard path for ``manifest_path`` and ``rank``."""
-
-        manifest_path = Path(manifest_path)
-        return manifest_path.with_name(f"{manifest_path.stem}_rank_{int(rank)}.h5")
-
     def write_objective_vector(
         self,
         path: Union[str, Path],
         *,
         state_fingerprint: str,
         term_layout: Union[TermLayout, Sequence[TermLayout]],
-        n_ranks: int = 1,
     ) -> Path:
-        """Write this vector as an ``fs-objective-vector-3`` manifest and shard.
+        """Write this vector as an ``fs-objective-vector-4`` manifest and file.
 
-        Rows are partitioned uniquely across ``n_ranks`` shards, including empty
-        shards. Sauce redistributes them to the saved mesh owners.
+        Rows are stored in canonical row-id order in ``<stem>.h5`` beside the
+        manifest; Sauce reads them on any MPI rank count.
 
         Args:
             path: Manifest JSON path.
@@ -1308,7 +1300,6 @@ class DataVector:
                 state the dual belongs to.
             term_layout: One or more :class:`TermLayout` objects whose
                 ``indices`` select the vector entries of each term.
-            n_ranks: Partition rank count declared in the manifest.
 
         Returns:
             The manifest path.
@@ -1327,51 +1318,35 @@ class DataVector:
         state = _normalize_hash(state_fingerprint)
         if not state.startswith("sha256:") or len(state) != 71:
             raise ValueError("state_fingerprint must be a sha256 fingerprint")
-
-        manifest_path = Path(path)
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        if isinstance(n_ranks, bool) or int(n_ranks) != n_ranks or n_ranks < 1:
-            raise ValueError("n_ranks must be a positive integer")
         for layout in layouts:
             if layout.indices is None or not layout.complete:
                 raise ValueError(
                     f"term {layout.id!r} needs complete data-space indices"
                 )
-        shards = []
-        for rank in range(int(n_ranks)):
-            shard = self.shard_path(manifest_path, rank)
-            with h5py.File(shard, "w") as h5:
-                for index, layout in enumerate(layouts):
-                    assert (
-                        layout.indices is not None
-                    )  # Validated before opening shards.
-                    # Sauce routes these unique rows to the saved mesh owners.
-                    selection = slice(rank, layout.n_global_rows, int(n_ranks))
-                    values = self.values[layout.indices[selection]]
-                    group = h5.create_group(f"/terms/{index}")
-                    group.create_dataset(
-                        "row_ids", data=layout.row_ids[selection].astype(np.int32)
-                    )
-                    group.create_dataset(
-                        "coordinate_keys",
-                        data=layout.coordinate_keys[selection].astype(np.int32),
-                    )
-                    group.create_dataset(
-                        "values",
-                        data=np.column_stack((values.real, values.imag)).astype(
-                            np.float64
-                        ),
-                    )
-            shards.append({"file": str(shard.resolve()), "sha256": file_sha256(shard)})
+
+        manifest_path = Path(path)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        data_path = manifest_path.with_suffix(".h5")
+        with h5py.File(data_path, "w") as h5:
+            for index, layout in enumerate(layouts):
+                assert layout.indices is not None  # Validated above.
+                order = np.argsort(layout.row_ids, kind="stable")
+                values = self.values[layout.indices[order]]
+                group = h5.create_group(f"/terms/{index}")
+                group.create_dataset(
+                    "coordinate_keys",
+                    data=layout.coordinate_keys[order].astype(np.int32),
+                )
+                group.create_dataset(
+                    "values",
+                    data=np.column_stack((values.real, values.imag)).astype(np.float64),
+                )
 
         manifest: Dict[str, Any] = {
             "schema": _OBJECTIVE_VECTOR_SCHEMA,
             "state_fingerprint": state,
-            "partition": {
-                "n_ranks": int(n_ranks),
-                "compatibility": "same_mesh_partition",
-            },
-            "shards": shards,
+            "file": data_path.name,
+            "sha256": file_sha256(data_path),
             "terms": [layout.manifest_entry() for layout in layouts],
         }
         manifest["manifest_fingerprint"] = canonical_json_sha256(manifest)
@@ -1382,14 +1357,14 @@ class DataVector:
     def read_objective_manifest(
         path: Union[str, Path], *, verify: bool = True
     ) -> Dict[str, Any]:
-        """Load and validate an ``fs-objective-vector-3`` manifest.
+        """Load and validate an ``fs-objective-vector-4`` manifest.
 
         Args:
             path: Manifest JSON path.
-            verify: Recompute the manifest fingerprint and shard hashes.
+            verify: Recompute the manifest fingerprint and payload hash.
 
         Returns:
-            The manifest with ``shards[*].file`` resolved to absolute paths.
+            The manifest with ``file`` resolved to an absolute path.
         """
 
         manifest_path = Path(path)
@@ -1398,42 +1373,33 @@ class DataVector:
             "schema",
             "state_fingerprint",
             "manifest_fingerprint",
-            "partition",
-            "shards",
+            "file",
+            "sha256",
             "terms",
         }
+        if manifest.get("schema") != _OBJECTIVE_VECTOR_SCHEMA:
+            raise ValueError(
+                "obsolete objective vector format; regenerate using version 4"
+            )
         missing = sorted(required.difference(manifest))
         if missing:
             raise ValueError(f"objective manifest is missing {', '.join(missing)}")
-        if manifest["schema"] != _OBJECTIVE_VECTOR_SCHEMA:
-            raise ValueError(
-                "obsolete objective vector format; regenerate using version 3"
-            )
-        if manifest["partition"].get("compatibility") != "same_mesh_partition":
-            raise ValueError("unsupported objective partition compatibility")
-        if not manifest["shards"] or not manifest["terms"]:
-            raise ValueError("objective manifest requires shards and terms")
+        if not manifest["terms"]:
+            raise ValueError("objective manifest requires terms")
         if verify:
             basis = {k: v for k, v in manifest.items() if k != "manifest_fingerprint"}
             if canonical_json_sha256(basis) != _normalize_hash(
                 manifest["manifest_fingerprint"]
             ):
                 raise ValueError("objective manifest fingerprint mismatch")
-        resolved = []
-        for entry in manifest["shards"]:
-            shard = Path(entry["file"])
-            if not shard.is_absolute():
-                shard = manifest_path.parent / shard
-            if not shard.exists():
-                candidate = manifest_path.parent / shard.name
-                if candidate.exists():
-                    shard = candidate
-            if not shard.exists():
-                raise FileNotFoundError(f"missing objective shard {entry['file']}")
-            if verify and file_sha256(shard) != _normalize_hash(entry["sha256"]):
-                raise ValueError(f"corrupt objective shard {shard}")
-            resolved.append({"file": str(shard), "sha256": entry["sha256"]})
-        manifest["shards"] = resolved
+        data_path = Path(manifest["file"])
+        if not data_path.is_absolute():
+            data_path = manifest_path.parent / data_path
+        if not data_path.exists():
+            raise FileNotFoundError(f"missing objective vector file {data_path}")
+        if verify and file_sha256(data_path) != _normalize_hash(manifest["sha256"]):
+            raise ValueError(f"corrupt objective vector file {data_path}")
+        manifest["file"] = str(data_path)
         return manifest
 
     @staticmethod
@@ -1466,64 +1432,29 @@ class DataVector:
     def _gather_rows(
         manifest: Mapping[str, Any],
     ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        """Collect rows of every term across shards, sorted by row id."""
+        """Read every term's canonical rows; row ``i`` is stored at position ``i``."""
 
         import h5py
 
-        n_terms = len(manifest["terms"])
-        ids: List[List[np.ndarray]] = [[] for _ in range(n_terms)]
-        keys: List[List[np.ndarray]] = [[] for _ in range(n_terms)]
-        values: List[List[np.ndarray]] = [[] for _ in range(n_terms)]
-        for entry in manifest["shards"]:
-            with h5py.File(entry["file"], "r") as h5:
-                terms = h5.get("terms")
-                if terms is None:
-                    raise ValueError(f"objective shard {entry['file']} has no terms")
-                for index in range(n_terms):
-                    group = terms.get(str(index))
-                    if group is None:
-                        raise ValueError(
-                            f"objective shard {entry['file']} lacks term {index}"
-                        )
-                    row_ids = np.asarray(group["row_ids"][()], dtype=np.int64).reshape(
-                        -1
-                    )
-                    row_keys = np.asarray(
-                        group["coordinate_keys"][()], dtype=np.int64
-                    ).reshape(-1, 3)
-                    raw = np.asarray(group["values"][()], dtype=np.float64).reshape(
-                        -1, 2
-                    )
-                    if not (row_ids.size == row_keys.shape[0] == raw.shape[0]):
-                        raise ValueError(
-                            f"objective shard {entry['file']} term {index} has "
-                            "inconsistent row counts"
-                        )
-                    ids[index].append(row_ids)
-                    keys[index].append(row_keys)
-                    values[index].append(raw[:, 0] + 1j * raw[:, 1])
         result = []
-        for index, term in enumerate(manifest["terms"]):
-            row_ids = np.concatenate(ids[index]) if ids[index] else np.zeros(0, int)
-            row_keys = (
-                np.concatenate(keys[index]) if keys[index] else np.zeros((0, 3), int)
-            )
-            row_values = (
-                np.concatenate(values[index]) if values[index] else np.zeros(0, complex)
-            )
-            n_global = int(term["n_global_rows"])
-            if row_ids.size != n_global:
-                raise ValueError(
-                    f"objective term {term['id']!r} has {row_ids.size} rows; "
-                    f"expected {n_global}"
+        with h5py.File(manifest["file"], "r") as h5:
+            for index, term in enumerate(manifest["terms"]):
+                group = h5.get(f"terms/{index}")
+                if group is None:
+                    raise ValueError(f"objective vector file lacks term {index}")
+                keys = np.asarray(group["coordinate_keys"][()], dtype=np.int64).reshape(
+                    -1, 3
                 )
-            if row_ids.size and (row_ids.min() < 1 or row_ids.max() > n_global):
-                raise ValueError(f"objective term {term['id']!r} has out-of-range rows")
-            order = np.argsort(row_ids, kind="stable")
-            row_ids = row_ids[order]
-            if np.any(np.diff(row_ids) == 0):
-                raise ValueError(f"objective term {term['id']!r} has duplicate rows")
-            result.append((row_ids, row_keys[order], row_values[order]))
+                raw = np.asarray(group["values"][()], dtype=np.float64).reshape(-1, 2)
+                n_global = int(term["n_global_rows"])
+                if not (keys.shape[0] == raw.shape[0] == n_global):
+                    raise ValueError(
+                        f"objective term {term['id']!r} stores {raw.shape[0]} rows; "
+                        f"expected {n_global}"
+                    )
+                result.append(
+                    (np.arange(1, n_global + 1), keys, raw[:, 0] + 1j * raw[:, 1])
+                )
         return result
 
     @classmethod
@@ -1537,11 +1468,10 @@ class DataVector:
         verify: bool = True,
         state_fingerprint: Optional[str] = None,
     ) -> "DataVector":
-        """Read an ``fs-objective-vector-3`` file into a vector over ``space``.
+        """Read an ``fs-objective-vector-4`` file into a vector over ``space``.
 
-        Rows may be spread over any number of shards in any order; they are
-        reassembled by canonical row id and their coordinate keys are checked
-        against the layout.
+        Rows are stored in canonical row-id order; their coordinate keys are
+        checked against the layout.
 
         Args:
             path: Manifest JSON path.
@@ -1551,7 +1481,7 @@ class DataVector:
                 matching terms to receiver groups by id.
             frequency: Frequency (value or index) of the file when the space
                 spans several frequencies and no layouts are given.
-            verify: Recompute fingerprints and shard hashes.
+            verify: Recompute the manifest fingerprint and payload hash.
             state_fingerprint: Optional expected ``state_fingerprint``.
 
         Returns:

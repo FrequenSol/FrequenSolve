@@ -226,6 +226,68 @@ class JobRemoteMixin:
             return {"compatibility": digest}
         return self.staged_artifact_fingerprints(site)
 
+    def downloaded_task_fingerprints(self) -> List[Dict[str, str]]:
+        """Return staged identities whose inputs still match the saved local job.
+
+        Recreate the path rewrite before trusting provenance. This also supports
+        existing sidecars without accepting results from a changed simulation.
+        """
+        candidates = []
+        try:
+            local_job = json.loads(self.job_file.read_text())
+            # The scheduler id is saved after submission; the staged copy predates it.
+            local_job.pop("job_id", None)
+            local_layout = self._saved_layout()
+            local_simulation = json.loads(local_layout.simulation_file.read_text())
+        except (OSError, ValueError, TypeError, AttributeError):
+            return candidates
+        remote_root = self._result_path / "_fs_run" / "remote"
+        for provenance in sorted(remote_root.glob("*/provenance.json")):
+            site = provenance.parent.name
+            fingerprints = self.staged_task_fingerprints(site)
+            if fingerprints is None:
+                continue
+            try:
+                staged_file = provenance.parent / local_layout.job_file.name
+                staged_job = json.loads(staged_file.read_text())
+                staged_job.pop("job_id", None)
+                remote_layout = local_layout.with_project(staged_job["project_path"])
+                expected_job = self._payload_for_layout(
+                    local_job,
+                    source=local_layout,
+                    target=remote_layout,
+                    source_projects=self._remote_source_projects(
+                        local_layout, local_job
+                    ),
+                )
+                expected_simulation = self._map_payload_project_roots(
+                    local_simulation,
+                    source_projects=self._remote_source_projects(
+                        local_layout, local_simulation
+                    ),
+                    target_project=remote_layout.project,
+                )
+                expected_simulation["project_path"] = str(remote_layout.project)
+                simulation_file = (
+                    provenance.parent
+                    / remote_layout.simulation_file.relative_to(remote_layout.project)
+                )
+                staged_simulation = json.loads(simulation_file.read_text())
+                recorded = self.staged_artifact_fingerprints(site)
+                if recorded is None:
+                    continue
+                if (
+                    staged_job != expected_job
+                    or staged_simulation != expected_simulation
+                    or self._sha256_file(staged_file) != recorded["job"]
+                    or self._sha256_file(simulation_file) != recorded["simulation"]
+                ):
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            candidates.append(fingerprints)
+        return candidates
+
     @staticmethod
     def _valid_sha256_digest(value: object) -> bool:
         if not isinstance(value, str) or len(value) != len("sha256:") + 64:

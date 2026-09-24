@@ -1,5 +1,12 @@
 # fs-control-registry-1
 
-Resolved control baseline and active subspace. The top-level arrays describe `descriptor_rank`; `rank_descriptors` indexes all MPI rank views with canonical JSON fingerprints. Every rank descriptor includes distributed block global IDs and owned global IDs. The common registry fingerprint covers every rank, its baseline and ordered selection.
+Resolved control baseline and active subspace, written once per task by the
+root rank and independent of the MPI partition. `coordinates` and `values`
+hold the complete baseline in global order; each block `layout` gives its
+one-based offset and size in that vector. Distributed blocks are gathered into
+global coordinate order and report `global_dofs`. `active_offsets` locate the
+active blocks, in `active_blocks` order, within the active vector. The registry
+fingerprint is the canonical JSON hash of this description without
+`fingerprint`, so every rank count reports the same identity.
 
-See [shared inversion controls](../../../docs/imaging/controls.md) for coordinate definitions, block layouts and vector I/O. Rank descriptor files use the core fields without the top-level index fields.
+See [shared inversion controls](../../../docs/imaging/controls.md) for coordinate definitions, block layouts and vector I/O.

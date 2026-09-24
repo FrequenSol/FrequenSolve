@@ -385,6 +385,10 @@ def test_rsync_exact_transfer_uses_null_files_from(monkeypatch, tmp_path):
         calls.append((argv, kwargs))
         option = next(value for value in argv if value.startswith("--files-from="))
         listed.extend(Path(option.split("=", 1)[1]).read_bytes().split(b"\0")[:-1])
+        for item in listed:
+            output = Path(argv[-1]) / item.decode()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"data")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     site = SimpleNamespace(
@@ -405,15 +409,47 @@ def test_rsync_exact_transfer_uses_null_files_from(monkeypatch, tmp_path):
         "/remote/results",
         tmp_path / "local",
         ("traces/a.h5", "images/manifest.json"),
-        missing_ok=True,
     )
 
     argv, _ = calls[0]
     assert "--relative" in argv
     assert "--from0" in argv
-    assert "--ignore-missing-args" in argv
+    assert "--ignore-missing-args" not in argv
     assert listed == [b"traces/a.h5", b"images/manifest.json"]
     assert argv[-2] == "user@login.example.edu:/remote/results/"
+
+
+@pytest.mark.parametrize("method", ["rsync", "sftp"])
+def test_optional_transfers_skip_only_missing_files(tmp_path, method):
+    class SFTP:
+        def get(self, remote, local):
+            if remote.endswith("missing"):
+                raise FileNotFoundError(remote)
+            if remote.endswith("denied"):
+                Path(local).write_bytes(b"partial")
+                raise PermissionError(remote)
+            Path(local).write_bytes(b"data")
+
+        def stat(self, remote):
+            return SimpleNamespace(st_size=4)
+
+        def close(self):
+            pass
+
+    site = SimpleNamespace(
+        transfer_method=method,
+        login_client=SimpleNamespace(open_sftp=SFTP),
+    )
+    manager = SlurmTransferManager(site)
+    (tmp_path / "missing").write_bytes(b"stale")
+    assert manager.get_files(
+        "/remote", tmp_path, ["present", "missing"], missing_ok=True
+    ) == [tmp_path / "present"]
+    (tmp_path / "denied").write_bytes(b"complete")
+    with pytest.raises(PermissionError):
+        manager.get_files("/remote", tmp_path, ["denied"], missing_ok=True)
+    assert (tmp_path / "denied").read_bytes() == b"complete"
+    assert not list(tmp_path.glob("*.partial"))
 
 
 @pytest.mark.parametrize(

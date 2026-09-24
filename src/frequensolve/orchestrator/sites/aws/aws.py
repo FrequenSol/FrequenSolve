@@ -1719,8 +1719,9 @@ class AWSSite(BaseSite):
         if callable(requires_postprocess) and requires_postprocess():
             return self.fetch_postprocess(job, requests=requests)
 
+        # The packed trace manifest lives only in the pack operation result.
         self.fetch_artifacts(
-            job, requests=requests, include_defaults=True, operations=()
+            job, requests=requests, include_defaults=True, operations=("pack",)
         )
         if hasattr(job, "result_manifest_file"):
             return job.results

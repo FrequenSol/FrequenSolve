@@ -123,16 +123,11 @@ def test_named_objective_terms_share_a_receiver_group(tmp_path, labels):
             super()._write_state(job, task, lin, frequency)
             path = job.state_file(task)
             manifest = json.loads(path.read_text())
-            for entry in manifest["shards"]:
-                shard = Path(entry["file"])
-                payload = json.loads(shard.read_text())
-                for term in payload["terms"]:
-                    term["receiver_group"] = "surface"
-                shard.write_text(json.dumps(payload))
-                entry["sha256"] = file_sha256(shard)
+            for term in manifest["terms"]:
+                term["receiver_group"] = "surface"
             path.write_text(json.dumps(manifest))
 
-    fake = TermSite(n_ranks=3)
+    fake = TermSite()
     _, problem = _problem(
         tmp_path,
         fake,
@@ -150,31 +145,27 @@ def test_named_objective_terms_share_a_receiver_group(tmp_path, labels):
         manifest = DataVector.read_objective_manifest(
             vjp.task_input(vjp.objective_vector, task)
         )
-        assert manifest["partition"]["n_ranks"] == len(manifest["shards"]) == 3
+        assert Path(manifest["file"]).is_file()
         assert [term["id"] for term in manifest["terms"]] == list(labels)
 
 
 def test_saved_sparse_rows_and_missing_legacy_residual(tmp_path):
-    _, problem = _problem(tmp_path, FakeImagingSite(n_ranks=2))
+    _, problem = _problem(tmp_path, FakeImagingSite())
     lin = problem.linearize()
     # Change keys to a valid sparse/projected coordinate sequence, keeping rows.
     for task in (1, 2):
         path = lin.job.state_file(task)
         manifest = json.loads(path.read_text())
-        for entry in manifest["shards"]:
-            shard = Path(entry["file"])
-            payload = json.loads(shard.read_text())
-            cache = Path(payload["terms"][0]["cache"]["file"])
-            with h5py.File(cache, "a") as h5:
-                group = h5["terms/0"]
-                keys = group["coordinate_keys"][...]
-                keys[:, 1] *= 2
-                group["coordinate_keys"][...] = keys
-                if task == 2:
-                    del group["objective_residual"]
-            payload["terms"][0]["runtime"]["cache_fingerprint"] = file_sha256(cache)
-            shard.write_text(json.dumps(payload))
-            entry["sha256"] = file_sha256(shard)
+        term = manifest["terms"][0]
+        cache = path.parent / term["cache"]["file"]
+        with h5py.File(cache, "a") as h5:
+            group = h5["terms/0"]
+            keys = group["coordinate_keys"][...]
+            keys[:, 1] *= 2
+            group["coordinate_keys"][...] = keys
+            if task == 2:
+                del group["objective_residual"]
+        term["runtime"]["cache_fingerprint"] = file_sha256(cache)
         path.write_text(json.dumps(manifest))
     states = [ObjectiveState(lin.job.state_file(t)) for t in (1, 2)]
     space = objective_space(problem.simulation, lin.frequencies, states)

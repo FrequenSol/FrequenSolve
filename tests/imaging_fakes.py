@@ -378,7 +378,6 @@ class FakeImagingSite(BaseSite):
             Required when a job has no ``controls.state``; when it has one the
             file's sizes are used and checked against this table.
         seed: Seed of the surrogate.
-        n_ranks: Rank count recorded in objective-vector manifests.
         support_masks: Optional ``qualified block -> bool mask`` written to
             ``/support/<block>`` of every state output and covector (blocks
             not listed are fully supported).  Emulates Sauce freezing DOFs.
@@ -407,7 +406,6 @@ class FakeImagingSite(BaseSite):
         block_sizes: Optional[Mapping[str, int]] = None,
         *,
         seed: int = 0,
-        n_ranks: int = 1,
         support_masks: Optional[Mapping[str, Any]] = None,
         mechanism_baseline: float = 0.75,
         mechanism_scaling: float = 2.0e9,
@@ -427,7 +425,6 @@ class FakeImagingSite(BaseSite):
             for name, size in dict(block_sizes or {}).items()
         }
         self.seed = int(seed)
-        self.n_ranks = int(n_ranks)
         self.support_masks: Dict[str, Any] = {
             qualified_block_name(name): (
                 mask if callable(mask) else np.asarray(mask, dtype=bool).reshape(-1)
@@ -774,7 +771,6 @@ class FakeImagingSite(BaseSite):
                     job.objective_vector_file(task),
                     state_fingerprint=lin.state_fingerprint,
                     term_layout=lin.space.term_layouts(frequency=frequency),
-                    n_ranks=self.n_ranks,
                 )
             elif job.action == "vjp":
                 r = self._objective_vector(job, task, lin, frequency)
@@ -1030,7 +1026,6 @@ class FakeImagingSite(BaseSite):
                     job.objective_vector_file(task),
                     state_fingerprint=lin.state_fingerprint,
                     term_layout=lin.space.term_layouts(frequency=frequency),
-                    n_ranks=self.n_ranks,
                 )
             elif job.action == "vjp":
                 r = self._objective_vector(job, task, lin, frequency)
@@ -1585,7 +1580,8 @@ class FakeImagingSite(BaseSite):
         path.parent.mkdir(parents=True, exist_ok=True)
         f = complex(frequency)
         payload = {
-            "schema": FAKE_STATE_SCHEMA,
+            "schema": "fs-objective-linearization-4",
+            "fake_state": FAKE_STATE_SCHEMA,
             "state_fingerprint": lin.state_fingerprint,
             "control_registry_fingerprint": lin.control_registry_fingerprint,
             "task": task,
@@ -1599,41 +1595,32 @@ class FakeImagingSite(BaseSite):
         }
         from frequensolve.imaging.data import file_sha256
 
-        payload["partition"] = {
-            "n_ranks": self.n_ranks,
-            "compatibility": "same_mesh_partition",
-        }
-        payload["shards"] = []
+        # One canonical cache per task, rows in row-id order, like Sauce.
         residual = lin.J @ lin.m - lin.d
-        for rank in range(self.n_ranks):
-            shard = path.with_name(f"{path.stem}_rank_{rank}.json")
-            cache = shard.with_suffix(".h5")
-            terms = []
-            with h5py.File(cache, "w") as h5:
-                for index, layout in enumerate(
-                    lin.space.term_layouts(frequency=frequency)
-                ):
-                    select = slice(rank, layout.n_global_rows, self.n_ranks)
-                    group = h5.create_group(f"terms/{index}")
-                    group["row_ids"] = layout.row_ids[select]
-                    group["coordinate_keys"] = layout.coordinate_keys[select]
-                    group["n_global_rows"] = layout.n_global_rows
-                    values = residual[layout.indices[select]]
-                    group["objective_residual"] = np.column_stack(
-                        (values.real, values.imag)
-                    )
-                    terms.append(
-                        {
-                            "id": layout.id,
-                            "receiver_group": layout.id,
-                            "cache": {"file": str(cache), "group": f"/terms/{index}"},
-                            "runtime": {},
-                        }
-                    )
-            for term in terms:
-                term["runtime"]["cache_fingerprint"] = file_sha256(cache)
-            shard.write_text(json.dumps({"terms": terms}))
-            payload["shards"].append({"file": str(shard), "sha256": file_sha256(shard)})
+        cache = path.with_name(f"{path.stem}_cache.h5")
+        terms = []
+        with h5py.File(cache, "w") as h5:
+            for index, layout in enumerate(lin.space.term_layouts(frequency=frequency)):
+                order = np.argsort(layout.row_ids, kind="stable")
+                group = h5.create_group(f"terms/{index}")
+                group["coordinate_keys"] = layout.coordinate_keys[order]
+                group["n_global_rows"] = [layout.n_global_rows]
+                values = residual[layout.indices[order]]
+                group["objective_residual"] = np.column_stack(
+                    (values.real, values.imag)
+                )
+                terms.append(
+                    {
+                        "id": layout.id,
+                        "receiver_group": layout.id,
+                        "cache": {"file": cache.name, "group": f"/terms/{index}"},
+                        "layout_fingerprint": layout.layout_fingerprint,
+                        "runtime": {},
+                    }
+                )
+        for term in terms:
+            term["runtime"]["cache_fingerprint"] = file_sha256(cache)
+        payload["terms"] = terms
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
     def _load_state(
@@ -1651,7 +1638,7 @@ class FakeImagingSite(BaseSite):
         if not path.is_file():
             raise FileNotFoundError(f"missing objective state {path}")
         data = json.loads(path.read_text())
-        if data.get("schema") != FAKE_STATE_SCHEMA:
+        if data.get("fake_state") != FAKE_STATE_SCHEMA:
             raise ValueError(f"{path} is not a fake imaging state")
         frequency = complex(*data["frequency"])
         expected = complex(job.f_list[task - 1])
@@ -1789,9 +1776,6 @@ class FakeImagingSite(BaseSite):
             "active_blocks": active_ids,
             "active_offsets": active_offsets,
             "blocks": blocks,
-            "descriptor_rank": 0,
-            "n_ranks": self.n_ranks,
-            "rank_descriptors": [],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

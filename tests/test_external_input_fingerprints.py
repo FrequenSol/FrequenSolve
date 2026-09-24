@@ -245,3 +245,32 @@ def test_directory_input_fingerprint_is_compact_and_content_sensitive(tmp_path):
         "files": 2,
     }
     assert changed["sha256"] != first["sha256"]
+
+
+def test_downloaded_fingerprints_validate_rewritten_inputs_and_reload(tmp_path):
+    job, _ = _born_job(tmp_path)
+    job.save_for_remote("SlurmSite", "/work2/example/project")
+    job.save_simulation_for_remote("SlurmSite", "/work2/example/project")
+    expected = job.staged_task_fingerprints("SlurmSite")
+    assert job.downloaded_task_fingerprints() == [expected]
+    loaded = BaseJob.load(job.job_file)
+    assert loaded.downloaded_task_fingerprints() == [expected]
+    loaded.save()
+    assert loaded.downloaded_task_fingerprints() == [expected]
+    # Submission records the scheduler id after the inputs were staged.
+    loaded._job_id = "3532821"
+    loaded.save()
+    assert "job_id" in json.loads(loaded.job_file.read_text())
+    assert loaded.downloaded_task_fingerprints() == [expected]
+    payload = json.loads(loaded.simulation._file.read_text())
+    payload["scaling"] = "robust"
+    loaded.simulation._file.write_text(json.dumps(payload))
+    assert loaded.downloaded_task_fingerprints() == []
+
+
+def test_downloaded_fingerprints_reject_tampered_staging(tmp_path):
+    job, _ = _born_job(tmp_path)
+    staged, _ = job.save_for_remote("SlurmSite", "/work2/example/project")
+    job.save_simulation_for_remote("SlurmSite", "/work2/example/project")
+    staged.write_text(staged.read_text() + "\n")
+    assert job.downloaded_task_fingerprints() == []

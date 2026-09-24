@@ -847,7 +847,11 @@ def test_directory_upload_merges_inputs_only_after_valid_extraction(
         return (
             None,
             Stream(result.stdout.decode(), exit_status=result.returncode),
-            Stream(result.stderr.decode()),
+            # Login shells (e.g. Stampede3 Lmod) report module swaps on stderr.
+            Stream(
+                "The following have been reloaded with a version change:\n"
+                + result.stderr.decode()
+            ),
         )
 
     site = _sftp_site(LocalSFTP())
@@ -1129,6 +1133,28 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
         assert "ControlPath=/tmp/verified-control" in argv
         assert kwargs["timeout"] == 120
         assert "private-token" not in str(kwargs)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "error"),
+    [
+        ('File "/remote/optional.json" not found.\n', FileNotFoundError),
+        ("stat remote: No such file or directory\n", FileNotFoundError),
+        ("remote open: Permission denied\n", OSError),
+        ("Connection closed\n", OSError),
+    ],
+)
+def test_ssh_proxy_sftp_preserves_transfer_errors(monkeypatch, tmp_path, stderr, error):
+    monkeypatch.setattr(
+        ssh_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr=stderr),
+    )
+    proxy = SSHProxy("/tmp/verified-control", "scientist", "login.example.edu")
+    with pytest.raises(error) as caught:
+        proxy.open_sftp().get("/remote/optional.json", str(tmp_path / "optional.json"))
+    assert type(caught.value) is error
+    assert str(caught.value) == stderr.strip()
 
 
 def test_slurm_wait_timeout_preserves_non_cancelling_behavior():

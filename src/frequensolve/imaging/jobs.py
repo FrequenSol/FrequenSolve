@@ -916,13 +916,13 @@ class FWIOperatorJob(_ImagingJobBase):
             ``source.<i>.<quantity>``, ``reflectivity.<name>``; bare material
             IDs are qualified as ``model.<id>``). Required (may be empty) for
             state actions; must be ``None`` for ``calibrate`` and ``wri``.
-        state: ``fs-objective-linearization-3`` stem: an output for
+        state: ``fs-objective-linearization-4`` stem: an output for
             ``linearize`` (result-relative), an input otherwise.
         covector: ``fs-control-vector-1`` output stem (``model_covector`` for
             ``wri``).
         direction: ``fs-control-vector-1`` input (``model_direction`` for
             ``wri``).
-        objective_vector: ``fs-objective-vector-3`` output (``jvp``) or input
+        objective_vector: ``fs-objective-vector-4`` output (``jvp``) or input
             (``vjp``, optional ``solve`` target).
         objective: Optional scalar objective report output.
         control_state: ``fs-control-state-1`` baseline input.
@@ -1318,7 +1318,7 @@ class FWIOperatorJob(_ImagingJobBase):
         """Return the ``fs-objective-report-1`` stem or one task's report.
 
         State actions (``linearize``, ``jvp``, ``vjp``, ``normal``, ``solve``)
-        receive their report beside the objective state shard as
+        receive their report beside the objective state manifest as
         ``<state stem>_<task>_report.json``; Sauce does not read
         ``fwi_operator.objective`` for them.  ``calibrate`` and ``wri`` use the
         ``objective`` path.

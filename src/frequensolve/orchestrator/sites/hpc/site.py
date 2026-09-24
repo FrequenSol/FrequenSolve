@@ -1800,6 +1800,8 @@ class SlurmSite(BaseSite):
                                 "hdf5_shard",
                                 "packed_hdf5",
                                 "collection_manifest",
+                                "packed_trace",
+                                "packed_manifest",
                             ),
                             retention="durable",
                         ),
@@ -1868,7 +1870,10 @@ class SlurmSite(BaseSite):
 
         local_results = job._local_path / "results"
         local_results.mkdir(parents=True, exist_ok=True)
-        self.fetch_artifacts(job, requests=requests, include_defaults=True)
+        # The packed trace manifest lives only in the pack operation result.
+        self.fetch_artifacts(
+            job, requests=requests, include_defaults=True, operations=("pack",)
+        )
         if _job_requires_postprocess(job):
             self.fetch_postprocess(job)
         return local_results

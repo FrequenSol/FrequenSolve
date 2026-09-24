@@ -856,9 +856,15 @@ class Project:
         )
 
     def _remote_project_root(self, site: BaseSite) -> Path:
+        return self.remote_root_for(site, self.path)
+
+    @staticmethod
+    def remote_root_for(site: BaseSite, project_path: Path) -> Path:
+        """Return where ``site`` keeps the project rooted at ``project_path``."""
+
         site_class = site.__class__
         if site_class.__name__ == "AWSSite" and ".aws" in site_class.__module__:
-            return site.work_dir / self.path.name
+            return site.work_dir / Path(project_path).name
         return site.work_dir
 
     def _job_files(

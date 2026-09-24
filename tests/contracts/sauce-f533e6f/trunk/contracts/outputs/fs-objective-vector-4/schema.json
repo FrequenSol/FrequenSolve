@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fs-objective-vector-4",
+  "description": "One objective-space vector for a frozen FWI state, stored as canonical rows in one HDF5 file independent of the MPI partition.",
+  "type": "object",
+  "required": [
+    "schema",
+    "state_fingerprint",
+    "manifest_fingerprint",
+    "file",
+    "sha256",
+    "terms"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-objective-vector-4"
+    },
+    "state_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "manifest_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "HDF5 row file, absolute or relative to the manifest directory."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the exact row-file bytes."
+    },
+    "terms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "n_global_rows",
+          "layout_fingerprint"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "n_global_rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "layout_fingerprint": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

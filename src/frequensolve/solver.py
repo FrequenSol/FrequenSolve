@@ -37,6 +37,9 @@ CompatibilityPolicy = Literal["warn", "strict", "off"]
 CompatibilityStatus = Literal["compatible", "untested", "unknown", "off"]
 ValidationProfile = Literal["standard", "solver-backed"]
 
+# Each (executable, message) warning is emitted once per process.
+_EMITTED_WARNINGS: set = set()
+
 __all__ = [
     "COMPATIBILITY_SCHEMA",
     "IDENTITY_QUERY_TIMEOUT_SECONDS",
@@ -545,8 +548,8 @@ def check_solver_compatibility(
 ) -> SolverCompatibility:
     """Check a configured solver against this package's preferred release.
 
-    ``warn`` (the default) emits :class:`SolverCompatibilityWarning` for
-    an unknown or untested pair. ``strict`` raises
+    ``warn`` (the default) emits :class:`SolverCompatibilityWarning` once per
+    process for each executable's unknown or untested pair. ``strict`` raises
     :class:`SolverCompatibilityError`. ``off`` performs no solver query.
     """
 
@@ -581,5 +584,8 @@ def check_solver_compatibility(
                 1,
             )
         )
-    warnings.warn(result.message, SolverCompatibilityWarning, stacklevel=2)
+    key = (str(executable), result.message)
+    if key not in _EMITTED_WARNINGS:
+        _EMITTED_WARNINGS.add(key)
+        warnings.warn(result.message, SolverCompatibilityWarning, stacklevel=2)
     return result

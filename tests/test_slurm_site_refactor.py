@@ -2677,3 +2677,19 @@ def test_launch_scripts_survive_interleaved_submissions(monkeypatch, tmp_path, b
         "second",
         "first",
     ]
+
+
+def test_fetch_traces_requests_native_packed_products(monkeypatch, tmp_path):
+    simulation = Project(name="packed", path=tmp_path).new_simulation(
+        name="simulation", physics="acoustic", dimension=2
+    )
+    job = FrequencyDomainJob("forward", simulation, [4.0])
+    calls = []
+    site = object.__new__(SlurmSite)
+    site.fetch_artifacts = lambda *args, **kwargs: calls.append(kwargs)
+    expected = object()
+    monkeypatch.setattr(hpc.TraceDataset, "from_job", lambda *args: expected)
+    assert site.fetch_traces(job) is expected
+    request = calls[0]["requests"][0]
+    assert {"packed_trace", "packed_manifest"} <= set(request.representations)
+    assert calls[0]["operations"] == ("pack",)

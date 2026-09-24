@@ -28,69 +28,40 @@ class ObjectiveState:
     def __init__(self, path: Union[str, Path]) -> None:
         self.path = Path(path)
         manifest = json.loads(self.path.read_text())
-        self.n_ranks = int(manifest["partition"]["n_ranks"])
-        if self.n_ranks < 1 or len(manifest["shards"]) != self.n_ranks:
-            raise ValueError("objective state has an inconsistent rank partition")
+        if manifest.get("schema") != "fs-objective-linearization-4":
+            raise ValueError("obsolete objective state; regenerate it with linearize")
         self.terms: Dict[str, Dict[str, Any]] = {}
         hashes: Dict[Path, str] = {}
-        for entry in manifest["shards"]:
-            shard = _resolve(self.path.parent, entry["file"])
-            if file_sha256(shard) != entry["sha256"]:
-                raise ValueError("objective state shard hash mismatch")
-            payload = json.loads(shard.read_text())
-            for term in payload["terms"]:
-                cache = _resolve(shard.parent, term["cache"]["file"])
-                expected = term["runtime"]["cache_fingerprint"]
-                if cache not in hashes:
-                    hashes[cache] = file_sha256(cache)
-                if hashes[cache] != expected:
-                    raise ValueError("objective state cache hash mismatch")
-                with h5py.File(cache, "r") as h5:
-                    group = h5[term["cache"].get("group", "/")]
-                    ids = np.asarray(group["row_ids"], dtype=int).reshape(-1)
-                    keys = np.asarray(group["coordinate_keys"], dtype=int).reshape(
-                        -1, 3
-                    )
-                    count = int(np.asarray(group["n_global_rows"]).item())
-                    residual = None
-                    if "objective_residual" in group:
-                        packed = np.asarray(group["objective_residual"])
-                        residual = (packed[..., 0] + 1j * packed[..., 1]).reshape(-1)
-                if term["id"] not in self.terms:
-                    self.terms[term["id"]] = {
-                        "receiver_group": term["receiver_group"],
-                        "count": count,
-                        "keys": np.zeros((count, 3), int),
-                        "seen": np.zeros(count, bool),
-                        "residual": np.zeros(count, complex),
-                        "has_residual": True,
-                    }
-                item = self.terms[term["id"]]
-                if count != item["count"] or keys.shape != (ids.size, 3):
-                    raise ValueError("objective state has inconsistent row coordinates")
-                if np.any(ids < 1) or np.any(ids > count):
-                    raise ValueError("objective state has out-of-range row ids")
-                if residual is not None and residual.size != ids.size:
-                    raise ValueError("objective residual size differs from saved rows")
-                indices = ids - 1
-                repeated = item["seen"][indices]
-                if np.any(item["keys"][indices[repeated]] != keys[repeated]):
-                    raise ValueError("replicated objective coordinates disagree")
-                if residual is not None:
-                    if not np.allclose(
-                        item["residual"][indices[repeated]],
-                        residual[repeated],
-                        rtol=1e-5,
-                        atol=1e-7,
-                    ):
-                        raise ValueError("replicated objective residuals disagree")
-                    item["residual"][indices] = residual
-                else:
-                    item["has_residual"] = False
-                item["keys"][indices] = keys
-                item["seen"][indices] = True
-        if not self.terms or any(not np.all(t["seen"]) for t in self.terms.values()):
-            raise ValueError("objective state does not cover every global row")
+        for term in manifest["terms"]:
+            cache = _resolve(self.path.parent, term["cache"]["file"])
+            if cache not in hashes:
+                hashes[cache] = file_sha256(cache)
+            if hashes[cache] != term["runtime"]["cache_fingerprint"]:
+                raise ValueError("objective state cache hash mismatch")
+            with h5py.File(cache, "r") as h5:
+                group = h5[term["cache"]["group"]]
+                keys = np.asarray(group["coordinate_keys"], dtype=int).reshape(-1, 3)
+                count = int(np.asarray(group["n_global_rows"]).reshape(-1)[0])
+                residual = None
+                if "objective_residual" in group:
+                    packed = np.asarray(group["objective_residual"]).reshape(-1, 2)
+                    residual = packed[:, 0] + 1j * packed[:, 1]
+            # Canonical cache rows are stored in row-id order, one per global row.
+            if keys.shape[0] != count or (
+                residual is not None and residual.size != count
+            ):
+                raise ValueError("objective state has inconsistent row coordinates")
+            self.terms[term["id"]] = {
+                "receiver_group": term["receiver_group"],
+                "count": count,
+                "keys": keys,
+                "residual": (
+                    residual if residual is not None else np.zeros(count, complex)
+                ),
+                "has_residual": residual is not None,
+            }
+        if not self.terms:
+            raise ValueError("objective state has no terms")
 
 
 class _ObjectiveSpace(DataSpace):

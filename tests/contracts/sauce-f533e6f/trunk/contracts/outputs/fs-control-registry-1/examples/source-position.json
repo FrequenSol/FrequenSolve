@@ -48,13 +48,5 @@
   "values": [
     513.7,
     34.1
-  ],
-  "descriptor_rank": 0,
-  "n_ranks": 1,
-  "rank_descriptors": [
-    {
-      "file": "controls.json.rank_0.json",
-      "fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-    }
   ]
 }

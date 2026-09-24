@@ -72,7 +72,8 @@
               "type": "integer"
             },
             "minItems": 4,
-            "maxItems": 4
+            "maxItems": 4,
+            "description": "[one-based offset, size, components, coordinate kind] in the global coordinate vector; distributed blocks use their global size."
           },
           "units": {
             "type": "string",
@@ -109,22 +110,6 @@
           "global_dofs": {
             "type": "integer",
             "minimum": 0
-          },
-          "global_ids": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "uniqueItems": true
-          },
-          "owned_global_ids": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "uniqueItems": true
           }
         },
         "required": [
@@ -141,35 +126,6 @@
         ],
         "additionalProperties": false
       }
-    },
-    "descriptor_rank": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "n_ranks": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "rank_descriptors": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "required": [
-          "file",
-          "fingerprint"
-        ],
-        "properties": {
-          "file": {
-            "type": "string"
-          },
-          "fingerprint": {
-            "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
-          }
-        },
-        "additionalProperties": false
-      }
     }
   },
   "required": [
@@ -181,10 +137,7 @@
     "values",
     "active_blocks",
     "active_offsets",
-    "blocks",
-    "descriptor_rank",
-    "n_ranks",
-    "rank_descriptors"
+    "blocks"
   ],
   "additionalProperties": false
 }

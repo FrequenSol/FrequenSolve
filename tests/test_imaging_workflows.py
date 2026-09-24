@@ -1078,6 +1078,8 @@ def test_sensitivity_kernel_job_builds_a_schema_valid_zero_data_kernel(problem, 
         {"name": "surface", "projection": {"kind": "identity"}, "observed": None}
     ]
     assert payload["Imaging"]["data_path"] is None
+    for term in payload["Imaging"]["misfit"]["objective_terms"]:
+        assert term["normalization"]["scale"] == {"kind": "explicit", "value": 1.0}
     assert job.field_retention == "adjoint" and job.observed is None
     assert job.simulation is problem.simulation
     plan = problem.backend.dry_run(job)

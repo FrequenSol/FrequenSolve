@@ -30,7 +30,7 @@ CONTRACT_ROOT = (
     Path(__file__).parent / "contracts" / "sauce-f533e6f" / "trunk" / "contracts"
 )
 OBJECTIVE_VECTOR_SCHEMA = (
-    CONTRACT_ROOT / "outputs" / "fs-objective-vector-3" / "schema.json"
+    CONTRACT_ROOT / "outputs" / "fs-objective-vector-4" / "schema.json"
 )
 STATE = "sha256:" + "ab" * 32
 
@@ -342,7 +342,7 @@ def test_layout_fingerprint_matches_sauce_chunked_catalog():
 
 
 # ---------------------------------------------------------------------------
-# fs-objective-vector-3
+# fs-objective-vector-4
 # ---------------------------------------------------------------------------
 
 
@@ -359,22 +359,16 @@ def test_objective_vector_write_read_round_trip(tmp_path, space):
     Draft202012Validator(json.loads(OBJECTIVE_VECTOR_SCHEMA.read_text())).validate(
         manifest
     )
-    assert manifest["schema"] == "fs-objective-vector-3"
+    assert manifest["schema"] == "fs-objective-vector-4"
     assert manifest["state_fingerprint"] == STATE
-    assert manifest["partition"] == {
-        "n_ranks": 1,
-        "compatibility": "same_mesh_partition",
-    }
-    shard = Path(manifest["shards"][0]["file"])
-    assert shard == (tmp_path / "dual_rank_0.h5").resolve()
-    assert manifest["shards"][0]["sha256"] == file_sha256(shard)
+    assert manifest["file"] == "dual.h5"
+    assert manifest["sha256"] == file_sha256(tmp_path / "dual.h5")
     assert manifest["terms"] == [layouts[0].manifest_entry()]
     basis = {k: v for k, v in manifest.items() if k != "manifest_fingerprint"}
     assert manifest["manifest_fingerprint"] == canonical_json_sha256(basis)
-    with h5py.File(shard, "r") as h5:
+    with h5py.File(tmp_path / "dual.h5", "r") as h5:
         assert h5["/terms/0/coordinate_keys"].shape == (12, 3)
         assert h5["/terms/0/values"].shape == (12, 2)
-        assert h5["/terms/0/row_ids"].shape == (12,)
 
     restored = DataVector.read_objective_vector(manifest_path, space, frequency=10.0)
 
@@ -394,39 +388,20 @@ def test_objective_vector_write_read_round_trip(tmp_path, space):
         )
 
 
-def test_objective_vector_reader_reassembles_multiple_shards(tmp_path, space):
+def test_objective_vector_manifest_moves_with_its_row_file(tmp_path, space):
     single = DataSpace(frequencies=[5.0], segments=space.segments)
     vector = single.random(seed=4)
     layout = single.term_layout("surface", id="pressure")
-    manifest_path = tmp_path / "vector.json"
     vector.write_objective_vector(
-        manifest_path, state_fingerprint=STATE, term_layout=layout
+        tmp_path / "vector.json", state_fingerprint=STATE, term_layout=layout
     )
-    manifest = json.loads(manifest_path.read_text())
-    original = Path(manifest["shards"][0]["file"])
-
-    with h5py.File(original, "r") as h5:
-        ids = h5["/terms/0/row_ids"][()]
-        keys = h5["/terms/0/coordinate_keys"][()]
-        values = h5["/terms/0/values"][()]
-    order = np.random.default_rng(1).permutation(ids.size)
-    split = ids.size // 3
-    shards = []
-    for rank, selection in enumerate((order[:split], order[split:])):
-        shard = tmp_path / f"vector_rank_{rank}.h5"
-        with h5py.File(shard, "w") as h5:
-            h5.create_dataset("/terms/0/row_ids", data=ids[selection])
-            h5.create_dataset("/terms/0/coordinate_keys", data=keys[selection])
-            h5.create_dataset("/terms/0/values", data=values[selection])
-        shards.append({"file": shard.name, "sha256": file_sha256(shard)})
-    manifest["shards"] = shards
-    manifest["partition"]["n_ranks"] = 2
-    basis = {k: v for k, v in manifest.items() if k != "manifest_fingerprint"}
-    manifest["manifest_fingerprint"] = canonical_json_sha256(basis)
-    manifest_path.write_text(json.dumps(manifest))
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    for name in ("vector.json", "vector.h5"):
+        (tmp_path / name).rename(moved / name)
 
     restored = DataVector.read_objective_vector(
-        manifest_path, single, term_layout=layout
+        moved / "vector.json", single, term_layout=layout
     )
 
     np.testing.assert_allclose(restored.values, vector.values)
@@ -440,7 +415,7 @@ def test_objective_vector_reader_rejects_corrupt_or_incomplete_files(tmp_path, s
         manifest_path, state_fingerprint=STATE, term_layout=single.term_layouts()
     )
     manifest = json.loads(manifest_path.read_text())
-    shard = Path(manifest["shards"][0]["file"])
+    rows = tmp_path / "v.h5"
 
     tampered = dict(manifest, state_fingerprint="sha256:" + "11" * 32)
     (tmp_path / "tampered.json").write_text(json.dumps(tampered))
@@ -448,26 +423,26 @@ def test_objective_vector_reader_rejects_corrupt_or_incomplete_files(tmp_path, s
         DataVector.read_objective_vector(tmp_path / "tampered.json", single)
     DataVector.read_objective_vector(tmp_path / "tampered.json", single, verify=False)
 
-    with h5py.File(shard, "a") as h5:
+    with h5py.File(rows, "a") as h5:
         h5["/terms/0/values"][0, 0] += 1.0
-    with pytest.raises(ValueError, match="corrupt objective shard"):
+    with pytest.raises(ValueError, match="corrupt objective vector file"):
         DataVector.read_objective_vector(manifest_path, single)
 
-    with h5py.File(shard, "a") as h5:
-        ids = h5["/terms/0/row_ids"][()]
-        ids[1] = ids[0]
-        del h5["/terms/0/row_ids"]
-        h5.create_dataset("/terms/0/row_ids", data=ids)
-    manifest["shards"][0]["sha256"] = file_sha256(shard)
+    with h5py.File(rows, "a") as h5:
+        for name in ("values", "coordinate_keys"):
+            truncated = h5[f"/terms/0/{name}"][1:]
+            del h5[f"/terms/0/{name}"]
+            h5.create_dataset(f"/terms/0/{name}", data=truncated)
+    manifest["sha256"] = file_sha256(rows)
     basis = {k: v for k, v in manifest.items() if k != "manifest_fingerprint"}
     manifest["manifest_fingerprint"] = canonical_json_sha256(basis)
     manifest_path.write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match="duplicate rows"):
+    with pytest.raises(ValueError, match="stores 11 rows; expected 12"):
         DataVector.read_objective_vector(manifest_path, single)
 
-    obsolete = dict(manifest, schema="fs-objective-vector-2")
+    obsolete = dict(manifest, schema="fs-objective-vector-3")
     (tmp_path / "old.json").write_text(json.dumps(obsolete))
-    with pytest.raises(ValueError, match="version 3"):
+    with pytest.raises(ValueError, match="version 4"):
         DataVector.read_objective_vector(tmp_path / "old.json", single, verify=False)
 
 
@@ -499,26 +474,4 @@ def test_objective_vector_reader_requires_matching_layout(tmp_path, space):
     with pytest.raises(ValueError, match="sha256"):
         vector.write_objective_vector(
             tmp_path / "bad.json", state_fingerprint="abc", term_layout=layout
-        )
-
-
-@pytest.mark.parametrize("n_ranks", [2, 31])
-def test_objective_vector_writer_covers_every_rank_including_empty(
-    tmp_path, space, n_ranks
-):
-    vector = space.random(4)
-    path = vector.write_objective_vector(
-        tmp_path / "dual.json",
-        state_fingerprint=STATE,
-        term_layout=space.term_layouts(frequency=space.frequencies[0]),
-        n_ranks=n_ranks,
-    )
-    manifest = DataVector.read_objective_manifest(path)
-    assert len(manifest["shards"]) == manifest["partition"]["n_ranks"] == n_ranks
-    restored = DataVector.read_objective_vector(
-        path, space, frequency=space.frequencies[0]
-    )
-    for layout in space.term_layouts(frequency=space.frequencies[0]):
-        np.testing.assert_array_equal(
-            restored.values[layout.indices], vector.values[layout.indices]
         )

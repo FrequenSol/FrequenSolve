@@ -11,3 +11,5 @@ Changes adopted relative to the previous `sauce-83c7f06` pin:
 Refreshed 2026-09-21 to `5e076241` (adds the implicit-geometry length-scaling fix: all implicit surface lengths are in model units and nondimensionalized with the model; `blend` `width` reads a length).
 
 Refreshed 2026-09-22 to local `FS_cuda` `f533e6fd` (merge of the imaging solver-fixes, pml-refinement and cache-concurrency branches): task-suffixed operator inputs and exports, joint smoothing output, result-directory control paths, mechanism /scaling, keyed mesh caches.
+
+The version-4 objective contracts and partition-independent control registry are copied from `FrequenSol/Sauce@80d9e5e8cd5fc67eb0610c8eecf35241631e7ef6` (solver 0.4.1). `fs-objective-linearization-4` and `fs-objective-vector-4` use one canonical row file per task; `fs-control-registry-1` describes distributed blocks in global order without per-rank descriptor files. Other contracts retain the earlier pins above.

@@ -5,8 +5,9 @@ and an execution site.  It owns three concerns that the operator layer should
 not repeat:
 
 - **Submission.** :class:`Backend` submits jobs with one pinned set of site
-  options so every action of one linearization runs with the same rank count
-  and mesh partition, names jobs consistently, and waits for job families.
+  options, stages client-written operator inputs on remote sites, names jobs
+  consistently, and waits for job families.  Saved states and objective
+  vectors do not depend on the MPI rank count.
 - **Artifact reduction.** Sauce writes one task-suffixed output per frequency
   task (``<stem>_<task><ext>``).  The module-level helpers reduce per-task
   covectors with the misfit frequency weights, assemble per-task objective
@@ -48,8 +49,9 @@ from frequensolve.imaging._artifacts import (
     ObjectiveReport,
 )
 from frequensolve.imaging.data import DataSpace, DataVector
-from frequensolve.imaging.jobs import FWIOperatorJob
+from frequensolve.imaging.jobs import FWIOperatorJob, _task_path
 from frequensolve.orchestrator.sites.base import BaseSite, RunHandle, RunResult
+from frequensolve.project import Project
 from frequensolve.simulation.jobs.base import BaseJob
 
 __all__ = [
@@ -304,10 +306,8 @@ def write_task_objective_vectors(
     data_vector: Union[DataVector, np.ndarray],
     space: DataSpace,
     state_fingerprint: str,
-    *,
-    n_ranks: int = 1,
 ) -> List[Path]:
-    """Write one ``fs-objective-vector-3`` per frequency task of ``job``.
+    """Write one ``fs-objective-vector-4`` per frequency task of ``job``.
 
     Task ``t`` receives the rows of ``space`` at ``job.f_list[t - 1]``; the
     files are written at ``job.objective_vector_file(t)``.
@@ -328,7 +328,6 @@ def write_task_objective_vectors(
                 job.objective_vector_file(task),
                 state_fingerprint=state_fingerprint,
                 term_layout=layouts,
-                n_ranks=n_ranks,
             )
         )
     return paths
@@ -404,6 +403,45 @@ def read_manifest(job: FWIOperatorJob, task: int = 1) -> ControlRegistryManifest
 # ---------------------------------------------------------------------------
 
 
+def _operator_input_files(job: BaseJob) -> List[Path]:
+    """Return the existing input files a job reads, including per-task siblings."""
+
+    candidates: List[Any] = [
+        getattr(job, name, None)
+        for name in ("direction", "objective_vector", "control_state", "input_vector")
+    ]
+    extension = getattr(job, "extension", None)
+    if isinstance(extension, Mapping):
+        candidates.append(extension.get("direction"))
+    n_tasks = int(getattr(job, "n_tasks", 1) or 1)
+    files: List[Path] = []
+    for value in candidates:
+        if not isinstance(value, (str, Path)):
+            continue
+        path = Path(value)
+        variants = [path, *(_task_path(path, task) for task in range(1, n_tasks + 1))]
+        for variant in variants:
+            if variant.is_file():
+                files.append(variant)
+                files.extend(_manifest_payload(variant))
+    return list(dict.fromkeys(files))
+
+
+def _manifest_payload(path: Path) -> List[Path]:
+    """Return the data file an objective-vector manifest names beside itself."""
+
+    if path.suffix != ".json":
+        return []
+    try:
+        name = json.loads(path.read_text()).get("file")
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not isinstance(name, str) or not name:
+        return []
+    payload = path.parent / Path(name).name
+    return [payload] if payload.is_file() else []
+
+
 class Backend:
     """Submit imaging jobs to one site with pinned submission options.
 
@@ -413,9 +451,7 @@ class Backend:
             bookkeeping.  Cache eviction deletes job directories only when
             they live inside it.
         submit_options: Site submission keyword arguments applied to every
-            submission (rank count, partition, validation flags, ...).  Every
-            action of one linearization must use the same profile so Sauce
-            states and objective vectors stay partition-compatible.
+            submission (rank count, partition, validation flags, ...).
         prefix: Job name prefix; names are ``f"{prefix}_{counter:04d}"``.
     """
 
@@ -468,6 +504,7 @@ class Backend:
 
     def _options(self, *, postprocess_only: bool) -> Dict[str, Any]:
         options = dict(self.submit_options)
+        options.setdefault("fetch", True)
         if postprocess_only:
             options["postprocess_only"] = True
         return options
@@ -475,7 +512,37 @@ class Backend:
     def submit(self, job: BaseJob, *, postprocess_only: bool = False) -> RunHandle:
         """Submit ``job`` with the pinned options and return its handle."""
 
+        self._stage_remote_inputs(job)
         return self.site.submit(job, **self._options(postprocess_only=postprocess_only))
+
+    def _stage_remote_inputs(self, job: BaseJob) -> None:
+        """Upload operator inputs written on this machine to a remote site.
+
+        Project sync carries only simulations, and remote jobs see their own
+        results; client-written directions and objective vectors live under
+        the project's ``imaging`` tree and must be uploaded explicitly.  Paths
+        are mapped under the remote project root exactly as the job payload
+        rewrites them.
+        """
+
+        # Local sites read inputs in place; only remote sites expose a work_dir.
+        if getattr(self.site, "work_dir", None) is None or not callable(
+            getattr(self.site, "put", None)
+        ):
+            return
+        try:
+            root = job._project_path()
+        except (AttributeError, ValueError):
+            return
+        remote_root = Path(Project.remote_root_for(self.site, root))
+        for path in _operator_input_files(job):
+            try:
+                relative = path.resolve().relative_to(root)
+            except ValueError:
+                continue
+            if relative.parts[:1] == ("jobs",):
+                continue
+            self.site.put(path, remote_root / relative)
 
     def run(
         self,
@@ -514,10 +581,12 @@ class Backend:
         keep_cluster = bool(getattr(site, "shutdown_on_completion", False))
         extra = {"shutdown_on_completion": False} if keep_cluster else {}
         try:
-            handles = [
-                site.submit(job, **self._options(postprocess_only=False), **extra)
-                for job in jobs
-            ]
+            handles = []
+            for job in jobs:
+                self._stage_remote_inputs(job)
+                handles.append(
+                    site.submit(job, **self._options(postprocess_only=False), **extra)
+                )
             return site.wait_all(handles, check=check)
         finally:
             if keep_cluster:

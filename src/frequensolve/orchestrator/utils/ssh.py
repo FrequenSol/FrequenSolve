@@ -432,7 +432,15 @@ class _OpenSSHControlSFTP:
             timeout=self.command_timeout,
         )
         if result.returncode != 0:
-            raise OSError("SFTP operation failed")
+            detail = result.stderr.strip() or "SFTP operation failed"
+            # Match OpenSSH's missing-file diagnostics to Paramiko's exception.
+            if any(
+                (line.startswith('File "') and line.endswith('" not found.'))
+                or line.endswith(": No such file or directory")
+                for line in detail.splitlines()
+            ):
+                raise FileNotFoundError(detail)
+            raise OSError(detail)
 
     def _run_ssh(self, command: str) -> str:
         result = subprocess.run(

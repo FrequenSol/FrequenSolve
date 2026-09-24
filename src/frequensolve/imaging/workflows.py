@@ -29,6 +29,7 @@ its negative.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import json
@@ -70,7 +71,7 @@ from frequensolve.imaging.controls import (
 )
 from frequensolve.imaging.data import DataVector, TraceStoreRef
 from frequensolve.imaging.jobs import ControlGradientJob, ImageKernelJob, ImageSpec
-from frequensolve.imaging.misfit import Loss, Misfit
+from frequensolve.imaging.misfit import Loss, Misfit, Normalization
 from frequensolve.imaging.problem import ImagingProblem, Linearization, _MisfitPayload
 from frequensolve.imaging.results import FWIResult, StageResult
 from frequensolve.inversion.continuation import (
@@ -2115,10 +2116,26 @@ def sensitivity_kernel_job(
         misfit: Any = problem._misfit_payload
     elif observed is None:
         observed_arg = None
-        # Zero-data kernels keep the misfit settings but drop the observed
-        # references (Sauce substitutes zero observed data).
+        # Observed RMS is undefined without observations. Retain the reduction
+        # and all other term settings, using a unit scale for zero-data kernels.
+        kernel_misfit = copy.copy(problem.misfit)
+        kernel_misfit._terms = tuple(
+            (
+                dataclasses.replace(
+                    term,
+                    normalization=Normalization(
+                        kind="explicit",
+                        value=1.0,
+                        reduction=term.normalization.reduction,
+                    ),
+                )
+                if term.normalization.kind == "observed_rms"
+                else term
+            )
+            for term in problem.misfit.objective_terms([g.name for g in groups])
+        )
         misfit = _MisfitPayload(
-            problem.misfit,
+            kernel_misfit,
             [dataclasses.replace(g, observed=None, derivatives={}) for g in groups],
         )
     else:
@@ -2157,7 +2174,8 @@ def sensitivity_kernel(
     """Run a Cartesian sensitivity-kernel (``Imaging.grid``) job and return its images.
 
     With ``observed=None`` Sauce uses zero observed data, so the images are
-    the pure model sensitivity kernels; ``observed=True`` images the misfit
+    the pure model sensitivity kernels; observed-RMS normalization uses a
+    unit scale while retaining its reduction. ``observed=True`` images the misfit
     residual instead.  See :func:`sensitivity_kernel_job` for the arguments.
     """
 

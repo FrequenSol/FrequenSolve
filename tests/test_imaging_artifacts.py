@@ -360,7 +360,7 @@ def test_control_registry_manifest_reads_pinned_example():
     np.testing.assert_array_equal(
         manifest.unpack_state()["source.1.position"], [513.7, 34.1]
     )
-    assert manifest.rank_descriptors[0]["file"] == "controls.json.rank_0.json"
+    assert "rank_descriptors" not in manifest.raw
 
 
 def test_control_registry_manifest_orders_active_blocks_and_offsets():
@@ -411,11 +411,6 @@ def test_control_registry_manifest_orders_active_blocks_and_offsets():
                     "basis_identity": "",
                     "distributed": False,
                 },
-            ],
-            "descriptor_rank": 0,
-            "n_ranks": 1,
-            "rank_descriptors": [
-                {"file": "r.json", "fingerprint": "sha256:" + "1" * 64}
             ],
         }
     )
@@ -807,3 +802,51 @@ def test_smoothing_config_from_value_accepts_sauce_spellings():
 def test_smoothing_config_rejects_invalid_values(kwargs, message):
     with pytest.raises(ValueError, match=message):
         SmoothingConfig(**kwargs)
+
+
+def test_image_set_reads_numerator_from_task_channels(tmp_path):
+    path = tmp_path / "images"
+    path.mkdir()
+    with h5py.File(path / "image_1.h5", "w") as h5:
+        _write_image_group(
+            h5,
+            "image",
+            np.arange(18.0).reshape(3, 6),
+            axis_units=["km", "km"],
+            units="gradient",
+        )
+        h5["image/vp"].attrs["component"] = np.array(
+            ["numerator", "forward_illumination", "adjoint_illumination"],
+            dtype=h5py.string_dtype(),
+        )
+        h5["image/vp"].attrs["value_scale"] = [2.0, 3.0, 4.0]
+    image = ImageSet(path=path, parts=1).read_images("raw", part=1)
+    np.testing.assert_array_equal(image.vp, np.arange(6.0).reshape(2, 3))
+    assert image.vp.attrs["value_scale"] == 2.0
+
+
+def test_image_set_converts_solver_task_numerator_to_output_units(tmp_path):
+    path = tmp_path / "images"
+    path.mkdir()
+    with h5py.File(path / "image_1.h5", "w") as h5:
+        _write_image_group(
+            h5,
+            "image",
+            np.arange(18.0).reshape(3, 6),
+            axis_units=["m", "m"],
+            units="m/s",
+        )
+        attrs = h5["image/vp"].attrs
+        attrs["component"] = np.array(
+            ["numerator", "forward_illumination", "adjoint_illumination"],
+            dtype=h5py.string_dtype(),
+        )
+        attrs["value_frame_roles"] = np.array(
+            ["dual", "diagonal", "diagonal"], dtype=h5py.string_dtype()
+        )
+        attrs["value_storage"] = np.array(["solver"], dtype=h5py.string_dtype())
+        attrs["value_scale"] = [1000.0, 1000.0, 1000.0]
+    image = ImageSet(path=path, parts=1).read_images("raw", part=1)
+    # Dual channels divide by the solver-to-output factor, matching the stacked aggregate.
+    np.testing.assert_allclose(image.vp, np.arange(6.0).reshape(2, 3) / 1000.0)
+    assert image.vp.attrs["value_storage"] == "output"

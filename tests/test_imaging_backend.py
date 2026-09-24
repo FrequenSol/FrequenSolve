@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -219,7 +220,7 @@ def test_objective_vectors_round_trip_per_task(setup):
     state_fp = "sha256:" + "a" * 64
     paths = write_task_objective_vectors(job, r, space, state_fp)
     assert [p.name for p in paths] == ["dual_1.json", "dual_2.json"]
-    assert all(p.with_name(f"{p.stem}_rank_0.h5").is_file() for p in paths)
+    assert all(p.with_suffix(".h5").is_file() for p in paths)
     back = read_task_objective_vectors(job, space, state_fingerprint=state_fp)
     np.testing.assert_allclose(back.values, r.values)
     for task in (1, 2):
@@ -319,7 +320,7 @@ def test_jvp_vjp_normal_are_adjoint_consistent_through_files(setup):
         "normal",
         "vjp",
     ]
-    assert all(s["options"] == {"n_ranks": 2} for s in fake.submissions)
+    assert all(s["options"] == {"n_ranks": 2, "fetch": True} for s in fake.submissions)
 
 
 def test_direction_bound_to_another_state_fails_the_run(setup):
@@ -375,7 +376,7 @@ def test_smoothing_postprocess_writes_weighted_aggregate_and_raw(setup):
     result = backend.run(job, postprocess_only=True)
     assert result.successful
     np.testing.assert_allclose(read_smoothed_covector(job).pack(ACTIVE), expected)
-    assert fake.submissions[-1]["options"] == {"n_ranks": 2}
+    assert fake.submissions[-1]["options"] == {"n_ranks": 2, "fetch": True}
 
     plain = _linearize(backend, sim)
     with pytest.raises(ValueError, match="no smoothing postprocess"):
@@ -554,3 +555,100 @@ def test_fingerprint_is_stable_and_detects_changes(tmp_path):
     assert fingerprint(observed=first) != fingerprint(
         observed=content_fingerprint(path)
     )
+
+
+def test_backend_fetch_defaults_and_explicit_override(setup):
+    sim, fake, backend = setup
+    job = _linearize(backend, sim)
+    assert fake.submissions[-1]["options"]["fetch"] is True
+    remote_only = Backend(fake, sim.project_path, submit_options={"fetch": False})
+    remote_only.submit(job)
+    assert fake.submissions[-1]["options"]["fetch"] is False
+
+
+class _RemoteRecordingSite(FakeImagingSite):
+    """Fake remote site recording uploads under a remote project root."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.work_dir = Path("/remote/project")
+        self.uploads = []
+
+    def put(self, local_path, remote_path):
+        self.uploads.append((Path(local_path), Path(remote_path)))
+
+
+def test_remote_sites_receive_client_written_operator_inputs(tmp_path):
+    sim = _simulation(tmp_path)
+    # Imaging problems run derived simulations that know only their project path.
+    sim._project = None
+    site = _RemoteRecordingSite(SIZES, seed=7)
+    backend = Backend(site, sim.project_path)
+    ops = backend.staging_dir("ops", "0001")
+    for task in (1, 2):
+        (ops / f"direction_{task}.h5").write_bytes(b"d")
+    produced = Path(sim.project_path) / "jobs" / sim.name / "linearize" / "results"
+    produced.mkdir(parents=True)
+    (produced / "baseline.h5").write_bytes(b"b")
+    job = FWIOperatorJob(
+        backend.job_name("jvp"),
+        sim,
+        [4.0, 6.0],
+        action="jvp",
+        active=ACTIVE,
+        state="state.json",
+        direction=ops / "direction.h5",
+        control_state=produced / "baseline.h5",
+        objective_vector="jvp.json",
+    )
+
+    backend._stage_remote_inputs(job)
+
+    root = Path(sim.project_path).resolve()
+    # Per-task inputs travel to the same relative location; solver results stay remote.
+    assert site.uploads == [
+        (
+            ops / f"direction_{task}.h5",
+            Path("/remote/project")
+            / (ops / f"direction_{task}.h5").resolve().relative_to(root),
+        )
+        for task in (1, 2)
+    ]
+    # Sites without a remote work directory read inputs in place.
+    site.uploads.clear()
+    site.work_dir = None
+    backend._stage_remote_inputs(job)
+    assert site.uploads == []
+
+
+def test_remote_staging_uploads_objective_vector_payloads(tmp_path):
+    sim = _simulation(tmp_path)
+    site = _RemoteRecordingSite(SIZES, seed=7)
+    backend = Backend(site, sim.project_path)
+    ops = backend.staging_dir("ops", "0002")
+    for task in (1, 2):
+        (ops / f"dual_{task}.h5").write_bytes(b"rows")
+        (ops / f"dual_{task}.json").write_text(json.dumps({"file": f"dual_{task}.h5"}))
+    job = FWIOperatorJob(
+        backend.job_name("vjp"),
+        sim,
+        [4.0, 6.0],
+        action="vjp",
+        active=ACTIVE,
+        state="state.json",
+        covector="vjp.h5",
+        objective_vector=ops / "dual.json",
+    )
+
+    backend._stage_remote_inputs(job)
+
+    assert sorted(local.name for local, _ in site.uploads) == [
+        "dual_1.h5",
+        "dual_1.json",
+        "dual_2.h5",
+        "dual_2.json",
+    ]
+    assert {remote.parent for _, remote in site.uploads} == {
+        Path("/remote/project")
+        / ops.resolve().relative_to(Path(sim.project_path).resolve())
+    }

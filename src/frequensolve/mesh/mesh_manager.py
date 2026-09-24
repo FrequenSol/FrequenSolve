@@ -1091,8 +1091,6 @@ class MeshManager:
             manager.set_adapt(
                 elems_per_wave=_pop_elems_per_wave(a),
                 order=a.pop("order", 3),
-                adapt_sources=a.pop("adapt_sources", 0),
-                adapt_receivers=a.pop("adapt_receivers", 0),
                 jump_tolerance=a.pop("jump_tolerance", None),
                 jump_factor=a.pop("jump_factor", None),
                 smooth_refs=a.pop("smooth_refs", False),

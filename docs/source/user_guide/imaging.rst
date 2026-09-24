@@ -780,8 +780,10 @@ their reference model in both solvers.
 (``Imaging.grid``) and returns an :class:`~frequensolve.imaging.ImageSet` with
 xarray ``raw``, ``smoothed`` and ``incremental`` datasets on ``(z, x)``. With
 ``observed=None`` (the default) Sauce uses zero data and the images are the
-pure model sensitivity kernels; ``observed=True`` images the misfit residual
-instead. ``condition="fwi"`` resolves to the property-gradient condition of
+pure model sensitivity kernels. Observed-RMS normalization uses an explicit
+unit scale for these kernels and retains the configured reduction; explicit and
+balance-artifact scales are preserved. ``observed=True`` images the misfit residual
+with the problem's original normalization. ``condition="fwi"`` resolves to the property-gradient condition of
 the physics; other condition names are passed verbatim. Kernels run on a
 simulation copy with the current state installed
 (``problem.simulation_at(v)``, also :attr:`FWIResult.simulation

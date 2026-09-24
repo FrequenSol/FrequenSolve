@@ -298,7 +298,11 @@ def test_slurm_fetch_outputs_fetches_every_postprocess_role(monkeypatch, tmp_pat
 
     site.fetch_outputs(job)
 
-    assert calls[0] == {"requests": (), "include_defaults": True}
+    assert calls[0] == {
+        "requests": (),
+        "include_defaults": True,
+        "operations": ("pack",),
+    }
     assert calls[1]["operations"] == ("smooth",)
     assert calls[1]["include_defaults"] is False
     assert tuple(request.role for request in calls[1]["requests"]) == (

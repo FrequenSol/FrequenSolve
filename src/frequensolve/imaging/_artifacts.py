@@ -754,8 +754,6 @@ class RegistryBlock:
     distributed: bool
     components: Tuple[str, ...] = ()
     global_dofs: Optional[int] = None
-    global_ids: Tuple[int, ...] = ()
-    owned_global_ids: Tuple[int, ...] = ()
 
     @property
     def offset(self) -> int:
@@ -818,8 +816,6 @@ class RegistryBlock:
             global_dofs=(
                 None if data.get("global_dofs") is None else int(data["global_dofs"])
             ),
-            global_ids=tuple(int(v) for v in data.get("global_ids", ())),
-            owned_global_ids=tuple(int(v) for v in data.get("owned_global_ids", ())),
         )
 
 
@@ -835,9 +831,6 @@ class ControlRegistryManifest:
     values: np.ndarray
     packing: str = REAL_INTERLEAVED
     pairing: str = "real_euclidean"
-    descriptor_rank: int = 0
-    n_ranks: int = 1
-    rank_descriptors: Tuple[Dict[str, str], ...] = ()
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -863,12 +856,6 @@ class ControlRegistryManifest:
             values=np.asarray(data.get("values", ()), dtype=np.float64),
             packing=str(data.get("packing", REAL_INTERLEAVED)),
             pairing=str(data.get("pairing", "real_euclidean")),
-            descriptor_rank=int(data.get("descriptor_rank", 0)),
-            n_ranks=int(data.get("n_ranks", 1)),
-            rank_descriptors=tuple(
-                {"file": str(item["file"]), "fingerprint": str(item["fingerprint"])}
-                for item in data.get("rank_descriptors", ())
-            ),
             raw=dict(data),
         )
 
@@ -1470,6 +1457,35 @@ class ExtensionSolveReport:
 # ---------------------------------------------------------------------------
 
 
+def _task_channel_to_output(
+    attrs: Mapping[str, Any], channel: int, values: np.ndarray
+) -> Tuple[np.ndarray, bool]:
+    """Convert one solver-stored task image channel to the aggregate's output units.
+
+    Task parts keep each frequency's solver frame; ``value_scale`` is the
+    solver-to-output factor, applied inversely to dual (gradient) channels.
+    Returns the values and whether they are now in output storage.
+    """
+
+    storage = _decode_attr(attrs.get("value_storage"))
+    if isinstance(storage, list):
+        storage = storage[0] if storage else None
+    if storage != "solver":
+        return values, False
+    roles = _decode_attr(attrs.get("value_frame_roles"))
+    if isinstance(roles, str):
+        roles = [roles]
+    scales = np.asarray(attrs.get("value_scale", []), dtype=np.float64).reshape(-1)
+    if not isinstance(roles, list) or channel >= len(roles) or scales.size == 0:
+        return values, False
+    scale = scales[channel] if scales.size > 1 else scales[0]
+    if roles[channel] == "dual":
+        return values / scale, True
+    if roles[channel] == "primal":
+        return values * scale, True
+    return values, False
+
+
 @dataclass(kw_only=True)
 class ImageSet:
     """Reader for Cartesian image files written by imaging workflows.
@@ -1581,6 +1597,13 @@ class ImageSet:
         file = self.require_aggregate() if part is None else self.image_file(part)
         location = f"{root.rstrip('/')}/{group}" if group else root
         with h5py.File(file, "r") as h5:
+            if (
+                part is not None
+                and group == "raw"
+                and root == "/image"
+                and location not in h5
+            ):
+                location = root
             if location.strip("/") not in h5 and location not in h5:
                 raise KeyError(f"{file} has no image group {location!r}")
             h5group = h5[location]
@@ -1604,19 +1627,34 @@ class ImageSet:
                 coords = {
                     dim: np.linspace(x0[i], x1[i], n[i]) for i, dim in enumerate(dims)
                 }
-                array = xr.DataArray(
-                    data=h5data[:].reshape(n), dims=dims, coords=coords
-                )
+                values = h5data[:]
+                channel = None
+                if values.size != int(np.prod(n)):
+                    labels = np.asarray(attrs.get("component", [])).reshape(-1)
+                    labels = [str(_decode(label)) for label in labels]
+                    if group == "raw" and "numerator" in labels:
+                        channel = labels.index("numerator")
+                        values = values.reshape(len(labels), -1)[channel]
+                    else:
+                        raise ValueError(f"{file}:{h5data.name} is not a scalar image")
+                    values, output = _task_channel_to_output(attrs, channel, values)
+                array = xr.DataArray(data=values.reshape(n), dims=dims, coords=coords)
                 for dim, units in zip(dims, axis_units):
                     if units:
                         array.coords[dim].attrs["units"] = units
                 units = _decode_attr(attrs.get("units"))
+                if channel is not None and isinstance(units, list):
+                    units = units[channel]
                 if units:
                     array.attrs["units"] = units
                 for attr_name in ("coordinate_system", "value_scale", "value_storage"):
                     value = _decode_attr(attrs.get(attr_name))
+                    if channel is not None and isinstance(value, list):
+                        value = value[channel]
                     if value is not None:
                         array.attrs[attr_name] = value
+                if channel is not None and output:
+                    array.attrs["value_storage"] = "output"
                 images[prop] = array
         return images
 
