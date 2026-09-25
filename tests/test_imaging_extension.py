@@ -31,6 +31,7 @@ from frequensolve.imaging.operators import (
     ModelOperator,
     ReducedNormal,
 )
+from frequensolve.imaging.regularization import Quadratic
 from frequensolve.imaging.workflows import FWI, NewtonCG, Stage
 from frequensolve.inversion.validation import gradient_taylor_test
 from frequensolve.simulation import SolverConfig
@@ -691,21 +692,39 @@ def test_check_runs_every_identity(setup):
 # ---------------------------------------------------------------------------
 
 
-def test_fwi_decreases_the_reduced_objective(setup, fake):
+@pytest.mark.parametrize("regularization_weight", [0.0, 0.2])
+def test_fwi_decreases_the_reduced_objective(setup, fake, regularization_weight):
     sim, problem, xp = setup
     problem.state = problem.state_from(np.linspace(-0.5, 0.5, 8))
-    initial = xp.value()
+    regularization = Quadratic(np.eye(xp.space.size), weight=regularization_weight)
+    bound = regularization.bind(xp.space)
+    initial = xp.value() + bound.value(problem.vector())
     fwi = FWI(
         xp,
-        stages=[Stage(FREQUENCIES, iterations=4)],
-        optimizer=NewtonCG(max_cg_iterations=8),
+        stages=[Stage(FREQUENCIES, iterations=10)],
+        optimizer=NewtonCG(
+            max_cg_iterations=20,
+            initial_forcing=1e-8,
+            minimum_forcing=1e-8,
+            maximum_forcing=1e-8,
+            gradient_tolerance=1e-9,
+            objective_tolerance=0.0,
+            step_tolerance=0.0,
+        ),
+        regularization=regularization,
     )
     result = fwi.run(resume=False)
     assert result.stages[0].success
     assert result.stages[0].final_loss.total < initial
-    assert result.stages[0].final_loss.total == pytest.approx(
-        xp.value(result.state.vector(xp.space))
-    )
+    final = result.state.vector(xp.space)
+    loss = result.stages[0].final_loss
+    lin = xp.linearize(final)
+    assert lin.report["regularization"] > 0.0  # backend tap regularization
+    assert loss.data == pytest.approx(lin.value)
+    assert loss.regularization == pytest.approx(bound.value(final))
+    assert loss.total == pytest.approx(lin.value + bound.value(final))
+    # Both terms must participate in the optimum, with the inner term counted once.
+    assert np.linalg.norm(lin.gradient.values + bound.gradient(final).values) < 1e-5
     assert problem.state is result.state
     assert any(job.reduced_normal is not None for job in _extension_jobs(fake))
     assert any(job.model_gradient for job in _extension_jobs(fake))

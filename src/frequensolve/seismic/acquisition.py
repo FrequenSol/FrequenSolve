@@ -15,6 +15,7 @@ from frequensolve.seismic.receivers import (
     ReceiverDevice,
     ReceiverGroup,
 )
+from frequensolve.seismic.source_signature import SourceSignature
 from frequensolve.seismic.sources import (
     EncodedSource,
     PointSource,
@@ -31,7 +32,7 @@ from frequensolve.util.named_list import NamedList
 
 __all__ = ["Acquisition"]
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole"}
+_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
 
 
 def _coerce_source_geometry(value: Any) -> Optional[SourceGeometry]:
@@ -105,6 +106,7 @@ class Acquisition(ExtraFieldsMixin):
     """Physical sources, optional RHS encoding, receivers, and surveys."""
 
     source_geometry: Optional[SourceGeometry] = None
+    source_signature: Optional[Any] = None
     source_encoding: Optional[SourceEncoding] = None
     boundary_loadings: List[Any] = field(default_factory=list)
     receiver_groups: NamedList = field(default_factory=NamedList)
@@ -119,6 +121,7 @@ class Acquisition(ExtraFieldsMixin):
         source_geometry: Optional[Any] = None,
         sources: Optional[Any] = None,
         source_encoding: Optional[Any] = None,
+        source_signature: Optional[Any] = None,
         source_groups: Optional[Any] = None,
         boundary_loadings: Optional[Any] = None,
         receivers: Optional[Any] = None,
@@ -151,6 +154,13 @@ class Acquisition(ExtraFieldsMixin):
             source_geometry if source_geometry is not None else sources
         )
         self.source_encoding = _coerce_source_encoding(source_encoding)
+        if source_signature is not None and not isinstance(
+            source_signature, (SourceSignature, Mapping)
+        ):
+            raise TypeError(
+                "source_signature must be a SourceSignature or materialized contract mapping"
+            )
+        self.source_signature = source_signature
         self.boundary_loadings = _coerce_boundary_loadings(boundary_loadings)
         self.receiver_groups = NamedList(
             receiver_groups if receiver_groups is not None else receivers or []
@@ -251,6 +261,7 @@ class Acquisition(ExtraFieldsMixin):
             ),
             max_batch=payload.pop("max_batch", None),
             write_vtk=payload.pop("write_vtk", None),
+            source_signature=payload.pop("source_signature", None),
             extra=payload,
         )
 
@@ -290,6 +301,16 @@ class Acquisition(ExtraFieldsMixin):
             payload["write_vtk"] = self.write_vtk
         if self.source_geometry is not None:
             payload["source_geometry"] = self.source_geometry.to_fs(ctx)
+        if self.source_signature is not None:
+            if self.source_geometry is None:
+                raise ValueError("source_signature requires physical source_geometry")
+            payload["source_signature"] = (
+                self.source_signature.to_fs(
+                    ctx, source_count=self.source_geometry.point_count
+                )
+                if isinstance(self.source_signature, SourceSignature)
+                else copy.deepcopy(dict(self.source_signature))
+            )
         if self.source_encoding is not None:
             payload["source_encoding"] = self.source_encoding.to_fs(ctx)
         if all_boundary_loadings:
@@ -370,12 +391,10 @@ class Acquisition(ExtraFieldsMixin):
             if not geometry.is_bulk:
                 for index, source in enumerate(geometry.sources):
                     if source.kind is not None and (
-                        str(source.kind).strip().lower() != geometry.kind
+                        str(source.kind).strip().lower() not in _SOURCE_KINDS
                     ):
                         raise ValueError(
-                            "Inline source point kind must match source_geometry.kind: "
-                            f"sources[{index}] is {source.kind!r}, geometry is "
-                            f"{geometry.kind!r}"
+                            f"Unsupported inline source kind at sources[{index}]: {source.kind!r}"
                         )
             geometry.validate_unique_names()
 
@@ -607,9 +626,14 @@ class Acquisition(ExtraFieldsMixin):
         if current.domain != geometry.domain:
             raise ValueError("All source points in one geometry must share a domain")
         if current.defaults != geometry.defaults:
-            raise ValueError(
-                "All appended source points must share source-geometry defaults"
-            )
+            # Differing amplitudes or mechanisms become per-point fields.
+            if not (
+                current.fold_defaults_into_points()
+                and geometry.fold_defaults_into_points()
+            ):
+                raise ValueError(
+                    "Appended source points have incompatible source-geometry defaults"
+                )
         known = set(current.point_names())
         new_names = geometry.point_names()
         duplicates = sorted(known.intersection(new_names))

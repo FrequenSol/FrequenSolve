@@ -2072,3 +2072,56 @@ def test_smooth_job_rejects_sources_without_parts(tmp_path):
         SmoothJob(calibrate, smoothing={"type": "tv"})
     with pytest.raises(TypeError, match="requires an"):
         SmoothJob(object(), smoothing={"type": "tv"})
+
+
+def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_path):
+    from frequensolve.imaging.jobs import RegularizationJob
+
+    sim = _saved_simulation(tmp_path)
+    source = FWIOperatorJob(
+        "native",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="g.h5",
+    )
+    vector = ControlVectorFile(
+        {"model.vp": [1.0, 2.0]}, control_spaces={"model.vp": "mesh-basis"}
+    )
+    prepare = RegularizationJob(
+        source,
+        smoothing=SmoothingConfig(kind="tv", normalize_amplitude=True),
+        input_vector=vector,
+        operation="prepare",
+    )
+    staged = ControlVectorFile.read(prepare.input_vector, native=True)
+    assert staged.control_spaces == {"vp": "mesh-basis"}
+    payload = _assert_valid(prepare.to_fs())
+    assert (
+        payload["control_sensitivities"]["Regularization"]["normalize_amplitude"]
+        is True
+    )
+    loaded = _round_trip(prepare)
+    assert isinstance(loaded, RegularizationJob) and loaded.operation == "prepare"
+    assert loaded.context == prepare.context
+    assert loaded.postprocess_fetch_files() == prepare.postprocess_fetch_files()
+    prepare.context.write_text("{}")
+    prox = RegularizationJob(
+        source,
+        smoothing=SmoothingConfig(kind="tv"),
+        input_vector=vector,
+        operation="proximal",
+        context=prepare.context,
+        metric=vector,
+        lower=vector,
+        upper=vector,
+    )
+    _assert_valid(prox.to_fs())
+    loaded = _round_trip(prox)
+    assert loaded.regularization_inputs == prox.regularization_inputs
+    for path in loaded.regularization_inputs.values():
+        assert ControlVectorFile.read(path, native=True).control_spaces == {
+            "vp": "mesh-basis"
+        }

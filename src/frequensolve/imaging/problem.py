@@ -20,9 +20,9 @@ Conventions
   unweighted sum).  Frequency weighting is a Sauce preprocess hook
   (:meth:`~frequensolve.imaging.misfit.Preprocess.frequency_weight`) and is
   therefore already contained in the reported totals and covectors.
-- ``problem.smoothing`` is applied by Sauce's ``--smooth`` postprocess to
-  :attr:`Linearization.gradient` only; the Jacobian and normal operators stay
-  exact so adjoint identities hold.
+- ``problem.smoothing`` supplies native model regularization to FWI/LSRTM.
+  ``gradient`` is the data-objective derivative, paired with its Jacobian
+  and normal. Workflows assemble the regularization objective separately.
 - Support masks (§4.1.1) are taken from the first ``linearize`` of a problem
   view (the AND of every frequency task's masks) and held fixed for that
   view; a view created by :meth:`restrict` inherits the masks its parent
@@ -83,7 +83,6 @@ from frequensolve.imaging._backend import (
     frequency_weights,
     read_manifest,
     read_report,
-    read_smoothed_covector,
     read_state_output,
     read_task_objective_vectors,
     reduce_covectors,
@@ -611,8 +610,8 @@ class ImagingProblem:
         frequencies: Frequencies solved per linearization; inferred from the
             observed data when omitted.
         site: Execution site; defaults to the configured ``Site()`` lazily.
-        smoothing: Optional :class:`SmoothingConfig` (or mapping) applied by
-            Sauce's ``--smooth`` postprocess to linearize gradients.
+        smoothing: Optional native regularization configuration inherited by FWI/LSRTM.
+            Problem derivatives remain derivatives of the data objective.
         workdir: Directory for staged inputs and cache bookkeeping; defaults
             to ``<project>/imaging/<name>``.
         name: Problem name, used for job prefixes and the default workdir.
@@ -1184,7 +1183,7 @@ class ImagingProblem:
         discover: bool = False,
     ) -> FWIOperatorJob:
         shared = self._shared
-        smoothing = self.smoothing if gradient else None
+        smoothing = None  # Model regularization is assembled by the workflow.
         # The registry discovery linearize asks for ``state_output`` and
         # ``manifest`` (task-suffixed when the job has several tasks); a
         # space with active mechanism blocks asks for ``state_output`` on
@@ -1600,22 +1599,7 @@ class ImagingProblem:
         entry.extra["mechanism_factors"] = factors
         gradient_file: Optional[ControlVectorFile] = None
         if gradient:
-            if job.requires_postprocess():
-                gradient_file = read_smoothed_covector(job)
-                # Sauce's ``--smooth`` aggregate sums the mechanism parts in
-                # each task's own coordinates (they are not smoothed): replace
-                # them with the converted reduction.
-                mechanisms = [
-                    name
-                    for name in _mechanism_blocks(space)
-                    if name in gradient_file.blocks
-                ]
-                if mechanisms:
-                    converted = reduce_covectors(job, factors=factors)
-                    for name in mechanisms:
-                        gradient_file.blocks[name] = converted.blocks[name]
-            else:
-                gradient_file = reduce_covectors(job, factors=factors)
+            gradient_file = reduce_covectors(job, factors=factors)
         linearization = Linearization(
             self,
             space=space,
@@ -1678,7 +1662,7 @@ class ImagingProblem:
         return self.linearize(v, gradient=False).value
 
     def gradient(self, v: Any = None) -> ControlVector:
-        """Return the misfit gradient (real covector) at ``v``."""
+        """Return the raw misfit derivative (real covector) at ``v``."""
 
         gradient = self.linearize(v, gradient=True).gradient
         assert gradient is not None
@@ -2317,10 +2301,11 @@ def _install_source_mechanism(
     dimension = int(simulation.dimension)
     real, phase = _real_components(values, block.name)
     physical = real * float(scale)
-    if kind in {"scalar", "monopole"}:
+    if kind in {"scalar", "monopole", "volume_injection"}:
         if physical.size != 1:
             raise ValueError(f"{block.name!r} must have one component for {kind}")
-        point.amplitude = {"value": float(physical[0]), "units": units or "N*m"}
+        default_units = "m^3/s" if kind == "volume_injection" else "N*m"
+        point.amplitude = {"value": float(physical[0]), "units": units or default_units}
         return phase
     if kind in {"vector", "dipole"}:
         if physical.size != dimension:
@@ -2423,7 +2408,7 @@ def _uninstallable_message(block: ResolvedBlock) -> str:
             f"source block {block.name!r} differs from its authored baseline; "
             f"the {block.quantity} coefficients have no representation on the "
             "authored sources (signature_df is an additive per-Hz term and "
-            "FrequenSolve authors no Acquisition/source_signature spectrum), so "
+            "installing it requires rematerializing the authored spectral response), so "
             "simulation_at cannot install them"
         )
     if block.kind == "mesh":
@@ -2467,8 +2452,8 @@ class Linearization:
         frequency_weights: One objective weight per task (unit by default).
         value: Total misfit value (weighted sum over tasks).
         report: ``term id -> weighted value`` summed over tasks.
-        gradient: Real covector on ``space`` (smoothed when the problem has a
-            smoothing), or ``None`` for a value-only linearization.
+        gradient: Raw objective derivative on ``space``, or ``None`` for a
+            value-only linearization.
     """
 
     def __init__(

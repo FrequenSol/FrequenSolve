@@ -144,6 +144,9 @@ def generate(source_root: Path, output_root: Path) -> dict[str, Any]:
         raise RuntimeError("Refusing to replace a symlinked benchmark output directory")
     source_root = source_root.resolve()
     output_root = output_root.resolve()
+    sources = sorted(source_root.rglob("*.ipynb"))
+    if not sources:
+        raise RuntimeError(f"No tutorial notebooks found under {source_root}")
     if output_root.exists():
         if not (output_root / GENERATED_MARKER).is_file():
             raise RuntimeError(
@@ -157,7 +160,7 @@ def generate(source_root: Path, output_root: Path) -> dict[str, Any]:
         encoding="utf-8",
     )
     cases = []
-    for source in sorted(source_root.rglob("*.ipynb")):
+    for source in sources:
         notebook_bytes = source.read_bytes()
         notebook = json.loads(notebook_bytes)
         relative = source.relative_to(source_root)
@@ -223,7 +226,7 @@ def main() -> int:
     parser.add_argument(
         "--source",
         type=Path,
-        default=Path("examples/tutorials"),
+        default=Path("tutorials"),
     )
     parser.add_argument(
         "--output",

@@ -4521,9 +4521,10 @@ def test_trace_dataset_reads_indexed_sparse_gathers_with_catalog_metadata(tmp_pa
 
     wavelet = RickerWavelet(f=10.0, center=0.0)
     shaped = traces.fd("middle_offsets", "p", source=1, wavelet=wavelet)
-    expected_scale = np.interp(
-        raw.coords["frequency"], wavelet.frequencies, wavelet.spectrum
+    expected_scale = wavelet.sample(traces.times(upscale=1)[:-1]).at_frequencies(
+        raw.coords["frequency"].values
     )
+    assert wavelet.times is None
     np.testing.assert_allclose(shaped.values, raw.values * expected_scale[:, None])
     for name in ("receiver", "trace_id", "weight", "receiver_x", "receiver_z"):
         np.testing.assert_array_equal(shaped.coords[name], raw.coords[name])
@@ -5168,7 +5169,7 @@ def test_trace_dataset_fd_uses_ordinary_wavelet_spectrum_for_laplace_data(tmp_pa
     fd = traces.fd("surface", "p", source=7, wavelet=wavelet)
 
     base_wavelet = RickerWavelet(f=60.0, center=0.0)
-    base_wavelet.times = traces.times(upscale=1)
+    base_wavelet = base_wavelet.sample(traces.times(upscale=1)[:-1])
     expected = xr.DataArray(
         base_wavelet.spectrum,
         dims=["frequency"],
@@ -5210,16 +5211,20 @@ def test_trace_dataset_td_spectrum_is_wavelet_limited_before_interpolation(tmp_p
     td = traces.td("surface", "p", source=7, wavelet=wavelet, upscale=4)
 
     base_wavelet = RickerWavelet(f=10.0, center=0.0373)
-    base_wavelet.times = traces.times(upscale=1)
+    base_wavelet = base_wavelet.sample(traces.times(upscale=1)[:-1])
     coarse_spectrum = xr.DataArray(
         base_wavelet.spectrum,
         dims=["frequency"],
         coords={"frequency": base_wavelet.frequencies},
     )
     expected_spectrum = coarse_spectrum.interp(
-        frequency=wavelet.frequencies,
+        frequency=np.fft.rfftfreq(td.sizes["time"], float(td.time[1] - td.time[0])),
         kwargs={"fill_value": 0},
     ).values
+    expected_spectrum[frequencies.size - 1] = (
+        0.5 * expected_spectrum[frequencies.size - 1].real
+    )
+    expected_spectrum *= 4
     expected = np.fft.irfft(expected_spectrum)
     np.testing.assert_allclose(
         td.values[:, 0],
@@ -5303,17 +5308,21 @@ def test_trace_dataset_td_applies_wavelet_before_interpolating_oscillatory_respo
     td = traces.td("surface", "p", source=7, wavelet=wavelet, upscale=4)
 
     base_wavelet = RickerWavelet(f=40.0, center=0.0)
-    base_wavelet.times = traces.times(upscale=1)
+    base_wavelet = base_wavelet.sample(traces.times(upscale=1)[:-1])
     coarse_response = xr.DataArray(
         response * base_wavelet.spectrum,
         dims=["frequency"],
         coords={"frequency": frequencies},
     )
     expected_spectrum = coarse_response.interp(
-        frequency=wavelet.frequencies,
+        frequency=np.fft.rfftfreq(td.sizes["time"], float(td.time[1] - td.time[0])),
         kwargs={"fill_value": 0},
     ).values
 
+    expected_spectrum[frequencies.size - 1] = (
+        0.5 * expected_spectrum[frequencies.size - 1].real
+    )
+    expected_spectrum *= 4
     actual_spectrum = np.fft.rfft(td.values[:, 0])
     np.testing.assert_allclose(
         actual_spectrum,
@@ -5356,6 +5365,62 @@ def _write_base_and_df_trace_product(
             dset.attrs["receiver"] = np.array([101], dtype=np.int32)
             dset.attrs["component"] = np.array(["p"], dtype=string_dtype)
             dset.attrs["shot"] = np.array([7], dtype=np.int32)
+
+
+@pytest.mark.parametrize("eager_max_bytes", [0, 64 * 1024**2])
+@pytest.mark.parametrize("reconstruction", ["standard", "hermite"])
+@pytest.mark.parametrize("upscale", [2, 4, 200])
+@pytest.mark.parametrize("high_frequency_taper", [False, True])
+def test_trace_dataset_td_upscale_preserves_amplitude(
+    tmp_path, reconstruction, upscale, high_frequency_taper, eager_max_bytes
+):
+    packed = tmp_path / "upscale.h5"
+    _write_base_and_df_trace_product(
+        packed, np.arange(1.0, 26.0), delay=0.03, laplace=-0.25
+    )
+    traces = TraceDataset.open(packed)
+
+    def read(factor):
+        return traces.td(
+            "surface",
+            "p",
+            source=7,
+            wavelet=RickerWavelet(f=10.0, center=0.15),
+            upscale=factor,
+            reconstruction=reconstruction,
+            target_df=1.0,
+            high_frequency_taper=high_frequency_taper,
+            eager_max_bytes=eager_max_bytes,
+        )
+
+    base = read(1)
+    fine = read(upscale).isel(time=slice(None, None, upscale))
+    np.testing.assert_allclose(fine.time, base.time, atol=1e-14)
+    # Compare physical samples directly: fitting a gain would hide the bug.
+    np.testing.assert_allclose(fine.values, base.values, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("upscale", [2, 4])
+def test_windowed_td_upscale_preserves_amplitude(tmp_path, upscale):
+    packed = tmp_path / "windowed.h5"
+    _write_base_and_df_trace_product(packed, np.arange(1.0, 26.0), delay=0.03)
+    traces = TraceDataset.open(packed)
+    window = xr.DataArray(np.ones(50), dims=["time"])
+
+    def read(factor):
+        return traces.store.read_windowed_TD(
+            "surface",
+            "p",
+            source=7,
+            wavelet=RickerWavelet(f=10.0, center=0.15),
+            window=window,
+            N_window=0,
+            upscale=factor,
+        )
+
+    base = read(1)
+    fine = read(upscale).isel(time=slice(None, None, upscale))
+    np.testing.assert_allclose(fine.values, base.values, rtol=1e-10, atol=1e-12)
 
 
 def test_trace_dataset_td_restores_frequency_derivative_parity(tmp_path):
@@ -5475,10 +5540,13 @@ def test_trace_dataset_td_hermite_upscale_only_zero_pads_spectrum(tmp_path):
 
     base_spectrum = np.fft.rfft(base.values[:, 0])
     upscaled_spectrum = np.fft.rfft(upscaled.values[:, 0])
-    # The base-grid final bin is its real-valued Nyquist bin; after zero-padding
-    # that same frequency is interior and may retain an imaginary component.
-    assert upscaled_spectrum[: base_spectrum.size - 1] == pytest.approx(
+    # DFT coefficients grow with the sample count to preserve amplitude.
+    # Padding splits the base Nyquist coefficient across frequency signs.
+    assert upscaled_spectrum[: base_spectrum.size - 1] / 4 == pytest.approx(
         base_spectrum[:-1]
+    )
+    assert upscaled_spectrum[base_spectrum.size - 1] / 4 == pytest.approx(
+        0.5 * base_spectrum[-1].real
     )
     assert upscaled_spectrum[base_spectrum.size :] == pytest.approx(0.0j)
 
@@ -5535,8 +5603,9 @@ def test_trace_dataset_td_hermite_can_roll_high_frequency_spectrum_to_zero(tmp_p
     assert abs(spectrum[near_endpoint]) < 5.0e-3 * np.max(np.abs(spectrum))
     # DFT coefficients scale with transform length. Compare X/N so extending
     # the inverse-FFT grid for the rolloff cannot alter physical amplitudes at
-    # any frequency below the original cutoff.
-    solved_bins = frequencies <= 25.0 + 1.0e-12
+    # any frequency below the original cutoff. The old Nyquist bin changes
+    # from a split real endpoint to an interior complex coefficient.
+    solved_bins = frequencies < 25.0 - 1.0e-12
     assert spectrum[solved_bins] / td.sizes["time"] == pytest.approx(
         untapered_spectrum[: np.count_nonzero(solved_bins)] / untapered.sizes["time"]
     )
@@ -5579,7 +5648,7 @@ def test_trace_dataset_td_standard_can_use_endpoint_derivative_taper_with_laplac
         tapered.sizes["time"],
         d=float(tapered.time.values[1] - tapered.time.values[0]),
     )
-    solved_bins = frequencies <= 25.0 + 1.0e-12
+    solved_bins = frequencies < 25.0 - 1.0e-12
     taper_endpoint = int(np.argmin(np.abs(frequencies - 26.0)))
 
     assert tapered.attrs["reconstruction"] == "standard"

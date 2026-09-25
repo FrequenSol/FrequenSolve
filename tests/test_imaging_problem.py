@@ -358,27 +358,16 @@ def test_restricted_views_share_state_and_submit_only_their_tasks(setup, fake):
     assert problem.restrict().space.blocks == tuple(ACTIVE)
 
 
-def test_smoothing_reads_the_smoothed_aggregate_covector(tmp_path, fake):
+def test_smoothing_is_a_workflow_regularizer_and_does_not_process_derivatives(
+    tmp_path, fake
+):
     _sim, problem = _problem(tmp_path, fake, smoothing={"type": "tv", "lambda": 0.3})
-
-    assert problem.smoothing is not None and problem.smoothing.kind == "tv"
+    assert problem.smoothing.kind == "tv"
     lin = problem.linearize()
-
-    assert lin.job.requires_postprocess()
-    assert lin.job.control_active == ["vp", "rho"]  # unqualified model blocks
-    assert lin.job.smoothing.kind == "tv"
-    assert (
-        lin.job.covector_file().is_file() and lin.job.covector_file(raw=True).is_file()
-    )
-    smoothed = ControlVectorFile.read(lin.job.covector_file()).pack(ACTIVE)
-    np.testing.assert_allclose(lin.gradient.values, smoothed)
+    assert not lin.job.requires_postprocess()
+    assert lin.job.smoothing is None
     np.testing.assert_allclose(lin.gradient.values, _surrogate(fake, lin).gradient)
-    plan = problem.dry_run()
-    assert plan["requires_postprocess"]
-    assert plan["job"]["control_sensitivities"]["Smoothing"]["type"] == "tv"
-
-    value_only = problem.restrict(frequencies=[4.0]).linearize(gradient=False)
-    assert not value_only.job.requires_postprocess()
+    assert not problem.dry_run()["requires_postprocess"]
 
 
 def test_frozen_dofs_are_dropped_from_vectors_and_expanded_to_sauce_layout(
@@ -1210,3 +1199,21 @@ def test_check_reports_passing_adjoint_normal_and_taylor_tests(setup):
         "normal",
         "passed",
     }
+
+
+def test_volume_injection_mechanism_keeps_volumetric_units(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, mechanism=True, signature=False)
+    geometry = problem.simulation.acquisition.source_geometry
+    geometry.kind = "volume_injection"
+    for point in geometry.sources:
+        point.kind = "volume_injection"
+    state = _mechanism_state(
+        problem,
+        tmp_path,
+        [2.0],
+        scaling={"source.1.mechanism": 1.0, "source.2.mechanism": 1.0},
+    )
+    installed = problem.simulation_at(state)
+    points = installed.acquisition.source_geometry.sources
+    assert points[0].amplitude == {"value": 1.0, "units": "m^3/s"}
+    assert points[1].amplitude == {"value": 2.0, "units": "m^3/s"}

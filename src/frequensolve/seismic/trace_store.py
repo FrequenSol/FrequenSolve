@@ -4,16 +4,18 @@
 """
 
 import html
+import json
 import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
 import h5py
 import numpy as np
 from xarray import DataArray
 
+from frequensolve.seismic.spectra import GainDelay, SampledWavelet, TransferFunction
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.sampling import UniformSweepSampling
 from frequensolve.util.fft import get_fft_backend
@@ -107,6 +109,74 @@ def _dataset_ints(h5, path: str) -> np.ndarray:
     return np.asarray(h5[path][()]).ravel().astype(np.int64)
 
 
+def _source_strength_table(h5: h5py.File) -> Optional[Dict[str, Any]]:
+    """Read the physical source strengths the solver recorded, if any."""
+
+    geometry = "survey/source_geometry"
+    if f"{geometry}/strength" not in h5:
+        return None
+    encoding = _dataset_strings(h5, "survey/source_encoding/encoding_kind")
+    return {
+        "strength": np.asarray(h5[f"{geometry}/strength"][()], dtype=float).ravel(),
+        "units": _dataset_strings(h5, f"{geometry}/strength_units"),
+        "origin": _dataset_strings(h5, f"{geometry}/strength_origin"),
+        "kind": _dataset_strings(h5, f"{geometry}/source_kind_name"),
+        "encoding": encoding[0] if encoding else "identity",
+    }
+
+
+def _source_strength_attrs(
+    table: Optional[Dict[str, Any]], source: Any
+) -> Dict[str, Any]:
+    """Describe the physical load behind one source's traces."""
+
+    if table is None:
+        return {}
+    fields = (
+        ("source_strength_units", "units"),
+        ("source_strength_origin", "origin"),
+        ("source_kind", "kind"),
+    )
+    strength = table["strength"]
+    try:
+        index = int(source) - 1
+    except (TypeError, ValueError):
+        index = -1
+    attrs: Dict[str, Any] = {}
+    if table["encoding"] == "identity" and 0 <= index < strength.size:
+        if np.isfinite(strength[index]):
+            attrs["source_strength"] = float(strength[index])
+        for key, name in fields:
+            values = table[name]
+            if index < len(values) and values[index]:
+                attrs[key] = values[index]
+        return attrs
+    # Encoded fields superpose several physical sources; report only what they share.
+    attrs["source_encoding"] = table["encoding"]
+    for key, name in fields:
+        distinct = {value for value in table[name] if value}
+        if len(distinct) == 1:
+            attrs[key] = distinct.pop()
+    return attrs
+
+
+def _wavelet_attrs(wavelet: Wavelet | TransferFunction) -> Dict[str, Any]:
+    """Describe the dimensionless wavelet multiplied into a gather."""
+
+    attrs: Dict[str, Any] = {
+        "wavelet": type(wavelet).__name__,
+        "wavelet_scale": float(getattr(wavelet, "scale", 1.0)),
+        "wavelet_center": float(getattr(wavelet, "center", 0.0)),
+        "wavelet_units": "1",
+    }
+    if isinstance(wavelet, TransferFunction):
+        attrs["wavelet_definition"] = json.dumps(wavelet.describe(), sort_keys=True)
+    f = getattr(wavelet, "f", None)
+    if f is not None:
+        attrs["wavelet_f"] = np.asarray(f, dtype=float) if np.ndim(f) else float(f)
+    return attrs
+
+
 def _clean_h5_path(path: str) -> str:
     return "/" + str(path).strip("/")
 
@@ -164,11 +234,12 @@ class TraceStore:
     metadata: Dict[str, Any]
     files: List[str]
     _upscale: int
-    _consolidated: Optional[Path] = None
-    _cache_dir: Optional[Path] = None
     _open_files: List[h5py.File]
     _packed_group_files: Dict[str, Path]
     _packed_segment_entries: List[Dict[str, Any]]
+    _physical_value_cache: Dict[Any, Any]
+    _consolidated: Optional[Path] = None
+    _cache_dir: Optional[Path] = None
 
     def __init__(
         self,
@@ -188,6 +259,7 @@ class TraceStore:
         self._open_files = []
         self._packed_group_files = {}
         self._packed_segment_entries = []
+        self._physical_value_cache = {}
 
     @classmethod
     def from_job(cls, job, upscale: int = 1):
@@ -1935,7 +2007,7 @@ class TraceStore:
         group: str,
         component: str,
         source: int,
-        wavelet: Optional[Wavelet] = None,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         **kwargs,
     ):
         """Read one complex frequency-domain gather.
@@ -1951,20 +2023,10 @@ class TraceStore:
             Complex ``xarray.DataArray`` indexed by frequency and receiver axes.
         """
 
-        if wavelet is not None:
-            sampling = UniformSweepSampling(
-                f_min=0.0,
-                f_max=self.metadata["f_max"],
-                df=self.metadata["df"],
-            )
-            wavelet.times = sampling.T_list
-
         dset = self.read_h5(group)
         gather = self._select_gather(dset, group, component, source)
         fd = gather.sel(complex="real") + 1j * gather.sel(complex="imag")
         fd = fd.fillna(0)
-        if wavelet is not None:
-            fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
         fd.attrs.update(
             self._trace_array_attrs(
                 group,
@@ -1973,6 +2035,10 @@ class TraceStore:
                 domain="frequency",
             )
         )
+        if wavelet is not None:
+            fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
+        if wavelet is not None:
+            fd.attrs.update(_wavelet_attrs(wavelet))
         return fd
 
     def _trace_array_attrs(
@@ -1999,20 +2065,121 @@ class TraceStore:
                 attrs["wavefield_grid"] = grid
             if "path" in wavefield:
                 attrs["wavefield_path"] = wavefield["path"]
+        attrs.update(self._physical_value_attrs(group, component, source))
         return attrs
+
+    def _physical_value_attrs(
+        self, group: str, component: str, source: Any
+    ) -> Dict[str, Any]:
+        """Return data units and the physical source strength behind a gather.
+
+        Trace values are responses to the recorded source strength, not per unit
+        source, so reciprocity and spectrum scaling need both.
+        """
+
+        try:
+            path = self._trace_file_for_group(group)
+        except (FileNotFoundError, KeyError):
+            return {}
+        key = (str(path), group)
+        if key not in self._physical_value_cache:
+            with h5py.File(path, "r") as h5:
+                self._physical_value_cache[key] = (
+                    self._component_units(h5, group),
+                    _source_strength_table(h5),
+                    (
+                        _attr_strings(h5["survey/source_signature_hash"][()])[0]
+                        if "survey/source_signature_hash" in h5
+                        else None
+                    ),
+                    self._receiver_response_applied(h5, group),
+                )
+        units, strengths, signature_hash, receiver_response = (
+            self._physical_value_cache[key]
+        )
+        attrs: Dict[str, Any] = {}
+        if str(component) in units:
+            attrs["units"] = units[str(component)]
+        attrs.update(_source_strength_attrs(strengths, source))
+        if receiver_response:
+            attrs["receiver_response_applied"] = True
+        if signature_hash is not None:
+            attrs["source_signature_hash"] = signature_hash
+            attrs["source_signature_applied"] = True
+        return attrs
+
+    @staticmethod
+    def _receiver_response_applied(h5: h5py.File, group: str) -> bool:
+        catalog = "survey/receiver_groups/_catalog"
+        if f"{catalog}/response_applied" not in h5 or f"{catalog}/group_name" not in h5:
+            return False
+        names = _attr_strings(h5[f"{catalog}/group_name"][()])
+        return group in names and bool(
+            h5[f"{catalog}/response_applied"][names.index(group)]
+        )
+
+    def _component_units(self, h5: h5py.File, group: str) -> Dict[str, str]:
+        try:
+            if self._is_indexed_packed_h5(h5) and group not in h5:
+                dset = h5[self._indexed_trace_paths(h5, group)[0]]
+            else:
+                dset = h5[self._template_dataset_path_for_group(h5, group)]
+        except (KeyError, IndexError, ValueError):
+            return {}
+        names = _attr_strings(
+            dset.attrs.get("component", dset.attrs.get("value_frame_components", []))
+        )
+        units = _attr_strings(
+            dset.attrs.get("units", dset.attrs.get("value_frame_coordinate_units", []))
+        )
+        if len(names) != len(units):
+            return {}
+        return {name: unit for name, unit in zip(names, units) if unit}
+
+    @staticmethod
+    def _check_source_filter(
+        attrs: Mapping[str, Any],
+        wavelet: Wavelet | TransferFunction | None,
+        allow: bool,
+    ) -> None:
+        identity = (
+            isinstance(wavelet, GainDelay) and wavelet.gain == 1 and wavelet.delay == 0
+        )
+        if (
+            wavelet is not None
+            and not identity
+            and attrs.get("source_signature_applied")
+            and not allow
+        ):
+            raise ValueError(
+                "These traces already include an acquisition source signature; omit wavelet or set allow_additional_filter=True for an intentional extra filter"
+            )
 
     def _apply_wavelet_to_fd(
         self,
         fd: DataArray,
-        wavelet: Wavelet,
+        wavelet: Wavelet | TransferFunction,
         **kwargs,
     ) -> DataArray:
-        freqs = wavelet.frequencies
-        spectrum = DataArray(
-            wavelet.spectrum, dims=["frequency"], coords={"frequency": freqs}
+        self._check_source_filter(
+            fd.attrs, wavelet, kwargs.get("allow_additional_filter", False)
         )
-        w = spectrum.interp(
-            frequency=fd.coords["frequency"].values, kwargs={"fill_value": 0}
+        response: TransferFunction
+        if isinstance(wavelet, Wavelet):
+            sampling = UniformSweepSampling(
+                f_min=0.0, f_max=self.metadata["f_max"], df=self.metadata["df"]
+            )
+            response = wavelet.sample(sampling.T_list[:-1])
+        else:
+            response = wavelet
+        if not isinstance(response, TransferFunction) or response.units != "1":
+            raise ValueError(
+                "Trace filtering requires a dimensionless spectral response"
+            )
+        w = DataArray(
+            response.at_frequencies(fd.frequency.values),
+            dims=["frequency"],
+            coords={"frequency": fd.frequency},
         )
         if "f_taper" in kwargs:
             alpha = kwargs["f_taper"]
@@ -2028,23 +2195,57 @@ class TraceStore:
                     coords={dim: fd[dim]},
                 )
                 w *= window
-        return fd * w
+        result = fd * w
+        result.attrs = fd.attrs.copy()
+        return result
+
+    @staticmethod
+    def _rescale_padded_spectrum(
+        fd: DataArray, sampling: UniformSweepSampling
+    ) -> DataArray:
+        """Preserve real-signal amplitudes when extending the inverse FFT grid."""
+
+        if sampling.upscale == 1:
+            return fd
+        # The base Nyquist bin represents both frequency signs. Once padding
+        # makes it an interior bin, retain half its real value at each sign.
+        # irfft already supplies the negative-frequency conjugate implicitly.
+        nyquist = DataArray(
+            np.arange(fd.sizes["frequency"]) == sampling.nfreq - 1,
+            dims=["frequency"],
+            coords={"frequency": fd.frequency},
+        )
+        attrs = fd.attrs.copy()
+        fd = fd.where(~nyquist, 0.5 * fd.real)
+        # irfft divides by the output length, while the wavelet's DFT was
+        # sampled on the base grid. Compensate for the length increase.
+        result = fd * (sampling.nTime / sampling.ntime)
+        result.attrs = attrs
+        return result
 
     @staticmethod
     def _sample_wavelet_spectrum(
-        wavelet: Wavelet,
+        wavelet: Wavelet | TransferFunction,
         times: np.ndarray,
         frequencies: np.ndarray,
     ) -> np.ndarray:
         """Sample a wavelet spectrum at the requested frequencies."""
 
-        from scipy.interpolate import CubicSpline
-
-        wavelet.times = times
-        wavelet_frequencies = np.asarray(wavelet.frequencies, dtype=float)
-        wavelet_spectrum = np.asarray(wavelet.spectrum, dtype=np.complex128)
-        spline = CubicSpline(wavelet_frequencies, wavelet_spectrum, extrapolate=False)
-        return np.nan_to_num(spline(frequencies))
+        response = (
+            wavelet.sample(times[:-1]) if isinstance(wavelet, Wavelet) else wavelet
+        )
+        if not isinstance(response, TransferFunction) or response.units != "1":
+            raise ValueError(
+                "Trace filtering requires a dimensionless spectral response"
+            )
+        if isinstance(response, SampledWavelet):
+            frequencies = np.asarray(frequencies)
+            in_band = frequencies <= 0.5 / response.dt
+            values = np.zeros(frequencies.shape, dtype=np.complex128)
+            if np.any(in_band):
+                values[in_band] = response.at_frequencies(frequencies[in_band])
+            return values
+        return response.at_frequencies(frequencies)
 
     def _read_raw_selected_fd(
         self,
@@ -2072,7 +2273,7 @@ class TraceStore:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Wavelet | TransferFunction,
         *,
         target_df: float,
         upscale: int,
@@ -2211,9 +2412,10 @@ class TraceStore:
         )
         # Match the DFT normalization used by the standard path, which samples
         # the wavelet on the base (non-upscaled) time grid.
-        oversampled_wavelet_value *= (
-            base_wavelet_sampling.T_list.size / wavelet_sampling.T_list.size
-        )
+        if isinstance(wavelet, Wavelet):
+            oversampled_wavelet_value *= (base_wavelet_sampling.T_list.size - 1) / (
+                wavelet_sampling.T_list.size - 1
+            )
         solved_endpoint_index = int(np.rint(solved_f_max / target_df))
         endpoint_denominator = oversampled_wavelet_value[solved_endpoint_index]
         if not np.isclose(endpoint_denominator, 0.0):
@@ -2402,7 +2604,7 @@ class TraceStore:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         laplace_compensation: Union[str, bool] = "auto",
@@ -2419,7 +2621,7 @@ class TraceStore:
             component: Component name.
             source: One-based source id.
             wavelet: Wavelet used for inverse transformation.
-            upscale: Reconstruction upscaling factor.
+            upscale: Time-sampling refinement factor; preserves trace amplitudes.
             T_max: Optional maximum time to return.
             laplace_compensation: ``"auto"``, ``"on"``, ``"off"``, or boolean
                 compatibility value controlling Laplace damping compensation.
@@ -2439,6 +2641,13 @@ class TraceStore:
             Time-domain ``xarray.DataArray``.
         """
 
+        self._check_source_filter(
+            self._physical_value_attrs(group, component, source),
+            wavelet,
+            kwargs.get("allow_additional_filter", False),
+        )
+        if wavelet is None:
+            wavelet = GainDelay()
         eager_max_bytes = kwargs.pop("eager_max_bytes", _TD_EAGER_MAX_BYTES)
         if eager_max_bytes is None:
             eager_max_bytes = 0
@@ -2522,18 +2731,11 @@ class TraceStore:
                     max_bytes=int(eager_max_bytes),
                 )
                 if fd is not None:
-                    source_sampling = UniformSweepSampling(
-                        f_min=0.0,
-                        f_max=self.metadata["f_max"],
-                        df=self.metadata["df"],
-                    )
-                    wavelet.times = source_sampling.T_list
                     fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
                 else:
                     fd = self.read_FD(group, component, source, wavelet, **kwargs)
                     fd = self._coalesce_td_chunks(fd)
         laplace = self._uniform_laplace(fd)
-        wavelet.times = sampling.T_list
 
         if reconstruction == "standard":
             fd = fd.interp(frequency=sampling.F_list, kwargs={"fill_value": 0})
@@ -2548,13 +2750,14 @@ class TraceStore:
         if derivative_order:
             fd = fd.copy(data=fd.data * (1j**derivative_order))
         fft = get_fft_backend()
+        fd = self._rescale_padded_spectrum(fd, sampling)
         td = fft.irfft(fd.data, axis=0)
         dims = ["time" if d == "frequency" else d for d in fd.dims]
         coords = {
             d: (
                 fd.coords[d]
                 if d in fd.coords
-                else sampling.T_list[:-1] - wavelet.center
+                else sampling.T_list[:-1] - getattr(wavelet, "center", 0.0)
             )
             for d in dims
         }
@@ -2593,6 +2796,7 @@ class TraceStore:
         td.attrs["damping_factor"] = self._damping_factor(laplace, sampling.T)
         td.attrs["reconstruction"] = reconstruction
         td.attrs["phase_derivative_order"] = derivative_order
+        td.attrs.update(_wavelet_attrs(wavelet))
         if derivative_assisted:
             for name in (
                 "target_df",
@@ -2620,7 +2824,7 @@ class TraceStore:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,
@@ -2686,7 +2890,7 @@ class TraceStore:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Wavelet | TransferFunction,
         window: DataArray,
         N_window: int,
         upscale: int = 1,
@@ -2703,7 +2907,7 @@ class TraceStore:
             window: Time-domain window.
             N_window: Number of frequency bins on each side of the window
                 kernel.
-            upscale: Reconstruction upscaling factor.
+            upscale: Time-sampling refinement factor; preserves trace amplitudes.
             T_max: Optional maximum time to return.
             **kwargs: Optional frequency-domain read controls.
 
@@ -2718,9 +2922,10 @@ class TraceStore:
             upscale=upscale,
         )
         fd = self.read_FD(group, component, source, wavelet, **kwargs)
-        wavelet.times = sampling.T_list
 
         fd = fd.interp(frequency=sampling.F_list, kwargs={"fill_value": 0})
+
+        fd = self._rescale_padded_spectrum(fd, sampling)
 
         N = len(window.data)
 
@@ -2748,7 +2953,7 @@ class TraceStore:
             if d in fd.coords:
                 coords[d] = fd.coords[d]
             else:
-                coords[d] = sampling.T_list[:-1] - wavelet.center
+                coords[d] = sampling.T_list[:-1] - getattr(wavelet, "center", 0.0)
 
         td = DataArray(data=td, dims=dims, coords=coords)
         if T_max is not None:
@@ -2762,6 +2967,7 @@ class TraceStore:
                 domain="time",
             )
         )
+        td.attrs.update(_wavelet_attrs(wavelet))
         for d in td.dims:
             td.coords[d].attrs["long_name"] = d.title()
             if d == "time":

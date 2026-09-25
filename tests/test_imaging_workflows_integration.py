@@ -74,7 +74,9 @@ def test_lsrtm_solvers_and_fwi_checkpoint_through_public_api(tmp_path, site):
     problem = _problem(tmp_path, site)
     lin = problem.linearize()
     reference = np.linspace(0.01, 0.04, lin.space.size)
-    penalty = im.Quadratic(np.eye(lin.space.size), weight=0.2, reference=reference)
+    regularization = im.Quadratic(
+        np.eye(lin.space.size), weight=0.2, reference=reference
+    )
     images = {}
     for method in ("cg", "lsqr"):
         workflow = im.LSRTM(
@@ -83,7 +85,7 @@ def test_lsrtm_solvers_and_fwi_checkpoint_through_public_api(tmp_path, site):
             iterations=25,
             tolerance=1e-4,
             damping=0.1,
-            penalty=penalty,
+            regularization=regularization,
         )
         image = workflow.run()
         assert workflow.info["converged"], workflow.info
@@ -94,7 +96,7 @@ def test_lsrtm_solvers_and_fwi_checkpoint_through_public_api(tmp_path, site):
         gradient = (
             lin.vjp(residual).values
             + 0.1 * image.values
-            + penalty.bind(lin.space).gradient(image).values
+            + regularization.bind(lin.space).gradient(image).values
         )
         assert np.linalg.norm(gradient) < 1e-3 * max(
             np.linalg.norm(lin.gradient.values), 0.01
@@ -150,3 +152,33 @@ def test_saved_residual_and_adjoint_through_public_api(tmp_path, site, loss, spa
         lin.vjp(residual).values, lin.gradient.values, rtol=3e-3, atol=1e-6
     )
     assert lin.jacobian.dot_test(seed=3, tolerance=3e-3)["passed"]
+
+
+def test_native_tv_fwi_objective_through_local_orchestration(tmp_path, site):
+    """Execute native callbacks and PDE line-search trials through LocalSite."""
+    from frequensolve.imaging._native_regularization import bind_workflow_regularization
+
+    problem = _problem(tmp_path, site)
+    specification = im.TV(alpha=0.002)
+    result = im.FWI(
+        problem,
+        im.Stage([FREQUENCY], iterations=2),
+        regularization=specification,
+        step_limit=0.05,
+        optimizer=im.LBFGS(objective_tolerance=0, step_tolerance=0),
+    ).run()
+    stage = result.stages[0]
+    assert stage.final_loss.total < stage.initial_loss.total
+    assert result.history.iterations[-1].metrics["optimizer"] == "proximal_gradient"
+    point = result.state.vector(problem.space)
+    linearization = problem.linearize(point)
+    _, native = bind_workflow_regularization(
+        specification, linearization.space, problem, linearization
+    )
+    assert result.loss.regularization == pytest.approx(
+        native.value(point), rel=1e-6, abs=1e-10
+    )
+    assert result.loss.data == pytest.approx(linearization.value, rel=1e-5, abs=1e-10)
+    assert result.loss.total == pytest.approx(
+        result.loss.data + result.loss.regularization
+    )

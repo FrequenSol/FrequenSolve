@@ -116,6 +116,56 @@ def test_source_amplitudes_export_dimensionless_and_physical_units():
     assert Acquisition.from_fs(payload).to_fs() == payload
 
 
+def test_add_sources_appends_points_with_different_strengths():
+    acquisition = Acquisition()
+    acquisition.add_sources(kind="scalar", coords=[[0.1, 0.2], [0.3, 0.2]])
+    acquisition.add_sources(
+        kind="scalar", coords=[[0.5, 0.2]], amplitude=2.0e9 * ureg.N * ureg.m
+    )
+    acquisition.add_sources(
+        kind="scalar", coords=[[0.7, 0.2]], mechanism="isotropic", amplitude=3.0
+    )
+
+    geometry = acquisition.to_fs()["source_geometry"]
+
+    assert "defaults" not in geometry or not geometry["defaults"]
+    rows = geometry["sources"]
+    assert [row["name"] for row in rows] == [
+        "source_000001",
+        "source_000002",
+        "source_000003",
+        "source_000004",
+    ]
+    assert "amplitude" not in rows[0] and "amplitude" not in rows[1]
+    assert rows[2]["amplitude"] == {"value": 2.0e9, "units": "m*N"}
+    assert rows[3]["amplitude"] == 3.0
+    assert rows[3]["mechanism"] == {"type": "isotropic"}
+    assert Acquisition.from_fs(acquisition.to_fs()).to_fs() == acquisition.to_fs()
+
+
+def test_folded_defaults_keep_point_shape_and_strength_overrides():
+    geometry = SourceGeometry.inline(
+        kind="vector",
+        sources=[
+            PointSource("inherits", coords=[0.1, 0.2]),
+            PointSource("own_shape", coords=[0.3, 0.2], direction=[1.0, 0.0]),
+            PointSource("own_strength", coords=[0.5, 0.2], amplitude=5.0 * ureg.N),
+        ],
+        defaults={"direction": [0.0, 1.0], "amplitude": 20.0 * ureg.kN},
+    )
+
+    assert geometry.fold_defaults_into_points()
+
+    rows = geometry.to_fs()["sources"]
+    assert not geometry.defaults
+    assert rows[0]["direction"] == [0.0, 1.0]
+    assert rows[0]["amplitude"] == {"value": 20.0, "units": "kN"}
+    assert rows[1]["direction"] == [1.0, 0.0]
+    assert rows[1]["amplitude"] == {"value": 20.0, "units": "kN"}
+    assert rows[2]["direction"] == [0.0, 1.0]
+    assert rows[2]["amplitude"] == {"value": 5.0, "units": "N"}
+
+
 def test_file_source_defaults_serialize_unit_bearing_amplitudes():
     geometry = SourceGeometry.hdf5(
         "sources.h5",
@@ -1295,13 +1345,21 @@ def test_source_groups_compatibility_view_rejects_mutation_without_state_loss():
     assert acquisition.to_fs() == before
 
 
-def test_inline_point_kind_must_match_geometry_kind():
+def test_inline_point_kind_overrides_are_validated_and_preserved():
     geometry = SourceGeometry.inline(
         kind="scalar",
-        sources=[PointSource(name="bad", coordinates=[0.5, 0.05], kind="vector")],
+        sources=[
+            PointSource(
+                name="force", coordinates=[0.5, 0.05], kind="vector", direction=[0, 1]
+            )
+        ],
     )
 
-    with pytest.raises(ValueError, match="kind must match"):
+    mixed = Acquisition(source_geometry=geometry).to_fs()
+    assert mixed["source_geometry"]["sources"][0]["kind"] == "vector"
+    _sauce_acquisition_validator().validate(mixed)
+    geometry.sources[0].kind = "unknown"
+    with pytest.raises(ValueError, match="Unsupported inline source kind"):
         Acquisition(source_geometry=geometry).to_fs()
 
     normalized_point = PointSource(

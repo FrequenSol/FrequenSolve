@@ -46,10 +46,15 @@ Operators
    :show-inheritance:
    :noindex:
 
-Penalties, Smoothing And Preconditioners
-----------------------------------------
+Regularization, Smoothing And Preconditioners
+---------------------------------------------
 
 .. automodule:: frequensolve.imaging.regularization
+   :members:
+   :show-inheritance:
+   :noindex:
+
+.. autoclass:: frequensolve.imaging.NativeRegularization
    :members:
    :show-inheritance:
    :noindex:
