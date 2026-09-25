@@ -31,6 +31,7 @@ from frequensolve.seismic.trace_store import TraceStore
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.jobs.artifacts import RunMetadata
 from frequensolve.simulation.simulation import CustomJSONEncoder
+from frequensolve.simulation.task_index import TASK_INDEX_VERSION
 
 SCHEMA = "frequensolve-sdk-performance/v1"
 BASELINE_SCHEMA = "frequensolve-sdk-performance-baseline/v1"
@@ -392,40 +393,53 @@ def _validation_scenario(root: Path, size: str, coordinate_count: int) -> Scenar
 def _write_run_metadata(result_path: Path, artifact_count: int) -> None:
     run_dir = result_path / "_fs_run"
     run_dir.mkdir(parents=True)
-    (run_dir / "run_manifest.json").write_text(
-        json.dumps(
-            {
-                "schema": "fs-run-manifest-1",
-                "exit_status": {"status": "success"},
-                "job_file_sha256": "a" * 64,
-                "simulation_file_sha256": "b" * 64,
-            }
+    task_ids = np.arange(1, artifact_count + 1, dtype=np.int64)
+    strings = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(run_dir / "tasks.h5", "w") as h5:
+        h5.attrs["schema"] = TASK_INDEX_VERSION
+        tasks = h5.create_group("tasks")
+        artifacts = h5.create_group("artifacts")
+        dependencies = h5.create_group("dependencies")
+        tasks.create_dataset("task_id", data=task_ids)
+        tasks.create_dataset("status", data=["success"] * artifact_count, dtype=strings)
+        tasks.create_dataset("frequency_real", data=task_ids.astype(np.float64))
+        tasks.create_dataset("frequency_imag", data=np.zeros(artifact_count))
+        for name, digit in (("job", "a"), ("simulation", "b"), ("outputs", "c")):
+            tasks.create_dataset(
+                f"fingerprint_{name}", data=[digit * 64] * artifact_count, dtype=strings
+            )
+        tasks.create_dataset("artifact_offset", data=task_ids - 1)
+        tasks.create_dataset(
+            "artifact_count", data=np.ones(artifact_count, dtype=np.int64)
         )
-    )
-    (run_dir / "outputs.json").write_text(
-        json.dumps(
-            {
-                "files": [
-                    {
-                        "path": f"ParaView/pv_{index:05d}.vtu",
-                        "kind": "vtk",
-                        "schema": "fs-output-artifact-1",
-                    }
-                    for index in range(artifact_count)
-                ]
-            }
-        )
-    )
-    (run_dir / "timings.json").write_text(
-        json.dumps(
-            {
-                "frequency_tasks": [
-                    {"task": index + 1, "total_seconds": float(index + 1) / 10.0}
-                    for index in range(artifact_count)
-                ]
-            }
-        )
-    )
+        tasks.create_dataset("iterations", data=task_ids)
+        tasks.create_dataset("residual", data=np.zeros(artifact_count))
+        for name in (
+            "mesh",
+            "setup",
+            "assembly",
+            "solve_forward",
+            "solve_adjoint",
+            "imaging",
+        ):
+            tasks.create_dataset(
+                f"timing_{name}", data=task_ids.astype(np.float64) / 10
+            )
+        for name, values in {
+            "id": [f"vtk-{task}" for task in task_ids],
+            "role": ["visualization"] * artifact_count,
+            "schema": ["fs-output-artifact-1"] * artifact_count,
+            "representation": ["vtu"] * artifact_count,
+            "path": [f"ParaView/pv_{index:05d}.vtu" for index in range(artifact_count)],
+            "retention": ["durable"] * artifact_count,
+            "generation": ["performance-fixture"] * artifact_count,
+        }.items():
+            artifacts.create_dataset(name, data=values, dtype=strings)
+        for name in ("bytes", "dependency_offset", "dependency_count"):
+            artifacts.create_dataset(
+                name, data=np.zeros(artifact_count, dtype=np.int64)
+            )
+        dependencies.create_dataset("id", data=[], dtype=strings)
     (result_path / "_fs_python_run.json").write_text(
         json.dumps({"status": "completed"})
     )
@@ -446,7 +460,7 @@ def _result_metadata_scenario(
             raise RuntimeError("result metadata did not roundtrip expected artifacts")
         return {
             "artifacts": len(artifacts),
-            "timingRows": len(metadata.timings.get("frequency_tasks", [])),
+            "timingRows": sum(bool(task.timings) for task in metadata.tasks.values()),
         }
 
     return Scenario(

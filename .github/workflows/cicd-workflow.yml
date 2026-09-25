@@ -7,9 +7,9 @@ permissions:
 
 on:
   pull_request:
-    branches: [ "v2", "next" ]
+    branches: [ "v2", "next", "main" ]
   push:
-    branches: [ "v2", "next" ]
+    branches: [ "v2", "next", "main" ]
   workflow_dispatch:
     inputs:
       RUN_DOCKER_IMAGE_INTEGRATION:
