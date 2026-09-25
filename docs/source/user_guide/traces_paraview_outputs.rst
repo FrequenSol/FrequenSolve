@@ -54,11 +54,128 @@ are :term:`HDF5`-backed and may be consolidated into a local cache with
 export is available through the trace-record helpers when the ``seismic-io``
 extra is installed.
 
-Wavelets are applied when :term:`time-domain` traces are reconstructed. For
+Optional postprocessing wavelets are applied when :term:`time-domain` traces are reconstructed. For
 ``RickerWavelet``, the peak is placed at physical time zero while the generated
 signal still includes pre-zero-time samples. If ``center`` is not supplied,
 ``RickerWavelet(f=...)`` uses one period of center padding,
 ``1 / f``.
+
+Trace values are the response to the source's physical strength, not to a unit
+source. When a source gives no amplitude, the solver assumes the default
+strength for its kind: 1e6 N for force (``vector``) sources and 1e9 N·m for
+moment sources. Each returned ``DataArray`` records what it is relative
+to in its attributes:
+
+- ``units``: data units of the component, such as ``Pa`` or ``m/s``.
+- ``source_strength`` and ``source_strength_units``: the physical load, such as
+  ``1e9`` ``N*m``. Force sources report the force magnitude and moment tensors
+  report the scalar moment.
+- ``source_strength_origin``: ``specified`` when the input fixed the strength,
+  ``default`` when the default strength was assumed, and ``scaled_default``
+  when a bare numeric ``amplitude`` multiplied that default.
+- ``source_kind``: the source kind, such as ``vector`` or ``monopole``.
+- ``wavelet``, ``wavelet_f``, ``wavelet_scale``, ``wavelet_center`` and
+  ``wavelet_units``: the wavelet applied, when there is one. Wavelets are
+  dimensionless shapes (``wavelet_units == "1"``), so they do not change the
+  source strength.
+
+To compare responses per unit source, for example when checking reciprocity,
+divide by ``source_strength``. Encoded sources superpose several physical
+sources, so they report ``source_encoding`` and only the properties their
+sources share. Outputs written before the solver recorded source strength have
+no ``source_strength`` attributes.
+
+Converting observed traces for Sauce
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``convert_traces`` writes the canonical HDF5 observed-data store consumed by
+Sauce. It accepts SEG-Y files (with the ``seismic-io`` extra), streamed
+``.npy`` files, NumPy arrays, and xarray ``DataArray`` or ``Dataset`` objects.
+Time and frequency gathers returned by our trace readers can be written directly:
+
+.. code-block:: python
+
+   from frequensolve.seismic import convert_traces
+
+   convert_traces(td, "observed-time.h5")
+   convert_traces(fd, "observed-frequency.h5")
+
+   convert_traces(
+       "observations.npy", "observed.h5",
+       dt=0.002, t0=0.0, component="p",
+       frequencies=[5.0, 7.5, 10.0],
+   )
+   convert_traces("observations.sgy", "observed-segy.h5", component="p")
+
+The optional ``array.fs.to_trace_store(...)`` shorthand is available after
+importing ``frequensolve.seismic.trace_record`` to register the xarray accessor.
+
+NumPy input defaults to ``(trace, time)``. Use ``dims=("source", "receiver",
+"time")`` for dense cubes, or include a ``component`` dimension. Xarray uses its
+named time/frequency axis and source, receiver, component, or trace dimensions;
+select ``variable="pressure"`` for a Dataset containing multiple variables.
+Time coordinates and ``dt``/``t0`` use seconds; frequency coordinates use Hz.
+Frequency gathers may carry scalar or per-frequency ``laplace`` and
+``time_power`` coordinates, and complex values or a ``complex=["real", "imag"]``
+axis. Time input must be real and uniformly sampled.
+
+Source and receiver identifiers come from xarray coordinates (``source_id`` /
+``receiver_id`` or ``source`` / ``receiver``), the gather's ``source_id`` attribute,
+or one-based indices. For flattened arrays, ``source_ids`` and ``receiver_ids``
+can supply one identifier per trace; the default is one source with sequential
+receivers. Component names come from a coordinate, ``long_name``, the DataArray
+name, or the explicit ``component`` argument. Use ``component_map={"p": 1,
+"vx": 2}`` to match the acquisition's component output numbers. Without a map,
+component numbers follow sorted unique names. IDs must match the separately
+configured Sauce acquisition geometry. The converter does not infer physical
+units, coordinates, source encoding, or instrument response from sample values.
+
+SEG-Y reads fixed-length traces without assuming a regular inline/crossline
+geometry. By default it uses ``FieldRecord`` for source IDs and ``TraceNumber``
+for receiver IDs. ``segy_headers`` accepts alternate byte positions for
+``source_id``, ``receiver_id``, ``dt``, and ``t0``; interval and delay fields use
+microseconds and milliseconds, respectively. ``endian="little"`` supports
+little-endian files. Differing per-trace intervals or delays are rejected;
+align those recordings explicitly before conversion. Coordinates and amplitudes
+are not rescaled. Verify that SEG-Y channel identifiers match the acquisition's
+receiver numbering, especially when channel numbers restart for each shot.
+``source_ids`` and ``receiver_ids`` can override SEG-Y header IDs with the
+matching solver identifiers without modifying the input file.
+
+Conversion streams bounded blocks with a 64 MiB working-buffer target
+(``batch_bytes``). NumPy files use contiguous block reads in their stored order;
+time-first layouts are tiled across time instead of repeatedly scanning the file.
+The minimum block is one trace, or one time slice for time-first input. Library
+workspaces, metadata, and existing caller arrays are additional memory. Lazy
+xarray inputs are selected before samples are materialized; their underlying
+chunk sizes and task concurrency also affect memory and repeated-read costs.
+SEG-Y samples are read in bulk through the native library.
+
+``frequencies`` optionally prepares an unnormalized Fourier cache from time
+samples, including the ``t0`` phase. Four or more matching Fourier bins use a
+batched FFT; other selections use blocked real matrix products with reusable
+kernels. Frequency caches use chunks spanning many traces for one frequency,
+matching Sauce's selected-frequency reads. It preserves the time samples for later
+frequency/Laplace/time-moment requests. Output is published only after successful
+conversion; existing files require ``overwrite=True``. These files are observed
+stores, not packed solver-output manifests for ``TraceDataset.open``.
+
+The maintained ``benchmarks.trace_conversion`` command measures conversion plus
+file synchronization and validates output samples. Run fixture preparation and
+measurement in separate processes to keep peak-RSS measurements meaningful:
+
+.. code-block:: bash
+
+   python -m benchmarks.trace_conversion --directory /tmp/trace-bench --mib 4096 --prepare
+   python -m benchmarks.trace_conversion --directory /tmp/trace-bench --mib 4096 --cache 32
+
+Use ``--kind segy`` or ``--kind time-first`` when preparing and measuring those
+formats, and ``--off-grid`` to measure arbitrary-frequency cache preparation.
+Reported throughput depends on storage and OS caching.
+
+Configure Sauce's observed input as ``{"_type": "SeismicStore", "file":
+"observed.h5"}``, together with the matching acquisition and appropriate
+``source_basis``. No Zarr reader or conversion is introduced by this API.
 
 Derivative-assisted time reconstruction
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -326,3 +443,108 @@ saves its final state, history and stage summaries to a directory with
 ``save()``. An :class:`~frequensolve.imaging.ImageKernelJob` that has already
 run can be reopened from local files with ``job.load_images()`` without
 contacting an execution site.
+
+Acquisition wavelets and transfer functions
+---------------------------------------------
+
+Use ``SampledWavelet`` for a measured recording. Its samples, sample interval
+``dt`` and first-sample time ``t0`` are immutable; importing never normalizes,
+recenters, windows or resamples the recording. NumPy arrays/``.npy``, a single
+xarray ``time`` series, and a selected SEG-Y trace are supported. SEG-Y import
+uses the trace interval and recording delay and requires explicit amplitude
+units. NPY import requires an explicit clock.
+
+.. code-block:: python
+
+   import numpy as np
+   from frequensolve.seismic import SampledWavelet, GainDelay, SourceSignature
+
+   force = SampledWavelet.from_npy("force.npy", dt=0.001, t0=-0.02, units="N")
+   shape = force.relative_to(1000, units="N")
+   # Set the corresponding physical source amplitude to 1000 N as well.
+   signature = SourceSignature(
+       shape * GainDelay(delay=0.003),
+       frequencies=[5, 10, 15],
+       laplace=[0, -0.1],
+   )
+   acquisition.source_signature = signature
+
+A shared signature applies to every physical source. A mapping such as
+``{1: shape_a, 2: shape_b}`` must cover all one-based physical source IDs.
+Sauce applies these factors before source encoding. Export writes reusable,
+content-addressed HDF5 tables in bounded frequency blocks; shared response
+objects are evaluated once per block. Include every solve frequency and
+Laplace coordinate explicitly. Tables require a matching task coordinate;
+there is no automatic extrapolation or conversion of an undamped table to a
+damped one. ``laplace`` is the nonpositive imaginary frequency in **Hz**.
+
+The discrete transform is ``sum(x[n] * exp(-2*pi*i*(f+i*laplace)*t[n]))``.
+Default ``normalization="dft"`` matches trace-store extraction; the explicit
+``"integral"`` option multiplies this sum by ``dt``. Choose the convention to
+match the data being compared: these differ in amplitude by the sample
+interval. DFT coefficients belong to their recording clock; changing the
+inverse-FFT length changes its amplitude normalization. No automatic
+sample-rate compensation is applied to an authored measured spectrum.
+``relative_to`` divides the sample amplitudes by a reference strength; it
+does not change the Fourier convention. Direct evaluation above recording
+Nyquist fails. Time reconstruction treats frequencies above that band as zero.
+
+``GainDelay(gain=..., delay=...)`` accepts a complex gain (including a fixed
+phase) and a delay in seconds; a positive delay gives negative Fourier phase.
+Multiply responses to compose a source wavelet and source response only when
+the measured wavelet does not already include that response.
+``TabulatedSpectrum`` uses exact lookup by default. Explicit
+``interpolation="linear"`` interpolates real/imaginary parts inside its band;
+it does not extrapolate or infer values at other Laplace coordinates.
+The default ``spectral_derivative="total"`` exports the evaluator's exact
+first physical-Hz derivative. Exact tabulated spectra must supply derivatives;
+``"frozen"`` explicitly requests zero derivative instead.
+
+A transfer function is the complex multiplier ``H(f)`` in ``Y(f) = H(f) X(f)``:
+its magnitude is gain and its argument is phase. ``TransferFunction`` is the
+public evaluation interface; ``GainDelay`` and ``TabulatedSpectrum`` can describe
+transfer functions. A ``SampledWavelet`` retains a recording, and a
+``SourceSignature`` specifies the emitted waveform; composing it with a source
+transfer function gives ``Q_emitted(f) = H_source(f) Q_drive(f)``.
+
+``SpectralResponse`` is an exact compatibility alias for ``TransferFunction``;
+``ReceiverResponse`` aliases ``ReceiverTransferFunction``. The receiver field
+``response`` is currently unused and reserved for future reciprocal-survey
+support. It is not an alias for ``transfer`` and has no calibration behavior.
+New serialized jobs use ``transfer`` for transfer functions.
+
+``ReceiverTransferFunction`` accepts the same inputs as ``SourceSignature``. Assign it
+to a receiver device's ``transfer`` or an individual ``ReceiverComponent``'s
+``transfer``, then export through its ``ReceiverGroup``. IDs index physical
+receiver points, including expanded array nodes, before encoding/reduction.
+Transfer functions are dimensionless scalar calibrations per component; component
+units remain unchanged. The native forward, conjugate adjoint and first
+frequency derivative include the response. Cross-component response matrices,
+fiber calibration, higher frequency derivatives, and material-dependent Born
+frequency jets with a varying receiver response are not supported.
+
+Source signatures require an existing Sauce source-signature-capable backend;
+receiver responses require a backend with this receiver-response contract.
+Older backends must not be used for response-bearing inputs.
+
+Trace metadata records whether a source signature or receiver response was
+applied. Use ``traces.td(group, component, source=...)`` with no wavelet to
+reconstruct already shaped data. Applying another source filter to such data
+raises unless ``allow_additional_filter=True`` is explicit. Raw or older
+trace stores without this provenance cannot detect double application.
+
+Analytical wavelets no longer need assignment-based evaluation:
+
+.. code-block:: python
+
+   from frequensolve.seismic import RickerWavelet
+
+   definition = RickerWavelet(f=15, center=0.12)
+   sampled = definition.sample(np.arange(1000) * 0.001)
+   spectrum = sampled.at_frequencies([5, 10, 15])
+   definition.plot()  # Uses its own plotting grid; leaves the definition alone.
+
+``sample`` returns a new immutable recording. Trace readers and plotting leave
+the analytical definition unchanged; callers that previously read back
+``wavelet.times`` after plotting or reconstruction should retain the returned
+samples instead. Legacy ``times`` assignment and ``evaluate`` remain available.

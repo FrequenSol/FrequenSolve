@@ -36,7 +36,7 @@ The layers, lowest first:
 - The **problem** (:class:`~frequensolve.imaging.ImagingProblem`) and its
   **linearizations** expose ``value``, ``gradient``, ``jacobian`` and
   ``normal`` at any point.
-- **Penalties, preconditioners and smoothing** live in FrequenSolve
+- **Regularization, preconditioners and smoothing** are configured in FrequenSolve
   (:class:`~frequensolve.imaging.Tikhonov`, :class:`~frequensolve.imaging.TV`,
   :class:`~frequensolve.imaging.Diagonal`, :class:`~frequensolve.imaging.Smoothing`).
 - **Workflows** (:class:`~frequensolve.imaging.FWI`, :class:`~frequensolve.imaging.LSRTM`,
@@ -47,8 +47,9 @@ The layers, lowest first:
   :class:`~frequensolve.imaging.ImageKernelJob`,
   :class:`~frequensolve.imaging.SmoothJob`) are what the layers above submit.
 
-Sauce owns the physics and gradient smoothing; FrequenSolve owns bounds,
-stages, continuation, penalties, optimizers, checkpoints and history. The
+Sauce owns the physics, native regularization energies and proximal solves;
+FrequenSolve assembles the objective and owns bounds, stages, continuation,
+optimizers, checkpoints and history. The
 generic optimizer toolkit (:mod:`frequensolve.inversion`: L-BFGS, Newton-CG,
 continuation schedules, history, derivative checks) is reused underneath and
 remains available on its own.
@@ -434,9 +435,11 @@ through ``operator.to_pylops()``.
 
 .. code-block:: python
 
+   import numpy as np
    from scipy.sparse.linalg import cg
 
-   R = im.Tikhonov(alpha=1e-2).bind(problem.space).operator()
+   # An explicit custom quadratic on optimizer coordinates.
+   R = im.Quadratic(np.eye(lin.space.size), weight=1e-2).bind(lin.space).operator()
    step, info = cg(H + R.T @ R, -lin.gradient, maxiter=20)   # one Gauss-Newton step
 
 ``problem.restrict(frequencies=..., active=...)`` returns a stage view that
@@ -481,108 +484,89 @@ that reports the first- and second-order remainders. A fully reassembled
 Taylor curve reaches a quadratic regime before flattening at the frozen
 test-map discretization error; refining the mesh lowers that floor. For
 finite-difference checks keep the mesh, element orders and quadrature fixed,
-use a tight solver tolerance, and disable smoothing and preconditioning, which
-change the raw covector. PML elements are excluded from sensitivities; the PML
+use a tight solver tolerance and the raw ``gradient``. Configured smoothing
+and optimizer preconditioning do not alter this derivative. PML elements are excluded from sensitivities; the PML
 uses the outward extension of the boundary model, which is held fixed.
 
 Regularization, smoothing and preconditioning
 ---------------------------------------------
 
-Three families with different roles:
-
-- **Penalties** are part of the objective. They are evaluated in Python on
-  the block coordinates (after the transform, frozen nodes excluded) and
-  expose ``value``, ``gradient``, a Hessian operator and, for quadratic
-  penalties, ``operator()`` returning ``R`` with ``hessian == R.T @ R``.
-- **Smoothing** is Sauce's native gradient smoothing: a step transform on
-  covectors that is not part of the objective.
-- **Preconditioners** change the linear solve only.
+FrequenSolve minimizes the data objective plus the model regularization value.
+Sauce owns the native control discretization, including meshed controls, B-spline
+profiles and tensor hat lattices. Use ``regularization=`` on ``FWI``, ``Stage`` or
+``LSRTM``:
 
 .. code-block:: python
 
-   penalty = im.Tikhonov(alpha=1e-2, order=1)                       # first-derivative seminorm per block
-   penalty = im.TV(alpha=1e-3) + 0.5 * im.Tikhonov(alpha=1e-2, order=2)
-   penalty = im.Tikhonov(alpha=1e-2, weights={"vp": 1.0, "salt": 0.1}, reference=problem.vector())
-   penalty = im.Tikhonov(alpha=1e-2, length=100 * u.m)               # derivatives per 100 m instead
+   regularization = im.NativeRegularization(
+       im.Smoothing(kind="tv", wavelength_fraction=0.3),
+       iterations=1000,
+   )
+   result = im.FWI(problem, stages, regularization=regularization).run()
 
-Penalties are scale free. Each lattice block is measured on its
-nondimensional coordinate :math:`\xi = (x - x_0)/L`, with :math:`L` the
-block's span per axis, and the penalty is a quadrature-weighted
-discretization of a continuous seminorm over the unit interval (square,
-cube):
+``im.Tikhonov(alpha=...)``, ``im.TV(alpha=...)`` and ``im.TGV(alpha1=..., alpha2=...)``
+are also dispatched to Sauce by these workflows. A problem's ``smoothing=``
+configuration supplies the native regularizer when no explicit workflow or stage
+regularization is given. An explicit regularization overrides that inherited
+configuration, avoiding duplicate terms.
 
-.. math::
-
-   \mathrm{Tikhonov}_k(c) = \tfrac12\,\alpha \sum_{\text{axes}}
-   \int_{[0,1]^d} \Bigl|\frac{\partial^k (c - c_{\mathrm{ref}})}{\partial \xi^k}\Bigr|^2 d\xi,
-   \qquad
-   \mathrm{TV}(c) = \alpha \int_{[0,1]^d}
-   \Bigl(\sqrt{|\nabla_\xi (c - c_{\mathrm{ref}})|^2 + \epsilon^2} - \epsilon\Bigr) d\xi .
-
-First differences are weighted by their edge length (exact for the
-piecewise-linear hat profile), second differences by their dual-cell length,
-other lattice axes by trapezoid weights; TV evaluates the gradient per
-lattice cell. The value of a fixed smooth field therefore converges as the
-profile is refined instead of growing with the node count, and because the
-default misfit normalization (``observed_rms``) makes the data term order
-one, ``alpha`` between :math:`10^{-3}` and :math:`10^{-1}` is a meaningful
-range. ``length=`` (a length, a per-axis sequence or a ``block -> length``
-mapping) measures derivatives per physical length instead of per block span.
-B-spline profiles difference their coefficients at the Greville abscissae.
-Material blocks have unit weight; source, interface and reflectivity blocks
-are unpenalized unless ``weights`` names them, in which case they receive a
-ridge toward the reference. :class:`~frequensolve.imaging.TV` has a
-lagged-diffusivity Hessian; ``TV(order=2)`` is a second-order TV. Full TGV is
-a Sauce-side smoothing (below), not a Python penalty.
-:class:`~frequensolve.imaging.Quadratic` wraps an arbitrary matrix.
-
-Smoothing
-~~~~~~~~~
-
-.. code-block:: python
-
-   smoothing = im.Smoothing(kind="tikhonov", wavelength_fraction=0.5, derivative_order=1)
-   smoothing = im.Smoothing(kind="tgv", wavelength_fraction=0.3, tgv_ratio=1.0)
-
-   smoothed_problem = im.ImagingProblem(simulation, controls=space, observed=observed,
-                                        frequencies=[3.0, 5.0], site=site, smoothing=smoothing)
-   smoothed = im.smooth(problem.gradient(v), smoothing, problem)   # one explicit vector
-
-Attached to the problem (or overridden per stage), every gradient and
-covector is smoothed by Sauce's ``smooth`` postprocess; :func:`~frequensolve.imaging.smooth`
-runs the same Riesz map on one explicit vector through a
-:class:`~frequensolve.imaging.SmoothJob`. History records it as a transform.
-
-The native Tikhonov system is :math:`(M + \alpha K_p)\,g = b`, where
-:math:`M` is the control-basis mass matrix and :math:`K_p` its derivative
-Gram matrix. By default Sauce derives
-:math:`\alpha = (\lambda\, v_{p,\min} / (2\pi f_{\mathrm{ref}}))^{2p}`
-independently for each owning material layer, with :math:`\lambda` the
-authored ``wavelength_fraction``, :math:`v_{p,\min}` that layer's conservative
-P-wave speed and :math:`f_{\mathrm{ref}}` the largest physical frequency of
-the job. ``alpha`` or ``reference_wavelength`` may be supplied explicitly.
-TV uses the same basis and quadrature with a lagged-diffusivity iteration.
-Second-order TGV introduces an auxiliary spline field :math:`w` and minimizes
+TV and TGV use split-Bregman shrinkage. ``epsilon`` controls the splitting
+parameter; it does not round off the absolute-value norm. The native energies are
 
 .. math::
 
-   \tfrac12\lVert g\rVert_M^2 - b(g)
-   + \alpha_1\lVert g' - w\rVert_1
-   + \alpha_2\lVert w'\rVert_1,
+   R_{\mathrm{Tik}}(m) = \tfrac12\alpha\int |D^p m|^2\,dx,\qquad
+   R_{\mathrm{TV}}(m) = \sqrt{\alpha}\int |D^p m|\,dx,
 
-with :math:`\alpha_1 = \lambda\, v_{p,\min} / (2\pi f_{\mathrm{ref}})` and
-:math:`\alpha_2 = r\,\alpha_1^2`, where ``tgv_ratio`` is :math:`r`; this keeps
-sharp interfaces while allowing affine trends and avoids much of TV's
-staircase bias. Native control smoothing requires a MUMPS-enabled Sauce build
-and is implemented for hat, B-spline and mesh blocks; lattices are not yet
-smoothed Sauce-side.
+   R_{\mathrm{TGV}}(m) = \min_w\int\alpha_1|\nabla m-w|
+       +\alpha_2|\operatorname{sym}\nabla w|\,dx.
 
-For Cartesian image kernels the same object emits the image-stacking
-smoothing. Its ``illumination_normalization`` policy is ``"none"`` by default
-(the raw linear adjoint before its Riesz map); ``"source"`` divides by a
-fixed source-illumination diagonal and stays linear in the data;
-``"cross"`` also uses adjoint illumination, is nonlinear, and is meant for
-display only, never as the adjoint inside a ``J.T @ J`` operator.
+Spatial axes use km (angular axes use radians). First derivatives are supported
+by all native bases; second derivatives require a B-spline basis of degree at
+least two. TGV uses first derivatives. Each included material block contributes
+its native integral. Non-material controls can receive separate custom terms,
+such as ``Quadratic``.
+
+Sauce evaluates the energy at every line-search trial and solves the constrained
+proximal update in the optimizer's metric. Native regularization selects
+proximal-gradient backtracking instead of a Newton-CG or L-BFGS step; history
+records the effective optimizer. Newton/L-BFGS preconditioners do not apply to
+this path; use coordinate ``scaling`` to set its diagonal metric. Bounds and
+frozen coefficients enter the
+proximal problem itself. Regularization uses the full model, including fixed
+values; an optional ``NativeRegularization(reference=full_state)`` regularizes
+the difference from a complete reference state. Native nonconvergence fails the
+callback rather than reporting a valid value or accepting an unfinished update.
+
+Wavelength-derived weights and amplitude scales are frozen at the beginning of
+each stage and saved in checkpoints. With amplitude normalization scale ``a``,
+the energy is ``a**2 * R((m-reference)/a)``. Coordinate scaling uses the matching
+proximal metric. Native weights differ from the former Python unit-domain
+coefficient regularizers; their ``alpha`` values are not interchangeable.
+``Tikhonov``, ``TV`` and ``TGV`` are configuration objects for Sauce; they have
+no Python value, gradient, Hessian or finite-difference implementation.
+Pass them to FWI/LSRTM. Their former ``length`` and per-block ``weights`` options
+are removed. Use ``NativeRegularization`` for wavelength-based configuration,
+reference states and callback tolerances, and ``Quadratic`` for an explicit
+custom matrix on optimizer coordinates.
+
+``Quadratic`` and custom smooth regularizers retain the value, gradient and
+``hessian_operator`` protocol. Smooth terms can be added to one native model
+regularizer. The underlying ``ImagingProblem.value``, ``gradient`` and ``normal``
+remain data-objective operations. ``gradient`` is its actual derivative; there
+is no separate ``smoothed_gradient`` API. The explicit ``im.smooth(vector,
+configuration, problem)`` operation remains available for vector processing.
+
+LSRTM uses the same composite solver for native regularization of its image
+(update), with zero fixed image coefficients and a frozen data Jacobian. Its
+ordinary CG/LSQR paths remain available without native regularization or with
+quadratic custom terms. TV is no longer approximated by a single Hessian frozen
+at zero.
+
+Extension solves already include their auxiliary tap regularization in the
+reduced objective and Schur normal. Outer model regularization is added once;
+``loss.data`` contains the reduced objective including the inner term, and
+``loss.regularization`` records the background model term.
 
 Preconditioners
 ~~~~~~~~~~~~~~~
@@ -590,12 +574,12 @@ Preconditioners
 .. code-block:: python
 
    preconditioner = im.Diagonal(probe_count=4, relative_damping=1e-2, maximum_inverse_ratio=1e3)
-   preconditioner = im.FromOperator(my_inverse_hessian_action)
+   preconditioner = im.FromOperator(my_inverse_curvature_action)
 
 :class:`~frequensolve.imaging.Diagonal` estimates
 :math:`\operatorname{diag}(\operatorname{Re} J^{\mathsf H} W J + R^{\mathsf T} R)`
 with a few Rademacher probes of the normal operator (one normal action per
-probe, no Jacobian is formed), adds the penalty's exact curvature diagonal,
+probe, no Jacobian is formed), adds the regularization curvature diagonal,
 and applies block-wise relative damping and dynamic-range clipping before
 exposing the inverse action. For L-BFGS this supplies only the initial
 inverse-Hessian action of the two-loop recursion; gradients and secant pairs
@@ -610,7 +594,7 @@ FWI: stages, continuation and checkpoints
 
 A :class:`~frequensolve.imaging.Stage` names the frequencies, iteration
 budget and active blocks of one continuation stage, with optional loss,
-misfit, penalty, smoothing, optimizer and frequency-weight overrides.
+misfit, regularization, smoothing, optimizer and frequency-weight overrides.
 
 .. code-block:: python
 
@@ -659,7 +643,7 @@ Running and resuming
        problem,
        stages=stages,
        optimizer=im.LBFGS(memory=10, step_limit=0.015),     # or im.NewtonCG(max_cg_iterations=20)
-       penalty=im.Tikhonov(alpha=1e-2),
+       regularization=im.Tikhonov(alpha=1e-2),
        preconditioner=im.Diagonal(probe_count=4),
        checkpoint="checkpoint.h5",
        history="history.json",
@@ -688,7 +672,7 @@ every accepted iteration.
 
 The repository benchmark ``benchmarks/imaging/fwi_1d_profile.py`` is a
 complete example: a layered sediment column with a low-velocity notch, a
-smooth start, Huber misfit with an offset taper, Tikhonov penalty, L-BFGS
+smooth start, Huber misfit with an offset taper, Tikhonov regularization, L-BFGS
 with a step cap and a diagonal preconditioner over two frequency bands.
 
 Activating blocks by hand
@@ -868,7 +852,7 @@ LSRTM, RTM, kernels and focusing
 .. code-block:: python
 
    image = im.rtm(problem)                                      # gradient at the current state
-   dm = im.LSRTM(problem, iterations=15, penalty=None).run()   # LSQR on lin.jacobian
+   dm = im.LSRTM(problem, iterations=15, regularization=None).run()   # LSQR on lin.jacobian
    dm = im.LSRTM(problem, iterations=15, method="cg", damping=1e-3).run()
    kernels = im.sensitivity_kernel(problem, grid, properties=["vp"], condition="fwi")
    kernels.raw["vp"].plot.imshow(x="x", y="z", yincrease=False)
@@ -886,7 +870,7 @@ state) or by conjugate gradients on the Gauss-Newton normal equations
 (``method="cg"``, uses ``lin.normal`` and ``lin.gradient`` only). It is
 typically run over :class:`~frequensolve.imaging.GridParameters` or
 reflectivity blocks. Older saved states without an objective residual must
-be regenerated before LSQR; CG can still use them. Quadratic penalties keep
+be regenerated before LSQR; CG can still use them. Quadratic regularization terms keep
 their reference model in both solvers.
 
 :func:`~frequensolve.imaging.sensitivity_kernel` images on a Cartesian grid
@@ -1073,7 +1057,7 @@ Sauce contract mapping
        (``Imaging.Smoothing`` for image kernels)
    * - ``sensitivity_kernel``
      - ``Imaging.grid``, ``Imaging.images``
-   * - bounds, stages, penalties, optimizers, checkpoints
+   * - bounds, stages, regularization, optimizers, checkpoints
      - FrequenSolve only
 
 Solver support

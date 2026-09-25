@@ -366,7 +366,7 @@
         },
         "Smoothing": {
           "type": "object",
-          "description": "Optional representation-owned variational Riesz map applied after frequency aggregation.",
+          "description": "Optional representation-owned variational regularization solve applied to the aggregated or explicit control vector.",
           "properties": {
             "type": {
               "enum": [
@@ -433,6 +433,10 @@
                 "primal"
               ],
               "default": "dual"
+            },
+            "normalize_amplitude": {
+              "type": "boolean",
+              "description": "Normalize native control amplitudes before regularization."
             }
           },
           "dependentRequired": {
@@ -444,9 +448,249 @@
             ]
           },
           "additionalProperties": false
+        },
+        "Regularization": {
+          "type": "object",
+          "description": "Native full-model regularization value or constrained proximal callback; invoked with --smooth and explicit input.",
+          "properties": {
+            "type": {
+              "enum": [
+                "none",
+                "tikhonov",
+                "l2",
+                "tv",
+                "tgv"
+              ],
+              "default": "tikhonov"
+            },
+            "lambda": {
+              "type": "number",
+              "minimum": 0,
+              "default": 1,
+              "description": "Multiplier of wavelength/(2*pi) for the native regularization length; alpha=length^(2*derivative_order) for Tikhonov/TV."
+            },
+            "alpha": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Direct native coefficient: Tikhonov energy is alpha/2 times the squared derivative integral; TV energy is sqrt(alpha) times the derivative norm integral. Not valid for TGV."
+            },
+            "alpha1": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Optional direct first-order TGV weight. Must be supplied with alpha2."
+            },
+            "alpha2": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Optional direct second-order TGV weight. Must be supplied with alpha1."
+            },
+            "tgv_ratio": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1,
+              "description": "Dimensionless second-order TGV balance; wavelength scaling gives alpha1=length and alpha2=tgv_ratio*length^2."
+            },
+            "reference_wavelength": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Optional reference wavelength used with lambda instead of deriving one from the material model and f_list."
+            },
+            "derivative_order": {
+              "enum": [
+                1,
+                2
+              ],
+              "default": 1,
+              "description": "Spatial derivative order; order two requires a spline of degree at least two. TGV requires order one."
+            },
+            "epsilon": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 0.001,
+              "description": "Positive initial split-Bregman parameter for TV/TGV; residual balancing may adapt splitting coefficients. It does not smooth the norm or change the energy."
+            },
+            "iterations": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1000
+            },
+            "input_role": {
+              "enum": [
+                "dual",
+                "primal"
+              ],
+              "default": "dual",
+              "description": "Accepted shared smoothing setting, ignored by model callbacks: input always contains primal full-model coefficients; proximal fidelity uses metric."
+            },
+            "normalize_amplitude": {
+              "type": "boolean",
+              "description": "Freeze scale a=max(abs(input)) per block during prepare (a=1 for a zero block), then evaluate a^2*R(input/a). Defaults to true for wavelength-derived weights and false for explicit alpha or alpha1/alpha2."
+            },
+            "operation": {
+              "enum": [
+                "prepare",
+                "value",
+                "proximal"
+              ]
+            },
+            "context": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Prepared stage context: output for prepare, immutable input for value/proximal."
+            },
+            "result": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+            },
+            "tau": {
+              "type": "number",
+              "minimum": 0,
+              "default": 1,
+              "description": "Nonnegative multiplier of the regularization energy in the proximal objective; not included in the reported energy."
+            },
+            "relative_tolerance": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1e-06
+            },
+            "absolute_tolerance": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1e-08
+            },
+            "metric": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Full positive coefficient diagonal H for proximal fidelity 0.5*(u-input)^T H (u-input)."
+            },
+            "lower": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Full finite coefficient lower bounds for the proximal model, in the same coordinates as input. Equal bounds freeze a coefficient."
+            },
+            "upper": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Full finite coefficient upper bounds for the proximal model, in the same coordinates as input. Equal bounds freeze a coefficient."
+            }
+          },
+          "dependentRequired": {
+            "alpha1": [
+              "alpha2"
+            ],
+            "alpha2": [
+              "alpha1"
+            ]
+          },
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "context",
+            "result"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "operation": {
+                    "const": "proximal"
+                  }
+                },
+                "required": [
+                  "operation"
+                ]
+              },
+              "then": {
+                "required": [
+                  "metric",
+                  "lower",
+                  "upper"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "tgv"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "alpha"
+                  ]
+                },
+                "properties": {
+                  "derivative_order": {
+                    "const": 1
+                  }
+                }
+              },
+              "else": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "alpha1"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "alpha2"
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "alpha1": {
+                    "const": 0
+                  }
+                },
+                "required": [
+                  "alpha1"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "alpha2": {
+                    "const": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "alpha2": {
+                    "const": 0
+                  }
+                },
+                "required": [
+                  "alpha2"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "alpha1": {
+                    "const": 0
+                  }
+                }
+              }
+            }
+          ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "dependentRequired": {
+        "Regularization": [
+          "input",
+          "gradient"
+        ]
+      }
     },
     "focus": {
       "type": "object",
@@ -591,7 +835,10 @@
           "description": "Fixed-baseline source location and mechanism controls; FrequenSolve owns parameter updates and optimization. Requires waveform linearize/jvp/vjp. Location/mechanism controls currently require one MPI rank; OpenMP is supported.",
           "properties": {
             "location_method": {
-              "enum": ["analytic", "local_fd4"],
+              "enum": [
+                "analytic",
+                "local_fd4"
+              ],
               "default": "analytic",
               "description": "Analytic basis and coefficient product rule. Unsupported derivatives fail. local_fd4 is a deprecated alias for analytic; it does not enable finite differences."
             },
@@ -1848,6 +2095,13 @@
         "properties": {
           "workflow": {
             "const": "forward"
+          },
+          "control_sensitivities": {
+            "not": {
+              "required": [
+                "Regularization"
+              ]
+            }
           }
         },
         "required": [

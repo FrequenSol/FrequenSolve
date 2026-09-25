@@ -60,6 +60,7 @@ __all__ = [
     "ImageKernelJob",
     "ImageSpec",
     "SmoothJob",
+    "RegularizationJob",
     "FWI_ACTIONS",
 ]
 
@@ -2725,7 +2726,15 @@ class SmoothJob(_ImagingJobBase):
             raise ValueError("input_vector has no model.* control blocks to smooth")
         self.control_active = list(model_blocks)
         if isinstance(vector, ControlVectorFile):
-            ControlVectorFile(model_blocks, native=True).write(source_path)
+            ControlVectorFile(
+                model_blocks,
+                native=True,
+                control_spaces={
+                    unqualified_block_name(k): v
+                    for k, v in source.control_spaces.items()
+                    if unqualified_block_name(k) in model_blocks
+                },
+            ).write(source_path)
         return source_path
 
     # -- output paths ---------------------------------------------------------
@@ -2892,6 +2901,176 @@ class SmoothJob(_ImagingJobBase):
             input_vector=resolve(input_vector),
             gradient=resolve(gradient),
             name=data["name"],
+        )
+        cls._finish_load(job, data)
+        return job
+
+
+@register_class
+class RegularizationJob(SmoothJob):
+    """Evaluate Sauce's native model regularizer or solve its constrained prox.
+
+    ``input_vector`` contains full model coefficients, including fixed values.
+    A prepared context freezes native weights and amplitude scales for a stage.
+    """
+
+    def __init__(
+        self,
+        source_job: Any,
+        *,
+        smoothing: Union[SmoothingConfig, Mapping[str, Any]],
+        input_vector: Union[str, Path, ControlVectorFile],
+        operation: str = "value",
+        context: Optional[Union[str, Path]] = None,
+        metric: Optional[Union[str, Path, ControlVectorFile]] = None,
+        lower: Optional[Union[str, Path, ControlVectorFile]] = None,
+        upper: Optional[Union[str, Path, ControlVectorFile]] = None,
+        tau: float = 1.0,
+        iterations: int = 1000,
+        relative_tolerance: float = 1e-6,
+        absolute_tolerance: float = 1e-8,
+        gradient: Union[str, Path] = "regularized.h5",
+        name: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            source_job,
+            smoothing=smoothing,
+            input_vector=input_vector,
+            gradient=gradient,
+            name=name,
+        )
+        if operation not in {"prepare", "value", "proximal"}:
+            raise ValueError(
+                "regularization operation must be prepare, value or proximal"
+            )
+        if operation != "prepare" and context is None:
+            raise ValueError("regularization requires a prepared context")
+        self.operation = operation
+        self.context: Path = (
+            self._result_path / "regularization_context.json"
+            if context is None
+            else Path(context)
+        )
+        self.result: Path = self._result_path / "regularization_result.json"
+        assert self.context is not None and self.result is not None
+        self.tau = float(tau)
+        self.iterations = int(iterations)
+        self.relative_tolerance = float(relative_tolerance)
+        self.absolute_tolerance = float(absolute_tolerance)
+        if self.iterations < 1 or any(
+            not np.isfinite(t) or t <= 0
+            for t in (self.relative_tolerance, self.absolute_tolerance)
+        ):
+            raise ValueError(
+                "regularization iterations and tolerances must be positive"
+            )
+        self.regularization_inputs: Dict[str, Path] = {}
+        if not np.isfinite(self.tau) or self.tau < 0:
+            raise ValueError("proximal tau must be finite and nonnegative")
+        for label, vector in (("metric", metric), ("lower", lower), ("upper", upper)):
+            if operation == "proximal" and vector is None:
+                raise ValueError(f"proximal regularization requires {label}")
+            if vector is not None:
+                path = _output_path(f"regularization_{label}.h5", self._result_path)
+                assert path is not None
+                if isinstance(vector, ControlVectorFile):
+                    ControlVectorFile(
+                        {
+                            unqualified_block_name(k): v
+                            for k, v in vector.blocks.items()
+                        },
+                        native=True,
+                        control_spaces={
+                            unqualified_block_name(k): v
+                            for k, v in vector.control_spaces.items()
+                        },
+                    ).write(path)
+                else:
+                    path = Path(vector)
+                self.regularization_inputs[label] = path
+
+    def to_fs(
+        self, ctx: Optional[ExportContext] = None, *, project_relative: bool = False
+    ) -> Dict[str, Any]:
+        payload = super().to_fs(ctx, project_relative=project_relative)
+        controls = payload["control_sensitivities"]
+        request = controls.pop("Smoothing")
+        request.update(
+            operation=self.operation,
+            context=_job_path(self.context, ctx, False),
+            result=_job_path(self.result, ctx, False),
+            tau=self.tau,
+            iterations=self.iterations,
+            relative_tolerance=self.relative_tolerance,
+            absolute_tolerance=self.absolute_tolerance,
+        )
+        request.update(
+            {k: _job_path(v, ctx, False) for k, v in self.regularization_inputs.items()}
+        )
+        controls["Regularization"] = request
+        return payload
+
+    def postprocess_fetch_files(self) -> List[Path]:
+        paths = [self.gradient_file(), self.result]
+        if self.operation == "prepare":
+            paths.append(self.context)
+        return paths
+
+    def postprocess_output_exists(self) -> bool:
+        return all(path.is_file() for path in self.postprocess_fetch_files())
+
+    def _input_fingerprint_payload(self) -> Dict[str, Any]:
+        payload = super()._input_fingerprint_payload()
+        paths = dict(self.regularization_inputs)
+        if self.operation != "prepare":
+            paths["context"] = self.context
+        payload.update({k: self._path_content_fingerprint(v) for k, v in paths.items()})
+        return payload
+
+    @classmethod
+    def from_fs(
+        cls,
+        data: Mapping[str, Any],
+        base_path: Optional[Union[str, Path]] = None,
+        project_path: Optional[Union[str, Path]] = None,
+    ) -> RegularizationJob:
+        source = BaseJob.from_fs(
+            dict(data["smooth_source"]), base_path=base_path, project_path=project_path
+        )
+        controls = data["control_sensitivities"]
+        request = dict(controls["Regularization"])
+
+        def resolve(value: Union[str, Path]) -> Path:
+            path = _resolve_saved_job_path(
+                value,
+                base_path=base_path,
+                project_path=project_path or data.get("project_path"),
+                source_project=data.get("project_path"),
+            )
+            assert path is not None
+            return path
+
+        options = {
+            key: request.pop(key)
+            for key in (
+                "operation",
+                "tau",
+                "iterations",
+                "relative_tolerance",
+                "absolute_tolerance",
+            )
+        }
+        for key in ("context", "metric", "lower", "upper"):
+            if key in request:
+                options[key] = resolve(request.pop(key))
+        request.pop("result", None)
+        job = cls(
+            source,
+            smoothing=request,
+            input_vector=resolve(controls["input"]),
+            gradient=resolve(controls["gradient"]),
+            name=data["name"],
+            **options,
         )
         cls._finish_load(job, data)
         return job

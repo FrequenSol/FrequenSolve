@@ -1655,3 +1655,10 @@ def test_profile_to_grid_follows_sloping_surface_and_converts_units(simulation):
     expected[expected < 0] = np.nan
     np.testing.assert_allclose(sampled.values, expected, equal_nan=True)
     assert sampled.x.attrs["units"] == "km"
+
+
+def test_volume_injection_mechanism_has_one_complex_component(tmp_path):
+    simulation = _layered_simulation(tmp_path, sources=1, kind="volume_injection")
+    bound = im.ControlSpace(src=im.SourceParameters(mechanism=True)).bind(simulation)
+    assert bound.block("source.1.mechanism").components == ("c1",)
+    assert bound.sizes["source.1.mechanism"] == 2

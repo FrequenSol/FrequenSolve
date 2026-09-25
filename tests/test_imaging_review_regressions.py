@@ -71,7 +71,9 @@ def test_cached_linearization_adopts_support_before_a_stage_uses_its_space(tmp_p
 
 
 @pytest.mark.parametrize("reference", [None, np.arange(8.0) + 10])
-def test_lsqr_uses_frozen_objective_residual_and_affine_penalty(tmp_path, reference):
+def test_lsqr_uses_frozen_objective_residual_and_affine_regularization(
+    tmp_path, reference
+):
     class ScaledSite(FakeImagingSite):
         def surrogate(self, *args, **kwargs):
             J, d, space = super().surrogate(*args, **kwargs)
@@ -82,7 +84,7 @@ def test_lsqr_uses_frozen_objective_residual_and_affine_penalty(tmp_path, refere
     problem.residual = lambda *_: (_ for _ in ()).throw(
         AssertionError("raw residual used")
     )
-    penalty = 0.3 * (
+    regularization = 0.3 * (
         im.Quadratic(np.eye(8), weight=10, reference=reference)
         + im.Quadratic(np.eye(8), weight=2, reference=np.ones(8))
     )
@@ -96,7 +98,7 @@ def test_lsqr_uses_frozen_objective_residual_and_affine_penalty(tmp_path, refere
             iterations=120,
             tolerance=1e-12,
             damping=0.1,
-            penalty=penalty,
+            regularization=regularization,
         )
         .run()
         .values

@@ -14,6 +14,7 @@ __all__ = [
     "LBFGSOptions",
     "minimize_inexact_newton",
     "minimize_lbfgs",
+    "minimize_proximal_gradient",
 ]
 
 
@@ -1461,3 +1462,208 @@ def minimize_lbfgs(
         0,
         steepest_descent_fallbacks,
     )
+
+
+def minimize_proximal_gradient(
+    objective: Objective,
+    gradient: Gradient,
+    regularization: Objective,
+    proximal: Callable[[np.ndarray, float, Tuple[np.ndarray, np.ndarray]], np.ndarray],
+    initial_model: Any,
+    *,
+    bounds: Optional[Tuple[Any, Any]] = None,
+    options: Optional[InexactNewtonOptions | LBFGSOptions] = None,
+    callback: Optional[IterationCallback] = None,
+    step_limit: Optional[StepLimit] = None,
+) -> InexactNewtonResult:
+    """Minimize a smooth objective plus a native convex regularizer.
+
+    ``proximal(v, tau, bounds)`` solves the constrained proximal problem in
+    these optimizer coordinates. Backtracking tests the smooth majorization
+    inequality and composite decrease. Stationarity uses the proximal-gradient
+    mapping, including at nonsmooth points and fixed bounds.
+    """
+    options = InexactNewtonOptions() if options is None else options
+    x = _finite_vector(initial_model, name="initial model")
+    lower, upper = _bounds(bounds, x.size, None)
+    box = (
+        np.full(x.size, -np.inf) if lower is None else lower,
+        np.full(x.size, np.inf) if upper is None else upper,
+    )
+    if np.any(x < box[0]) or np.any(x > box[1]):
+        raise ValueError("initial model violates its bounds")
+    evaluations = gradients = searches = 0
+    momentum = None
+
+    def evaluate(v: np.ndarray) -> Tuple[float, float]:
+        nonlocal evaluations
+        if (
+            options.max_objective_evaluations is not None
+            and evaluations >= options.max_objective_evaluations
+        ):
+            raise _EvaluationLimit
+        f = float(objective(v.copy()))
+        r = float(regularization(v.copy()))
+        evaluations += 1
+        if not np.isfinite(f + r):
+            raise ValueError("composite objective must be finite")
+        return f, r
+
+    f, reg = evaluate(x)
+    g = _finite_vector(gradient(x.copy()), name="gradient", size=x.size)
+    gradients += 1
+    tau = 1.0
+    stable_tau: Optional[float] = None
+
+    def finish(
+        success: bool, status: int, message: str, iteration: int
+    ) -> InexactNewtonResult:
+        return InexactNewtonResult(
+            success,
+            status,
+            message,
+            x.copy(),
+            f + reg,
+            g.copy(),
+            iteration,
+            evaluations,
+            gradients,
+            0,
+            0,
+            searches,
+            0,
+            0,
+        )
+
+    for iteration in range(1, options.max_iterations + 1):
+        accepted = False
+        trials = 0
+        previous = x.copy()
+        old_gradient = g.copy()
+        old_total = f + reg
+        try:
+            while tau >= options.minimum_step_length:
+                if (
+                    options.max_line_search_trials is not None
+                    and trials >= options.max_line_search_trials
+                ):
+                    break
+                trials += 1
+                trial = _finite_vector(
+                    proximal(x - tau * g, tau, box), name="proximal model", size=x.size
+                )
+                if np.any(trial < box[0] - options.bound_tolerance) or np.any(
+                    trial > box[1] + options.bound_tolerance
+                ):
+                    raise ValueError("proximal result violates the supplied bounds")
+                step = trial - x
+                mapping = float(np.linalg.norm(step) / tau)
+                if mapping <= options.gradient_tolerance:
+                    return finish(
+                        True, 0, "proximal gradient tolerance reached", iteration - 1
+                    )
+                if (
+                    step_limit is not None
+                    and float(step_limit(x.copy(), step.copy())) < 1.0
+                ):
+                    tau *= options.backtrack_factor
+                    continue
+                trial_f, trial_reg = evaluate(trial)
+                searches += 1
+                slope = float(g @ step)
+                norm2 = float(step @ step)
+                roundoff = (
+                    32
+                    * np.finfo(float).eps
+                    * max(1.0, abs(f), abs(trial_f), abs(old_total))
+                )
+                # At machine precision the value test cannot distinguish large
+                # unstable steps. Keep the last step certified above roundoff.
+                if (
+                    stable_tau is not None
+                    and norm2 / tau < 100 * roundoff
+                    and tau > stable_tau
+                ):
+                    tau = stable_tau
+                    continue
+                majorized = trial_f <= f + slope + 0.5 * norm2 / tau + roundoff
+                composite_slope = slope + trial_reg - reg
+                if (
+                    majorized
+                    and composite_slope <= roundoff - 0.5 * norm2 / tau
+                    and trial_f + trial_reg
+                    <= old_total
+                    + options.armijo_constant * min(composite_slope, 0.0)
+                    + roundoff
+                ):
+                    if norm2 / tau >= 100 * roundoff:
+                        stable_tau = tau
+                    accepted = True
+                    break
+                tau *= options.backtrack_factor
+        except _EvaluationLimit:
+            return finish(
+                False,
+                -2,
+                "objective evaluation limit reached during line search",
+                iteration - 1,
+            )
+        if not accepted:
+            return finish(False, -1, "composite line search failed", iteration - 1)
+        x = trial
+        f, reg = trial_f, trial_reg
+        g = _finite_vector(gradient(x.copy()), name="gradient", size=x.size)
+        gradients += 1
+        reduction = max(0.0, (old_total - f - reg) / max(1.0, abs(old_total)))
+        momentum = (
+            reduction
+            if momentum is None
+            else options.objective_tolerance_momentum * momentum
+            + (1 - options.objective_tolerance_momentum) * reduction
+        )
+        if callback is not None:
+            callback(
+                InexactNewtonIteration(
+                    iteration=iteration,
+                    model=x.copy(),
+                    objective=f + reg,
+                    objective_relative_reduction=reduction,
+                    objective_reduction_momentum=momentum,
+                    gradient=g.copy(),
+                    linearization_gradient=old_gradient,
+                    projected_gradient_norm=mapping,
+                    step=step.copy(),
+                    raw_step=-tau * old_gradient,
+                    directional_derivative=composite_slope,
+                    raw_directional_derivative=-tau
+                    * float(old_gradient @ old_gradient),
+                    step_length=tau,
+                    forcing=0.0,
+                    cg_iterations=0,
+                    cg_residual_norm=0.0,
+                    cg_relative_residual=0.0,
+                    step_transform_cosine=1.0,
+                    step_transform_norm_ratio=1.0,
+                    negative_curvature=False,
+                    steepest_descent_fallback=False,
+                    line_search_evaluations=trials,
+                    objective_evaluations=evaluations,
+                    gradient_evaluations=gradients,
+                    hessian_products=0,
+                )
+            )
+        if options.objective_target is not None and f + reg <= options.objective_target:
+            return finish(True, 0, "objective target reached", iteration)
+        if options.step_tolerance > 0 and np.linalg.norm(
+            step
+        ) <= options.step_tolerance * max(1.0, float(np.linalg.norm(previous))):
+            return finish(True, 0, "step tolerance reached", iteration)
+        if (
+            iteration >= options.objective_minimum_iterations
+            and options.objective_tolerance > 0
+            and momentum <= options.objective_tolerance
+        ):
+            return finish(True, 0, "objective tolerance reached", iteration)
+        if norm2 / tau >= 100 * roundoff:
+            tau = min(1.0, tau / options.backtrack_factor)
+    return finish(False, 1, "maximum iterations reached", options.max_iterations)

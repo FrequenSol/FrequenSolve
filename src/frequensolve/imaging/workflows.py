@@ -4,7 +4,7 @@ The workflow layer owns the outer loop of an inversion while
 :class:`~frequensolve.imaging.problem.ImagingProblem` owns the physics:
 
 - :class:`Stage` names the frequencies, active blocks and iteration budget of
-  one continuation stage (plus optional loss, penalty, smoothing, optimizer
+  one continuation stage (plus optional loss, regularization, smoothing, optimizer
   and frequency-weight overrides) and produces the stage view of a problem.
 - :class:`LBFGS` and :class:`NewtonCG` are thin configurations of the
   generic optimizers in :mod:`frequensolve.inversion.optimization`; they add
@@ -91,6 +91,7 @@ from frequensolve.inversion.optimization import (
     LBFGSOptions,
     minimize_inexact_newton,
     minimize_lbfgs,
+    minimize_proximal_gradient,
 )
 
 __all__ = [
@@ -273,8 +274,8 @@ class Stage:
             (``"huber"``, :class:`~frequensolve.imaging.misfit.Loss`, ...).
         misfit: Replace the whole misfit for the stage (exclusive with
             ``loss``).
-        penalty: Penalty overriding the workflow-level penalty.
-        smoothing: Gradient smoothing overriding the workflow/problem
+        regularization: Regularization overriding the workflow-level regularization.
+        smoothing: Gradient-output and search-step smoothing overriding the workflow/problem
             smoothing; ``False`` switches smoothing off for the stage.
         optimizer: :class:`LBFGS` / :class:`NewtonCG` overriding the
             workflow optimizer.
@@ -297,7 +298,7 @@ class Stage:
     active: Optional[Tuple[str, ...]] = None
     loss: Optional[Loss] = None
     misfit: Optional[Misfit] = None
-    penalty: Any = None
+    regularization: Any = None
     smoothing: Any = None
     optimizer: Any = None
     weights: Optional[Tuple[float, ...]] = None
@@ -665,6 +666,7 @@ class _OptimizerConfig:
         bounds: Optional[Tuple[Any, Any]] = None,
         preconditioner: Any = None,
         hessian_action: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
+        step_transform: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
         history: Optional[OptimizationHistory] = None,
         callback: Optional[Callable[[InexactNewtonIteration], None]] = None,
         max_iterations: Optional[int] = None,
@@ -686,6 +688,9 @@ class _OptimizerConfig:
                 with ``apply(g)`` (a bound imaging preconditioner).
             hessian_action: ``(model, dx) -> ndarray`` (Newton-CG only);
                 defaults to ``objective.hessian_action``.
+            step_transform: Optional ``(model, step) -> step`` in physical
+                optimizer coordinates. Applied outside CG; line searches
+                check the transformed step against the raw gradient.
             history: Optional history receiving one iteration record per
                 accepted iterate (``objective.loss`` required).
             callback: Called with every accepted
@@ -722,9 +727,9 @@ class _OptimizerConfig:
                 raise ValueError("scaling must be finite and positive")
         value_fn = objective.value
         gradient_fn = objective.gradient
-        hessian_fn = hessian_action
-        if hessian_fn is None:
-            hessian_fn = getattr(objective, "hessian_action", None)
+        curvature_fn = hessian_action
+        if curvature_fn is None:
+            curvature_fn = getattr(objective, "hessian_action", None)
         precondition = _preconditioner_callable(preconditioner, space)
 
         def to_physical(y: np.ndarray) -> np.ndarray:
@@ -741,11 +746,11 @@ class _OptimizerConfig:
             return grad if scale is None else scale * grad
 
         def h(y: np.ndarray, dy: np.ndarray) -> np.ndarray:
-            assert hessian_fn is not None
+            assert curvature_fn is not None
             out = _real_vector(
-                hessian_fn(to_physical(y), to_physical(dy)),
+                curvature_fn(to_physical(y), to_physical(dy)),
                 size=size,
-                name="Hessian product",
+                name="curvature product",
             )
             return out if scale is None else scale * out
 
@@ -761,6 +766,15 @@ class _OptimizerConfig:
         def step_limit_fn(y: np.ndarray, dy: np.ndarray) -> float:
             assert limit is not None
             return rms_step_limit(to_physical(dy), block_slices, limit)
+
+        def transform(y: np.ndarray, dy: np.ndarray) -> np.ndarray:
+            assert step_transform is not None
+            transformed = _real_vector(
+                step_transform(to_physical(y), to_physical(dy)),
+                size=size,
+                name="transformed step",
+            )
+            return to_scaled(transformed)
 
         def unscale_iteration(it: InexactNewtonIteration) -> InexactNewtonIteration:
             if scale is None:
@@ -804,13 +818,39 @@ class _OptimizerConfig:
             "options": self.options(max_iterations),
             "preconditioner": None if precondition is None else p,
             "step_limit": None if limit is None else step_limit_fn,
+            "step_transform": None if step_transform is None else transform,
             "callback": on_iteration,
         }
         y0 = cast(Sequence[float], to_scaled(x0))
-        if self.kind == "lbfgs":
+        native = getattr(objective, "native_regularization", None)
+        if native is not None:
+            if step_transform is not None:
+                raise ValueError(
+                    "native proximal optimization does not accept an extra step transform"
+                )
+            metric = np.ones(size) if scale is None else 1.0 / scale**2
+
+            def prox(
+                y: np.ndarray, tau: float, box: Tuple[np.ndarray, np.ndarray]
+            ) -> np.ndarray:
+                physical_box = (to_physical(box[0]), to_physical(box[1]))
+                return to_scaled(native.prox(to_physical(y), tau, metric, physical_box))
+
+            result = minimize_proximal_gradient(
+                lambda y: objective.smooth_value(to_physical(y)),
+                g,
+                lambda y: native.value(to_physical(y)),
+                prox,
+                y0,
+                bounds=scaled_bounds,
+                options=self.options(max_iterations),
+                callback=on_iteration,
+                step_limit=None if limit is None else step_limit_fn,
+            )
+        elif self.kind == "lbfgs":
             result = minimize_lbfgs(f, g, y0, **kwargs)
         else:
-            if hessian_fn is None:
+            if curvature_fn is None:
                 raise ValueError("NewtonCG requires a hessian_action")
             result = minimize_inexact_newton(f, g, h, y0, **kwargs)
         if scale is None:
@@ -882,10 +922,10 @@ class NewtonCG(_OptimizerConfig):
 
 
 class _StageObjective:
-    """Cached misfit-plus-penalty objective of one stage.
+    """Cached misfit-plus-regularization objective of one stage.
 
     One ``linearize`` (value and covector) per distinct point; the value,
-    gradient, Hessian action (Gauss-Newton normal plus penalty Hessian) and
+    gradient, curvature action (Gauss-Newton normal plus regularization curvature) and
     loss terms of the last point are reused.  Every new evaluation is
     appended to the history with the stage metrics.
     """
@@ -894,13 +934,14 @@ class _StageObjective:
         self,
         view: ImagingProblem,
         space: ControlSpace,
-        penalty: Any,
+        regularization: Any,
         history: Optional[OptimizationHistory],
         metrics: Mapping[str, Any],
     ) -> None:
         self.view = view
         self.space = space
-        self.penalty = penalty
+        self.regularization = regularization
+        self.native_regularization: Any = None
         self.history = history
         self.metrics = dict(metrics)
         self.evaluations = 0
@@ -924,11 +965,15 @@ class _StageObjective:
             raise RuntimeError("linearize returned no gradient")
         gradient = np.array(lin.gradient.values, dtype=np.float64, copy=True)
         regularization = 0.0
-        if self.penalty is not None:
-            regularization = float(self.penalty.value(vector))
+        if self.regularization is not None:
+            regularization = float(self.regularization.value(vector))
             gradient += _real_vector(
-                self.penalty.gradient(vector), size=point.size, name="penalty gradient"
+                self.regularization.gradient(vector),
+                size=point.size,
+                name="regularization gradient",
             )
+        if self.native_regularization is not None:
+            regularization += self.native_regularization.value(vector)
         loss = LossTerms(data=lin.value, regularization=regularization)
         self._point = np.array(point, copy=True)
         self._linearization = lin
@@ -951,6 +996,14 @@ class _StageObjective:
     def value(self, x: Any) -> float:
         return self.loss(x).total
 
+    def smooth_value(self, x: Any) -> float:
+        loss = self.loss(x)
+        return (
+            loss.total
+            if self.native_regularization is None
+            else loss.total - self.native_regularization.value(self.vector(x))
+        )
+
     def gradient(self, x: Any) -> np.ndarray:
         self._evaluate(x)
         assert self._gradient is not None
@@ -967,10 +1020,12 @@ class _StageObjective:
         out = np.array(
             np.asarray(lin.normal @ direction, dtype=np.float64).reshape(-1), copy=True
         )
-        if self.penalty is not None:
-            operator = self.penalty.hessian_operator(self.vector(x))
+        if self.regularization is not None:
+            operator = self.regularization.hessian_operator(self.vector(x))
             out += _real_vector(
-                operator @ direction, size=out.size, name="penalty Hessian product"
+                operator @ direction,
+                size=out.size,
+                name="regularization curvature product",
             )
         return out
 
@@ -1027,13 +1082,13 @@ class FWI:
             :class:`ContinuationSchedule`.
         optimizer: :class:`LBFGS` (default) or :class:`NewtonCG`; a stage's
             ``optimizer`` overrides it.
-        penalty: Penalty (``bind(space)`` protocol) added to the misfit; a
-            stage's ``penalty`` overrides it.
+        regularization: Regularization (``bind(space)`` protocol) added to the misfit; a
+            stage's ``regularization`` overrides it.
         preconditioner: Preconditioner (``bind(space)`` protocol) or plain
             ``(model, g) -> ndarray`` callable; bound preconditioners are
             updated at every stage start and every
             ``optimizer.preconditioner_refresh`` iterations.
-        smoothing: Gradient smoothing applied by Sauce for every stage
+        smoothing: Search-step smoothing applied by Sauce for every stage
             (overrides the problem's; ``False`` switches it off).
         step_limit: RMS step cap per block (overrides the optimizer's).
         scaling: ``None``, ``"curvature"`` (estimate block curvatures with
@@ -1054,7 +1109,7 @@ class FWI:
         stages: Any,
         *,
         optimizer: Any = None,
-        penalty: Any = None,
+        regularization: Any = None,
         preconditioner: Any = None,
         smoothing: Any = None,
         step_limit: Optional[float] = None,
@@ -1068,7 +1123,7 @@ class FWI:
         self.optimizer = LBFGS() if optimizer is None else optimizer
         if not callable(getattr(self.optimizer, "solve", None)):
             raise TypeError("optimizer must provide solve()")
-        self.penalty = penalty
+        self.regularization = regularization
         self.preconditioner = preconditioner
         if smoothing is not None and smoothing is not False:
             smoothing = SmoothingConfig.from_value(smoothing)
@@ -1214,7 +1269,7 @@ class FWI:
         stage: Stage,
         space: ControlSpace,
         optimizer: Any,
-        penalty: Any,
+        regularization: Any,
     ) -> Dict[str, Any]:
         view = self._views[stage.label(index)]
         smoothing = view.smoothing
@@ -1224,7 +1279,9 @@ class FWI:
             "frequencies": json.dumps(_frequency_pairs(stage.frequencies)),
             "active": ",".join(space.blocks),
             "optimizer": getattr(optimizer, "kind", type(optimizer).__name__),
-            "penalty": None if penalty is None else type(penalty).__name__,
+            "regularization": (
+                None if regularization is None else type(regularization).__name__
+            ),
             "smoothing": None if smoothing is None else smoothing.kind,
         }
 
@@ -1251,6 +1308,9 @@ class FWI:
         ).hexdigest()
         return {
             "schema": CHECKPOINT_SCHEMA,
+            "native_regularization": json.dumps(
+                getattr(self, "_native_checkpoint", None)
+            ),
             "problem": problem.name,
             "identity": self._identity(problem),
             # The control layout of this stage's problem (stages with
@@ -1325,6 +1385,10 @@ class FWI:
                 f"not {self.problem.name!r}"
             )
         index = int(meta["stage_index"])
+        self._resume_regularization = (
+            index,
+            json.loads(meta.get("native_regularization", "null")),
+        )
         if index >= len(self.stages):
             raise ValueError(
                 f"checkpoint stage index {index} exceeds the {len(self.stages)} stages"
@@ -1473,7 +1537,11 @@ class FWI:
             )
             self._views[label] = view
         optimizer = self.optimizer if stage.optimizer is None else stage.optimizer
-        penalty = self.penalty if stage.penalty is None else stage.penalty
+        regularization = (
+            self.regularization
+            if stage.regularization is None
+            else stage.regularization
+        )
         remaining = stage.iterations - int(start_iteration)
         if remaining < 1:
             raise ValueError(
@@ -1497,20 +1565,45 @@ class FWI:
         lower, upper = space.bounds
         x0 = np.clip(x0, lower, upper)
 
-        bound_penalty = None if penalty is None else penalty.bind(space)
-        metrics = self._stage_metrics(index, stage, space, optimizer, penalty)
-        objective = _StageObjective(view, space, bound_penalty, history, metrics)
+        from frequensolve.imaging._native_regularization import (
+            bind_workflow_regularization,
+        )
+
+        # Explicit stage/workflow regularization overrides the inherited native
+        # smoothing configuration; it is never silently counted twice.
+        regularization = view.smoothing if regularization is None else regularization
+        bound_regularization, native_regularization = bind_workflow_regularization(
+            regularization, space, view, first
+        )
+        resumed = getattr(self, "_resume_regularization", None)
+        if resumed is not None and resumed[0] == index:
+            if (resumed[1] is None) != (native_regularization is None):
+                raise ValueError(
+                    "checkpoint native regularization configuration changed"
+                )
+            if native_regularization is not None:
+                native_regularization.restore(resumed[1])
+        self._native_checkpoint = (
+            None
+            if native_regularization is None
+            else native_regularization.checkpoint()
+        )
+        metrics = self._stage_metrics(index, stage, space, optimizer, regularization)
+        if native_regularization is not None:
+            metrics["optimizer"] = "proximal_gradient"
+        objective = _StageObjective(view, space, bound_regularization, history, metrics)
+        objective.native_regularization = native_regularization
         initial_loss = objective.loss(x0)
         linearizations_before = objective.evaluations
 
-        preconditioner = self.preconditioner
+        preconditioner = self.preconditioner if native_regularization is None else None
         bound_preconditioner: Any = None
         if preconditioner is not None and callable(
             getattr(preconditioner, "bind", None)
         ):
             bound_preconditioner = preconditioner.bind(space)
             bound_preconditioner.update(
-                objective.linearization(x0), penalty=bound_penalty
+                objective.linearization(x0), regularization=bound_regularization
             )
             preconditioner = bound_preconditioner
         refresh = getattr(optimizer, "preconditioner_refresh", None)
@@ -1572,7 +1665,8 @@ class FWI:
                 and it.iteration % int(refresh) == 0
             ):
                 bound_preconditioner.update(
-                    objective.linearization(it.model), penalty=bound_penalty
+                    objective.linearization(it.model),
+                    regularization=bound_regularization,
                 )
             if self.callback is not None:
                 self.callback(
@@ -1588,7 +1682,7 @@ class FWI:
                     )
                 )
 
-        hessian = (
+        curvature = (
             objective.hessian_action
             if getattr(optimizer, "kind", None) == "newton_cg"
             else None
@@ -1598,7 +1692,7 @@ class FWI:
             x0,
             bounds=(lower, upper),
             preconditioner=preconditioner,
-            hessian_action=hessian,
+            hessian_action=curvature,
             callback=on_iteration,
             max_iterations=remaining,
             step_limit=step_limit,
@@ -1806,20 +1900,24 @@ class _RealJacobian(LinearOperator):
     ``matvec`` interleaves real and imaginary parts (optionally scaled by
     ``sqrt(w)`` per row) so ``||A x - b||`` equals the weighted complex
     residual norm; ``rmatvec`` restores the complex dual and applies
-    ``J.H``.  Optional penalty rows ``R`` are appended.
+    ``J.H``.  Optional regularization rows ``R`` are appended.
     """
 
     def __init__(
         self,
         jacobian: Any,
         row_weights: np.ndarray,
-        penalty_operator: Any = None,
+        regularization_operator: Any = None,
     ) -> None:
         self.jacobian = jacobian
         self.sqrt_weights = np.sqrt(np.asarray(row_weights, dtype=np.float64))
-        self.penalty_operator = penalty_operator
+        self.regularization_operator = regularization_operator
         rows, cols = jacobian.shape
-        extra = 0 if penalty_operator is None else int(penalty_operator.shape[0])
+        extra = (
+            0
+            if regularization_operator is None
+            else int(regularization_operator.shape[0])
+        )
         self.data_rows = 2 * int(rows)
         super().__init__(np.dtype(np.float64), (self.data_rows + extra, int(cols)))
 
@@ -1827,11 +1925,13 @@ class _RealJacobian(LinearOperator):
         x = np.asarray(x, dtype=np.float64).reshape(-1)
         data = np.asarray(self.jacobian @ x).reshape(-1) * self.sqrt_weights
         out = np.stack((data.real, data.imag), axis=-1).reshape(-1)
-        if self.penalty_operator is not None:
+        if self.regularization_operator is not None:
             out = np.concatenate(
                 [
                     out,
-                    np.asarray(self.penalty_operator @ x, dtype=np.float64).reshape(-1),
+                    np.asarray(
+                        self.regularization_operator @ x, dtype=np.float64
+                    ).reshape(-1),
                 ]
             )
         return out
@@ -1841,9 +1941,9 @@ class _RealJacobian(LinearOperator):
         pairs = y[: self.data_rows].reshape(-1, 2)
         dual = (pairs[:, 0] + 1j * pairs[:, 1]) * self.sqrt_weights
         out = np.asarray(self.jacobian.H @ dual, dtype=np.float64).reshape(-1)
-        if self.penalty_operator is not None:
+        if self.regularization_operator is not None:
             out = out + np.asarray(
-                self.penalty_operator.H @ y[self.data_rows :], dtype=np.float64
+                self.regularization_operator.H @ y[self.data_rows :], dtype=np.float64
             ).reshape(-1)
         return out
 
@@ -1860,19 +1960,24 @@ class LSRTM:
     Solves ``min_dm 0.5 ||J dm + r||_W^2 + 0.5 damping ||dm||^2 + P(dm)`` with
     ``r = F(v0) - d`` (``J``, ``W`` and ``r`` frozen at ``v0``):
 
+    Native regularization uses composite proximal-gradient iterations, with
+    Sauce evaluating the regularizer and solving each constrained proximal
+    problem. This also handles nonsmooth TV/TGV; ``info["method"]`` reports
+    ``"proximal_gradient"``. Without native regularization:
+
     - ``method="lsqr"``: SciPy's LSQR on the real-stacked Jacobian with the
       data-space residual from ``problem.residual(v0)`` (a site ``forward``
-      hook or a forward job); a penalty must expose ``operator()`` and is
+      hook or a forward job); a regularization must expose ``operator()`` and is
       appended as extra rows ``||R dm||^2``.
     - ``method="cg"``: conjugate gradients on the Gauss-Newton normal
       equations ``(H + damping I + P'') dm = -(g + P'(0))`` using
       ``lin.normal`` and ``lin.gradient`` only (no data-space residual
-      needed; the gradient is smoothed when the problem smooths gradients).
+      needed; the gradient and normal are both unprocessed).
 
     Args:
         problem: Problem (typically over ``GridParameters``/reflectivity).
         iterations: Solver iteration limit.
-        penalty: Optional penalty (``bind(space)`` protocol) on the image.
+        regularization: Optional regularization (``bind(space)`` protocol) on the image.
         method: ``"lsqr"`` or ``"cg"``.
         damping: Tikhonov damping ``||dm||^2`` weight.
         tolerance: Relative solver tolerance.
@@ -1884,7 +1989,7 @@ class LSRTM:
         problem: ImagingProblem,
         iterations: int = 15,
         *,
-        penalty: Any = None,
+        regularization: Any = None,
         method: str = "lsqr",
         damping: float = 0.0,
         tolerance: float = 1.0e-8,
@@ -1894,7 +1999,7 @@ class LSRTM:
         self.iterations = int(iterations)
         if self.iterations < 1:
             raise ValueError("iterations must be positive")
-        self.penalty = penalty
+        self.regularization = regularization
         method = str(method).strip().lower()
         if method not in {"lsqr", "cg"}:
             raise ValueError("method must be 'lsqr' or 'cg'")
@@ -1915,10 +2020,82 @@ class LSRTM:
         lin = self.problem.linearize(v0, gradient=True)
         self.linearization = lin
         space = lin.space
-        bound = None if self.penalty is None else self.penalty.bind(space)
+        from types import SimpleNamespace
+
+        from ._native_regularization import bind_workflow_regularization
+
+        # LSRTM regularizes the image/update; frozen image coefficients are zero.
+        image_state = ControlState(
+            lin.state.space,
+            np.zeros_like(lin.state.values),
+            scaling=lin.state.scaling,
+            scaling_units=lin.state.scaling_units,
+        )
+        specification = (
+            self.problem.smoothing
+            if self.regularization is None
+            else self.regularization
+        )
+        bound, native = bind_workflow_regularization(
+            specification,
+            space,
+            self.problem,
+            SimpleNamespace(job=lin.job, state=image_state),
+        )
+        if native is not None:
+            return self._run_proximal(lin, space, bound, native)
         if self.method == "cg":
             return self._run_cg(lin, space, bound)
         return self._run_lsqr(lin, space, bound)
+
+    def _run_proximal(
+        self, lin: Linearization, space: ControlSpace, bound: Any, native: Any
+    ) -> ControlVector:
+        """Solve the regularized image objective with its frozen data normal."""
+        assert lin.gradient is not None
+        g0 = lin.gradient.values.copy()
+        cached: Dict[bytes, Tuple[float, np.ndarray]] = {}
+
+        def smooth(x: np.ndarray) -> Tuple[float, np.ndarray]:
+            key = x.tobytes()
+            if key not in cached:
+                hx = np.asarray(lin.normal @ x) + self.damping * x
+                value = lin.value + float(g0 @ x + 0.5 * (x @ hx))
+                gradient = g0 + hx
+                if bound is not None:
+                    vector = ControlVector(x, space)
+                    value += bound.value(vector)
+                    gradient += bound.gradient(vector).values
+                cached.clear()
+                cached[key] = value, gradient
+            return cached[key]
+
+        def iteration(it: InexactNewtonIteration) -> None:
+            if self.callback is not None:
+                self.callback(ControlVector(it.model, space))
+
+        result = minimize_proximal_gradient(
+            lambda x: smooth(x)[0],
+            lambda x: smooth(x)[1],
+            native.value,
+            lambda x, tau, box: native.prox(x, tau, np.ones(space.size), box),
+            np.zeros(space.size),
+            options=InexactNewtonOptions(
+                max_iterations=self.iterations,
+                gradient_tolerance=self.tolerance,
+                objective_tolerance=0.0,
+                step_tolerance=0.0,
+            ),
+            callback=iteration,
+        )
+        self.info = {
+            "method": "proximal_gradient",
+            "iterations": result.iterations,
+            "status": result.status,
+            "converged": result.success,
+            "objective": result.objective,
+        }
+        return ControlVector(result.model, space)
 
     def _run_cg(
         self, lin: Linearization, space: ControlSpace, bound: Any
@@ -1926,20 +2103,20 @@ class LSRTM:
         zero = space.zeros()
         assert lin.gradient is not None
         rhs = -np.asarray(lin.gradient.values, dtype=np.float64)
-        hessian = None
+        curvature = None
         if bound is not None:
             rhs = rhs - _real_vector(
-                bound.gradient(zero), size=space.size, name="penalty"
+                bound.gradient(zero), size=space.size, name="regularization"
             )
-            hessian = bound.hessian_operator(zero)
+            curvature = bound.hessian_operator(zero)
         normal = lin.normal
         damping = self.damping
 
         def matvec(x: np.ndarray) -> np.ndarray:
             x = np.asarray(x, dtype=np.float64).reshape(-1)
             out = np.asarray(normal @ x, dtype=np.float64).reshape(-1) + damping * x
-            if hessian is not None:
-                out = out + np.asarray(hessian @ x, dtype=np.float64).reshape(-1)
+            if curvature is not None:
+                out = out + np.asarray(curvature @ x, dtype=np.float64).reshape(-1)
             return out
 
         operator = LinearOperator(
@@ -1982,19 +2159,19 @@ class LSRTM:
                 "regenerate the linearization with a current Sauce build or use "
                 "method='cg' which works from lin.normal and lin.gradient"
             ) from exc
-        penalty_operator = None
+        regularization_operator = None
         if bound is not None:
-            penalty_operator = bound.operator()
-            if penalty_operator is None:
+            regularization_operator = bound.operator()
+            if regularization_operator is None:
                 raise ValueError(
-                    "LSRTM with method='lsqr' needs a penalty exposing operator(); "
-                    "use method='cg' for this penalty"
+                    "LSRTM with method='lsqr' needs a regularization exposing operator(); "
+                    "use method='cg' for this regularization"
                 )
         weights = np.ones(lin.data_space.size, dtype=np.float64)
         weights = lin.weight_data(
             DataVector(weights.astype(np.complex128), lin.data_space)
         ).values.real
-        operator = _RealJacobian(lin.jacobian, weights, penalty_operator)
+        operator = _RealJacobian(lin.jacobian, weights, regularization_operator)
         b = np.concatenate(
             [
                 -operator.pack(residual.values),
@@ -2037,7 +2214,7 @@ def rtm(problem: ImagingProblem, v: Any = None) -> ControlVector:
     """Return the misfit gradient (RTM image on the control space) at ``v``.
 
     Equals ``problem.gradient(v)``: the objective's real control covector
-    (smoothed when the problem smooths gradients). The Jacobian and its frozen
+    (the raw objective derivative). The Jacobian and its frozen
     comparison residual carry Sauce's objective-space sign and normalization.
     """
 
@@ -2293,10 +2470,7 @@ class TimeReversalFocus:
             current=current,
             misfit=problem._misfit_payload,
             weights=self.weights,
-            smoothing=self.smoothing,
-            raw_gradient=(
-                "focus_gradient_raw.h5" if self.smoothing is not None else None
-            ),
+            smoothing=None,
             spatial_window=self.spatial_window,
         )
         self._jobs[key] = job
@@ -2320,7 +2494,15 @@ class TimeReversalFocus:
         job = self.job(v)
         problem.backend.run(job)
         value = float(job.objective_value)
-        file = ControlVectorFile.read(job.gradient_file())
+        gradient = self._read_gradient(job, raw=False)
+        self._results[key] = (value, gradient)
+        return value, gradient
+
+    def _read_gradient(self, job: ControlGradientJob, *, raw: bool) -> ControlVector:
+        """Pack one raw or smoothed focus artifact on the problem space."""
+
+        file = ControlVectorFile.read(job.gradient_file(raw=raw))
+        problem = self.problem
         space = problem.space
         # Non-material blocks do not enter the focus workflow: zero gradient.
         blocks = {
@@ -2333,9 +2515,7 @@ class TimeReversalFocus:
             )
             for b in space.resolved_blocks
         }
-        gradient = space.pack(blocks)
-        self._results[key] = (value, gradient)
-        return value, gradient
+        return space.pack(blocks)
 
     def value(self, v: Any = None) -> float:
         """Return the focusing objective at ``v``."""
@@ -2343,6 +2523,6 @@ class TimeReversalFocus:
         return self.objective(v)[0]
 
     def gradient(self, v: Any = None) -> ControlVector:
-        """Return the focusing gradient on the problem space at ``v``."""
+        """Return the raw focusing derivative on the problem space at ``v``."""
 
         return self.objective(v)[1]

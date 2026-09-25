@@ -1,56 +1,12 @@
-"""Penalties, smoothing and preconditioners for the imaging API.
+"""Regularization specifications, smooth custom terms, and preconditioners.
 
-Three small families live here (spec section 5.3):
-
-- **Penalties** (:class:`Tikhonov`, :class:`TV`, :class:`Quadratic`,
-  :class:`Sum`) are part of the objective and are evaluated in Python on the
-  optimizer coordinates of a :class:`~frequensolve.imaging.controls.ControlSpace`
-  (block coefficients after the Sauce transform, frozen DOFs excluded).  A
-  penalty is an unbound, frozen configuration; :meth:`Penalty.bind` returns a
-  :class:`BoundPenalty` exposing ``value``, ``gradient``, ``hessian_operator``,
-  ``curvature_diagonal`` and, for quadratic penalties, ``operator`` (``R`` with
-  ``hessian == R.T @ R``) so ``H + R.T @ R`` enters Newton-CG.
-- **Smoothing** (:class:`Smoothing`, :func:`smooth`) is Sauce's native
-  ``control_sensitivities.Smoothing`` Riesz map, a step transform on
-  gradients that is *not* part of the objective.  :func:`smooth` runs it on
-  one explicit vector through a :class:`~frequensolve.imaging.jobs.SmoothJob`.
-- **Preconditioners** (:class:`Diagonal`, :class:`FromOperator`,
-  :class:`Identity`) change the linear solve only; a bound preconditioner is
-  refreshed with :meth:`BoundPreconditioner.update` at a new linearization
-  and applied with :meth:`BoundPreconditioner.apply`.
-
-Lattice conventions
--------------------
-
-Penalties are scale free: every lattice block is measured on its
-nondimensional coordinate ``xi = (x - x0) / L`` (``L`` the block span per
-axis unless ``length=`` names a physical scale) and each penalty is the
-quadrature-weighted discretization of a continuous seminorm over the unit
-interval / square / cube, so the value of a fixed smooth field does not
-depend on the node count.  1-D profiles (hat) differentiate along the
-profile axis at the node coordinates; B-spline profiles difference their
-coefficients at the Greville abscissae; lattices
-(:class:`~frequensolve.imaging.controls.GridParameters`) sum one term per
-lattice axis with trapezoid weights on the other axes.  Blocks without a lattice
-(source, interface, registry-only blocks) fall back to the identity
-"difference" (a ridge toward the reference) when a nonzero weight is
-requested for them; mesh blocks have no local topology and raise.
-
-Frozen DOFs
------------
-
-Penalties operate on the optimizer layout.  A finite difference that
-straddles a frozen node treats the node as absent: the row is dropped
-(Tikhonov / Quadratic-style stacks) or zeroed (node-based TV gradients), so
-frozen DOFs neither contribute to nor receive penalty curvature.
-
-Illumination preconditioning
-----------------------------
-
-There is no cheap source of per-DOF illumination in the ``fwi_operator``
-contract (it would need per-source wavefield energies that Sauce does not
-export), so no ``Illumination`` preconditioner is provided; use
-:class:`Diagonal` (randomized Gauss-Newton diagonal) instead.
+FWI and LSRTM dispatch Tikhonov, TV and TGV to Sauce's native model
+regularization callbacks. Native TV/TGV use split-Bregman shrinkage and the
+same energy in line searches. Quadratic and custom smooth terms retain the
+value/gradient/Hessian protocol. Tikhonov/TV/TGV are configuration objects only;
+all native model discretization and numerical evaluation belong to Sauce.
+The explicit ``smooth(vector, ...)`` operation remains available for processing
+an individual vector and does not assemble an inversion objective.
 """
 
 from __future__ import annotations
@@ -61,25 +17,21 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    Dict,
     List,
-    Mapping,
     Optional,
     Sequence,
     Tuple,
 )
 
 import numpy as np
-from scipy.sparse import csr_matrix, identity, issparse, kron, vstack
+from scipy.sparse import csr_matrix, issparse, vstack
 from scipy.sparse.linalg import LinearOperator
 
 from frequensolve.imaging._artifacts import ControlVectorFile, SmoothingConfig
 from frequensolve.imaging.controls import (
-    _DEFAULT_LENGTH_UNITS,
     ControlSpace,
     ControlState,
     ControlVector,
-    ResolvedBlock,
 )
 from frequensolve.imaging.jobs import FWIOperatorJob, SmoothJob
 from frequensolve.imaging.operators import ModelOperator
@@ -88,24 +40,17 @@ from frequensolve.inversion.preconditioning import (
     DiagonalInverseHessian,
     GaussNewtonDiagonalEstimate,
 )
-from frequensolve.model.parameterization import (
-    BSplineControl,
-    HatControl,
-    TensorHatControl,
-)
-from frequensolve.model.representation import ControlRepresentation
-from frequensolve.units import is_quantity
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from frequensolve.imaging.problem import ImagingProblem, Linearization
 
 __all__ = [
-    "BoundPenalty",
+    "BoundRegularization",
     "BoundPreconditioner",
     "Diagonal",
     "FromOperator",
     "Identity",
-    "Penalty",
+    "Regularization",
     "Preconditioner",
     "Quadratic",
     "Scaled",
@@ -116,9 +61,6 @@ __all__ = [
     "Tikhonov",
     "smooth",
 ]
-
-_LATTICE_KINDS = {"profile", "grid"}
-_ZERO_DEFAULT_KINDS = {"source", "interface", "reflectivity", "registry"}
 
 
 # ---------------------------------------------------------------------------
@@ -155,395 +97,6 @@ def _reference_values(reference: Any, space: ControlSpace) -> Optional[np.ndarra
     if isinstance(reference, ControlState):
         return np.array(reference.vector(space).values, copy=True)
     return np.array(_values_on(space, reference), copy=True)
-
-
-def _block_weights(
-    space: ControlSpace,
-    weights: Optional[Mapping[str, Any]],
-    default: Callable[[ResolvedBlock], float],
-) -> Dict[str, float]:
-    table = {block.name: default(block) for block in space.resolved_blocks}
-    for key, weight in dict(weights or {}).items():
-        value = _finite_scalar(weight, f"weight of {key!r}")
-        for block in space._select(key):
-            table[block.name] = value
-    return table
-
-
-def _material_default(block: ResolvedBlock) -> float:
-    return 0.0 if block.kind in _ZERO_DEFAULT_KINDS else 1.0
-
-
-# ---------------------------------------------------------------------------
-# lattice quadrature operators
-# ---------------------------------------------------------------------------
-
-
-def _greville(control: BSplineControl) -> np.ndarray:
-    representation = ControlRepresentation(control)
-    knots = representation.knots
-    degree = representation.degree
-    size = representation.size
-    return np.array([knots[i + 1 : i + degree + 1].mean() for i in range(size)])
-
-
-def _axis_nodes(block: ResolvedBlock) -> Optional[List[np.ndarray]]:
-    """Return per-axis node coordinates (first axis fastest) or ``None``."""
-
-    control = block.control
-    if isinstance(control, HatControl):
-        return [np.asarray(control.coordinates, dtype=np.float64)]
-    if isinstance(control, BSplineControl):
-        return [_greville(control)]
-    if isinstance(control, TensorHatControl):
-        return [
-            np.asarray(values, dtype=np.float64) for values in control.axis_coordinates
-        ]
-    return None
-
-
-def _length_magnitude(value: Any, block: ResolvedBlock) -> float:
-    if is_quantity(value):
-        units = block.units or _DEFAULT_LENGTH_UNITS
-        try:
-            magnitude = float(value.to(units).magnitude)
-        except Exception as exc:
-            raise ValueError(f"penalty length {value!r} is not a length") from exc
-    else:
-        magnitude = float(value)
-    if not math.isfinite(magnitude) or magnitude <= 0.0:
-        raise ValueError(f"penalty length must be positive and finite; got {value!r}")
-    return magnitude
-
-
-def _resolve_lengths(
-    space: ControlSpace, length: Any
-) -> Dict[str, Optional[Tuple[Any, ...]]]:
-    """Return ``block name -> per-axis length spec`` (``None``: block span)."""
-
-    table: Dict[str, Optional[Tuple[Any, ...]]] = {
-        block.name: None for block in space.resolved_blocks
-    }
-    if length is None:
-        return table
-    if isinstance(length, Mapping):
-        items = list(length.items())
-    else:
-        items = [(block.name, length) for block in space.resolved_blocks]
-    for key, value in items:
-        spec = (
-            tuple(value)
-            if isinstance(value, (list, tuple, np.ndarray)) and not is_quantity(value)
-            else (value,)
-        )
-        for block in space._select(key):
-            table[block.name] = spec
-    return table
-
-
-def _unit_coordinates(
-    block: ResolvedBlock, length: Optional[Tuple[Any, ...]]
-) -> Optional[List[np.ndarray]]:
-    """Return per-axis nondimensional nodes ``xi = (x - x0) / L`` or ``None``.
-
-    ``L`` is the block span along the axis unless ``length`` supplies one
-    physical scale (applied to every axis) or one per axis.  Axes with a
-    single node keep ``xi = [0]`` (no differences, unit measure).
-    """
-
-    nodes = _axis_nodes(block)
-    if nodes is None:
-        return None
-    if length is not None and len(length) not in (1, len(nodes)):
-        raise ValueError(
-            f"block {block.name!r} has {len(nodes)} lattice axes; penalty length "
-            f"gives {len(length)} values"
-        )
-    out: List[np.ndarray] = []
-    for k, axis in enumerate(nodes):
-        span = float(axis[-1] - axis[0]) if axis.size > 1 else 0.0
-        if axis.size > 1 and not span > 0.0:
-            raise ValueError(f"block {block.name!r} axis {k} nodes must increase")
-        if length is None:
-            scale = span if span > 0.0 else 1.0
-        else:
-            scale = _length_magnitude(length[0 if len(length) == 1 else k], block)
-        out.append((axis - axis[0]) / scale)
-    return out
-
-
-def _trapezoid(xi: np.ndarray) -> np.ndarray:
-    """Return trapezoid (dual-cell) node weights; a single node weighs 1."""
-
-    if xi.size < 2:
-        return np.ones(xi.size, dtype=np.float64)
-    h = np.diff(xi)
-    weights = np.zeros(xi.size, dtype=np.float64)
-    weights[:-1] += 0.5 * h
-    weights[1:] += 0.5 * h
-    return weights
-
-
-def _cells(xi: np.ndarray) -> np.ndarray:
-    """Return cell widths along one axis (a single node is one unit cell)."""
-
-    return np.diff(xi) if xi.size > 1 else np.ones(1, dtype=np.float64)
-
-
-def _difference_1d(nodes: np.ndarray, order: int) -> csr_matrix:
-    """Return the ``(n - order) x n`` edge/interior finite-difference matrix."""
-
-    n = int(nodes.size)
-    if order == 1:
-        if n < 2:
-            return csr_matrix((0, n), dtype=np.float64)
-        h = np.diff(nodes)
-        rows = np.repeat(np.arange(n - 1), 2)
-        cols = np.stack([np.arange(n - 1), np.arange(1, n)], axis=1).reshape(-1)
-        data = np.stack([-1.0 / h, 1.0 / h], axis=1).reshape(-1)
-        return csr_matrix((data, (rows, cols)), shape=(n - 1, n))
-    if order == 2:
-        if n < 3:
-            return csr_matrix((0, n), dtype=np.float64)
-        h = np.diff(nodes)
-        left, right = h[:-1], h[1:]
-        rows = np.repeat(np.arange(n - 2), 3)
-        cols = np.stack(
-            [np.arange(n - 2), np.arange(1, n - 1), np.arange(2, n)], axis=1
-        ).reshape(-1)
-        data = np.stack(
-            [
-                2.0 / (left * (left + right)),
-                -2.0 / (left * right),
-                2.0 / (right * (left + right)),
-            ],
-            axis=1,
-        ).reshape(-1)
-        return csr_matrix((data, (rows, cols)), shape=(n - 2, n))
-    raise ValueError("difference order must be 1 or 2")
-
-
-def _edge_weights(xi: np.ndarray, order: int) -> np.ndarray:
-    """Quadrature weight of each row of :func:`_difference_1d`."""
-
-    if order == 1:
-        return np.diff(xi)
-    h = np.diff(xi)
-    return 0.5 * (h[:-1] + h[1:])
-
-
-def _node_difference_1d(nodes: np.ndarray, order: int) -> csr_matrix:
-    """Return the ``n x n`` node-based difference (zero rows at the boundary)."""
-
-    n = int(nodes.size)
-    inner = _difference_1d(nodes, order).tocoo()
-    start = 0 if order == 1 else 1
-    return csr_matrix(
-        (inner.data, (inner.row + start, inner.col)), shape=(n, n), dtype=np.float64
-    )
-
-
-def _cell_average_1d(n: int) -> csr_matrix:
-    """Return the ``(n - 1) x n`` midpoint average (``1 x 1`` identity if n == 1)."""
-
-    if n < 2:
-        return csr_matrix(np.ones((1, 1)))
-    rows = np.repeat(np.arange(n - 1), 2)
-    cols = np.stack([np.arange(n - 1), np.arange(1, n)], axis=1).reshape(-1)
-    return csr_matrix((np.full(rows.size, 0.5), (rows, cols)), shape=(n - 1, n))
-
-
-def _cell_difference_1d(xi: np.ndarray) -> csr_matrix:
-    if xi.size < 2:
-        return csr_matrix((1, 1), dtype=np.float64)
-    return _difference_1d(xi, 1)
-
-
-def _kron(factors: Sequence[Any]) -> csr_matrix:
-    """Kronecker product of per-axis factors on a first-axis-fastest lattice."""
-
-    result: Optional[Any] = None
-    for factor in reversed(list(factors)):
-        result = factor if result is None else kron(result, factor, format="csr")
-    assert result is not None
-    return csr_matrix(result)
-
-
-def _kron_vector(factors: Sequence[np.ndarray]) -> np.ndarray:
-    result = np.ones(1, dtype=np.float64)
-    for factor in reversed(list(factors)):
-        result = np.kron(result, np.asarray(factor, dtype=np.float64))
-    return result
-
-
-def _restrict(
-    matrix: csr_matrix,
-    mask: np.ndarray,
-    offset: int,
-    columns: int,
-    *,
-    drop_rows: bool,
-) -> Tuple[csr_matrix, np.ndarray]:
-    """Map a block-local operator onto the optimizer layout.
-
-    Rows touching a frozen column are dropped (``drop_rows``) or zeroed;
-    active columns are shifted to ``offset`` in a ``columns``-wide matrix.
-    Returns the matrix and the boolean mask of the input rows it kept.
-    """
-
-    coo = matrix.tocoo()
-    m = int(matrix.shape[0])
-    keep_row = np.ones(m, dtype=bool)
-    if coo.nnz:
-        keep_row[np.unique(coo.row[~mask[coo.col]])] = False
-    if drop_rows:
-        row_map = np.full(m, -1, dtype=np.int64)
-        row_map[keep_row] = np.arange(int(np.count_nonzero(keep_row)))
-        rows_out = int(np.count_nonzero(keep_row))
-    else:
-        row_map = np.arange(m, dtype=np.int64)
-        rows_out = m
-    col_map = np.full(mask.size, -1, dtype=np.int64)
-    col_map[mask] = np.arange(int(np.count_nonzero(mask))) + int(offset)
-    select = keep_row[coo.row]
-    restricted = csr_matrix(
-        (
-            coo.data[select],
-            (row_map[coo.row[select]], col_map[coo.col[select]]),
-        ),
-        shape=(rows_out, int(columns)),
-        dtype=np.float64,
-    )
-    return restricted, (keep_row if drop_rows else np.ones(m, dtype=bool))
-
-
-def _check_lattice(block: ResolvedBlock, xi: Sequence[np.ndarray]) -> Tuple[int, ...]:
-    shape = tuple(int(axis.size) for axis in xi)
-    if int(np.prod(shape)) != block.size:
-        raise ValueError(
-            f"block {block.name!r} lattice {shape} does not match its {block.size} DOFs"
-        )
-    return shape
-
-
-def _reject_mesh(block: ResolvedBlock) -> None:
-    if block.kind == "mesh":
-        raise NotImplementedError(
-            f"mesh block {block.name!r} has no lattice: nodal differences need the "
-            "property-space topology Sauce freezes in its artifact. Exclude the "
-            f"block with weights={{{block.address!r}: 0}} or use Sauce-side "
-            "smoothing (im.Smoothing / ImagingProblem(smoothing=...)) where the "
-            "solver supports it"
-        )
-
-
-def _placement(space: ControlSpace, block: ResolvedBlock) -> Tuple[np.ndarray, int]:
-    return (
-        np.asarray(space.support[block.name], dtype=bool),
-        space.slices[block.name].start,
-    )
-
-
-def _tikhonov_rows(
-    space: ControlSpace,
-    block: ResolvedBlock,
-    *,
-    order: int,
-    length: Optional[Tuple[Any, ...]],
-) -> List[csr_matrix]:
-    """Return ``R_b`` with ``||R_b c||^2 ~= int |d^k c / d xi^k|^2 dxi``.
-
-    One stack per lattice axis: the order-``k`` difference on the
-    nondimensional nodes, each row scaled by the square root of its
-    quadrature weight (edge length or dual-cell length along the axis times
-    the trapezoid weights of the other axes).  Blocks without a lattice get
-    the identity (a ridge toward the reference).
-    """
-
-    _reject_mesh(block)
-    mask, offset = _placement(space, block)
-    xi = _unit_coordinates(block, length)
-    if xi is None:
-        eye = identity(block.size, format="csr")
-        return [_restrict(eye, mask, offset, space.size, drop_rows=True)[0]]
-    _check_lattice(block, xi)
-    rows: List[csr_matrix] = []
-    for k, axis in enumerate(xi):
-        difference = _difference_1d(axis, order)
-        if difference.shape[0] == 0:
-            continue
-        factors = [
-            (
-                csr_matrix(np.sqrt(_edge_weights(axis, order))[:, None])
-                .multiply(difference)
-                .tocsr()
-                if j == k
-                else csr_matrix(np.diag(np.sqrt(_trapezoid(other))))
-            )
-            for j, other in enumerate(xi)
-        ]
-        full = _kron(factors)
-        rows.append(_restrict(full, mask, offset, space.size, drop_rows=True)[0])
-    return rows
-
-
-def _tv_terms(
-    space: ControlSpace,
-    block: ResolvedBlock,
-    *,
-    order: int,
-    length: Optional[Tuple[Any, ...]],
-) -> Optional[Tuple[List[csr_matrix], np.ndarray]]:
-    """Return per-axis gradient components ``G_k`` and quadrature weights ``w``.
-
-    ``order=1`` evaluates the gradient per lattice cell (the axis difference
-    averaged over the other axes, exact for multilinear fields) with the cell
-    volume as weight; ``order=2`` evaluates per-axis second differences at
-    the nodes (zero on the axis boundary) with trapezoid node weights.  All
-    components share one row set.  ``None`` when the block has no rows.
-    """
-
-    _reject_mesh(block)
-    mask, offset = _placement(space, block)
-    xi = _unit_coordinates(block, length)
-    if xi is None:
-        eye = identity(block.size, format="csr")
-        matrix, kept = _restrict(eye, mask, offset, space.size, drop_rows=True)
-        return [matrix], np.ones(int(np.count_nonzero(kept)), dtype=np.float64)
-    shape = _check_lattice(block, xi)
-    active_axes = [k for k, axis in enumerate(xi) if axis.size > order]
-    if not active_axes:
-        return None
-    operators: List[csr_matrix] = []
-    if order == 1:
-        weights = _kron_vector([_cells(axis) for axis in xi])
-        for k in active_axes:
-            full = _kron(
-                [
-                    _cell_difference_1d(axis) if j == k else _cell_average_1d(shape[j])
-                    for j, axis in enumerate(xi)
-                ]
-            )
-            operators.append(
-                _restrict(full, mask, offset, space.size, drop_rows=False)[0]
-            )
-    else:
-        weights = _kron_vector([_trapezoid(axis) for axis in xi])
-        for k in active_axes:
-            full = _kron(
-                [
-                    (
-                        _node_difference_1d(axis, order)
-                        if j == k
-                        else identity(shape[j], format="csr")
-                    )
-                    for j, axis in enumerate(xi)
-                ]
-            )
-            operators.append(
-                _restrict(full, mask, offset, space.size, drop_rows=False)[0]
-            )
-    return operators, weights
 
 
 def _column_squares(matrix: csr_matrix) -> np.ndarray:
@@ -598,29 +151,30 @@ class _SymmetricModelOperator(ModelOperator):
 
 
 # ---------------------------------------------------------------------------
-# penalties
+# regularization
 # ---------------------------------------------------------------------------
 
 
-class Penalty:
-    """Unbound, immutable penalty configuration.
+class Regularization:
+    """Unbound, immutable regularization configuration.
 
-    ``penalty.bind(space)`` returns the :class:`BoundPenalty` evaluating it on
-    that space.  Penalties compose with ``+`` (a :class:`Sum`) and scale with
-    ``*`` by nonnegative scalars (a :class:`Scaled`).
+    Smooth custom terms implement ``bind(space)`` and return a
+    :class:`BoundRegularization`. Native model configurations require the
+    problem and stage context supplied by FWI/LSRTM. Terms compose with ``+``
+    (a :class:`Sum`) and scale with ``*`` by nonnegative scalars (a :class:`Scaled`).
     """
 
-    def bind(self, space: ControlSpace) -> "BoundPenalty":  # pragma: no cover
+    def bind(self, space: ControlSpace) -> "BoundRegularization":  # pragma: no cover
         raise NotImplementedError
 
-    def __add__(self, other: Any) -> "Penalty":
-        if not isinstance(other, Penalty):
+    def __add__(self, other: Any) -> "Regularization":
+        if not isinstance(other, Regularization):
             return NotImplemented
         return Sum(self, other)
 
     __radd__ = __add__
 
-    def __mul__(self, factor: Any) -> "Penalty":
+    def __mul__(self, factor: Any) -> "Regularization":
         if not isinstance(factor, (int, float, np.integer, np.floating)):
             return NotImplemented
         return Scaled(self, float(factor))
@@ -628,15 +182,15 @@ class Penalty:
     __rmul__ = __mul__
 
 
-class BoundPenalty:
-    """A penalty evaluated on one :class:`ControlSpace` (optimizer layout).
+class BoundRegularization:
+    """A regularization evaluated on one :class:`ControlSpace` (optimizer layout).
 
     Vectors are :class:`ControlVector` on ``space`` (or equivalent spaces) or
     ndarrays of ``space.size``; gradients come back as :class:`ControlVector`.
     """
 
-    def __init__(self, penalty: Penalty, space: ControlSpace) -> None:
-        self.penalty = penalty
+    def __init__(self, regularization: Regularization, space: ControlSpace) -> None:
+        self.regularization = regularization
         self.space = space
 
     # -- helpers ----------------------------------------------------------------
@@ -656,43 +210,47 @@ class BoundPenalty:
         raise NotImplementedError
 
     def hessian_operator(self, v: Any) -> ModelOperator:  # pragma: no cover
+        """Return the Hessian of this smooth regularization term at ``v``."""
+
         raise NotImplementedError
 
     def curvature_diagonal(self, v: Any) -> np.ndarray:  # pragma: no cover
         raise NotImplementedError
 
     def operator(self) -> Optional[ModelOperator]:
-        """Return ``R`` with ``hessian == R.T @ R`` (quadratic penalties only)."""
+        """Return ``R`` with ``hessian == R.T @ R`` (quadratic regularization terms only)."""
 
         return None
 
     def residual(self, v: Any) -> np.ndarray:
         """Return the affine least-squares residual, when an operator exists."""
 
-        raise NotImplementedError("penalty does not expose a least-squares residual")
+        raise NotImplementedError(
+            "regularization does not expose a least-squares residual"
+        )
 
     def __call__(self, v: Any) -> float:
         return self.value(v)
 
     def __repr__(self) -> str:
-        return f"Bound{self.penalty!r}[{self.space.size}]"
+        return f"Bound{self.regularization!r}[{self.space.size}]"
 
 
-class _BoundQuadraticForm(BoundPenalty):
+class _BoundQuadraticForm(BoundRegularization):
     """``0.5 * ||R (v - ref)||^2`` for a sparse ``R`` on the optimizer layout."""
 
     def __init__(
         self,
-        penalty: Penalty,
+        regularization: Regularization,
         space: ControlSpace,
         matrix: csr_matrix,
         reference: Optional[np.ndarray],
     ) -> None:
-        super().__init__(penalty, space)
+        super().__init__(regularization, space)
         self.matrix = csr_matrix(matrix, dtype=np.float64)
         if self.matrix.shape[1] != space.size:
             raise ValueError(
-                f"penalty operator has {self.matrix.shape[1]} columns; the space "
+                f"regularization operator has {self.matrix.shape[1]} columns; the space "
                 f"has {space.size}"
             )
         self.reference = reference
@@ -726,58 +284,31 @@ class _BoundQuadraticForm(BoundPenalty):
         return _SparseModelOperator(self.matrix, self.space)
 
 
+class _NativeModelRegularization(Regularization):
+    """Configuration for Sauce-owned model regularization."""
+
+    def bind(self, space: ControlSpace) -> BoundRegularization:
+        raise NotImplementedError(
+            "Model regularization requires native callbacks; pass it to FWI/LSRTM "
+            "or bind NativeRegularization with a problem and linearization"
+        )
+
+
 @dataclass(frozen=True)
-class Tikhonov(Penalty):
-    r"""Scale-free Tikhonov penalty on each block's nondimensional coordinate.
+class Tikhonov(_NativeModelRegularization):
+    r"""Native quadratic derivative regularization for FWI/LSRTM.
 
-    For every block ``b`` with lattice nodes ``x`` the coordinate is
-    ``xi = (x - x0) / L`` (``L`` the block span per axis by default) and the
-    term is the quadrature-weighted discretization of the continuous seminorm
-
-    .. math::
-
-        \tfrac12\,\alpha\, w_b \sum_{k} \int_{[0,1]^d}
-        \bigl|\partial^{p} (c - c_{\mathrm{ref}}) / \partial \xi_k^{p}\bigr|^2
-        \, d\xi
-
-    with ``p = order`` and one term per lattice axis ``k``.  Order ``1`` uses
-    edge differences weighted by the edge length (exact for the
-    piecewise-linear hat interpolant), order ``2`` interior second
-    differences weighted by the dual-cell length; the other lattice axes
-    carry trapezoid weights.  The value of a fixed smooth field therefore
-    converges under node refinement instead of growing with the node count,
-    and because the default misfit is normalized to ``O(1)`` values,
-    ``alpha`` in ``1e-3 .. 1e-1`` is meaningful.  B-spline profiles
-    difference their coefficients at the Greville abscissae.
-
-    Material blocks (profile, grid) have unit weight; source, interface and
-    reflectivity blocks are unpenalized unless ``weights`` names them, in
-    which case blocks without a lattice receive an identity (ridge) term
-    ``0.5 * alpha * w_b * ||c - c_ref||^2`` over their DOFs.  Mesh blocks
-    raise unless weighted zero.  Rows touching a frozen DOF are dropped.
-
-    Args:
-        alpha: Penalty strength (nonnegative).
-        order: Derivative order, ``1`` or ``2``.
-        weights: Optional ``block -> weight`` (user key, address or qualified
-            name) multiplying that block's term.
-        reference: ``v_ref`` as a :class:`ControlVector`, :class:`ControlState`
-            or array on the bound space; ``None`` penalizes ``v`` itself.
-        length: Physical length scale ``L`` of the nondimensional
-            coordinate ``xi = (x - x0) / L``.  ``None`` (default) uses each
-            block's span along each lattice axis, so the penalty is a
-            seminorm over the unit interval, square or cube and ``alpha`` is
-            scale free.  A length quantity (or a float in model coordinate
-            units), a per-axis sequence, or a mapping ``block -> length``
-            (unnamed blocks keep their span) measures derivatives per ``L``
-            instead.
+    Sauce evaluates ``alpha/2 * integral |D^order(m-reference)|^2`` on the
+    native material control basis. Spatial axes use km; angular axes use radians.
+    Order two requires a spline of degree at least two. Fixed coefficients
+    retain their full values in the integral. ``reference`` can be a complete
+    ControlState or an active-space vector. This object configures native
+    callbacks; it does not expose a Python derivative or matrix discretization.
     """
 
     alpha: float
     order: int = 1
-    weights: Optional[Mapping[str, Any]] = None
     reference: Any = None
-    length: Any = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "alpha", _finite_scalar(self.alpha, "alpha"))
@@ -785,40 +316,11 @@ class Tikhonov(Penalty):
         if order not in (1, 2):
             raise ValueError("Tikhonov order must be 1 or 2")
         object.__setattr__(self, "order", order)
-        if self.weights is not None:
-            object.__setattr__(self, "weights", dict(self.weights))
-        if isinstance(self.length, Mapping):
-            object.__setattr__(self, "length", dict(self.length))
-
-    def bind(self, space: ControlSpace) -> BoundPenalty:
-        weights = _block_weights(space, self.weights, _material_default)
-        lengths = _resolve_lengths(space, self.length)
-        rows: List[csr_matrix] = []
-        for block in space.resolved_blocks:
-            weight = weights[block.name]
-            if weight == 0.0:
-                continue
-            operators = _tikhonov_rows(
-                space, block, order=self.order, length=lengths[block.name]
-            )
-            if not operators:
-                continue
-            rows.append(
-                math.sqrt(self.alpha * weight) * vstack(operators, format="csr")
-            )
-        matrix = (
-            vstack(rows, format="csr")
-            if rows
-            else csr_matrix((0, space.size), dtype=np.float64)
-        )
-        return _BoundQuadraticForm(
-            self, space, matrix, _reference_values(self.reference, space)
-        )
 
 
 @dataclass(frozen=True)
-class Quadratic(Penalty):
-    """Arbitrary quadratic penalty ``0.5 * weight * ||matrix (v - reference)||^2``.
+class Quadratic(Regularization):
+    """Arbitrary quadratic regularization ``0.5 * weight * ||matrix (v - reference)||^2``.
 
     Wraps the semantics of
     :class:`~frequensolve.inversion.least_squares.QuadraticRegularization`
@@ -847,7 +349,7 @@ class Quadratic(Penalty):
         object.__setattr__(self, "matrix", matrix)
         object.__setattr__(self, "weight", _finite_scalar(self.weight, "weight"))
 
-    def bind(self, space: ControlSpace) -> BoundPenalty:
+    def bind(self, space: ControlSpace) -> BoundRegularization:
         if self.matrix.shape[1] != space.size:
             raise ValueError(
                 f"Quadratic matrix has {self.matrix.shape[1]} columns; the space "
@@ -872,45 +374,21 @@ class Quadratic(Penalty):
 
 
 @dataclass(frozen=True)
-class TV(Penalty):
-    r"""Scale-free smoothed total variation on the nondimensional coordinate.
+class TV(_NativeModelRegularization):
+    r"""Native unsmoothed total variation for FWI/LSRTM.
 
-    .. math::
-
-        \alpha\, w_b \int_{[0,1]^d}
-        \Bigl(\sqrt{|\nabla_\xi (c - c_{\mathrm{ref}})|^2 + \epsilon^2}
-        - \epsilon\Bigr)\, d\xi
-
-    per block, with ``xi`` as in :class:`Tikhonov`.  ``order=1`` evaluates
-    the gradient once per lattice cell (the axis difference averaged over the
-    other axes; exact for piecewise-linear profiles) weighted by the cell
-    volume; ``order=2`` (second-order TV) replaces the gradient by the
-    per-axis second differences at the nodes, weighted by trapezoid node
-    weights.  ``value`` and ``gradient`` are exact; ``hessian_operator`` is
-    the lagged-diffusivity (IRLS) operator
-    ``alpha * sum_k G_k^T diag(w / r) G_k`` with
-    ``r = sqrt(|G v|^2 + eps^2)`` frozen at ``v``, which is self-adjoint and
-    positive semidefinite.  The ``- eps`` offset makes constant fields cost
-    zero.  Frozen nodes zero every row that touches them.  Blocks without a
-    lattice (when weighted) sum ``sqrt(c_i^2 + eps^2) - eps`` over their
-    DOFs.
-
-    Args:
-        alpha: Penalty strength.
-        epsilon: Smoothing parameter of the absolute value, in units of
-            ``|grad_xi c|`` (coefficient units per unit ``xi``).
-        order: ``1`` (TV) or ``2`` (second-order TV).
-        weights: Per-block weights (see :class:`Tikhonov`).
-        reference: Optional reference vector (see :class:`Tikhonov`).
-        length: Physical length scale of ``xi`` (see :class:`Tikhonov`).
+    Sauce evaluates ``sqrt(alpha) * integral |D^order(m-reference)|`` on its
+    native mesh, spline or tensor control basis and uses split-Bregman shrinkage.
+    ``epsilon`` controls splitting, not smoothing of the norm. Order two
+    requires a spline of degree at least two. ``reference`` can be a complete
+    ControlState or an active-space vector. Use a complete state to specify
+    reference values at fixed coefficients.
     """
 
     alpha: float
     epsilon: float = 1.0e-3
     order: int = 1
-    weights: Optional[Mapping[str, Any]] = None
     reference: Any = None
-    length: Any = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "alpha", _finite_scalar(self.alpha, "alpha"))
@@ -922,158 +400,65 @@ class TV(Penalty):
         if order not in (1, 2):
             raise ValueError("TV order must be 1 or 2")
         object.__setattr__(self, "order", order)
-        if self.weights is not None:
-            object.__setattr__(self, "weights", dict(self.weights))
-        if isinstance(self.length, Mapping):
-            object.__setattr__(self, "length", dict(self.length))
-
-    def bind(self, space: ControlSpace) -> BoundPenalty:
-        weights = _block_weights(space, self.weights, _material_default)
-        lengths = _resolve_lengths(space, self.length)
-        terms: List[Tuple[float, List[csr_matrix], np.ndarray]] = []
-        for block in space.resolved_blocks:
-            weight = weights[block.name]
-            if weight == 0.0:
-                continue
-            found = _tv_terms(
-                space, block, order=self.order, length=lengths[block.name]
-            )
-            if found is not None:
-                operators, measure = found
-                terms.append((self.alpha * weight, operators, measure))
-        return _BoundTV(
-            self, space, terms, self.epsilon, _reference_values(self.reference, space)
-        )
-
-
-_TVNorms = List[
-    Tuple[float, List[csr_matrix], np.ndarray, List[np.ndarray], np.ndarray]
-]
-
-
-class _BoundTV(BoundPenalty):
-    def __init__(
-        self,
-        penalty: Penalty,
-        space: ControlSpace,
-        terms: Sequence[Tuple[float, Sequence[csr_matrix], np.ndarray]],
-        epsilon: float,
-        reference: Optional[np.ndarray],
-    ) -> None:
-        super().__init__(penalty, space)
-        self.terms = [
-            (float(scale), list(ops), np.asarray(measure, dtype=np.float64))
-            for scale, ops, measure in terms
-        ]
-        self.epsilon = float(epsilon)
-        self.reference = reference
-
-    def _shift(self, v: Any) -> np.ndarray:
-        values = self._values(v)
-        return values if self.reference is None else values - self.reference
-
-    def _norms(self, u: np.ndarray) -> _TVNorms:
-        out: _TVNorms = []
-        for scale, ops, measure in self.terms:
-            components = [np.asarray(op @ u) for op in ops]
-            squares = sum(c * c for c in components)
-            radius = np.sqrt(squares + self.epsilon**2)
-            out.append((scale, ops, measure, components, radius))
-        return out
-
-    def value(self, v: Any) -> float:
-        total = 0.0
-        for scale, _ops, measure, _components, radius in self._norms(self._shift(v)):
-            total += scale * float(np.dot(measure, radius - self.epsilon))
-        return total
-
-    def gradient(self, v: Any) -> ControlVector:
-        out = np.zeros(self.space.size, dtype=np.float64)
-        for scale, ops, measure, components, radius in self._norms(self._shift(v)):
-            for op, component in zip(ops, components):
-                out += scale * np.asarray(op.T @ (measure * component / radius))
-        return self._wrap(out)
-
-    def _weights(self, v: Any) -> List[Tuple[float, List[csr_matrix], np.ndarray]]:
-        return [
-            (scale, ops, measure / radius)
-            for scale, ops, measure, _components, radius in self._norms(self._shift(v))
-        ]
-
-    def hessian_operator(self, v: Any) -> ModelOperator:
-        frozen = self._weights(v)
-
-        def action(x: np.ndarray) -> np.ndarray:
-            out = np.zeros(self.space.size, dtype=np.float64)
-            for scale, ops, weight in frozen:
-                for op in ops:
-                    out += scale * np.asarray(op.T @ (weight * np.asarray(op @ x)))
-            return out
-
-        return _SymmetricModelOperator(action, self.space)
-
-    def curvature_diagonal(self, v: Any) -> np.ndarray:
-        out = np.zeros(self.space.size, dtype=np.float64)
-        for scale, ops, weight in self._weights(v):
-            for op in ops:
-                out += scale * np.asarray(op.multiply(op).T @ weight).reshape(-1)
-        return out
 
 
 @dataclass(frozen=True)
-class TGV(Penalty):
-    """Total generalized variation (not implemented in Python).
+class TGV(_NativeModelRegularization):
+    """Native second-order total generalized variation for FWI and LSRTM.
 
-    Full TGV needs an auxiliary vector field solved jointly with the controls,
-    which the value/gradient penalty protocol cannot express.  Use
-    ``TV(order=2)`` for a second-order TV penalty, or Sauce-side
-    ``Smoothing(kind="tgv", alpha1=..., alpha2=...)`` for TGV smoothing of
-    gradients.
+    Sauce minimizes over an auxiliary vector field using split-Bregman
+    shrinkage. ``epsilon`` controls splitting, not smoothing of the norm.
+    Use NativeRegularization for a reference state or callback tolerances.
     """
 
     alpha1: float
     alpha2: float
     epsilon: float = 1.0e-3
 
-    def bind(self, space: ControlSpace) -> BoundPenalty:
-        raise NotImplementedError(
-            "TGV penalties are not implemented in Python: use TV(order=2) for a "
-            "second-order TV penalty, or Sauce-side Smoothing(kind='tgv') on "
-            "gradients"
+    def __post_init__(self) -> None:
+        config = SmoothingConfig(
+            kind="tgv", alpha1=self.alpha1, alpha2=self.alpha2, epsilon=self.epsilon
         )
+        for name in ("alpha1", "alpha2", "epsilon"):
+            object.__setattr__(self, name, getattr(config, name))
 
 
-class Sum(Penalty):
-    """Sum of penalties (``a + b`` builds one; nested sums are flattened)."""
+class Sum(Regularization):
+    """Sum of regularization terms (``a + b`` builds one; nested sums are flattened)."""
 
-    def __init__(self, *penalties: Penalty) -> None:
-        terms: List[Penalty] = []
-        for penalty in penalties:
-            if not isinstance(penalty, Penalty):
-                raise TypeError(f"{type(penalty).__name__} is not a Penalty")
-            if isinstance(penalty, Sum):
-                terms.extend(penalty.penalties)
+    def __init__(self, *regularizations: Regularization) -> None:
+        terms: List[Regularization] = []
+        for regularization in regularizations:
+            if not isinstance(regularization, Regularization):
+                raise TypeError(
+                    f"{type(regularization).__name__} is not a Regularization"
+                )
+            if isinstance(regularization, Sum):
+                terms.extend(regularization.regularizations)
             else:
-                terms.append(penalty)
+                terms.append(regularization)
         if not terms:
-            raise ValueError("Sum requires at least one penalty")
-        self.penalties: Tuple[Penalty, ...] = tuple(terms)
+            raise ValueError("Sum requires at least one regularization")
+        self.regularizations: Tuple[Regularization, ...] = tuple(terms)
 
-    def bind(self, space: ControlSpace) -> BoundPenalty:
-        return _BoundSum(self, space, [p.bind(space) for p in self.penalties])
+    def bind(self, space: ControlSpace) -> BoundRegularization:
+        return _BoundSum(self, space, [p.bind(space) for p in self.regularizations])
 
     def __repr__(self) -> str:
-        return "Sum(" + ", ".join(repr(p) for p in self.penalties) + ")"
+        return "Sum(" + ", ".join(repr(p) for p in self.regularizations) + ")"
 
 
-class _BoundSum(BoundPenalty):
+class _BoundSum(BoundRegularization):
     def residual(self, v: Any) -> np.ndarray:
         return np.concatenate([term.residual(v) for term in self.terms])
 
     def __init__(
-        self, penalty: Penalty, space: ControlSpace, terms: Sequence[BoundPenalty]
+        self,
+        regularization: Regularization,
+        space: ControlSpace,
+        terms: Sequence[BoundRegularization],
     ) -> None:
-        super().__init__(penalty, space)
+        super().__init__(regularization, space)
         self.terms = list(terms)
 
     def value(self, v: Any) -> float:
@@ -1112,30 +497,34 @@ class _BoundSum(BoundPenalty):
         return _SparseModelOperator(vstack(matrices, format="csr"), self.space)
 
 
-class Scaled(Penalty):
-    """A penalty multiplied by a nonnegative scalar (``0.5 * TV(...)``)."""
+class Scaled(Regularization):
+    """A regularization multiplied by a nonnegative scalar (``0.5 * TV(...)``)."""
 
-    def __init__(self, penalty: Penalty, factor: float) -> None:
-        if not isinstance(penalty, Penalty):
-            raise TypeError(f"{type(penalty).__name__} is not a Penalty")
-        self.penalty = penalty
-        self.factor = _finite_scalar(factor, "penalty scale")
+    def __init__(self, regularization: Regularization, factor: float) -> None:
+        if not isinstance(regularization, Regularization):
+            raise TypeError(f"{type(regularization).__name__} is not a Regularization")
+        self.regularization = regularization
+        self.factor = _finite_scalar(factor, "regularization scale")
 
-    def bind(self, space: ControlSpace) -> BoundPenalty:
-        return _BoundScaled(self, space, self.penalty.bind(space), self.factor)
+    def bind(self, space: ControlSpace) -> BoundRegularization:
+        return _BoundScaled(self, space, self.regularization.bind(space), self.factor)
 
     def __repr__(self) -> str:
-        return f"{self.factor:g} * {self.penalty!r}"
+        return f"{self.factor:g} * {self.regularization!r}"
 
 
-class _BoundScaled(BoundPenalty):
+class _BoundScaled(BoundRegularization):
     def residual(self, v: Any) -> np.ndarray:
         return math.sqrt(self.factor) * self.inner.residual(v)
 
     def __init__(
-        self, penalty: Penalty, space: ControlSpace, inner: BoundPenalty, factor: float
+        self,
+        regularization: Regularization,
+        space: ControlSpace,
+        inner: BoundRegularization,
+        factor: float,
     ) -> None:
-        super().__init__(penalty, space)
+        super().__init__(regularization, space)
         self.inner = inner
         self.factor = float(factor)
 
@@ -1222,6 +611,17 @@ def smooth(
     config = SmoothingConfig.from_value(smoothing)
     if config is None:
         raise ValueError("smooth requires a smoothing configuration")
+    return _smooth_with_source(vector, config, problem, _smoothing_source_job(problem))
+
+
+def _smooth_with_source(
+    vector: Any,
+    config: SmoothingConfig,
+    problem: "ImagingProblem",
+    source: FWIOperatorJob,
+) -> ControlVector:
+    """Process a vector using the model and frequency context of one saved job."""
+
     space = problem.space
     control = (
         vector if isinstance(vector, ControlVector) else ControlVector(vector, space)
@@ -1230,7 +630,6 @@ def smooth(
         raise ValueError("vector does not live on the problem's control space")
     if not any(name.startswith("model.") for name in space.blocks):
         raise ValueError("smoothing requires at least one model.* block")
-    source = _smoothing_source_job(problem)
     job = SmoothJob(
         source,
         smoothing=config,
@@ -1274,7 +673,7 @@ class Preconditioner:
 class BoundPreconditioner:
     """Approximate inverse-Hessian action on one control space.
 
-    ``update(linearization, penalty)`` refreshes the approximation at a new
+    ``update(linearization, regularization)`` refreshes the approximation at a new
     point (a no-op for point-independent preconditioners); ``apply(g)`` (or
     ``self(g)``) returns ``M^{-1} g`` as a :class:`ControlVector`.
     """
@@ -1284,7 +683,9 @@ class BoundPreconditioner:
         self.space = space
 
     def update(
-        self, linearization: "Linearization", penalty: Optional[BoundPenalty] = None
+        self,
+        linearization: "Linearization",
+        regularization: Optional[BoundRegularization] = None,
     ) -> None:
         """Refresh the approximation at ``linearization`` (default: no-op)."""
 
@@ -1382,7 +783,7 @@ class Diagonal(Preconditioner):
     ``update`` estimates ``diag(Re J^H W J)`` with Rademacher probes of
     ``linearization.normal`` (Hutchinson: ``E[z * (N z)] = diag(N)``, one
     normal action per probe; negative samples are clipped to zero), adds the
-    penalty's exact ``curvature_diagonal`` at the linearization point and
+    regularization's ``curvature_diagonal`` at the linearization point and
     wraps the sum in
     :class:`~frequensolve.inversion.preconditioning.DiagonalInverseHessian`
     (block-wise relative damping and inverse-ratio clipping).  ``apply``
@@ -1432,7 +833,9 @@ class _BoundDiagonal(BoundPreconditioner):
         self.inverse: Optional[DiagonalInverseHessian] = None
 
     def update(
-        self, linearization: "Linearization", penalty: Optional[BoundPenalty] = None
+        self,
+        linearization: "Linearization",
+        regularization: Optional[BoundRegularization] = None,
     ) -> None:
         """Re-estimate the diagonal at ``linearization`` (adopting its space)."""
 
@@ -1440,10 +843,10 @@ class _BoundDiagonal(BoundPreconditioner):
         if space is not self.space and not space.equivalent(self.space):
             # Support masks are adopted at the first linearize; follow them.
             self.space = space
-        if penalty is not None and not (
-            penalty.space is space or penalty.space.equivalent(space)
+        if regularization is not None and not (
+            regularization.space is space or regularization.space.equivalent(space)
         ):
-            raise ValueError("penalty is bound to a different control space")
+            raise ValueError("regularization is bound to a different control space")
         normal = linearization.normal
         size = space.size
         config = self.config
@@ -1462,13 +865,13 @@ class _BoundDiagonal(BoundPreconditioner):
             data /= config.probe_count
             probe_count = config.probe_count
         data = np.maximum(data, 0.0)
-        regularization = (
+        regularization_diagonal = (
             np.zeros(size)
-            if penalty is None
-            else np.asarray(penalty.curvature_diagonal(linearization.point))
+            if regularization is None
+            else np.asarray(regularization.curvature_diagonal(linearization.point))
         )
         self.estimate = GaussNewtonDiagonalEstimate(
-            data, np.maximum(regularization, 0.0), probe_count, config.seed
+            data, np.maximum(regularization_diagonal, 0.0), probe_count, config.seed
         )
         self.inverse = DiagonalInverseHessian(
             self.estimate.total,
@@ -1481,7 +884,7 @@ class _BoundDiagonal(BoundPreconditioner):
         if self.inverse is None:
             raise RuntimeError(
                 "Diagonal preconditioner has no estimate yet; call "
-                "update(linearization, penalty) first"
+                "update(linearization, regularization) first"
             )
         return ControlVector(self.inverse.apply(_values_on(self.space, g)), self.space)
 

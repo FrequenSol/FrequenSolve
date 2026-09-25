@@ -127,6 +127,7 @@ from frequensolve.imaging.jobs import (
     ControlGradientJob,
     FWIOperatorJob,
     ImageKernelJob,
+    RegularizationJob,
     SmoothJob,
     _task_path,
 )
@@ -666,6 +667,9 @@ class FakeImagingSite(BaseSite):
     # -- execution ------------------------------------------------------------
 
     def _execute(self, job: Any) -> None:
+        if isinstance(job, RegularizationJob):
+            self._postprocess_regularization(job)
+            return
         if isinstance(job, SmoothJob):
             raise ValueError("SmoothJob runs as a postprocess-only submission")
         if isinstance(job, ControlGradientJob):
@@ -1055,6 +1059,9 @@ class FakeImagingSite(BaseSite):
     def _postprocess(self, job: Any) -> None:
         """Emulate ``--smooth``: weighted sum at the stem, ``_raw`` beside it."""
 
+        if isinstance(job, RegularizationJob):
+            self._postprocess_regularization(job)
+            return
         if isinstance(job, SmoothJob):
             self._postprocess_smooth(job)
             return
@@ -1326,6 +1333,61 @@ class FakeImagingSite(BaseSite):
         )
 
     # -- explicit-vector smoothing --------------------------------------------
+
+    def _postprocess_regularization(self, job):
+        """Model callback fixture: native numerics are covered by compiled probes.
+
+        Use a diagonal convex energy so constrained proximal orchestration has
+        an independent exact answer, including full frozen coefficients.
+        """
+        source = ControlVectorFile.read(job.input_vector, native=True)
+        if job.operation == "prepare":
+            context = {
+                name: {
+                    "amplitude": (
+                        max(1.0, float(np.max(np.abs(v))))
+                        if job.smoothing.normalize_amplitude
+                        else 1.0
+                    )
+                }
+                for name, v in source.blocks.items()
+            }
+            job.context.write_text(json.dumps(context))
+        else:
+            context = json.loads(job.context.read_text())
+        alpha = 0.1 if job.smoothing.alpha is None else job.smoothing.alpha
+        blocks = dict(source.blocks)
+        value = 0.0
+        for name, v in blocks.items():
+            a = context[name]["amplitude"]
+            weight = np.sqrt(alpha) * a if job.smoothing.kind == "tv" else alpha
+            if job.operation == "proximal":
+                metric, lower, upper = (
+                    ControlVectorFile.read(job.regularization_inputs[k], native=True)[
+                        name
+                    ]
+                    for k in ("metric", "lower", "upper")
+                )
+                v = (
+                    np.sign(v) * np.maximum(np.abs(v) - job.tau * weight / metric, 0.0)
+                    if job.smoothing.kind == "tv"
+                    else v / (1.0 + job.tau * weight / metric)
+                )
+                v = np.clip(v, lower, upper)
+                blocks[name] = v
+            value += weight * float(
+                np.abs(v).sum() if job.smoothing.kind == "tv" else 0.5 * (v @ v)
+            )
+        ControlVectorFile(blocks, native=True).write(job.gradient_file())
+        job.result.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-control-regularization-result-1",
+                    "value": value,
+                    "converged": True,
+                }
+            )
+        )
 
     def _postprocess_smooth(self, job: SmoothJob) -> None:
         """Copy ``control_sensitivities.input`` to ``gradient`` (identity)."""

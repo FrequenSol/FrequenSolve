@@ -361,7 +361,7 @@ def run_fwi(
         problem,
         stages=stages,
         optimizer=optimizer,
-        penalty=im.Tikhonov(alpha=TIKHONOV_ALPHA, order=1),
+        regularization=im.Tikhonov(alpha=TIKHONOV_ALPHA, order=1),
         preconditioner=im.Diagonal(
             probe_count=2 if case["coarse"] else 4,
             relative_damping=1.0e-2,

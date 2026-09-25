@@ -50,6 +50,13 @@ Traces
    :show-inheritance:
    :noindex:
 
+Trace Conversion
+----------------
+
+.. automodule:: frequensolve.seismic.trace_conversion
+   :members:
+   :noindex:
+
 Eikonal Results
 ---------------
 
@@ -72,4 +79,15 @@ Wavelet
 .. automodule:: frequensolve.seismic.wavelet
    :members:
    :show-inheritance:
+   :noindex:
+
+Acquisition Spectra
+-------------------
+
+.. automodule:: frequensolve.seismic.spectra
+   :members:
+   :noindex:
+
+.. automodule:: frequensolve.seismic.source_signature
+   :members:
    :noindex:

@@ -1697,9 +1697,10 @@ def _decode_attr(value: Any) -> Any:
 class SmoothingConfig:
     """Representation-independent variational smoothing configuration.
 
-    ``to_control_fs`` emits the ``control_sensitivities.Smoothing`` contract
-    (Riesz map on control coefficients); ``to_image_fs`` emits the
-    ``Imaging.Smoothing`` contract applied while stacking Cartesian shards.
+    ``to_control_fs`` emits native control regularization settings. SmoothJob
+    uses them for vector processing; NativeRegularization uses them with
+    model-energy/proximal callbacks in FWI/LSRTM. ``to_image_fs`` emits the
+    separate ``Imaging.Smoothing`` contract for Cartesian shards.
     """
 
     kind: str = "tikhonov"
@@ -1860,6 +1861,8 @@ class SmoothingConfig:
         payload["input_role"] = self.input_role
         if self.reference_wavelength is not None:
             payload["reference_wavelength"] = self.reference_wavelength
+        if self.normalize_amplitude is not None:
+            payload["normalize_amplitude"] = self.normalize_amplitude
         return payload
 
     def to_image_fs(self) -> Dict[str, Any]:

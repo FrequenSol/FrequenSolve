@@ -66,9 +66,9 @@ class _TrackedDiagonal(im.Diagonal):
         bound.updates = []
         update = bound.update
 
-        def tracked(linearization, penalty=None):
+        def tracked(linearization, regularization=None):
             bound.updates.append(linearization)
-            update(linearization, penalty=penalty)
+            update(linearization, regularization=regularization)
 
         bound.update = tracked
         self.bound.append(bound)
@@ -124,10 +124,10 @@ def _least_squares(J, d, alpha=0.0, *, R=None, weights=None):
     return np.linalg.solve(normal, np.real(J.conj().T @ (W * d)))
 
 
-def _penalty_matrix(penalty, space):
-    """Return the dense ``R`` of a quadratic penalty bound to ``space``."""
+def _regularization_matrix(regularization, space):
+    """Return the dense ``R`` of a quadratic regularization bound to ``space``."""
 
-    return penalty.bind(space).operator().matrix.toarray()
+    return regularization.bind(space).operator().matrix.toarray()
 
 
 def _row_weights(fake, problem, weights):
@@ -448,7 +448,7 @@ def test_fwi_newton_cg_reaches_the_least_squares_solution_in_few_iterations(
     assert normal  # Hessian actions ran Sauce's normal action
 
 
-def test_fwi_records_penalty_terms_and_solves_the_damped_problem(problem, fake):
+def test_fwi_records_regularization_terms_and_solves_the_damped_problem(problem, fake):
     J, d = _surrogate(fake, problem)
     alpha = 5.0
     damped = _least_squares(J, d, alpha)
@@ -457,7 +457,7 @@ def test_fwi_records_penalty_terms_and_solves_the_damped_problem(problem, fake):
         problem,
         Stage(FREQUENCIES, 5),
         optimizer=NewtonCG(**EXACT),
-        penalty=ridge,
+        regularization=ridge,
     )
 
     result = fwi.run()
@@ -468,41 +468,36 @@ def test_fwi_records_penalty_terms_and_solves_the_damped_problem(problem, fake):
     assert final.data > 0.0 and final.total == final.data + final.regularization
     evaluations = result.history.evaluations
     assert all(r.loss.regularization >= 0.0 for r in evaluations)
-    assert evaluations[-1].metrics["penalty"] == "Quadratic"
-    # a stage-level penalty overrides the workflow penalty
+    assert evaluations[-1].metrics["regularization"] == "Quadratic"
+    # a stage-level regularization overrides the workflow regularization
     override = FWI(
         problem,
-        Stage(FREQUENCIES, 5, penalty=im.Tikhonov(0.0)),
+        Stage(FREQUENCIES, 5, regularization=im.Tikhonov(0.0)),
         optimizer=NewtonCG(**EXACT),
-        penalty=ridge,
+        regularization=ridge,
     ).run()
     np.testing.assert_allclose(override.state.values, _least_squares(J, d), atol=1e-6)
     assert override.stages[0].final_loss.regularization == 0.0
-    assert override.history.evaluations[-1].metrics["penalty"] == "Tikhonov"
+    assert override.history.evaluations[-1].metrics["regularization"] == "Tikhonov"
 
 
 @pytest.mark.parametrize(
     "optimizer, atol",
-    [(NewtonCG(max_cg_iterations=30, **EXACT), 1e-6), (LBFGS(**TIGHT), 1e-3)],
+    [(NewtonCG(max_cg_iterations=30, **TIGHT), 1e-6), (LBFGS(**TIGHT), 1e-3)],
     ids=["newton_cg", "lbfgs"],
 )
-def test_fwi_tikhonov_with_diagonal_preconditioner_solves_the_regularized_problem(
-    problem, fake, optimizer, atol
-):
+def test_fwi_native_tikhonov_uses_composite_objective(problem, fake, optimizer, atol):
     J, d = _surrogate(fake, problem)
-    # penalties are scale free (unit-interval seminorms), so an O(1e-2)
-    # alpha is a meaningful weight against the surrogate's data term
+    # The fake native callback has a diagonal energy with an exact solution.
     alpha = 5.0e-2
-    R = _penalty_matrix(im.Tikhonov(alpha), problem.space)
-    assert R.shape == (4 + 2, 8)  # first differences of a 5- and a 3-node profile
+    R = np.sqrt(alpha) * np.eye(8)
     expected = _least_squares(J, d, R=R)
-    assert not np.allclose(expected, _least_squares(J, d), atol=5e-3)
-    stages = [Stage([4.0], 6, active=["vp"], name="low"), Stage(FREQUENCIES, 60)]
+    stages = [Stage([4.0], 6, active=["vp"], name="low"), Stage(FREQUENCIES, 150)]
     fwi = FWI(
         problem,
         stages,
         optimizer=optimizer,
-        penalty=im.Tikhonov(alpha),
+        regularization=im.Tikhonov(alpha),
         preconditioner=im.Diagonal(probe_count=4),
     )
 
@@ -517,15 +512,11 @@ def test_fwi_tikhonov_with_diagonal_preconditioner_solves_the_regularized_proble
     assert final.total == pytest.approx(
         _least_squares_value(J, d, result.state.values) + final.regularization
     )
-    assert result.history.evaluations[-1].metrics["penalty"] == "Tikhonov"
+    assert result.history.evaluations[-1].metrics["regularization"] == "Tikhonov"
     for index in (0, 1):
         losses = _stage_losses(result.history, index)
         assert len(losses) >= 2 and np.all(np.diff(losses) <= 1e-9)
-    # the Rademacher probes ran Sauce's normal action for both stages, one
-    # job per probe carrying every frequency of its stage
-    normal = [job for job in fake.jobs if getattr(job, "action", None) == "normal"]
-    assert {len(job.f_list) for job in normal} == {1, 2}
-    assert sum(len(job.f_list) == 2 for job in normal) >= 3
+    assert result.stages[1].metrics["optimizer"] == "proximal_gradient"
 
 
 @pytest.mark.parametrize(
@@ -857,7 +848,7 @@ def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
     np.testing.assert_allclose(image.values, solution, atol=1e-6)
     assert lsqr.info["converged"] and seen and seen[0] is image
 
-    # damping and a quadratic penalty (operator rows) agree between the two solvers
+    # damping and a quadratic regularization (operator rows) agree between the two solvers
     damped = _least_squares(J, d, 2.0 + 3.0)
     ridge = im.Quadratic(np.eye(8), weight=3.0)
     cg_image = LSRTM(
@@ -865,7 +856,7 @@ def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
         iterations=80,
         method="cg",
         damping=2.0,
-        penalty=ridge,
+        regularization=ridge,
         tolerance=1e-12,
     ).run()
     lsqr_image = LSRTM(
@@ -873,7 +864,7 @@ def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
         iterations=200,
         method="lsqr",
         damping=2.0,
-        penalty=ridge,
+        regularization=ridge,
         tolerance=1e-12,
     ).run()
     np.testing.assert_allclose(cg_image.values, damped, atol=1e-6)
@@ -889,35 +880,42 @@ def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
 
 def test_lsrtm_with_tikhonov_matches_the_dense_regularized_solve(problem, fake):
     J, d = _surrogate(fake, problem)
-    penalty = im.Tikhonov(1.0e-2, order=2)
-    R = _penalty_matrix(penalty, problem.space)
-    assert R.shape == (3 + 1, 8)  # second differences of the two profiles
+    regularization = im.Tikhonov(0.1, order=2)
+    R = np.sqrt(regularization.alpha) * np.eye(problem.space.size)
+    assert R.shape == (8, 8)  # fake native callback is a diagonal quadratic
     expected = _least_squares(J, d, R=R)
     assert not np.allclose(expected, _least_squares(J, d), atol=1e-3)
 
-    cg = LSRTM(problem, iterations=80, method="cg", penalty=penalty, tolerance=1e-12)
+    cg = LSRTM(
+        problem,
+        iterations=250,
+        method="cg",
+        regularization=regularization,
+        tolerance=1e-7,
+    )
     image = cg.run()
     np.testing.assert_allclose(image.values, expected, atol=1e-6)
     assert cg.info["converged"]
     lsqr = LSRTM(
-        problem, iterations=200, method="lsqr", penalty=penalty, tolerance=1e-12
+        problem,
+        iterations=250,
+        method="lsqr",
+        regularization=regularization,
+        tolerance=1e-7,
     )
     np.testing.assert_allclose(lsqr.run().values, expected, atol=1e-6)
 
-    # a TV penalty has no operator rows: cg solves the lagged-diffusivity
-    # normal equations at the origin, lsqr refuses
+    # TV takes the nonlinear composite path for either requested linear solver.
     tv = im.TV(1.0e-2, epsilon=1.0e-2)
-    hessian = tv.bind(problem.space).hessian_operator(problem.space.zeros())
-    dense = np.column_stack([np.asarray(hessian @ e).reshape(-1) for e in np.eye(8)])
-    assert np.linalg.norm(dense, 2) > 1.0
-    expected_tv = np.linalg.solve(
-        np.real(J.conj().T @ J) + dense, np.real(J.conj().T @ d)
+    tv_image = LSRTM(
+        problem, iterations=250, method="cg", regularization=tv, tolerance=1e-7
     )
-    assert not np.allclose(expected_tv, _least_squares(J, d), atol=1e-2)
-    tv_image = LSRTM(problem, iterations=80, method="cg", penalty=tv, tolerance=1e-12)
-    np.testing.assert_allclose(tv_image.run().values, expected_tv, atol=1e-6)
-    with pytest.raises(ValueError, match="operator"):
-        LSRTM(problem, method="lsqr", penalty=tv).run()
+    x = tv_image.run().values
+    g = np.real(J.conj().T @ (J @ x - d))
+    active = np.abs(x) > 1e-6
+    np.testing.assert_allclose(g[active] + 0.1 * np.sign(x[active]), 0, atol=2e-6)
+    assert np.all(np.abs(g[~active]) <= 0.1 + 2e-6)
+    assert tv_image.info["method"] == "proximal_gradient"
 
 
 def test_rtm_returns_the_misfit_gradient(problem):
