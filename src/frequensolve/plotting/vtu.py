@@ -820,6 +820,8 @@ def plot_vtu(
         show_edges: If true, overlay edges from ``extract_all_edges()`` on the
             scalar plot. This is useful for inspecting higher-order quad/hex
             topology without relying on VTK/PyVista's rendered surface edges.
+            Line-only interfaces remain scalar-colored when there are no
+            additional edges to overlay.
         edge_color: Color used when ``show_edges=True``.
         edge_width: Line width used when ``show_edges=True``.
         scalar_bar: Whether to show a scalar bar, or scalar-bar keyword
@@ -894,12 +896,14 @@ def plot_vtu(
 
     if show_edges:
         edge_mesh = display_mesh.extract_all_edges()
-        mesh_kwargs = {
-            "color": edge_color,
-            "line_width": edge_width,
-            **add_mesh_kwargs,
-        }
-        plotter.add_mesh(edge_mesh, **mesh_kwargs)
+        # VTK extracts no additional edges from valid 1D interface cells.
+        if edge_mesh.n_points and edge_mesh.n_cells:
+            mesh_kwargs = {
+                "color": edge_color,
+                "line_width": edge_width,
+                **add_mesh_kwargs,
+            }
+            plotter.add_mesh(edge_mesh, **mesh_kwargs)
 
     if zoom is not None:
         if zoom <= 0:
