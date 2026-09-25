@@ -97,7 +97,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             --report tests/output/platform-macos/pip-install-report.json \
-            "${package}[dev,parallel,cloud]"
+            "${package}[dev,parallel,cloud,visual,seismic-io,inversion]"
           echo "PACKAGE=$package" >> "$GITHUB_ENV"
 
       - name: Run full native macOS contract
