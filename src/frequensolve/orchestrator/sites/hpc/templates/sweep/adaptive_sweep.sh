@@ -223,6 +223,10 @@ if [ "$sizing_rc" -ne 0 ]; then
     fi
 fi
 
+{% if post_init_command_shell %}
+{{ post_init_command_shell }}
+{% endif %}
+
 python3 {{ scheduler_runner }} \
     --config "$scheduler_config" \
     --job "$job_file" \

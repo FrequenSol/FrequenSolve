@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -384,3 +385,51 @@ def test_render_allocation_selects_original_frequency_indices(monkeypatch):
     for selected in [[], [1, 1], [0], [5], [True]]:
         with pytest.raises(ValueError, match="task indices"):
             adaptive.render_allocation(**arguments, task_indices=selected)
+
+
+@pytest.mark.parametrize("restore_exit", [0, 7])
+def test_adaptive_post_init_restore_runs_between_sizing_and_frequency(
+    tmp_path, restore_exit
+):
+    from frequensolve.adaptive import AdaptivePool, render_allocation
+
+    events = tmp_path / "events.txt"
+    mpi = tmp_path / "srun"
+    mpi.write_text(
+        '#!/bin/bash\ncase " $* " in\n'
+        '  *" --init-no-size "*) echo init >> "$EVENTS" ;;\n'
+        '  *" --task "*) echo task >> "$EVENTS" ;;\n'
+        "esac\n"
+    )
+    mpi.chmod(0o755)
+    restore = tmp_path / "restore.sh"
+    restore.write_text(
+        '#!/bin/bash\necho "restore:$1" >> "$EVENTS"\nexit "$RESTORE_EXIT"\n'
+    )
+    restore.chmod(0o755)
+    script = render_allocation(
+        pool=AdaptivePool(1, 1, 1, 2048, 60, "cpu-single"),
+        job_file="job.json",
+        run_path=str(tmp_path),
+        output=str(tmp_path / "run-logs"),
+        executable="/fake/solver",
+        mpi=str(mpi),
+        mpi_args=["--fake-mpi-option"],
+        task_count=1,
+        pack=False,
+        post_init_command=[str(restore), "source result with spaces"],
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=script,
+        text=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env={**os.environ, "EVENTS": str(events), "RESTORE_EXIT": str(restore_exit)},
+    )
+    assert result.returncode == restore_exit, result.stderr
+    assert events.read_text().splitlines() == [
+        "init",
+        "restore:source result with spaces",
+        *(["task"] if restore_exit == 0 else []),
+    ]

@@ -126,6 +126,7 @@ def render_allocation(
     pack: bool = True,
     fresh: bool = True,
     health_check_timeout: str | None = None,
+    post_init_command: list[str] | None = None,
 ) -> str:
     """Render the direct engine inside an already-granted uniform allocation.
 
@@ -152,6 +153,14 @@ def render_allocation(
         raise ValueError(
             "Adaptive task indices must be a nonempty unique subset of the job"
         )
+    if post_init_command is not None and (
+        not post_init_command
+        or any(
+            not isinstance(argument, str) or not argument
+            for argument in post_init_command
+        )
+    ):
+        raise ValueError("Adaptive post-init command must contain nonempty arguments")
     ranks = pool.nodes * pool.ranks_per_node
     # Native initialization writes sizing beside the authored job descriptor.
     # Diagnostic logs can live elsewhere under an immutable run output prefix.
@@ -205,4 +214,7 @@ def render_allocation(
         pack_job=pack,
         mpi_health_check_timeout=health_check_timeout,
         mpi_health_check_timeout_shell=shlex.quote(health_check_timeout or ""),
+        post_init_command_shell=(
+            shlex.join(post_init_command) if post_init_command is not None else None
+        ),
     )
