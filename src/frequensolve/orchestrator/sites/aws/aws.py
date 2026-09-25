@@ -995,9 +995,9 @@ class AWSSite(BaseSite):
                 default for failed runs, or ``validate=False`` to skip SDK
                 pre-run validation. Pass ``allow_cpu_sharing=True`` to allow up to
                 two eligible single-CPU frequency jobs per vCPU; defaults to False.
-                Memory reservations remain unchanged. Pass ``retry_of=run.id`` with
-                the authored job to reuse verified completed frequencies from a
-                terminal, settled Cloud run. Strict retries require unchanged
+                Memory reservations remain unchanged. Pass ``retry=True`` with
+                the authored job to reuse verified completed frequencies from the
+                latest compatible terminal, settled Cloud run. Strict retries require unchanged
                 scientific inputs, outputs, runtime version and execution topology.
                 Resource budgets may change through the selected profile. A retry
                 creates a new run; its ordinary rates and minimum charge apply only
@@ -1017,7 +1017,7 @@ class AWSSite(BaseSite):
             "rerun",
             "skip",
             "skip_policy",
-            "retry_of",
+            "retry",
             "check",
             "validate",
             "fetch",
@@ -1045,14 +1045,11 @@ class AWSSite(BaseSite):
             kwargs.pop("skip", kwargs.pop("skip_policy", None))
         )
         fresh_run = bool(fresh_run or skip_policy.force)
-        retry_of = kwargs.pop("retry_of", None)
-        if retry_of is not None:
-            if not isinstance(retry_of, str) or not re.fullmatch(
-                r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", retry_of
-            ):
-                raise ValueError("retry_of must be a Cloud simulation id")
-            if fresh_run:
-                raise ValueError("Choose retry_of or force=True, not both")
+        retry = kwargs.pop("retry", False)
+        if type(retry) is not bool:
+            raise ValueError("retry must be a boolean")
+        if retry and fresh_run:
+            raise ValueError("Choose retry=True or force=True, not both")
         check = bool(kwargs.pop("check", False))
         validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
@@ -1063,7 +1060,7 @@ class AWSSite(BaseSite):
                 "GraphQL API. Recreate this Site with a current Cloud profile."
             )
         self.prepare_job(job, validate=validate)
-        if not fresh_run and retry_of is None and job.is_run_current():
+        if not fresh_run and not retry and job.is_run_current():
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             result_job = (
@@ -1112,7 +1109,7 @@ class AWSSite(BaseSite):
                 simulation_job_name=job.name,
                 send_simulation_status_email=kwargs.get("send_simulation_status_email"),
                 fresh=fresh_run,
-                **({"retry_of": retry_of} if retry_of is not None else {}),
+                **({"retry": True} if retry else {}),
                 **execution_arguments,
             )
 

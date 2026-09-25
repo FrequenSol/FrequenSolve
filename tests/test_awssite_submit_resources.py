@@ -554,21 +554,21 @@ def test_cpu_sharing_rejects_distributed_profile():
     assert not site.graphql_client.submit_calls
 
 
-def test_explicit_strict_retry_sends_source_id_and_does_not_skip_locally_current_job():
+def test_strict_retry_requests_latest_source_and_does_not_skip_locally_current_job():
     site = make_graphql_site()
     job = FakeJob()
     job.is_run_current = lambda: True
-    site.submit(job, retry_of="source-run")
-    assert site.graphql_client.submit_calls[0]["retry_of"] == "source-run"
+    site.submit(job, retry=True)
+    assert site.graphql_client.submit_calls[0]["retry"] is True
     assert site.graphql_client.submit_calls[0]["fresh"] is False
 
 
 @pytest.mark.parametrize(
     "options",
     [
-        {"retry_of": "../foreign"},
-        {"retry_of": "source", "force": True},
-        {"retry_of": "source", "skip": False},
+        {"retry": "true"},
+        {"retry": True, "force": True},
+        {"retry": True, "skip": False},
     ],
 )
 def test_invalid_retry_options_fail_before_staging(options):

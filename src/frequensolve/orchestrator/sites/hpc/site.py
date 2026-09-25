@@ -945,6 +945,7 @@ class SlurmSite(BaseSite):
         duration: Optional[str] = None,
         mpi_async_progress: Optional[bool] = None,
         force: bool = False,
+        retry: bool = False,
         mode: Literal["auto", "attached", "batch"] = "auto",
         fetch: bool = False,
         check: bool = False,
@@ -962,6 +963,7 @@ class SlurmSite(BaseSite):
                 raises :class:`NotImplementedError` while asynchronous MPI
                 progress support is unavailable.
             force: Force a new run even when current results exist.
+            retry: Reuse completed work and run only unfinished tasks (the default).
             mode: Submission mode: ``"auto"``, ``"attached"``, or ``"batch"``.
             fetch: Whether to fetch outputs after completion.
             check: Whether the returned handle raises by default when waited
@@ -988,6 +990,8 @@ class SlurmSite(BaseSite):
             }
         )
         solver_policy = overrides.pop("solver_policy", self.solver_policy)
+        if type(retry) is not bool:
+            raise ValueError("retry must be a boolean")
         fresh_run = bool(force or overrides.pop("rerun", False))
         skip_policy_value = overrides.pop("skip", overrides.pop("skip_policy", None))
         residual = overrides.pop("residual", None)
@@ -1009,6 +1013,8 @@ class SlurmSite(BaseSite):
             else None
         )
         fresh_run = bool(fresh_run or skip_policy.force)
+        if retry and fresh_run:
+            raise ValueError("Choose retry=True or force=True, not both")
         validate = overrides.pop("validate", True)
         enterprise_hpc = getattr(self, "enterprise_hpc", None)
         if enterprise_hpc is None:

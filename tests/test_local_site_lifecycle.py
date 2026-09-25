@@ -982,6 +982,15 @@ def test_local_submit_force_run_alias_bypasses_current_skip(monkeypatch):
     assert run.backend["fresh"] is True
 
 
+@pytest.mark.parametrize("options", [{"retry": "true"}, {"retry": True, "force": True}])
+def test_local_retry_option_rejects_invalid_or_conflicting_requests(
+    monkeypatch, options
+):
+    site, _closed = make_site(monkeypatch)
+    with pytest.raises(ValueError, match="retry"):
+        site.submit(DummyJob(), **options)
+
+
 def test_submit_local_tasks_reports_init_log_on_failure(monkeypatch, tmp_path):
     site, _closed = make_site(monkeypatch)
     site.executable = "/solver"

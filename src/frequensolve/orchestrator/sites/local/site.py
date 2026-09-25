@@ -645,6 +645,9 @@ class LocalSite(BaseSite):
             RunHandle for the submitted tasks
         """
         check = bool(kwargs.pop("check", False))
+        retry = kwargs.pop("retry", False)
+        if type(retry) is not bool:
+            raise ValueError("retry must be a boolean")
         postprocess_only = bool(kwargs.pop("postprocess_only", False))
         solver_policy = kwargs.pop("solver_policy", self.solver_policy)
         fresh_run = bool(
@@ -672,6 +675,8 @@ class LocalSite(BaseSite):
             else None
         )
         fresh_run = bool(fresh_run or skip_policy.force)
+        if retry and fresh_run:
+            raise ValueError("Choose retry=True or force=True, not both")
         validate = kwargs.pop("validate", True)
         pack = bool(kwargs.pop("pack", True)) and bool(
             getattr(job, "supports_trace_packing", True)

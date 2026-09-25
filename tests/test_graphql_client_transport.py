@@ -288,8 +288,8 @@ def test_only_transient_status_reads_signal_monitor_recovery(
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("source", [None, "source-run"])
-def test_retry_submission_argument_is_opt_in_for_older_backends(source):
+@pytest.mark.parametrize("retry", [False, True])
+def test_retry_submission_argument_is_opt_in_for_older_backends(retry):
     client = graphql_client.GraphQLClient.__new__(graphql_client.GraphQLClient)
     captured = {}
 
@@ -298,6 +298,6 @@ def test_retry_submission_argument_is_opt_in_for_older_backends(source):
         return {"submitJob": {"simulationId": "new-run", "status": "PENDING"}}
 
     client.execute = execute
-    client.submit_job("project/job.json", retry_of=source)
-    assert ("retryOfSimulationId" in captured["document"]) == (source is not None)
-    assert captured["variables"].get("retryOfSimulationId") == source
+    client.submit_job("project/job.json", retry=retry)
+    assert ("$retry: Boolean" in captured["document"]) == retry
+    assert captured["variables"].get("retry") == (True if retry else None)
