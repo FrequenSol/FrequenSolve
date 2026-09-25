@@ -776,10 +776,11 @@ terminal run after its Credit settlement completes:
 
 .. code-block:: python
 
-   retry = site.submit(job, retry_of=previous_run.id)
+   retry = site.submit(job, retry=True)
 
-Pass the authored ``job``, not ``previous_run.job`` (the latter is an immutable
-result snapshot). The server verifies completed frequencies and their archived
+Pass the authored ``job``, not a prior run's immutable result snapshot. The server
+selects the latest compatible, terminal, Credit-settled run by submission date
+(not by how many frequencies it can reuse), then verifies its completed frequencies and archived
 artifacts, then creates a separate run for failed, missing or invalid work.
 Unchanged scientific inputs, output requests, frequency ordering, solver/runtime
 version, execution mode and MPI topology are required. Resource budgets such as
@@ -789,5 +790,7 @@ independent-frequency and adaptive execution support this strict subset.
 Reused frequencies have no new compute usage. New processing uses the ordinary
 rates and run minimum, and the original charge remains unchanged. Older runs
 without verified retry receipts require a full rerun. To explicitly recompute
-all frequencies, use ``site.submit(job, force=True)`` without ``retry_of``.
+all frequencies, use ``site.submit(job, force=True)``.
 Changed scientific inputs or solver versions also require a full rerun.
+Local and Slurm sites also accept ``retry=True``; they already reuse completed
+task outputs by default, so the flag makes that intent explicit there.

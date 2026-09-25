@@ -680,6 +680,17 @@ def test_slurm_submit_overrides_site_run_config(monkeypatch):
     assert run.backend["scheduler_heartbeat_timeout"] == 17.0
 
 
+@pytest.mark.parametrize("options", [{"retry": "true"}, {"retry": True, "force": True}])
+def test_slurm_retry_option_rejects_invalid_or_conflicting_requests(
+    monkeypatch, options
+):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
+    site = DummySlurmSite("project/run")
+    with pytest.raises(ValueError, match="retry"):
+        site.submit(DummyJob(), **options)
+
+
 def test_slurm_submit_exposes_direct_resource_parameters():
     parameters = inspect.signature(SlurmSite.submit).parameters
 
