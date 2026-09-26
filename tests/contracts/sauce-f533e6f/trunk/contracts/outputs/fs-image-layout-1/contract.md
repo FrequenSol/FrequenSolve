@@ -19,7 +19,7 @@ unique names, finite coordinates and strict coordinate ordering.
 
 Channel `role` is 1=value, 2=forward illumination, 3=adjoint illumination or
 4=auxiliary. It is distinct from `value_role`: 1=primal, 2=dual, 3=diagonal.
-The latter uses the existing value-frame conversion rules. Empty channel units
+The latter uses the existing value-convention conversion rules. Empty channel units
 inherit the image property unit. Use `1` for dimensionless values. Axis units
 are explicit, and coordinates are physical values in those units. Axes are not
 nondimensionalized with the background frequency.
@@ -28,7 +28,7 @@ The complete per-column value frame remains authoritative for numeric scaling,
 space and pairing. Component labels expand as `name[axis=1]`, with one-based
 axis indices. Shard descriptors additionally carry `frame` with expanded
 components, units, dimensions and solver-to-coordinate scales. The manifest's
-existing value-frame space/pairing IDs remain per image. Stored images use
+existing value-convention space/pairing IDs remain per image. Stored images use
 canonical solver representation; they are not optimizer-coordinate covectors.
 
 ## Compatibility and operations
@@ -50,7 +50,7 @@ stacked output writes separate, unpadded datasets under `/image/products` (or
 `/incremental/products`) in the stack HDF5 file. Each publication replaces that
 owned group, removing obsolete product datasets while preserving sibling groups.
 
-Scalar material output keeps its existing scalar value-frame metadata and omits
+Scalar material output keeps its existing scalar value-convention metadata and omits
 this packed-product descriptor. Scalar material smoothing and incremental material
 updates require the standard
 three-channel semantic layout. Extra axes or different channel roles fail before

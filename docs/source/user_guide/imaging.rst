@@ -589,6 +589,43 @@ which must never replace a control gradient or a linear adjoint. Bound
 preconditioners are refreshed at every stage start and every
 ``preconditioner_refresh`` accepted iterations.
 
+For a supplied forward-energy density, :class:`~frequensolve.imaging.SourceEnergy`
+integrates the control basis against the energy and squared material-transform derivative:
+
+.. code-block:: python
+
+   metric = im.SourceEnergy(
+       energy={"vp": forward_energy},
+       grid=image_grid,
+       relative_damping=1e-2,
+   ).bind(linearization.space)
+   direction = -metric.apply(linearization.gradient)
+
+This supports material hat/B-spline profiles and tensor-hat grids, with the
+bound model's coordinate and subdomain maps. It assembles the lumped diagonal
+``B.T @ (quadrature * energy * transform_derivative**2)`` without dense
+matrices or extra wave solves; for partition-of-unity bases this is the row sum
+of ``B.T @ diag(...) @ B``, so smooth kernels map to physical-unit updates. Non-identity controls require the
+physical ``transform_derivative`` samples (for log controls, the current
+physical property). Unilluminated coefficients receive zero updates; inspect
+``metric.raw_diagonal`` for coverage. Energy is fixed at the supplied baseline;
+rebuild the metric when that baseline changes.
+
+Sum energy over frequencies/RHS with weights matching the covector before
+binding. Default quadrature uses the image grid's numeric length units;
+``quadrature_weights`` can supply a different measure. This is a source-energy
+pseudo-Hessian, not an automatically calibrated objective Hessian: bare
+pressure-squared does not establish velocity-update units, and differently
+normalized objectives need their corresponding metric scaling. Do not
+normalize the energy by its RMS when physical scaling matters.
+
+Spatial control smoothing is separate and does not automatically apply this
+metric. Passing an illumination mode to control smoothing is rejected rather
+than silently ignored. Cartesian image smoothing retains its explicit
+``illumination_normalization="source"`` option.
+If smoothing the resulting coefficient direction, use ``input_role="primal"``;
+the default dual-input Riesz map would apply an additional mass inverse.
+
 FWI: stages, continuation and checkpoints
 -----------------------------------------
 
@@ -633,6 +670,43 @@ enters as a negative imaginary part.
    [stage.frequencies for stage in stages]     # ((4-1.5j, 6-1.5j), (4-0.5j, 6-0.5j), (4, 6), ...)
 
 The problem must be declared with every complex frequency the stages use.
+
+Optimizer stopping tolerances
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``LBFGS`` and ``NewtonCG`` accept separate absolute and relative tolerances
+for the projected gradient norm and objective decrease:
+
+.. code-block:: python
+
+   optimizer = im.LBFGS(
+       grad_abs_tol=0.0,
+       grad_rel_tole=1e-6,
+       obj_abs_tol=0.0,
+       obj_rel_tol=1e-9,
+   )
+
+Each threshold is ``absolute + relative * abs(F_initial)``. ``F_initial``
+is the total initial objective (including regularization) for that stage,
+not the previous iteration's objective. It is retained in checkpoints on
+restart. The example shows the defaults. A zero initial objective contributes
+zero to the relative term; use an absolute tolerance if needed in that case.
+There is no unit-dependent floor of one. Standalone minimizers accept
+``initial_objective`` in their options to retain the reference across restarts.
+
+The objective test detects small decreases, not a small objective value;
+``objective_target`` remains the separate absolute target-value test.
+``objective_tolerance_momentum`` optionally averages decreases, and
+``objective_minimum_iterations`` delays that stopping test. Zero objective
+tolerances still detect an exactly zero decrease. Gradient tests use optimizer
+coordinates (the proximal-gradient mapping when using a nonsmooth regularizer).
+``step_tolerance`` remains a model-space step test, not an objective-relative
+test. These settings do not rescale the objective or search directions.
+
+Existing explicit ``gradient_tolerance`` means an absolute gradient tolerance
+and suppresses the default relative gradient term. Existing
+``objective_tolerance`` now means decrease relative to the fixed initial
+objective. Prefer the four explicit names above.
 
 Running and resuming
 ~~~~~~~~~~~~~~~~~~~~
@@ -933,7 +1007,14 @@ Model extension (FWIME) attaches an auxiliary tap space to material blocks:
 one time-lag axis (``Lags``) or one spatial half-offset axis
 (``HalfOffsets``) per field, with its own inner solve. The extended problem
 satisfies the same protocol as the problem, so ``im.FWI`` accepts it
-unchanged.
+unchanged. Real and complex physical frequencies are supported by the updated
+Sauce backend. For ``f = f_real + 1j*f_imag`` and lag ``tau`` seconds, each tap
+is multiplied by ``exp(2*pi*f_imag*tau) * exp(-1j*2*pi*f_real*tau)``.
+Adjoints retain the conjugate of the full factor; tap coordinates remain real.
+For example, declare ``frequencies=[3.0-2.0j]`` on the underlying problem;
+FrequenSolve exports ``f_list: [[3.0, -2.0]]``. Large imaginary-frequency/lag
+products can impair conditioning; Sauce rejects factors that are not
+representable in its working precision (single precision in production builds).
 
 .. code-block:: python
 
@@ -945,7 +1026,7 @@ unchanged.
        tolerance=1e-6, max_iterations=100, require_convergence=True,
    )
    xp = problem.restrict(active=["vp"]).extend(ext)   # material blocks only; shares state, site and cache
-   xp.capabilities()                         # real frequencies, waveform terms, no source blocks
+   xp.capabilities()                         # real or complex frequencies; waveform terms, no source blocks
    v = xp.vector()                           # active slice of the current state
    xp.value(v), xp.gradient(v)               # reduced objective and background gradient
    xp.normal(v)                              # reduced Gauss-Newton Schur operator
@@ -1070,5 +1151,39 @@ parameter spaces; elastic controls use the isotropic velocity/slowness,
 bulk/shear, p-modulus/shear, lambda/shear and density derivative paths.
 Unsupported formulations and model-dependent terms are rejected explicitly
 (``problem.capabilities()`` reports them up front) instead of silently
-producing incomplete gradients. Model extension requires real frequencies,
-waveform comparisons and no source or geometry blocks.
+producing incomplete gradients. Model extension supports real or complex
+frequencies and requires waveform comparisons and no active source or geometry
+blocks; relaxed assembly is accepted as an approximation.
+
+WRI observed-data calibration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+WRI defaults to ``objective_normalization="observed_energy"``: a common
+observed-energy divisor scales the objective, gradient and curvature without
+changing the reconstructed wavefield or PDE/data penalty balance. This is not
+illumination compensation. ``job.objective_value()`` and the backend's covector
+reduction use a ratio of weighted sums over frequencies, not a sum of ratios.
+
+For a fixed pre-inversion calibration, run a ``FWIOperatorJob(action="wri",
+wri={"penalty": penalty, "normalization_only": True}, objective="scale.h5")``
+with the same observations, preprocessing and frequency weights as inversion.
+It performs no wavefield assembly or solves and needs no covector output.
+Read ``divisor = calibration_job.wri_normalization_divisor()`` and set
+``wri={"penalty": penalty, "objective_normalization": divisor}`` on subsequent
+inversion jobs. Retain this divisor throughout model updates and line searches.
+``"none"`` selects the unnormalized objective; a zero observed-energy automatic
+calibration is rejected. Recalibrate when the observation selection, weights,
+penalty or data scales change, not when the model changes.
+
+``FWIOperatorJob(action="wri")`` supports full-dimensional coupled acoustic–elastic
+DPG with classic elasticity. Both ``fixed_wavefield`` and ``joint_schur`` curvature
+require frozen Gram weights and unwindowed material controls; relaxed assembly
+is accepted as an approximation. The PDE objective includes the interface continuity penalties.
+``gram_derivative="total"`` applies to objective gradients in both the fluid and
+solid domains; it does not enable total-Gram curvature. WRI still excludes 2.5-D.
+
+These capabilities require a Sauce build containing the coupled-WRI and
+complex-frequency extension updates. The unchanged ``fs-job-1`` schema version
+alone does not establish backend support; older executables may reject these
+jobs. The FrequenSolve contract fixture records the targeted compatibility
+updates separately from its historical Sauce pin.

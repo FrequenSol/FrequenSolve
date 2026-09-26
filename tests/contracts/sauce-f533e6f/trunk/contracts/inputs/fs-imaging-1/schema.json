@@ -687,7 +687,7 @@
     },
     "direction": {
       "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-      "description": "Read-only HDF5 Cartesian direction file consumed by incremental imaging workflows. The file contains image/<image-name> datasets in the same solver image/value-frame format as an aggregate image file."
+      "description": "Read-only HDF5 Cartesian direction file consumed by incremental imaging workflows. The file contains image/<image-name> datasets in the same solver image/value-convention format as an aggregate image file."
     },
     "zero_direction": {
       "type": "boolean",

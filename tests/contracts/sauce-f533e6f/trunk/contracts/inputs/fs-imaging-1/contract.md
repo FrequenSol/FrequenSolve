@@ -142,7 +142,7 @@ plus imaging evaluation cases.
   simulated receiver dataset with `objective_role=linearized_residual`.
 - `lsrtm_gradient` requires exactly one Cartesian iterate source: `direction`
   names a read-only HDF5 file containing `image/<image-name>` datasets in the
-  normal solver image/value-frame representation, or `zero_direction: true`
+  normal solver image/value-convention representation, or `zero_direction: true`
   explicitly selects the zero iterate. Frequency tasks may safely read the same
   direction file concurrently; solver outputs never overwrite it. The workflow
   deliberately recomputes the background field for each task so randomized

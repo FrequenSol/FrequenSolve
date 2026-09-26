@@ -130,6 +130,18 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   The `wri` action instead solves one reduced wavefield-reconstruction
   subproblem per source-encoding RHS,
   `min_u 0.5 ||B(m)u-q||^2_G^-1 + 0.5 lambda ||Pu-d||^2_s^-2`.
+  `wri/objective_normalization` defaults to `observed_energy`: all reported
+  objective terms, model covectors and curvature products are divided by
+  `lambda * ||S^-1 d||^2`, using the same observation selection, projection,
+  observed preprocessing and residual weights, summed across source batches.
+  This common factor does not alter reconstruction. `none` disables it; a
+  positive number specifies a fixed divisor. Zero observed energy is rejected.
+  The artifact saves `/observed_energy` and `/objective_normalization` with a
+  `policy` attribute. Multi-frequency reduction uses the ratio of weighted sums,
+  not a sum of independently normalized values. `wri/normalization_only: true`
+  exports the observed calibration without assembly, solves, covectors or
+  `/value`; it excludes curvature. Its full-survey divisor can be frozen as a
+  numeric `objective_normalization` throughout inversion.
   The positive `wri/penalty` is `lambda`; `wri/data_scale` resolves to a scale in each
   selected receiver component's coordinate units (unit-aware `auto` by default). The observation term is
   inserted into the uncondensed DPG normal system before bubble condensation,
@@ -177,19 +189,29 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   data/PDE weight ratios can still be ill-conditioned. Existing jobs that omitted
   the field change behavior; explicit `data_scale: 1` restores that scale choice.
   The objective artifact always writes `/data_scales`, with `components`,
-  `coordinate_units`, and `policy` attributes (`auto_solver_units` or `explicit`).
+  `units`, and `policy` attributes (`auto_solver_units` or `explicit`).
   The legacy scalar `/data_scale` is written only for explicit numeric input.
 
   Optional `wri/curvature: fixed_wavefield | joint_schur` changes
   `model_covector` to a model-normal action on `model_direction`. The former
   holds the reconstructed field fixed; the latter eliminates its increment
   from the joint Gauss–Newton system. Both retain cross-parameter entries and
-  require `Solver/relaxed_assembly=false`, frozen Gram weights, and unwindowed material controls in uncoupled
-  acoustic, classic elastic or Maxwell DPG. They are positive-semidefinite approximations,
-  not exact reduced Hessians. The objective output still describes the base
+  require frozen Gram weights and unwindowed material controls in acoustic,
+  classic elastic, coupled acoustic–elastic or Maxwell DPG. They are
+  positive-semidefinite approximations, not exact reduced Hessians. Relaxed
+  assembly is accepted as a further approximation; exact assembly
+  (`Solver/relaxed_assembly=false`) keeps the reconstruction and the curvature
+  contractions on the same Gram factor. The objective output still describes the base
   reconstruction; its `value` dataset records `curvature` and `gram_derivative`
   attributes. WRI reconstructs the base state within each invocation; these
   actions do not consume a waveform/phase saved-linearization artifact.
+  Coupled acoustic–elastic reconstruction and `pde_objective` include the same
+  registered normal-velocity and traction-continuity penalties. These interface
+  coefficients have no explicit material derivative. Objective gradients honor
+  `gram_derivative: total` in both acoustic and classic elastic domains; the
+  curvature actions remain frozen-Gram approximations. See the
+  [coupled WRI example](examples/fwi-operator-wri-coupled.json), which assumes
+  the referenced simulation defines the listed fluid and solid material controls.
   See [WRI curvature and costs](../../../docs/imaging/wri.md).
 - `control_sensitivities` selects native material-control sensitivities instead
   of a Cartesian image for a `born`, `rtm`, or `focus` workflow. `born` requires a
@@ -284,10 +306,10 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   explicitly formed inverse derivatives. WRI reuses its existing optimal
   residual; RTM/FWI caches an additional element-local optimal residual and
   currently factors/solves its Gram matrix once per source batch. The frozen
-  path performs none of this additional work. Total currently requires
-  `Solver/relaxed_assembly=false`: the approximate fast-mode assembly can be
-  inconsistent with the separately evaluated residual objective. Use fp64 Schur
-  storage and a tight solve tolerance for verification. Both RTM and WRI keep
+  path performs none of this additional work. With relaxed assembly, total is an
+  approximation: the fast-mode assembly can be inconsistent with the separately
+  evaluated residual objective. For verification use
+  `Solver/relaxed_assembly=false`, fp64 Schur storage and a tight solve tolerance. Both RTM and WRI keep
   frozen Gram as their default; total is an opt-in verification mode.
   Total requires full-dimensional Cartesian acoustic, classic elastic or
   Maxwell DPG material controls; Galerkin, weak-symmetry elasticity, geometry,
@@ -485,6 +507,18 @@ and defines exactly one axis:
   samples. `packet_mb` bounds native donor exchange. The midpoint halo artifact
   is inferred from the named mesh property space; `artifact` can override it.
 
+Real and complex physical frequencies use the existing job `f_list`: for example,
+`[[3.0, -2.0]]` represents `3-2i` Hz. At lag `tau` seconds, the factor is
+`exp(-i*2*pi*f*tau)`, including `exp(2*pi*Im(f)*tau)`. Real tap coordinates are
+retained; transpose actions conjugate the complete factor, including its amplitude.
+This applies to extension JVP/VJP, normals, inner solves, reduced gradients and
+reduced Schur actions. Each frequency task still has its own inner problem.
+Large imaginary-frequency/lag products can impair conditioning; nonfinite
+frequencies and factors not representable in the solver working precision are
+rejected. Full-dimensional waveform comparisons remain required; relaxed
+assembly is accepted as an approximation. See the
+[complex-frequency lag example](examples/fwi-operator-extension-complex.json).
+
 Fields borrow spatial control maps, including meshed properties. Tap values use
 the property catalog units without nonlinear model transforms or bounds. The lag
 sum absorbs quadrature weights. Auxiliary inputs and outputs use
@@ -511,8 +545,9 @@ objective coordinates. `normal` itself remains unregularized.
 CG verifies its final true residual and reports iterations, normal actions,
 convergence, residual norms and quadratic change. `cache_mb` bounds resident
 incident checkpoints per rank; excess batches use temporary storage. A zero
-budget forces spilling. `workspace_mb` separately bounds retained reduced-gradient
-wavefields. `require_convergence` rejects an unconverged solve after emitting its
+budget forces spilling. The retained reduced-gradient source-batch workspace is
+indivisible and sized by the batch; the deprecated `workspace_mb` is accepted and
+ignored. `require_convergence` rejects an unconverged solve after emitting its
 diagnostic artifacts.
 
 For a reduced background gradient, select material blocks in `controls/active`
@@ -552,8 +587,8 @@ mutually exclusive with `model_gradient=true` and requires the observed-data
 target. The same material-only and fixed DPG-metric restrictions apply. See the
 [example](examples/fwi-operator-reduced-normal.json).
 
-Real Fourier frequencies, full-dimensional waveform comparisons and
-`Solver/relaxed_assembly=false` are required. Volume scattering excludes PML and
+Full-dimensional waveform comparisons are required; relaxed assembly is
+accepted as an approximation. Volume scattering excludes PML and
 boundary coefficients. Factors and incident states are reused inside a request.
 Each frequency task currently has its own inner solve; a common extension across
 a band requires composition of frequency normals and right-hand sides before
@@ -604,11 +639,12 @@ physical-field normal of the lower-level native session. Robust objective
 weights are frozen at the saved baseline, just as in ordinary FWI actions.
 
 This workflow currently requires full-dimensional first-order acoustic or classic
-elastic DPG, compiled Forms, unrelaxed assembly, native receiver channels, and the
-frozen trial-to-test policy. Coupled physics, Galerkin, 2.5D, axisymmetry, phase
+elastic DPG, compiled Forms, native receiver channels, and the frozen
+trial-to-test policy; relaxed assembly is accepted as an approximation. Coupled physics, Galerkin, 2.5D, axisymmetry, phase
 objectives, explicit Dirichlet data, and sensitivity tapers are
-rejected. Volume reflectivity excludes PML cells. `workspace_mb` bounds the
-retained joint session; solver and acquisition buffers have their own owners.
+rejected. Volume reflectivity excludes PML cells. The retained joint session holds
+one indivisible source-batch workspace (the deprecated `workspace_mb` is accepted
+and ignored); solver and acquisition buffers have their own owners.
 One source batch is active at a time, and all propagations reuse the background
 factors.
 

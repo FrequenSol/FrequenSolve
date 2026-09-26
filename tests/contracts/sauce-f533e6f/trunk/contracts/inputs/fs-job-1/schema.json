@@ -260,7 +260,7 @@
             "total"
           ],
           "default": "frozen",
-          "description": "DPG material derivative mode; frozen is the default approximation. Total differentiates Gram and trial-to-test maps for supported full-dimensional Cartesian acoustic, classic elastic and Maxwell Born/RTM and fwi_operator linearize/jvp/vjp/normal actions, and supported WRI objective gradients. Requires Solver/relaxed_assembly=false. WRI normals require frozen Gram. Ordinary Maxwell includes fixed-stretch PML constitutive pullbacks wherever authored controls have support; seismic and WRI gradients exclude PML. Total excludes focus, phase objectives, geometry controls, source tapers, spatial windows and modal formulations. Receiver and incident-source restrictions remain physics-specific."
+          "description": "DPG material derivative mode; frozen is the default approximation. Total differentiates Gram and trial-to-test maps for supported full-dimensional Cartesian acoustic, classic elastic and Maxwell Born/RTM and fwi_operator linearize/jvp/vjp/normal actions, and supported WRI objective gradients. With relaxed assembly this is an approximation; use Solver/relaxed_assembly=false for verification. WRI normals require frozen Gram. Ordinary Maxwell includes fixed-stretch PML constitutive pullbacks wherever authored controls have support; seismic and WRI gradients exclude PML. Total excludes focus, phase objectives, geometry controls, source tapers, spatial windows and modal formulations. Receiver and incident-source restrictions remain physics-specific."
         },
         "active": {
           "type": "array",
@@ -775,7 +775,7 @@
         },
         "wri": {
           "type": "object",
-          "description": "DPG wavefield-reconstruction subproblem. Sauce solves the data-assimilated wavefield and optionally returns the reduced model covector; outer alternating updates remain orchestrator responsibilities.",
+          "description": "DPG wavefield-reconstruction subproblem. Sauce solves the data-assimilated wavefield and optionally returns the reduced model covector; outer alternating updates remain orchestrator responsibilities. Coupled acoustic-elastic DPG with classic elasticity is supported; the PDE objective includes the registered material-independent interface penalties.",
           "required": [
             "penalty"
           ],
@@ -798,6 +798,16 @@
               "default": "auto",
               "description": "Auto, including omission, uses one solver unit per component expressed in its receiver coordinate units. This avoids an implicit 1 Pa or 1 mm/s default and is independent of source amplitudes and observed values. A positive number explicitly applies that scale in each component's coordinate units. The resolved component scales are written to the WRI objective artifact; the penalty still controls data/PDE balance."
             },
+            "objective_normalization": {
+              "oneOf": [{"enum": ["observed_energy", "none"]}, {"type": "number", "exclusiveMinimum": 0}],
+              "default": "observed_energy",
+              "description": "Common divisor of the entire objective, gradient and curvature; never changes reconstruction. Observed_energy uses penalty times the weighted observed energy across all source batches. Frequency-task products must be combined using their saved divisors, as a ratio of weighted sums. A positive numeric divisor can freeze a full-survey pre-inversion calibration."
+            },
+            "normalization_only": {
+              "type": "boolean",
+              "default": false,
+              "description": "Read and preprocess observations to save their energy and normalization divisor without assembly, wavefield solves or gradients. Mutually exclusive with curvature."
+            },
             "receiver_group": {
               "type": "string",
               "minLength": 1,
@@ -819,7 +829,7 @@
                 "fixed_wavefield",
                 "joint_schur"
               ],
-              "description": "Return a frozen-Gram model normal in model_covector. fixed_wavefield holds the reconstruction fixed; joint_schur eliminates the wavefield increment from joint Gauss-Newton using one additional reconstruction solve per batch. Requires model_direction, Solver/relaxed_assembly=false, and unwindowed material controls. Omit to return the reduced gradient."
+              "description": "Return a frozen-Gram model normal in model_covector. fixed_wavefield holds the reconstruction fixed; joint_schur eliminates the wavefield increment from joint Gauss-Newton using one additional reconstruction solve per batch. Requires model_direction and unwindowed material controls; relaxed assembly is accepted as an approximation. Omit to return the reduced gradient. Supported full-dimensional DPG physics are acoustic, classic elastic, coupled acoustic-elastic and Maxwell; 2.5-D is excluded."
             }
           },
           "not": {
@@ -828,6 +838,10 @@
               "receiver_groups"
             ]
           },
+          "allOf": [{
+            "if": {"properties": {"normalization_only": {"const": true}}, "required": ["normalization_only"]},
+            "then": {"not": {"required": ["curvature"]}}
+          }],
           "additionalProperties": false
         },
         "source_controls": {
@@ -905,7 +919,7 @@
         },
         "extension": {
           "type": "object",
-          "description": "Auxiliary physical-property extension over material control bases. Auxiliary actions hold the background fixed; active physical model controls select the optional reduced background gradient after solve. Volume scattering excludes PML and boundary terms; the DPG test metric is held fixed.",
+          "description": "Auxiliary physical-property extension over material control bases. Auxiliary actions hold the background fixed; active physical model controls select the optional reduced background gradient after solve. Volume scattering excludes PML and boundary terms; the DPG test metric is held fixed. Real or complex physical frequencies are supported. For f=f_real+i*f_imag, lag factors are exp(2*pi*f_imag*tau)*exp(-i*2*pi*f_real*tau); adjoints retain their conjugate amplitudes.",
           "required": [
             "fields"
           ],
@@ -952,7 +966,8 @@
                         "minLength": 1,
                         "description": "Explicit time unit, such as s or ms."
                       }
-                    }
+                    },
+                    "description": "Uniform real tap amplitudes at physical time lags. Contraction uses the complete complex job frequency, in Hz, and lag coordinates converted to seconds. Nonfinite frequencies and factors not representable in the solver working precision are rejected."
                   },
                   "offsets": {
                     "type": "object",
@@ -1109,7 +1124,8 @@
                   "type": "number",
                   "exclusiveMinimum": 0,
                   "default": 512,
-                  "description": "Per-rank byte limit in MiB for the retained reduced-gradient wavefield session, separate from incident checkpoint storage."
+                  "deprecated": true,
+                  "description": "Deprecated and ignored. The retained reduced-gradient source-batch workspace is indivisible and allocated at its required size; allocation failure is reported."
                 },
                 "offset_penalty": {
                   "type": "number",
@@ -1219,7 +1235,8 @@
               "type": "number",
               "exclusiveMinimum": 0,
               "default": 512,
-              "description": "Per-rank retained joint field workspace budget in MiB, excluding solver factors and acquisition-owned buffers."
+              "deprecated": true,
+              "description": "Deprecated and ignored. The retained joint source-batch workspace is indivisible and allocated at its required size; allocation failure is reported."
             },
             "fields": {
               "type": "array",
