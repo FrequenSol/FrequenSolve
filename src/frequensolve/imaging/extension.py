@@ -38,6 +38,7 @@ import dataclasses
 import itertools
 import json
 import math
+import warnings
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -60,6 +61,7 @@ from frequensolve.imaging._artifacts import (
     ExtensionSolveReport,
     ExtensionVectorField,
     ExtensionVectorFile,
+    WORKSPACE_DEPRECATION,
     ObjectiveReport,
     unqualified_block_name,
 )
@@ -392,7 +394,9 @@ class Extension:
             coordinates ``z`` with ``taps = scale * z``).
         tolerance, absolute_tolerance, max_iterations: Inner CG controls.
         require_convergence: Fail an unconverged inner solve.
-        cache_mb, workspace_mb: Per-rank memory budgets.
+        cache_mb: Per-rank incident-checkpoint budget.
+        workspace_mb: Deprecated and ignored; the retained source-batch
+            workspace is indivisible.
         max_outer_iterations, max_line_search, gradient_tolerance
         (relative), gradient_absolute_tolerance: Robust (Huber, Student-t)
             observed-data inner iteration controls.
@@ -488,9 +492,10 @@ class Extension:
             raise ValueError("max_iterations must be nonnegative")
         object.__setattr__(self, "max_iterations", iterations)
         object.__setattr__(self, "require_convergence", bool(self.require_convergence))
+        if self.workspace_mb is not None:
+            warnings.warn(WORKSPACE_DEPRECATION, DeprecationWarning, stacklevel=3)
         for key in (
             "cache_mb",
-            "workspace_mb",
             "gradient_tolerance",
             "gradient_absolute_tolerance",
         ):
@@ -559,7 +564,6 @@ class Extension:
             solver["field_scales"] = list(self.field_scales)
         for key, name in (
             ("cache_mb", "cache_mb"),
-            ("workspace_mb", "workspace_mb"),
             ("max_outer_iterations", "max_outer_iterations"),
             ("max_line_search", "max_line_search"),
             ("gradient_tolerance", "gradient_relative_tolerance"),
@@ -1716,12 +1720,13 @@ class ExtendedProblem:
     def capabilities(self) -> Dict[str, Any]:
         """Statically validate the extension against Sauce's restrictions.
 
-        Errors: complex (Laplace) frequencies, non-waveform comparisons,
+        Real and complex physical frequencies are accepted.
+        Errors: non-waveform comparisons,
         losses other than L2/Huber/Student-t, source/geometry/reflectivity
         blocks in the active space, reflectivity anywhere in the registry,
-        fields that do not borrow a material block, and
-        ``Solver/relaxed_assembly`` left on.  Warnings: gradient smoothing
-        (not carried by extension jobs) and frozen non-material blocks.
+        and fields that do not borrow a material block. Relaxed assembly is an
+        accepted approximation. Warnings: gradient smoothing (not carried by
+        extension jobs) and frozen non-material blocks.
         """
 
         problem = self._problem
@@ -1731,8 +1736,6 @@ class ExtendedProblem:
         errors.extend(base["errors"])
         warnings.extend(base["warnings"])
 
-        if any(abs(complex(f).imag) > 0.0 for f in problem.frequencies):
-            errors.append("the extension requires real frequencies")
         comparisons = set(base["comparisons"])
         if comparisons - {"waveform"}:
             errors.append(
@@ -1777,18 +1780,6 @@ class ExtendedProblem:
             space = None
         if problem.smoothing is not None:
             warnings.append("gradient smoothing is not applied by extension jobs")
-        solver = getattr(problem.simulation, "solver", None)
-        extra = getattr(solver, "extra", None)
-        relaxed = (
-            None if not isinstance(extra, Mapping) else extra.get("relaxed_assembly")
-        )
-        if relaxed is None:
-            warnings.append(
-                "Sauce requires Solver/relaxed_assembly=false for extension actions; "
-                "set SolverConfig(relaxed_assembly=False) on the simulation"
-            )
-        elif bool(relaxed):
-            errors.append("the extension requires Solver/relaxed_assembly=false")
         return {
             "ok": not errors,
             "errors": errors,

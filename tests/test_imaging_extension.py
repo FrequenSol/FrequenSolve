@@ -298,7 +298,7 @@ def test_extend_shares_state_and_rejects_unsupported_setups(tmp_path, fake, setu
         problem.restrict(misfit=Misfit(comparison="phase_derivative")).extend(
             _extension()
         )
-    # unrelaxed assembly is required
+    # relaxed assembly is an accepted approximation
     relaxed = ImagingProblem(
         _simulation(tmp_path / "relaxed", relaxed=True),
         controls=_space(),
@@ -307,18 +307,7 @@ def test_extend_shares_state_and_rejects_unsupported_setups(tmp_path, fake, setu
         site=fake,
         name="relaxed",
     )
-    with pytest.raises(ValueError, match="relaxed_assembly"):
-        relaxed.extend(_extension())
-    # Laplace frequencies
-    with pytest.raises(ValueError, match="real frequencies"):
-        ImagingProblem(
-            sim,
-            controls=_space(),
-            observed={"surface": "observed.h5"},
-            frequencies=[4.0 - 0.5j],
-            site=fake,
-            name="laplace",
-        ).extend(_extension())
+    assert relaxed.extend(_extension()).capabilities()["ok"]
     # field must borrow a block of the space
     with pytest.raises(ValueError, match="not a block"):
         problem.extend(
@@ -365,9 +354,12 @@ def _extension_jobs(fake):
     ]
 
 
-def test_extension_jobs_validate_against_the_pinned_schema(setup, fake):
-    sim, problem, xp = setup
-    view = xp.restrict(frequencies=[4.0])
+@pytest.mark.parametrize("frequency", [4.0, 4.0 - 0.5j])
+def test_extension_jobs_validate_against_the_pinned_schema(tmp_path, fake, frequency):
+    sim, problem = _problem(tmp_path, fake, frequencies=[frequency])
+    xp = problem.extend(_extension())
+    assert xp.capabilities()["ok"]
+    view = xp.restrict(frequencies=[frequency])
     lin = view.linearize()
     taps, report = view.solve()
     view.gradient()
@@ -429,7 +421,15 @@ def test_extension_jobs_validate_against_the_pinned_schema(setup, fake):
             assert {"direction", "covector"} <= set(op["extension"])
     # one single-frequency job per action on the saved task
     assert all(job.n_tasks == 1 for job in jobs)
-    assert all(job.f_list == [4.0] for job in jobs)
+    assert all(job.f_list == [frequency] for job in jobs)
+    for job in jobs:
+        pair = job.to_fs()["f_list"][0]
+        expected = (
+            [frequency.real, frequency.imag]
+            if isinstance(frequency, complex)
+            else frequency
+        )
+        np.testing.assert_allclose(pair, expected)
 
 
 def test_multi_frequency_actions_submit_one_job_each(setup, fake):
@@ -728,3 +728,9 @@ def test_fwi_decreases_the_reduced_objective(setup, fake, regularization_weight)
     assert problem.state is result.state
     assert any(job.reduced_normal is not None for job in _extension_jobs(fake))
     assert any(job.model_gradient for job in _extension_jobs(fake))
+
+
+def test_extension_workspace_budget_is_deprecated_and_not_emitted():
+    with pytest.warns(DeprecationWarning, match="workspace_mb"):
+        ext = _extension(workspace_mb=64.0)
+    assert "workspace_mb" not in ext.solver_fs()

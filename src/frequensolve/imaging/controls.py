@@ -30,6 +30,7 @@ from __future__ import annotations
 import copy
 import itertools
 import math
+import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,6 +53,7 @@ from scipy.sparse.linalg import lsqr
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.imaging._artifacts import (
+    WORKSPACE_DEPRECATION,
     ControlRegistryManifest,
     ControlStateFile,
     ControlVectorFile,
@@ -2108,7 +2110,8 @@ class ReflectivityParameters(_BlockSpec):
     Args:
         parameterization: ``vp_ip``, ``vp_vs_ip`` or ``ip_is_rho``.
         fields: Non-empty sequence of :class:`ReflectivityField`.
-        workspace_mb: Optional per-rank workspace budget.
+        workspace_mb: Deprecated and ignored; the retained joint source-batch
+            workspace is indivisible.
     """
 
     parameterization: str = "vp_ip"
@@ -2141,10 +2144,7 @@ class ReflectivityParameters(_BlockSpec):
                 )
         object.__setattr__(self, "fields", fields)
         if self.workspace_mb is not None:
-            workspace = float(self.workspace_mb)
-            if not math.isfinite(workspace) or workspace <= 0.0:
-                raise ValueError("reflectivity workspace_mb must be positive")
-            object.__setattr__(self, "workspace_mb", workspace)
+            warnings.warn(WORKSPACE_DEPRECATION, DeprecationWarning, stacklevel=3)
 
     def default_key(self) -> str:
         return "reflectivity"
@@ -2160,8 +2160,6 @@ class ReflectivityParameters(_BlockSpec):
             "parameterization": self.parameterization,
             "fields": [f.to_fs(ctx) for f in self.fields],
         }
-        if self.workspace_mb is not None:
-            payload["workspace_mb"] = self.workspace_mb
         return payload
 
     def resolve(self, key: str, ctx: Optional[_BindContext]) -> List[ResolvedBlock]:
@@ -3245,9 +3243,6 @@ class BoundControlSpace(ControlSpace):
             "parameterization": parameterizations.pop(),
             "fields": copy.deepcopy(fields),
         }
-        workspaces = [p["workspace_mb"] for p in payloads if "workspace_mb" in p]
-        if workspaces:
-            payload["workspace_mb"] = max(workspaces)
         return payload
 
     def source_controls_payload(self) -> Optional[Dict[str, Any]]:
@@ -3809,26 +3804,21 @@ class ControlVector:
         values[~self.space._mask_of(block)] = frozen
         return values
 
-    def to_grid(
+    def _grid_sampling(
         self,
         grid: Any,
         key: str,
         *,
         context: Optional[EvaluationContext] = None,
-        frozen: Any = np.nan,
-    ) -> xr.DataArray:
-        """Evaluate a profile or tensor-hat coefficient field on a Cartesian grid.
+    ) -> Tuple[xr.DataArray, csr_matrix, np.ndarray]:
+        """Prepare the shared rendering and metric-pullback sampling map.
 
         This evaluates the basis rather than joining coefficients. Bound
         layered models resolve surface-relative depth and mask other layers.
         Grid units are converted to model units when declared. An explicit
         ``context`` can supply other maps in control units, in grid storage
-        order. Samples outside the basis/subdomain or influenced by frozen
-        DOFs use ``frozen``.
-
-        Values precede the material reference/transform. For a raw covector
-        this is a basis-rendered visualization, NOT a physical gradient
-        density or a covector transfer.
+        order. The returned validity mask excludes points outside the material
+        domain but leaves frozen-column handling to the caller.
         """
         from frequensolve.geometry.grids import CartesianGrid
         from frequensolve.units import ureg
@@ -3913,12 +3903,7 @@ class ControlVector:
             )
         else:
             operator = ControlRepresentation(control).sampling_operator(context)
-        values = self.space.to_sauce_vector(self)[self.space.full_slices[block.name]]
         valid = np.asarray(abs(operator).sum(axis=1)).ravel() > 0
-        mask = self.space._mask_of(block)
-        if not mask.all():
-            valid &= np.asarray(abs(operator[:, ~mask]).sum(axis=1)).ravel() == 0
-        sampled = np.asarray(operator @ values).reshape(grid.shape)
         valid = valid.reshape(grid.shape)
         if (
             binding
@@ -3940,6 +3925,32 @@ class ControlVector:
                 if limits is not None and axis in samples.coords:
                     coord = samples.coords[axis].broadcast_like(samples).values
                     valid &= (coord >= limits[0]) & (coord <= limits[1])
+        return result, operator, valid
+
+    def to_grid(
+        self,
+        grid: Any,
+        key: str,
+        *,
+        context: Optional[EvaluationContext] = None,
+        frozen: Any = np.nan,
+    ) -> xr.DataArray:
+        """Evaluate control coefficients, not a covector density, on a grid.
+
+        Coordinates, units and material masks follow the bound simulation.
+        Values precede the material reference/transform. Samples outside the
+        block or influenced by frozen coefficients receive ``frozen``.
+        """
+
+        result, operator, valid = self._grid_sampling(grid, key, context=context)
+        block = self.space.block(key)
+        mask = self.space._mask_of(block)
+        if not mask.all():
+            valid &= (
+                np.asarray(abs(operator[:, ~mask]).sum(axis=1)).reshape(grid.shape) == 0
+            )
+        values = self.space.to_sauce_vector(self)[self.space.full_slices[block.name]]
+        sampled = np.asarray(operator @ values).reshape(grid.shape)
         result.data = np.where(valid, sampled, frozen)
         result.attrs.update(
             block=block.name,
