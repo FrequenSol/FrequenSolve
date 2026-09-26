@@ -58,7 +58,7 @@ from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging._artifacts import (
     ControlVectorFile,
     ImageSet,
-    SmoothingConfig,
+    control_smoothing,
     unqualified_block_name,
 )
 from frequensolve.imaging._backend import fingerprint
@@ -326,9 +326,7 @@ class Stage:
         if self.misfit is not None and not isinstance(self.misfit, Misfit):
             raise TypeError("stage misfit must be a Misfit")
         if self.smoothing is not None and self.smoothing is not False:
-            object.__setattr__(
-                self, "smoothing", SmoothingConfig.from_value(self.smoothing)
-            )
+            object.__setattr__(self, "smoothing", control_smoothing(self.smoothing))
         if self.optimizer is not None and not callable(
             getattr(self.optimizer, "solve", None)
         ):
@@ -593,6 +591,13 @@ def _preconditioner_callable(
 class _OptimizerConfig:
     """Shared options of :class:`LBFGS` and :class:`NewtonCG`.
 
+    Gradient and objective-decrease thresholds are the corresponding
+    ``absolute_tolerance + relative_tolerance * abs(initial_objective)``.
+    Absolute defaults are zero; relative defaults are ``1e-6`` (gradient)
+    and ``1e-9`` (objective decrease). FWI retains the initial stage objective
+    through checkpoint restarts. See :class:`InexactNewtonOptions` for the
+    legacy tolerance spellings.
+
     ``step_limit`` caps the RMS update of every block per iteration
     (optimizer coordinates); ``scaling_max_ratio`` floors curvature-based
     scaling (see :func:`curvature_scaling`); ``preconditioner_refresh``
@@ -601,9 +606,13 @@ class _OptimizerConfig:
     """
 
     max_iterations: Optional[int] = None
-    gradient_tolerance: float = 1.0e-6
+    gradient_tolerance: Optional[float] = None
     step_tolerance: float = 1.0e-9
-    objective_tolerance: float = 1.0e-9
+    objective_tolerance: Optional[float] = None
+    grad_abs_tol: float = 0.0
+    grad_rel_tole: Optional[float] = None
+    obj_abs_tol: float = 0.0
+    obj_rel_tol: Optional[float] = None
     objective_target: Optional[float] = None
     objective_tolerance_momentum: float = 0.0
     objective_minimum_iterations: int = 1
@@ -643,6 +652,10 @@ class _OptimizerConfig:
             "gradient_tolerance": self.gradient_tolerance,
             "step_tolerance": self.step_tolerance,
             "objective_tolerance": self.objective_tolerance,
+            "grad_abs_tol": self.grad_abs_tol,
+            "grad_rel_tole": self.grad_rel_tole,
+            "obj_abs_tol": self.obj_abs_tol,
+            "obj_rel_tol": self.obj_rel_tol,
             "objective_target": self.objective_target,
             "objective_tolerance_momentum": self.objective_tolerance_momentum,
             "objective_minimum_iterations": self.objective_minimum_iterations,
@@ -670,6 +683,7 @@ class _OptimizerConfig:
         history: Optional[OptimizationHistory] = None,
         callback: Optional[Callable[[InexactNewtonIteration], None]] = None,
         max_iterations: Optional[int] = None,
+        initial_objective: Optional[float] = None,
         step_limit: Optional[float] = None,
         scaling: Optional[Any] = None,
         block_slices: Optional[Sequence[slice]] = None,
@@ -696,6 +710,8 @@ class _OptimizerConfig:
             callback: Called with every accepted
                 :class:`InexactNewtonIteration` (physical coordinates).
             max_iterations: Iteration budget overriding the configuration.
+            initial_objective: Original stage objective on restart; relative
+                stopping tolerances retain this fixed reference.
             step_limit: RMS step cap overriding the configuration.
             scaling: Per-DOF change-of-variables scale ``s`` (``x = s * y``)
                 or a ``block -> curvature`` mapping resolved with ``space``.
@@ -813,9 +829,12 @@ class _OptimizerConfig:
             lower = np.broadcast_to(np.asarray(bounds[0], dtype=np.float64), (size,))
             upper = np.broadcast_to(np.asarray(bounds[1], dtype=np.float64), (size,))
             scaled_bounds = (to_scaled(lower), to_scaled(upper))
+        options = self.options(max_iterations)
+        if initial_objective is not None:
+            options = dataclasses.replace(options, initial_objective=initial_objective)
         kwargs: Dict[str, Any] = {
             "bounds": scaled_bounds,
-            "options": self.options(max_iterations),
+            "options": options,
             "preconditioner": None if precondition is None else p,
             "step_limit": None if limit is None else step_limit_fn,
             "step_transform": None if step_transform is None else transform,
@@ -843,7 +862,7 @@ class _OptimizerConfig:
                 prox,
                 y0,
                 bounds=scaled_bounds,
-                options=self.options(max_iterations),
+                options=options,
                 callback=on_iteration,
                 step_limit=None if limit is None else step_limit_fn,
             )
@@ -1126,7 +1145,7 @@ class FWI:
         self.regularization = regularization
         self.preconditioner = preconditioner
         if smoothing is not None and smoothing is not False:
-            smoothing = SmoothingConfig.from_value(smoothing)
+            smoothing = control_smoothing(smoothing)
         self.smoothing = smoothing
         if step_limit is not None:
             limit = float(step_limit)
@@ -1319,6 +1338,7 @@ class FWI:
             "control_sizes": self._layout(problem)[1],
             "stage_index": int(index),
             "stage_name": stage.label(index),
+            "initial_objective": self._stage_initial_objective,
             "stage_iteration": int(stage_iteration),
             "stage_iterations": int(stage.iterations),
             "stage_completed": bool(completed),
@@ -1385,6 +1405,7 @@ class FWI:
                 f"not {self.problem.name!r}"
             )
         index = int(meta["stage_index"])
+        self._resume_initial_objective = (index, meta.get("initial_objective"))
         self._resume_regularization = (
             index,
             json.loads(meta.get("native_regularization", "null")),
@@ -1594,6 +1615,25 @@ class FWI:
         objective = _StageObjective(view, space, bound_regularization, history, metrics)
         objective.native_regularization = native_regularization
         initial_loss = objective.loss(x0)
+        self._stage_initial_objective = initial_loss.total
+        if start_iteration > 0:
+            reference_index, reference = getattr(
+                self, "_resume_initial_objective", (index, None)
+            )
+            if reference_index != index:
+                reference = None
+            if reference is None:
+                records = [
+                    r
+                    for r in history.iterations
+                    if r.metrics.get("stage_index") == index
+                ]
+                if not records:
+                    raise ValueError(
+                        "Cannot resume relative tolerances without the stage's initial objective"
+                    )
+                reference = records[0].loss.total
+            self._stage_initial_objective = float(reference)
         linearizations_before = objective.evaluations
 
         preconditioner = self.preconditioner if native_regularization is None else None
@@ -1695,6 +1735,7 @@ class FWI:
             hessian_action=curvature,
             callback=on_iteration,
             max_iterations=remaining,
+            initial_objective=self._stage_initial_objective,
             step_limit=step_limit,
             scaling=scaling,
             space=space,
@@ -2395,9 +2436,7 @@ class TimeReversalFocus:
         self.kind = str(kind).strip().lower()
         self.weights = None if weights is None else [float(w) for w in weights]
         self.smoothing = (
-            problem.smoothing
-            if smoothing is None
-            else SmoothingConfig.from_value(smoothing)
+            problem.smoothing if smoothing is None else control_smoothing(smoothing)
         )
         self.spatial_window = None if spatial_window is None else dict(spatial_window)
         self._results: Dict[str, Tuple[float, ControlVector]] = {}

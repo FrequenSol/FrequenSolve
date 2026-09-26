@@ -26,6 +26,139 @@ from frequensolve.inversion import (
     minimize_lbfgs,
     run_continuation,
 )
+from frequensolve.inversion.optimization import minimize_proximal_gradient
+
+
+@pytest.fixture(params=["newton", "lbfgs"])
+def tolerance_solver(request):
+    """A half-step quadratic with matched preconditioning at any objective scale."""
+
+    def solve(*, scale=1.0, offset=0.0, **settings):
+        options = dict(max_iterations=4, step_tolerance=0.0)
+        options.update(settings)
+        states = []
+        args = (
+            lambda x: scale * (offset + 0.5 * float(x @ x)),
+            lambda x: scale * x,
+        )
+        kwargs = dict(
+            preconditioner=lambda _x, g: g / scale,
+            step_transform=lambda _x, step: step / 2,
+            callback=states.append,
+        )
+        if request.param == "newton":
+            result = minimize_inexact_newton(
+                *args,
+                lambda _x, v: scale * v,
+                [2.0],
+                options=InexactNewtonOptions(**options),
+                **kwargs,
+            )
+        else:
+            result = minimize_lbfgs(
+                *args,
+                [2.0],
+                options=LBFGSOptions(**options),
+                **kwargs,
+            )
+        return result, states
+
+    return solve
+
+
+@pytest.mark.parametrize("scale", [1e-23, 1.0, 1e9])
+def test_gradient_tolerances_add_and_use_initial_objective(tolerance_solver, scale):
+    # Initial F=12s, ||g||=2s. After one half-step ||g||=s:
+    # 0.02s + 0.082 * 12s = 1.004s. Neither term alone suffices.
+    result, _ = tolerance_solver(
+        scale=scale,
+        offset=10.0,
+        grad_abs_tol=0.02 * scale,
+        grad_rel_tole=0.082,
+        obj_rel_tol=0.0,
+    )
+    assert result.success and result.status == 1 and result.iterations == 1
+    np.testing.assert_allclose(result.model, [1.0])
+
+
+@pytest.mark.parametrize("scale", [1e-23, 1.0, 1e9])
+def test_objective_tolerances_use_fixed_initial_reference(tolerance_solver, scale):
+    # Decreases: 1.5s, 0.375s. Stop on 0.05s + 0.17 * F0 = 0.39s.
+    result, states = tolerance_solver(
+        scale=scale,
+        grad_rel_tole=0.0,
+        obj_abs_tol=0.05 * scale,
+        obj_rel_tol=0.17,
+    )
+    assert result.success and result.status == 2 and result.iterations == 2
+    assert states[-1].objective_relative_reduction == pytest.approx(0.1875)
+
+
+@pytest.mark.parametrize("initial_objective", [12.0, -12.0])
+def test_restart_reference_uses_absolute_initial_objective(
+    tolerance_solver, initial_objective
+):
+    result, _ = tolerance_solver(
+        initial_objective=initial_objective,
+        grad_rel_tole=0.085,
+        obj_rel_tol=0.0,
+    )
+    assert result.success and result.status == 1 and result.iterations == 1
+
+
+def test_zero_initial_objective_has_no_relative_floor(tolerance_solver):
+    result, states = tolerance_solver(
+        offset=-2.0,
+        grad_rel_tole=100.0,
+        obj_rel_tol=100.0,
+        obj_abs_tol=0.4,
+        objective_tolerance_momentum=0.0,
+    )
+    assert result.success and result.status == 2 and result.iterations == 2
+    assert states[0].objective == 0.0
+    assert np.isinf(states[-1].objective_relative_reduction)
+    assert not np.isnan(states[-1].objective_reduction_momentum)
+
+
+def test_tiny_objective_is_not_initially_converged_by_default(tolerance_solver):
+    result, _ = tolerance_solver(scale=1e-23, max_iterations=1)
+    assert result.iterations == 1
+
+
+@pytest.mark.parametrize("options_type", [InexactNewtonOptions, LBFGSOptions])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "grad_abs_tol",
+        "grad_rel_tole",
+        "obj_abs_tol",
+        "obj_rel_tol",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf")])
+def test_absolute_relative_tolerances_are_validated(options_type, field, value):
+    with pytest.raises(ValueError, match=field):
+        options_type(**{field: value})
+
+
+@pytest.mark.parametrize("options_type", [InexactNewtonOptions, LBFGSOptions])
+def test_restart_reference_must_be_finite(options_type):
+    with pytest.raises(ValueError, match="initial_objective"):
+        options_type(initial_objective=float("nan"))
+
+
+def test_proximal_relative_tolerance_includes_regularization():
+    result = minimize_proximal_gradient(
+        lambda x: 0.5 * float(x @ x),
+        lambda x: x,
+        lambda x: 10.0,
+        lambda v, tau, bounds: v,
+        [2.0],
+        options=LBFGSOptions(grad_rel_tole=0.17),
+    )
+    # ||mapping||=2 <= 0.17 * (2+10), but not <= 0.17 * 2.
+    assert result.success and result.iterations == 0
+    assert result.objective == 12.0
 
 
 class _ControlSpace:

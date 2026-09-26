@@ -290,6 +290,25 @@ class _Quadratic:
         return self.A @ dx
 
 
+@pytest.mark.parametrize("config", [LBFGS, NewtonCG])
+def test_optimizer_configs_forward_absolute_relative_tolerances(config):
+    optimizer = config(
+        grad_abs_tol=0.02,
+        grad_rel_tole=0.17,
+        obj_abs_tol=0.01,
+        obj_rel_tol=0.04,
+    )
+    options = optimizer.options()
+    assert options.grad_abs_tol == 0.02
+    assert options.grad_rel_tole == 0.17
+    assert options.obj_abs_tol == 0.01
+    assert options.obj_rel_tol == 0.04
+    quadratic = _Quadratic(np.eye(1), np.zeros(1))
+    result = optimizer.solve(quadratic, [2.0], initial_objective=12.0)
+    # The restored threshold is 2.06, not 0.36 from the current F=2.
+    assert result.success and result.iterations == 0
+
+
 def test_optimizer_configs_wrap_the_generic_minimizers_with_scaling_and_step_limit():
     rng = np.random.default_rng(3)
     root = rng.standard_normal((6, 6))
@@ -671,10 +690,26 @@ def test_fwi_checkpoints_every_iteration_and_resumes_after_an_interruption(
     assert saved.model.size == 5
     history = OptimizationHistory.load(tmp_path / "run" / "history.json")
     assert history.status == "stopped" and "Interrupt" in history.message
+    initial_objective = history.iterations[0].loss.total
+    assert saved.metadata["initial_objective"] == initial_objective
+    assert initial_objective != saved.loss.total
     interrupted_records = history.iteration_count
     linearizations_before = _linearize_count(fake)
 
-    resumed = FWI(problem, _stages(), **options).run(resume=True)
+    resumed_references = []
+
+    def record_reference(event):
+        if event.stage_index == 0:
+            resumed_references.append(
+                OptimizationCheckpoint.load(checkpoint).metadata["initial_objective"]
+            )
+
+    resumed = FWI(problem, _stages(), callback=record_reference, **options).run(
+        resume=True
+    )
+    assert resumed_references and all(
+        value == initial_objective for value in resumed_references
+    )
 
     new_linearizations = _linearize_count(fake) - linearizations_before
     assert resumed.history.status == "converged"
