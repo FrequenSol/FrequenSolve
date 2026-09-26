@@ -17,6 +17,47 @@ Related tutorials:
 - :download:`Sparse surveys <../../../tutorials/05_surveys/04_sparse_surveys.ipynb>`
   for offset windows and explicit source-receiver layouts.
 
+Calibrated airgun sources
+------------------------
+
+``AirgunSignature`` accepts a ghost-free far-field pressure-distance signature,
+not chamber pressure or an imposed pressure at the source. It lowers to the
+existing acoustic ``volume_injection`` source and source-spectrum contract:
+
+.. code-block:: python
+
+   from frequensolve.seismic import AirgunSignature, SampledWavelet
+   from frequensolve.units import ureg as u
+
+   airgun = AirgunSignature(
+       SampledWavelet(samples, dt=0.001, units="bar*m", normalization="dft"),
+       ghost="excluded", water_density=1025 * u.kg / u.m**3,
+   )
+   acq = airgun.acquisition(
+       coords=[[0.5, 0.02]], frequencies=[1, 1.5, 2, 2.5, 3],
+       out_of_plane_thickness=100 * u.m,
+   )
+
+Add receivers and source encoding to ``acq`` normally. In planar 2D an explicit
+thickness is required: the total volume rate is divided by that thickness.
+This does not equate 2D line-source spreading with a 3D airgun at every range.
+For Cartesian 3D omit the thickness. These sources currently require acoustic
+physics and frequency-domain/frequency-synthesis jobs.
+
+To calibrate a synthetic shape, use ``AirgunSignature.from_wavelet(shape,
+strength=10*u.bar*u.m, measure="peak_to_peak", ghost="excluded")`` with a
+dimensionless ``SampledWavelet``. ``measure="peak"`` means maximum absolute
+sample. There is no implicit wavelet normalization. ``dft`` matches Sauce's
+sampled-data transform; ``integral`` multiplies by the time step and must match
+the transform convention of the observations.
+
+The monopole conversion is ``Q(f)=4*pi*S(f)/(rho*2*pi*i*f)`` and supports
+nonpositive imaginary frequencies and the analytic first frequency derivative.
+Zero complex frequency is rejected. The supplied signature must exclude the
+source ghost; deghost measured signatures and remove the measurement propagation
+delay before conversion so the clock is source-relative. Array directivity
+and airgun bubble dynamics are not inferred from a single signature.
+
 Survey Receivers
 ----------------
 

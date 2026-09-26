@@ -1,6 +1,8 @@
 """Seismic acquisition, source, receiver, survey, wavelet, and trace APIs."""
 
 from frequensolve._exports import unique_exports
+from frequensolve.seismic.airgun import *  # noqa: F403
+from frequensolve.seismic.airgun import __all__ as _airgun_all
 from frequensolve.seismic.acquisition import *  # noqa: F403
 from frequensolve.seismic.acquisition import __all__ as _acquisition_all
 from frequensolve.seismic.boundary_loadings import *  # noqa: F403
@@ -27,6 +29,7 @@ from frequensolve.seismic.wavelet import *  # noqa: F403
 from frequensolve.seismic.wavelet import __all__ as _wavelet_all
 
 __all__ = unique_exports(
+    _airgun_all,
     _acquisition_all,
     _boundary_loadings_all,
     _eikonal_all,
