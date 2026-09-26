@@ -22,6 +22,7 @@ from frequensolve.imaging.controls import *  # noqa: F403
 from frequensolve.imaging.controls import __all__ as _controls_all
 from frequensolve.imaging.data import *  # noqa: F403
 from frequensolve.imaging.data import __all__ as _data_all
+from frequensolve.imaging.energy import SourceEnergy as SourceEnergy
 from frequensolve.imaging.extension import *  # noqa: F403
 from frequensolve.imaging.extension import __all__ as _extension_all
 from frequensolve.imaging.jobs import *  # noqa: F403
@@ -41,7 +42,7 @@ from frequensolve.imaging.workflows import *  # noqa: F403
 from frequensolve.imaging.workflows import __all__ as _workflows_all
 
 __all__ = unique_exports(
-    ["PropertyMesh", "NativeRegularization"],
+    ["PropertyMesh", "NativeRegularization", "SourceEnergy"],
     _controls_all,
     _data_all,
     _misfit_all,

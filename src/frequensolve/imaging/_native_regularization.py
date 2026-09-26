@@ -11,7 +11,7 @@ from typing import Any, Mapping, Optional
 
 import numpy as np
 
-from ._artifacts import ControlVectorFile, SmoothingConfig
+from ._artifacts import ControlVectorFile, SmoothingConfig, control_smoothing
 from .controls import ControlSpace, ControlState, ControlVector
 from .jobs import RegularizationJob
 from .regularization import (
@@ -44,7 +44,7 @@ class NativeRegularization(Regularization):
     absolute_tolerance: float = 1e-8
 
     def __post_init__(self) -> None:
-        config = SmoothingConfig.from_value(self.smoothing or SmoothingConfig())
+        config = control_smoothing(self.smoothing or SmoothingConfig())
         object.__setattr__(self, "smoothing", config)
         if self.reference is not None and not isinstance(self.reference, ControlState):
             raise TypeError(

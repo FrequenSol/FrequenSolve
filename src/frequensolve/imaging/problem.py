@@ -72,6 +72,7 @@ from frequensolve.imaging._artifacts import (
     ControlVectorFile,
     ObjectiveReport,
     SmoothingConfig,
+    control_smoothing,
     unqualified_block_name,
 )
 from frequensolve.imaging._backend import (
@@ -320,9 +321,7 @@ class _Shared:
                     "declare them"
                 )
         self.frequencies: List[Any] = _normalize_frequencies(frequencies)
-        self.smoothing: Optional[SmoothingConfig] = SmoothingConfig.from_value(
-            smoothing
-        )
+        self.smoothing: Optional[SmoothingConfig] = control_smoothing(smoothing)
         if min_support is not None:
             threshold = float(min_support)
             if not math.isfinite(threshold) or threshold < 0.0:
@@ -922,7 +921,7 @@ class ImagingProblem:
         elif loss is not None:
             view._overrides["misfit"] = _misfit_with_loss(self.misfit, loss)
         if smoothing is not _UNSET:
-            view._overrides["smoothing"] = SmoothingConfig.from_value(smoothing)
+            view._overrides["smoothing"] = control_smoothing(smoothing)
         if min_support is not _UNSET:
             if min_support is not None:
                 threshold = float(min_support)
@@ -1902,8 +1901,8 @@ class ImagingProblem:
         """Return ``(errors, warnings)`` of a reflectivity-carrying space.
 
         ``fwi_operator.reflectivity`` needs full-dimensional first-order
-        acoustic or classic elastic DPG with unrelaxed assembly and waveform
-        objectives; it rejects ``extension``, coupled physics, Galerkin,
+        acoustic or classic elastic DPG and waveform objectives (relaxed
+        assembly is an accepted approximation); it rejects ``extension``, coupled physics, Galerkin,
         2.5D, axisymmetry, phase objectives, interface (geometry) controls and
         ``signature_df`` source blocks (spectral observation support).
         """
@@ -1956,15 +1955,6 @@ class ImagingProblem:
         if method.strip().upper() != "DPG":
             errors.append(
                 f"reflectivity requires Discretization(method='DPG') (got {method!r})"
-            )
-        solver = getattr(getattr(simulation, "solver", None), "extra", None) or {}
-        relaxed = solver.get("relaxed_assembly")
-        if relaxed is None:
-            relaxed = str(solver.get("mode", "")).strip().lower() == "fast"
-        if relaxed:
-            errors.append(
-                "reflectivity requires unrelaxed assembly "
-                "(SolverConfig(relaxed_assembly=False))"
             )
         return errors, warnings
 

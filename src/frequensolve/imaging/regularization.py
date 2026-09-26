@@ -27,7 +27,11 @@ import numpy as np
 from scipy.sparse import csr_matrix, issparse, vstack
 from scipy.sparse.linalg import LinearOperator
 
-from frequensolve.imaging._artifacts import ControlVectorFile, SmoothingConfig
+from frequensolve.imaging._artifacts import (
+    ControlVectorFile,
+    SmoothingConfig,
+    control_smoothing,
+)
 from frequensolve.imaging.controls import (
     ControlSpace,
     ControlState,
@@ -608,7 +612,7 @@ def smooth(
             "weights do not apply to explicit-vector smoothing (Sauce ignores "
             "frequency weights with control_sensitivities.input)"
         )
-    config = SmoothingConfig.from_value(smoothing)
+    config = control_smoothing(smoothing)
     if config is None:
         raise ValueError("smooth requires a smoothing configuration")
     return _smooth_with_source(vector, config, problem, _smoothing_source_job(problem))

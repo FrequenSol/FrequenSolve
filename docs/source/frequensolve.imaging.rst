@@ -54,6 +54,11 @@ Regularization, Smoothing And Preconditioners
    :show-inheritance:
    :noindex:
 
+.. autoclass:: frequensolve.imaging.SourceEnergy
+   :members:
+   :show-inheritance:
+   :noindex:
+
 .. autoclass:: frequensolve.imaging.NativeRegularization
    :members:
    :show-inheritance:

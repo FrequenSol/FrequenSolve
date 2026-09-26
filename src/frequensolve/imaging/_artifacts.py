@@ -1857,6 +1857,7 @@ class SmoothingConfig:
     def to_control_fs(self) -> Dict[str, Any]:
         """Serialize the ``control_sensitivities.Smoothing`` Riesz-map contract."""
 
+        _require_control_smoothing(self)
         payload = self._common_fs()
         payload["input_role"] = self.input_role
         if self.reference_wavelength is not None:
@@ -1915,3 +1916,30 @@ class SmoothingConfig:
             )
         payload.pop("normalize_coordinate", None)
         return cls(**payload)
+
+
+def _require_control_smoothing(config: SmoothingConfig) -> None:
+    if config.illumination_normalization != "none":
+        raise ValueError(
+            "Control smoothing does not apply illumination normalization; "
+            "use SourceEnergy for control-energy preconditioning"
+        )
+
+
+def control_smoothing(value: Any) -> Optional[SmoothingConfig]:
+    """Coerce smoothing for a control context, where illumination modes do not apply.
+
+    Illumination normalization is a Cartesian-image option; requesting it for
+    control smoothing is rejected when the configuration is supplied.
+    """
+
+    config = SmoothingConfig.from_value(value)
+    if config is not None:
+        _require_control_smoothing(config)
+    return config
+
+
+WORKSPACE_DEPRECATION = (
+    "workspace_mb is deprecated and ignored: Sauce allocates the indivisible "
+    "source-batch workspace at its required size"
+)
