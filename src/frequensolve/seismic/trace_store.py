@@ -2127,10 +2127,10 @@ class TraceStore:
         except (KeyError, IndexError, ValueError):
             return {}
         names = _attr_strings(
-            dset.attrs.get("component", dset.attrs.get("value_frame_components", []))
+            dset.attrs.get("component", dset.attrs.get("value_convention_components", []))
         )
         units = _attr_strings(
-            dset.attrs.get("units", dset.attrs.get("value_frame_coordinate_units", []))
+            dset.attrs.get("units", dset.attrs.get("value_convention_primal_units", []))
         )
         if len(names) != len(units):
             return {}
