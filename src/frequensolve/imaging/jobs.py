@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from typing import (
@@ -43,7 +44,9 @@ from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging._artifacts import (
     ControlVectorFile,
     ImageSet,
+    WORKSPACE_DEPRECATION,
     SmoothingConfig,
+    control_smoothing,
     qualified_block_name,
     unqualified_block_name,
 )
@@ -564,6 +567,8 @@ def _validate_wri(value: Mapping[str, Any]) -> Dict[str, Any]:
     allowed = {
         "penalty",
         "data_scale",
+        "objective_normalization",
+        "normalization_only",
         "receiver_group",
         "receiver_groups",
         "curvature",
@@ -577,6 +582,26 @@ def _validate_wri(value: Mapping[str, Any]) -> Dict[str, Any]:
     if not np.isfinite(penalty) or penalty <= 0.0:
         raise ValueError("wri penalty must be finite and positive")
     payload: Dict[str, Any] = {"penalty": penalty}
+    normalization = value.get("objective_normalization", "observed_energy")
+    if isinstance(normalization, str):
+        if normalization not in {"observed_energy", "none"}:
+            raise ValueError(
+                "wri objective_normalization must be observed_energy, none or a positive divisor"
+            )
+    else:
+        normalization = float(normalization)
+        if not np.isfinite(normalization) or normalization <= 0:
+            raise ValueError(
+                "wri objective_normalization divisor must be finite and positive"
+            )
+    if "objective_normalization" in value:
+        payload["objective_normalization"] = normalization
+    if "normalization_only" in value:
+        if not isinstance(value["normalization_only"], bool):
+            raise ValueError("wri normalization_only must be boolean")
+        payload["normalization_only"] = value["normalization_only"]
+        if value["normalization_only"] and "curvature" in value:
+            raise ValueError("WRI normalization_only does not compute curvature")
     if "data_scale" in value:
         scale = value["data_scale"]
         if isinstance(scale, str):
@@ -702,11 +727,12 @@ def _validate_extension_solver(
         if not scales or any(not np.isfinite(s) or s <= 0.0 for s in scales):
             raise ValueError("extension solver field_scales must be positive")
         payload["field_scales"] = scales
+    if "workspace_mb" in value:
+        warnings.warn(WORKSPACE_DEPRECATION, DeprecationWarning, stacklevel=3)
     for key in (
         "relative_tolerance",
         "absolute_tolerance",
         "cache_mb",
-        "workspace_mb",
         "gradient_relative_tolerance",
         "gradient_absolute_tolerance",
     ):
@@ -874,10 +900,7 @@ def _validate_reflectivity(value: Mapping[str, Any]) -> Dict[str, Any]:
         "fields": payload_fields,
     }
     if "workspace_mb" in value:
-        workspace = float(value["workspace_mb"])
-        if not np.isfinite(workspace) or workspace <= 0.0:
-            raise ValueError("reflectivity workspace_mb must be positive")
-        payload["workspace_mb"] = workspace
+        warnings.warn(WORKSPACE_DEPRECATION, DeprecationWarning, stacklevel=3)
     return payload
 
 
@@ -1057,7 +1080,7 @@ class FWIOperatorJob(_ImagingJobBase):
         self.kernel_derivative = _kernel_derivative(
             kernel_derivative, residuals=_KERNEL_RESIDUALS_FWI
         )
-        self.smoothing = SmoothingConfig.from_value(smoothing)
+        self.smoothing = control_smoothing(smoothing)
         self.weights = _frequency_weights(
             weights, self.n_tasks, label="control-gradient"
         )
@@ -1146,8 +1169,10 @@ class FWIOperatorJob(_ImagingJobBase):
         elif action == "wri":
             if self.wri is None:
                 raise ValueError("action wri requires wri options with a penalty")
-            if self.covector is None:
+            if self.covector is None and not self.wri.get("normalization_only", False):
                 raise ValueError("wri requires a covector (model_covector) output")
+            if self.wri.get("normalization_only", False) and self.smoothing is not None:
+                raise ValueError("WRI normalization_only has no covector to smooth")
             if "curvature" in self.wri:
                 if self.direction is None:
                     raise ValueError(
@@ -1307,6 +1332,103 @@ class FWIOperatorJob(_ImagingJobBase):
                 raise ValueError("raw aggregate covectors do not have task parts")
             return _raw_path(self.covector)
         return _task_path(self.covector, task)
+
+    def wri_reduction_weights(self, weights: Any = None) -> np.ndarray:
+        """Combine task-normalized WRI products using one full-survey energy."""
+        import h5py
+
+        values = self.weights if weights is None else weights
+        weights = (
+            np.ones(self.n_tasks) if values is None else np.asarray(values, dtype=float)
+        )
+        if (
+            weights.shape != (self.n_tasks,)
+            or not np.isfinite(weights).all()
+            or np.any(weights < 0)
+        ):
+            raise ValueError(
+                "WRI frequency weights must be finite and nonnegative, one per task"
+            )
+        if (
+            self.action != "wri"
+            or self.wri.get("objective_normalization", "observed_energy")
+            != "observed_energy"
+        ):
+            return weights
+        denominators = []
+        for task in range(1, self.n_tasks + 1):
+            with h5py.File(self.report_file(task), "r") as h5:
+                policy = h5["objective_normalization"].attrs["policy"][0]
+                if isinstance(policy, bytes):
+                    policy = policy.decode()
+                if policy != "observed_energy":
+                    raise ValueError(
+                        "WRI task has a different objective normalization policy"
+                    )
+                denominators.append(float(h5["objective_normalization"][()]))
+        denominators = np.asarray(denominators)
+        total = np.dot(weights, denominators)
+        if (
+            not np.isfinite(denominators).all()
+            or np.any(denominators <= 0)
+            or not np.isfinite(total)
+            or total <= 0
+        ):
+            raise ValueError(
+                "WRI observed-energy denominator must be finite and positive"
+            )
+        return weights * denominators / total
+
+    def wri_normalization_divisor(self, weights: Any = None) -> float:
+        """Read the fixed full-survey divisor from an observed-only calibration job.
+
+        Reuse the returned number as ``wri.objective_normalization`` on all
+        inversion jobs with this observation selection, penalty and data scales.
+        Calibration uses ``wri.normalization_only=True`` and performs no solves.
+        """
+        import h5py
+
+        if self.action != "wri":
+            raise ValueError("Normalization calibration requires a WRI job")
+        values = self.weights if weights is None else weights
+        weights = (
+            np.ones(self.n_tasks) if values is None else np.asarray(values, dtype=float)
+        )
+        if (
+            weights.shape != (self.n_tasks,)
+            or not np.isfinite(weights).all()
+            or np.any(weights < 0)
+        ):
+            raise ValueError(
+                "WRI frequency weights must be finite and nonnegative, one per task"
+            )
+        energies = []
+        for task in range(1, self.n_tasks + 1):
+            with h5py.File(self.report_file(task), "r") as h5:
+                energies.append(
+                    float(h5["penalty"][()]) * float(h5["observed_energy"][()])
+                )
+        result = float(np.dot(weights, energies))
+        if (
+            not np.isfinite(energies).all()
+            or np.any(np.asarray(energies) < 0)
+            or not np.isfinite(result)
+            or result <= 0
+        ):
+            raise ValueError("WRI observed energy must be finite and positive")
+        return result
+
+    def objective_value(self) -> float:
+        """Read the globally normalized WRI objective over all frequency tasks."""
+        import h5py
+
+        if self.action != "wri":
+            raise ValueError("Use objective reports for non-WRI operator jobs")
+        values = []
+        for task in range(1, self.n_tasks + 1):
+            with h5py.File(self.report_file(task), "r") as h5:
+                values.append(float(h5["value"][()]))
+        return float(np.dot(self.wri_reduction_weights(), values))
 
     def objective_vector_file(self, task: Optional[int] = None) -> Path:
         """Return the objective-vector manifest stem or one task's manifest."""
@@ -1485,7 +1607,8 @@ class FWIOperatorJob(_ImagingJobBase):
                 controls["support_measure"] = True
             op["controls"] = controls
         if self.action == "wri":
-            op["model_covector"] = _job_path(self.covector, ctx, False)
+            if self.covector is not None:
+                op["model_covector"] = _job_path(self.covector, ctx, False)
             if self.direction is not None:
                 op["model_direction"] = _job_path(self.direction, ctx, False)
             op["wri"] = copy.deepcopy(self.wri)
@@ -1775,7 +1898,7 @@ class ControlGradientJob(_ImagingJobBase):
         self.weights = _frequency_weights(
             weights, self.n_tasks, label="control-gradient"
         )
-        self.smoothing = SmoothingConfig.from_value(smoothing)
+        self.smoothing = control_smoothing(smoothing)
         self.raw_gradient = _output_path(raw_gradient, result_dir)
         self.focus = None if focus is None else _validate_focus(focus)
         self.kernel_derivative = _kernel_derivative(
@@ -2685,7 +2808,7 @@ class SmoothJob(_ImagingJobBase):
                 else SmoothingConfig.from_value(smoothing)
             )
         else:
-            config = SmoothingConfig.from_value(smoothing)
+            config = control_smoothing(smoothing)
             assert config is not None
             self.smoothing = config
         self.weights = _frequency_weights(weights, self.n_tasks, label="smoothing")

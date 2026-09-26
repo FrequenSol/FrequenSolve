@@ -312,6 +312,29 @@ def test_fwi_wri_payloads_match_pinned_examples(tmp_path):
     assert payload["control_sensitivities"] == example["control_sensitivities"]
     _round_trip(wri)
 
+    calibration = FWIOperatorJob(
+        "observed_energy",
+        sim,
+        [4.0],
+        action="wri",
+        objective="scale.h5",
+        wri={"penalty": 10.0, "normalization_only": True},
+    )
+    _assert_valid(calibration.to_fs())
+    _round_trip(calibration)
+    for divisor in ("observed_energy", "none", 1e-15):
+        calibrated = FWIOperatorJob(
+            "normalized_wri",
+            sim,
+            [4.0],
+            action="wri",
+            covector="g.h5",
+            objective="objective.h5",
+            wri={"penalty": 10.0, "objective_normalization": divisor},
+        )
+        _assert_valid(calibrated.to_fs())
+        _round_trip(calibrated)
+
     schur = FWIOperatorJob(
         "wri_schur_normal",
         sim,
@@ -2125,3 +2148,27 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_p
         assert ControlVectorFile.read(path, native=True).control_spaces == {
             "vp": "mesh-basis"
         }
+
+
+@pytest.mark.parametrize("curvature", ["fixed_wavefield", "joint_schur"])
+def test_coupled_wri_contract_export(tmp_path, curvature):
+    sim = SeismicSimulation(
+        name="coupled_wri", physics="coupled", dimension=2, project_path=tmp_path
+    )
+    sim.save()
+    job = FWIOperatorJob(
+        "coupled_wri",
+        sim,
+        [3.0 - 0.2j],
+        action="wri",
+        covector="normal.h5",
+        direction="direction.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0, "curvature": curvature},
+        gram_derivative="frozen",
+        control_active=["fluid_vp", "solid_vp"],
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["wri"]["curvature"] == curvature
+    assert payload["f_list"] == [[3.0, -0.2]]
+    assert _round_trip(job).wri["curvature"] == curvature

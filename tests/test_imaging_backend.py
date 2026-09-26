@@ -62,6 +62,70 @@ def _simulation(tmp_path):
     return sim
 
 
+def test_wri_observed_energy_reduction_and_fixed_calibration(tmp_path):
+    import h5py
+
+    job = FWIOperatorJob(
+        "wri",
+        _simulation(tmp_path),
+        FREQUENCIES,
+        action="wri",
+        covector="gradient.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0},
+        weights=[1.0, 2.0],
+    )
+    for task, denominator, value, gradient in [(1, 2.0, 3.0, 4.0), (2, 8.0, 7.0, 10.0)]:
+        path = job.report_file(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, "w") as h:
+            h["value"] = value
+            h["penalty"] = 10.0
+            h["observed_energy"] = denominator / 10
+            h["objective_normalization"] = denominator
+            h["objective_normalization"].attrs["policy"] = ["observed_energy"]
+        ControlVectorFile(
+            {"model.vp": [gradient]},
+            state_fingerprint="state",
+            control_registry_fingerprint="registry",
+        ).write(job.covector_file(task))
+    assert job.wri_normalization_divisor() == pytest.approx(18.0)
+    np.testing.assert_allclose(job.wri_reduction_weights(), [2 / 18, 16 / 18])
+    assert job.objective_value() == pytest.approx((2 * 3 + 16 * 7) / 18)
+    np.testing.assert_allclose(
+        reduce_covectors(job).blocks["model.vp"], [(2 * 4 + 16 * 10) / 18]
+    )
+    job.wri["objective_normalization"] = 18.0
+    np.testing.assert_allclose(job.wri_reduction_weights(), [1, 2])
+
+
+def test_wri_calibration_payload_requires_no_covector(tmp_path):
+    job = FWIOperatorJob(
+        "calibration",
+        _simulation(tmp_path),
+        FREQUENCIES,
+        action="wri",
+        objective="calibration.h5",
+        wri={"penalty": 10.0, "normalization_only": True},
+    )
+    payload = job.to_fs()["fwi_operator"]
+    assert payload["wri"]["normalization_only"]
+    assert "model_covector" not in payload
+
+
+@pytest.mark.parametrize("normalization", [0.0, -1.0, float("nan"), "current_residual"])
+def test_wri_rejects_invalid_normalization(tmp_path, normalization):
+    with pytest.raises(ValueError, match="normalization"):
+        FWIOperatorJob(
+            "wri",
+            _simulation(tmp_path),
+            FREQUENCIES,
+            action="wri",
+            covector="g.h5",
+            wri={"penalty": 10.0, "objective_normalization": normalization},
+        )
+
+
 @pytest.fixture
 def setup(tmp_path):
     sim = _simulation(tmp_path)

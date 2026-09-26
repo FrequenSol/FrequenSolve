@@ -187,6 +187,8 @@ def reduce_covectors(
     """
 
     weight = frequency_weights(job, weights)
+    if job.action == "wri":
+        weight = job.wri_reduction_weights(weight)
     if factors is not None and len(factors) != job.n_tasks:
         raise ValueError(
             f"expected {job.n_tasks} per-task block factor tables, "
