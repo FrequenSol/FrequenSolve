@@ -8,7 +8,8 @@ Layers, lowest first: the contract layer (:mod:`frequensolve.imaging.data`,
 (:mod:`frequensolve.imaging.operators`), regularization and preconditioners
 (:mod:`frequensolve.imaging.regularization`), and the workflows
 (:mod:`frequensolve.imaging.workflows`, :mod:`frequensolve.imaging.results`),
-and the model extension (:mod:`frequensolve.imaging.extension`).
+the model extension (:mod:`frequensolve.imaging.extension`) and coherent
+focusing objectives (:mod:`frequensolve.imaging.focusing`).
 Import it as ``from frequensolve import imaging as im``.
 """
 
@@ -25,6 +26,8 @@ from frequensolve.imaging.data import __all__ as _data_all
 from frequensolve.imaging.energy import SourceEnergy as SourceEnergy
 from frequensolve.imaging.extension import *  # noqa: F403
 from frequensolve.imaging.extension import __all__ as _extension_all
+from frequensolve.imaging.focusing import *  # noqa: F403
+from frequensolve.imaging.focusing import __all__ as _focusing_all
 from frequensolve.imaging.jobs import *  # noqa: F403
 from frequensolve.imaging.jobs import __all__ as _jobs_all
 from frequensolve.imaging.misfit import *  # noqa: F403
@@ -38,11 +41,12 @@ from frequensolve.imaging.regularization import *  # noqa: F403
 from frequensolve.imaging.regularization import __all__ as _regularization_all
 from frequensolve.imaging.results import *  # noqa: F403
 from frequensolve.imaging.results import __all__ as _results_all
+from frequensolve.imaging.windows import write_receiver_window as write_receiver_window
 from frequensolve.imaging.workflows import *  # noqa: F403
 from frequensolve.imaging.workflows import __all__ as _workflows_all
 
 __all__ = unique_exports(
-    ["PropertyMesh", "NativeRegularization", "SourceEnergy"],
+    ["PropertyMesh", "NativeRegularization", "SourceEnergy", "write_receiver_window"],
     _controls_all,
     _data_all,
     _misfit_all,
@@ -54,4 +58,5 @@ __all__ = unique_exports(
     _workflows_all,
     _results_all,
     _extension_all,
+    _focusing_all,
 )

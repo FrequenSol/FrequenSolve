@@ -26,7 +26,6 @@ from frequensolve.imaging.workflows import (
     FWIIteration,
     NewtonCG,
     Stage,
-    TimeReversalFocus,
     block_curvatures,
     curvature_scaling,
     rms_step_limit,
@@ -989,7 +988,7 @@ def test_smooth_runs_the_smooth_job_as_a_fake_postprocess(problem, fake):
 
 
 # ---------------------------------------------------------------------------
-# sensitivity kernels and time-reversal focus
+# sensitivity kernels
 # ---------------------------------------------------------------------------
 
 
@@ -1040,53 +1039,8 @@ def test_sensitivity_kernel_runs_on_the_fake_and_returns_an_image_set(problem, f
     )
 
 
-def test_time_reversal_focus_objective_runs_on_the_fake(problem, fake):
-    softening = 12.5
-    weights = [1.0, 0.5]
-    focus = TimeReversalFocus(problem, softening, weights=weights)
-    sizes = {"model.vp": 5, "model.rho": 3}
-    J, d, space = fake.surrogate(problem.simulation, list(sizes), sizes, FREQUENCIES)
-
-    def expected(m):
-        value, gradient = 0.0, np.zeros(8)
-        for weight, frequency in zip(weights, FREQUENCIES):
-            rows = np.concatenate(
-                [layout.indices for layout in space.term_layouts(frequency=frequency)]
-            )
-            residual = J[rows] @ m - d[rows]
-            value += weight * softening * 0.5 * float(np.vdot(residual, residual).real)
-            gradient += weight * softening * np.real(J[rows].conj().T @ residual)
-        return value, gradient
-
-    before = len(fake.submissions)
-    value, gradient = focus.objective()
-
-    assert isinstance(value, float) and isinstance(gradient, ControlVector)
-    assert gradient.space is problem.space
-    authored_value, authored_gradient = expected(np.zeros(8))
-    assert value == pytest.approx(authored_value)
-    np.testing.assert_allclose(gradient.values, authored_gradient)
-    assert value > 0.0 and len(fake.submissions) == before + 1
-    assert fake.submissions[-1]["workflow"] == "focus"
-    job = focus.job()
-    assert job.objective_value == pytest.approx(value)
-    assert job.gradient_file(raw=True).is_file() and job.objective_file(2).is_file()
-    # results are cached per state; a moved point runs a job with ``current``
-    assert focus.objective() == (value, gradient)
-    assert len(fake.submissions) == before + 1
-    v = problem.space.ones()
-    moved_value, moved_gradient = expected(np.ones(8))
-    assert focus.value(v) == pytest.approx(moved_value)
-    np.testing.assert_allclose(focus.gradient(v).values, moved_gradient)
-    assert len(fake.submissions) == before + 2
-    assert focus.job(v).current is not None
-    # unit weights halve nothing: the 6 Hz task enters fully
-    plain = TimeReversalFocus(problem, softening).objective()[0]
-    assert plain > value
-
-
 # ---------------------------------------------------------------------------
-# sensitivity kernels and time-reversal focus (payload level)
+# sensitivity kernels (payload level)
 # ---------------------------------------------------------------------------
 
 
@@ -1125,48 +1079,6 @@ def test_sensitivity_kernel_job_builds_a_schema_valid_zero_data_kernel(problem, 
     assert with_data.simulation is not problem.simulation
 
 
-def test_time_reversal_focus_builds_schema_valid_focus_jobs(problem, tmp_path, fake):
-    focus = TimeReversalFocus(problem, 12.5, weights=[1.0, 0.5])
-    assert focus.active == ["vp", "rho"]
-
-    job = focus.job()
-    payload = _assert_valid(job.to_fs())
-    assert payload["workflow"] == "focus"
-    assert payload["focus"]["softening"] == 12.5 and payload["focus"]["kind"] == "trfwi"
-    assert payload["control_sensitivities"]["active"] == ["vp", "rho"]
-    assert payload["control_sensitivities"]["weights"] == [1.0, 0.5]
-    assert "current" not in payload["control_sensitivities"]
-    assert payload["Imaging"]["misfit"]["receiver_groups"][0]["name"] == "surface"
-    assert focus.job() is job
-
-    moved = focus.job(problem.space.ones())
-    payload = _assert_valid(moved.to_fs())
-    assert payload["control_sensitivities"]["current"].endswith("current.h5")
-    assert moved.current.is_file()
-    plan = focus.dry_run(problem.space.ones())
-    assert plan["workflow"] == "focus" and fake.submissions == []
-
-    weft = TimeReversalFocus(problem.restrict(active=["vp"]), 2.0, kind="weft")
-    assert weft.job().active == ["vp"]
-    assert _assert_valid(weft.job().to_fs())["focus"]["kind"] == "weft"
-    with pytest.raises(ValueError, match="softening"):
-        TimeReversalFocus(problem, -1.0)
-
-    sim = layered_simulation(tmp_path / "sources")
-    sources = ImagingProblem(
-        sim,
-        controls=ControlSpace(
-            vp=DepthProfile("vp", "sediment", count=2), src=SourceParameters()
-        ),
-        observed={"surface": "observed.h5"},
-        frequencies=FREQUENCIES,
-        site=fake,
-        name="src",
-    )
-    with pytest.raises(ValueError, match="model"):
-        TimeReversalFocus(sources.restrict(active=["src"]), 1.0).job()
-
-
 def _source_problem(tmp_path, fake):
     """Problem over ``vp`` plus per-source signatures (the full bound space)."""
 
@@ -1182,7 +1094,7 @@ def _source_problem(tmp_path, fake):
     )
 
 
-def test_kernel_and_focus_run_on_a_problem_with_source_blocks(tmp_path, fake):
+def test_kernel_runs_on_a_problem_with_source_blocks(tmp_path, fake):
     problem = _source_problem(tmp_path, fake)
     assert problem.space.blocks == (
         "model.vp",
@@ -1204,29 +1116,14 @@ def test_kernel_and_focus_run_on_a_problem_with_source_blocks(tmp_path, fake):
     moved = sensitivity_kernel(problem, grid, v=update)
     assert list(moved.raw.data_vars) == ["vp"]
 
-    # focus differentiates the material blocks only
-    focus = TimeReversalFocus(problem, 5.0)
-    assert focus.active == ["vp"]
-    plan = focus.dry_run()
-    assert plan["workflow"] == "focus"
-    assert _assert_valid(focus.job(update).to_fs())["control_sensitivities"][
-        "active"
-    ] == ["vp"]
-    value, gradient = focus.objective(update)
-    assert np.isfinite(value) and gradient.space is problem.space
-    np.testing.assert_array_equal(gradient["src"]["source.1.signature"], 0.0)
-    assert np.any(gradient["vp"] != 0.0)
     # a changed signature is authored into the kernel's simulation (q scales
-    # source 1's column of the made-explicit identity encoding); focusing runs
-    # on the authored simulation and still refuses a moved source block
+    # source 1's column of the made-explicit identity encoding)
     signature = problem.vector().values.copy()
     signature[5] = 0.5
     job = sensitivity_kernel_job(problem, grid, v=signature)
     np.testing.assert_allclose(
         job.simulation.acquisition.source_encoding.weights, np.diag([0.5, 1.0])
     )
-    with pytest.raises(NotImplementedError, match=r"'source\.1\.signature'"):
-        focus.job(signature)
 
 
 def test_fwi_result_simulation_installs_a_state_with_source_blocks(tmp_path, fake):

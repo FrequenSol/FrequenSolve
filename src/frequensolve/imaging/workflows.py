@@ -1,4 +1,4 @@
-"""Imaging workflows: staged FWI, LSRTM, RTM, sensitivity kernels, focusing.
+"""Imaging workflows: staged FWI, LSRTM, RTM, sensitivity kernels.
 
 The workflow layer owns the outer loop of an inversion while
 :class:`~frequensolve.imaging.problem.ImagingProblem` owns the physics:
@@ -18,8 +18,8 @@ The workflow layer owns the outer loop of an inversion while
   records every evaluation and iteration in an
   :class:`~frequensolve.inversion.history.OptimizationHistory`, checkpoints
   after every accepted iteration and resumes from a matching checkpoint.
-- :class:`LSRTM`, :func:`rtm`, :func:`sensitivity_kernel` and
-  :class:`TimeReversalFocus` are the single-linearization workflows.
+- :class:`LSRTM`, :func:`rtm` and :func:`sensitivity_kernel` are the
+  single-linearization workflows.
 
 Sign convention: Sauce's covector is the gradient of the misfit, i.e. the
 adjoint applied to ``simulated - observed``.  :func:`rtm` returns that
@@ -56,10 +56,8 @@ from scipy.sparse.linalg import lsqr as scipy_lsqr
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging._artifacts import (
-    ControlVectorFile,
     ImageSet,
     control_smoothing,
-    unqualified_block_name,
 )
 from frequensolve.imaging._backend import fingerprint
 from frequensolve.imaging.controls import (
@@ -69,7 +67,7 @@ from frequensolve.imaging.controls import (
     _BlockSpec,
 )
 from frequensolve.imaging.data import DataVector, TraceStoreRef
-from frequensolve.imaging.jobs import ControlGradientJob, ImageKernelJob, ImageSpec
+from frequensolve.imaging.jobs import ImageKernelJob, ImageSpec
 from frequensolve.imaging.misfit import Loss, Misfit
 from frequensolve.imaging.problem import ImagingProblem, Linearization, _MisfitPayload
 from frequensolve.imaging.results import FWIResult, StageResult
@@ -101,7 +99,6 @@ __all__ = [
     "LSRTM",
     "NewtonCG",
     "Stage",
-    "TimeReversalFocus",
     "block_curvatures",
     "curvature_scaling",
     "rms_step_limit",
@@ -283,6 +280,9 @@ class Stage:
         name: Stage label (default ``stage_<index>``).
         min_support: Relative support threshold for the stage.
         metadata: Free-form scalar metadata recorded with the stage.
+        mesh_averaging_wavelengths: Half-width of the material-aware slowness
+            averaging window for explicit mesh changes, in material-average
+            wavelengths at the largest requested control sizing frequency.
         controls: Change the control layout from this stage on: a complete
             :class:`~frequensolve.imaging.controls.ControlSpace` or a mapping
             ``{block key: new block spec}`` replacing those blocks (e.g.
@@ -306,8 +306,14 @@ class Stage:
     min_support: Optional[float] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     controls: Any = None
+    mesh_averaging_wavelengths: float = 0.5
 
     def __post_init__(self) -> None:
+        if (
+            not np.isfinite(self.mesh_averaging_wavelengths)
+            or self.mesh_averaging_wavelengths <= 0
+        ):
+            raise ValueError("mesh_averaging_wavelengths must be finite and positive")
         object.__setattr__(self, "frequencies", _stage_frequencies(self.frequencies))
         iterations = int(self.iterations)
         if iterations < 1:
@@ -1176,6 +1182,7 @@ class FWI:
         self.results: List[StageResult] = []
         self._views: Dict[str, ImagingProblem] = {}
         self._problems: Dict[int, ImagingProblem] = {}
+        self._stage_inputs: Dict[str, str] = {}
 
     # -- stage problems
 
@@ -1204,11 +1211,31 @@ class FWI:
                 f"needs an ImagingProblem; {type(previous).__name__} has no "
                 "with_controls"
             )
-        problem = (
-            previous
-            if stage.controls is None
-            else previous.with_controls(stage.controls)
-        )
+        if stage.controls is None:
+            problem = previous
+        elif isinstance(previous, ImagingProblem):
+            previous._ensure_registry()
+            entry = self._stage_inputs.get(str(index))
+            if entry is not None:
+                previous.state = ControlState.load(
+                    entry, previous.full_space.without_support()
+                )
+            elif self.checkpoint_path is not None:
+                accepted = previous._require_state()
+                digest = hashlib.sha256(accepted.values.tobytes()).hexdigest()[:20]
+                path = (
+                    self.checkpoint_path.parent
+                    / f"{self.checkpoint_path.stem}.stage_{index}.{digest}.h5"
+                )
+                path.parent.mkdir(parents=True, exist_ok=True)
+                accepted.save(path)
+                self._stage_inputs[str(index)] = str(path)
+            problem = previous.with_controls(
+                stage.controls,
+                mesh_averaging_wavelengths=stage.mesh_averaging_wavelengths,
+            )
+        else:
+            problem = previous.with_controls(stage.controls)
         self._problems[index] = problem
         return problem
 
@@ -1327,6 +1354,7 @@ class FWI:
         ).hexdigest()
         return {
             "schema": CHECKPOINT_SCHEMA,
+            "stage_inputs": json.dumps(self._stage_inputs, sort_keys=True),
             "native_regularization": json.dumps(
                 getattr(self, "_native_checkpoint", None)
             ),
@@ -1416,6 +1444,7 @@ class FWI:
             )
         # Rebuild the control layout the checkpointed stage ran on (stage
         # ``controls`` of every stage up to it) before comparing layouts.
+        self._stage_inputs = json.loads(meta.get("stage_inputs", "{}"))
         problem = self._problem_for(index)
         control_ids, control_sizes = self._layout(problem)
         if meta.get("control_ids") != control_ids:
@@ -1811,6 +1840,7 @@ class FWI:
         self.results = []
         self._views = {}
         self._problems = {}
+        self._stage_inputs = {}
         plan = self._resume_plan() if resume else None
         if plan is not None:
             # ``_resume_plan`` built the checkpointed stage's problem.
@@ -2393,175 +2423,3 @@ def sensitivity_kernel(
     )
     problem.backend.run(job)
     return job.load_images()
-
-
-class TimeReversalFocus:
-    """Time-reversal focusing objective over the problem's material blocks.
-
-    Non-material blocks of the problem view (sources, reflectivity) are held
-    at the current state; their gradient entries are zero.
-
-    Wraps ``ControlGradientJob(kind="focus")``: Sauce back-propagates the
-    observed data, measures the focusing of the time-reversed wavefield with
-    softening length ``softening`` (km) and returns the focusing objective and
-    its gradient with respect to the active ``model.*`` blocks.
-
-    Args:
-        problem: Problem providing simulation, observed data, site and the
-            active material blocks.
-        softening: Focusing softening length in km (or a length quantity).
-        kind: ``"trfwi"`` or ``"weft"``.
-        weights: Optional per-frequency weights.
-        smoothing: Gradient smoothing (default: the problem's).
-        spatial_window: Optional ``control_sensitivities.spatial_window``.
-    """
-
-    def __init__(
-        self,
-        problem: ImagingProblem,
-        softening: Any,
-        *,
-        kind: str = "trfwi",
-        weights: Optional[Sequence[float]] = None,
-        smoothing: Any = None,
-        spatial_window: Optional[Mapping[str, Any]] = None,
-    ) -> None:
-        self.problem = problem
-        magnitude = getattr(softening, "magnitude", None)
-        if magnitude is not None and hasattr(softening, "to"):
-            softening = softening.to("km").magnitude
-        self.softening = float(softening)
-        if not math.isfinite(self.softening) or self.softening <= 0.0:
-            raise ValueError("softening must be a positive length (km)")
-        self.kind = str(kind).strip().lower()
-        self.weights = None if weights is None else [float(w) for w in weights]
-        self.smoothing = (
-            problem.smoothing if smoothing is None else control_smoothing(smoothing)
-        )
-        self.spatial_window = None if spatial_window is None else dict(spatial_window)
-        self._results: Dict[str, Tuple[float, ControlVector]] = {}
-        self._jobs: Dict[str, ControlGradientJob] = {}
-
-    @property
-    def active(self) -> List[str]:
-        """Return the unqualified material block ids of the problem view.
-
-        Only ``model.*`` blocks enter Sauce's focus workflow; other blocks of
-        the view (sources, reflectivity) are held at the state and receive a
-        zero gradient.
-        """
-
-        blocks = list(self.problem.space.blocks)
-        model = [name for name in blocks if name.startswith("model.")]
-        if not model:
-            raise ValueError(
-                "time-reversal focusing needs at least one model.* block "
-                f"(active blocks: {blocks})"
-            )
-        return [unqualified_block_name(name) for name in model]
-
-    def _key(self, state: ControlState) -> str:
-        return _digest(state.values)[:16]
-
-    def job(self, v: Any = None) -> ControlGradientJob:
-        """Build the focus job at ``v`` (default: the current state)."""
-
-        problem = self.problem
-        state = problem.state_from(v) if v is not None else problem.state
-        if state is None:
-            raise ValueError("the control state is unknown; linearize once first")
-        key = self._key(state)
-        job = self._jobs.get(key)
-        if job is not None:
-            return job
-        active = self.active
-        full = problem.full_space
-        for block, sl in zip(full.resolved_blocks, full.full_slices.values()):
-            if block.name.startswith("model."):
-                continue
-            baseline = problem._authored_block(block.name, sl)
-            if baseline is None or not np.array_equal(state.values[sl], baseline):
-                raise NotImplementedError(
-                    f"time-reversal focusing runs on the authored simulation, but "
-                    f"block {block.name!r} differs from its authored baseline"
-                )
-        current: Optional[Path] = None
-        if v is not None or not problem.is_authored(state):
-            staging = problem.backend.staging_dir("focus", key)
-            blocks = {
-                name: values
-                for name, values in state.blocks().items()
-                if name.startswith("model.")
-            }
-            current = ControlVectorFile(blocks, native=True).write(
-                staging / "current.h5"
-            )
-        job = ControlGradientJob(
-            problem.backend.job_name("focus"),
-            problem.simulation,
-            list(problem.frequencies),
-            kind="focus",
-            observed=_observed_paths(problem),
-            gradient="focus_gradient.h5",
-            objective_file="focus_objective.h5",
-            focus={"softening": self.softening, "kind": self.kind},
-            active=active,
-            current=current,
-            misfit=problem._misfit_payload,
-            weights=self.weights,
-            smoothing=None,
-            spatial_window=self.spatial_window,
-        )
-        self._jobs[key] = job
-        return job
-
-    def dry_run(self, v: Any = None) -> Dict[str, Any]:
-        """Describe the focus job at ``v`` without submitting it."""
-
-        return self.problem.backend.dry_run(self.job(v))
-
-    def objective(self, v: Any = None) -> Tuple[float, ControlVector]:
-        """Return ``(value, gradient)`` of the focusing objective at ``v``."""
-
-        problem = self.problem
-        state = problem.state_from(v) if v is not None else problem.state
-        assert state is not None
-        key = self._key(state)
-        cached = self._results.get(key)
-        if cached is not None:
-            return cached
-        job = self.job(v)
-        problem.backend.run(job)
-        value = float(job.objective_value)
-        gradient = self._read_gradient(job, raw=False)
-        self._results[key] = (value, gradient)
-        return value, gradient
-
-    def _read_gradient(self, job: ControlGradientJob, *, raw: bool) -> ControlVector:
-        """Pack one raw or smoothed focus artifact on the problem space."""
-
-        file = ControlVectorFile.read(job.gradient_file(raw=raw))
-        problem = self.problem
-        space = problem.space
-        # Non-material blocks do not enter the focus workflow: zero gradient.
-        blocks = {
-            b.name: (
-                file[b.name]
-                if b.name.startswith("model.")
-                else np.zeros(
-                    b.coefficient_count, dtype=complex if b.complex else float
-                )
-            )
-            for b in space.resolved_blocks
-        }
-        return space.pack(blocks)
-
-    def value(self, v: Any = None) -> float:
-        """Return the focusing objective at ``v``."""
-
-        return self.objective(v)[0]
-
-    def gradient(self, v: Any = None) -> ControlVector:
-        """Return the raw focusing derivative on the problem space at ``v``."""
-
-        return self.objective(v)[1]
