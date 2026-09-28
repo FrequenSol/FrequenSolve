@@ -322,7 +322,10 @@ def _collect_future_results(
             )
         else:
             if isinstance(result, Mapping):
-                results.append(dict(result))
+                if "group_tasks" in result:
+                    results.extend(dict(row) for row in result["group_tasks"])
+                else:
+                    results.append(dict(result))
             else:
                 results.append({"status": "success", "result": result})
     return results, errors
@@ -406,6 +409,7 @@ def run_task(
     n_threads: int = 1,
     stdout_dir: Optional[str] = None,
     fresh: bool = False,
+    frequency_groups: int = 1,
 ) -> Dict[str, Any]:
     """Run a single task and return its results.
 
@@ -415,9 +419,10 @@ def run_task(
         executable: Path to the solver executable
         env: Environment variables
         n_ranks: Number of MPI ranks
-        n_threads: Number of threads per rank
+        n_threads: Total thread budget across MPI ranks
         stdout_dir: Directory to store task logs
         fresh: Pass --fresh to the solver to disable solver-side output reuse
+        frequency_groups: Number of simultaneous frequency task groups
 
     Returns:
         Dict containing task results
@@ -425,6 +430,10 @@ def run_task(
     _wait_for_path(job_file)
     if n_ranks < 1:
         raise ValueError("n_ranks must be at least 1")
+    if frequency_groups < 1 or n_ranks % frequency_groups:
+        raise ValueError("n_ranks must be divisible by frequency_groups")
+    if frequency_groups > 1 and task_id != 0:
+        raise ValueError("A frequency band must start at task zero")
     threads_per_rank = max(1, n_threads // n_ranks)
     core_count = n_ranks * threads_per_rank
     if n_ranks > 1:
@@ -451,6 +460,8 @@ def run_task(
         args += ["--smooth"]
     elif task_id == MESH_TASK_ID:
         args += ["--init-no-size"]
+    elif frequency_groups > 1:
+        args += ["--frequency-groups", str(frequency_groups)]
     else:
         args += ["--task", f"{task_id + 1}"]
     command = shlex.join(args)
@@ -476,6 +487,45 @@ def run_task(
                 args, stdout=stdout, stderr=stdout, env=env, text=True
             )
             return_code = proc.wait()
+
+        if frequency_groups > 1:
+            rows = []
+            for index in range(frequency_groups):
+                contract = None
+                contract_error = None
+                try:
+                    contract = _read_task_result(job_file, index)
+                except (ArtifactContractError, OSError) as error:
+                    contract_error = str(error)
+                successful = (
+                    return_code == 0 and contract is not None and contract.successful
+                )
+                row = {
+                    "task_id": index,
+                    "status": "success" if successful else "error",
+                    "complete": contract is not None,
+                    "returncode": return_code,
+                    "duration_seconds": time.perf_counter() - started,
+                    "n_ranks": n_ranks // frequency_groups,
+                    "threads_per_rank": threads_per_rank,
+                    "core_count": core_count // frequency_groups,
+                    "stdout": stdout_file,
+                }
+                _attach_task_result(row, contract)
+                if not successful:
+                    row["error"] = (
+                        contract_error
+                        or "Shared frequency solve failed or did not publish a successful task contract"
+                    )
+                rows.append(row)
+            return {
+                "group_tasks": rows,
+                "status": (
+                    "success"
+                    if all(r["status"] == "success" for r in rows)
+                    else "error"
+                ),
+            }
 
         task_result = _read_task_result(job_file, task_id)
         if return_code != 0:
@@ -598,6 +648,7 @@ class LocalSite(BaseSite):
         dashboard_port: Dashboard port, or ``0`` to let Dask choose.
     """
 
+    supports_frequency_groups = True
     config: LocalSiteConfig = field(init=False)
     executable: Optional[str] = field(init=False)
     env: Dict[str, str] = field(default_factory=dict)
@@ -932,8 +983,9 @@ class LocalSite(BaseSite):
             return JobStatus(state="skipped", return_code=0, job_id=run.id)
         statuses = [getattr(future, "status", "unknown") for future in futures]
         states = [_local_task_state(status) for status in statuses]
+        frequency_groups = getattr(run.job, "frequency_groups", 1)
         task_status = _merge_task_status_with_plan(
-            _local_task_status(statuses),
+            _local_task_status(statuses * frequency_groups),
             run.backend.get("task_plan"),
             job=run.job,
         )
@@ -1012,9 +1064,15 @@ class LocalSite(BaseSite):
                         "task_result_errors": task_result_errors,
                     },
                 )
+            task_failed = any(not _task_result_successful(row) for row in task_results)
+            task_status = _merge_task_status_with_plan(
+                _local_task_status(row.get("status") for row in task_results),
+                run.backend.get("task_plan"),
+                job=run.job,
+            )
             return JobStatus(
-                state="completed",
-                return_code=0,
+                state="failed" if task_failed else "completed",
+                return_code=1 if task_failed else 0,
                 job_id=run.id,
                 message=_local_task_status_message(task_status),
                 raw={
@@ -1464,6 +1522,11 @@ class LocalSite(BaseSite):
         pending_indices = list(task_plan["pending_indices"])
         if not pending_indices:
             return LocalTaskSubmission(futures=[], task_plan=task_plan)
+        frequency_groups = getattr(job, "frequency_groups", 1)
+        if frequency_groups > 1:
+            # One coupled iteration cannot reuse or retry a subset of the band.
+            task_plan = job.task_run_plan(reuse=False, force=True)
+            pending_indices = list(task_plan["pending_indices"])
 
         n_ranks = kwargs.get("procs_per_job", 1)
         max_ranks = getattr(job, "max_ranks_per_task", None)
@@ -1475,6 +1538,14 @@ class LocalSite(BaseSite):
 
         self._ensure_dask_for_tasks(1)
         client = self._dask_client_or_raise()
+
+        total_ranks = n_ranks * frequency_groups
+        total_threads = self._current_threads_per_worker()
+        if frequency_groups > 1 and total_threads < total_ranks:
+            raise ValueError(
+                f"Shared frequency fit needs at least {total_ranks} local worker threads "
+                f"({frequency_groups} frequencies × {n_ranks} ranks)"
+            )
 
         stdout_dir = str(job._stdout_path)
         os.makedirs(stdout_dir, exist_ok=True)
@@ -1522,6 +1593,25 @@ class LocalSite(BaseSite):
                 raise RuntimeError(message)
         finally:
             self._release_futures([future])
+
+        if frequency_groups > 1:
+            future = client.submit(
+                run_task,
+                job_file,
+                0,
+                executable,
+                self.env,
+                n_ranks=total_ranks,
+                n_threads=total_threads,
+                frequency_groups=frequency_groups,
+                stdout_dir=stdout_dir,
+                fresh=True,
+                retries=0,
+                pure=False,
+                resources={"CPU": total_threads},
+            )
+            self._futures.append(future)
+            return LocalTaskSubmission(futures=[future], task_plan=task_plan)
 
         self._ensure_dask_for_tasks(len(pending_indices))
         client = self._dask_client_or_raise()

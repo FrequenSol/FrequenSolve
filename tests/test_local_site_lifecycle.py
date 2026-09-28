@@ -424,6 +424,123 @@ def _write_local_task_result(tmp_path, payload):
     return task_result
 
 
+@pytest.mark.parametrize("missing", [False, True])
+def test_shared_frequency_launcher_checks_each_contract(monkeypatch, tmp_path, missing):
+    captured = {}
+
+    class FakeProcess:
+        def wait(self):
+            return 0
+
+    def popen(args, **kwargs):
+        captured["args"] = args
+        return FakeProcess()
+
+    monkeypatch.setattr(local_module.subprocess, "Popen", popen)
+    job = tmp_path / "job.json"
+    job.write_text(
+        json.dumps(
+            {
+                "project_path": str(tmp_path),
+                "result_path": "results",
+                "f_list": [[2.5, -0.05], [3.0, -0.05]],
+            }
+        )
+    )
+    for task, frequency in enumerate((2.5, 3.0), 1):
+        if missing and task == 2:
+            continue
+        payload = _task_result_payload(real=frequency)
+        payload["partition"].update(task=task, task_count=2)
+        path = tmp_path / f"results/_fs_run/tasks/task_{task:06d}/result.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(payload))
+    result = run_task(
+        str(job), 0, "/solver", {}, n_ranks=4, n_threads=8, frequency_groups=2
+    )
+    assert captured["args"][:3] == ["mpirun", "-np", "4"]
+    assert captured["args"][-2:] == ["--frequency-groups", "2"]
+    assert "--task" not in captured["args"]
+    assert result["status"] == ("error" if missing else "success")
+    rows, errors = local_module._collect_future_results([DummyFuture(result)])
+    assert not errors and len(rows) == 2
+    assert rows[0]["status"] == "success"
+    assert rows[1]["status"] == ("error" if missing else "success")
+    assert all(row["n_ranks"] == 2 and row["threads_per_rank"] == 2 for row in rows)
+
+
+def test_shared_frequency_launcher_requires_equal_groups(tmp_path):
+    job = tmp_path / "job.json"
+    job.write_text("{}")
+    with pytest.raises(ValueError, match="divisible"):
+        run_task(str(job), 0, "/solver", {}, n_ranks=3, frequency_groups=2)
+
+
+def test_shared_fit_poll_does_not_hide_worker_failure(monkeypatch):
+    site, _ = make_site(monkeypatch)
+    job = DummyJob()
+    job.frequency_groups = 2
+    future = DummyFuture(
+        {
+            "group_tasks": [
+                {"task_id": 0, "status": "success"},
+                {"task_id": 1, "status": "error", "error": "Missing contract"},
+            ],
+            "status": "error",
+        }
+    )
+    status = site._poll_local_run(make_run(site, job, [future]))
+    assert status.state == "failed" and status.return_code == 1
+    assert len(status.raw["tasks"]) == 2
+    assert status.raw["task_status"]["failed"] == 1
+    assert status.raw["task_status"]["successful"] == 1
+
+
+@pytest.mark.parametrize("threads", [2, 8])
+def test_shared_fit_submission_is_one_indivisible_band(monkeypatch, tmp_path, threads):
+    site, _ = make_site(monkeypatch)
+    site.executable = "/solver"
+    site.threads_per_worker = threads
+    calls = []
+
+    class FakeClient:
+        def submit(self, func, job_file, task_id, *args, **kwargs):
+            calls.append((task_id, kwargs))
+            return DummyFuture({"task_id": task_id, "status": "success"})
+
+    class BandJob(DummyJob):
+        frequency_groups = 2
+
+        def __init__(self):
+            super().__init__()
+            self._file = tmp_path / "job.json"
+            self._file.write_text("{}")
+            self._stdout_path = tmp_path / "logs"
+
+        def task_run_plan(self, reuse=True, force=False):
+            return {
+                "pending_indices": [0, 1] if force else [1],
+                "current_tasks": [],
+                "reused_tasks": [],
+            }
+
+    site._dask_client = FakeClient()
+    monkeypatch.setattr(site, "_ensure_dask_for_tasks", lambda count: None)
+    if threads < 4:
+        with pytest.raises(ValueError, match="at least 4"):
+            site._submit_local_tasks(BandJob(), procs_per_job=2)
+        assert not calls  # Refuse insufficient resources before even meshing.
+        return
+    submission = site._submit_local_tasks(BandJob(), procs_per_job=2)
+    assert submission.task_plan["pending_indices"] == [0, 1]
+    assert len(submission.futures) == 1
+    assert [task for task, _ in calls] == [local_module.MESH_TASK_ID, 0]
+    launch = calls[1][1]
+    assert launch["n_ranks"] == 4 and launch["n_threads"] == 8
+    assert launch["frequency_groups"] == 2
+    assert launch["retries"] == 0 and launch["fresh"] is True
+
+
 def test_run_task_reports_failed_producer_task_result(monkeypatch, tmp_path):
     class FakeProcess:
         def wait(self):
