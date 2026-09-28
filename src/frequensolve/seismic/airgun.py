@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from frequensolve.seismic.acquisition import Acquisition
 
 import numpy as np
 
@@ -33,7 +36,9 @@ class _AirgunVolumeRate(TransferFunction):
             "reference_pressure_distance_Pa_m": 1.0,
         }
 
-    def at_frequencies(self, frequencies, *, laplace=0.0, derivative=False):
+    def at_frequencies(
+        self, frequencies: Any, *, laplace: Any = 0.0, derivative: bool = False
+    ) -> np.ndarray:
         _, z = _coordinates(frequencies, laplace)
         if np.any(z == 0):
             raise ValueError(
@@ -73,8 +78,12 @@ class AirgunSignature:
     water_density: float
 
     def __init__(
-        self, wavelet: SampledWavelet, *, ghost: str, water_density=1025 * u.kg / u.m**3
-    ):
+        self,
+        wavelet: SampledWavelet,
+        *,
+        ghost: str,
+        water_density: Any = 1025 * u.kg / u.m**3,
+    ) -> None:
         if not isinstance(wavelet, SampledWavelet):
             raise TypeError(
                 "AirgunSignature requires a SampledWavelet with pressure-distance units"
@@ -104,11 +113,11 @@ class AirgunSignature:
         cls,
         wavelet: SampledWavelet,
         *,
-        strength,
+        strength: Any,
         measure: str,
         ghost: str,
-        water_density=1025 * u.kg / u.m**3,
-    ):
+        water_density: Any = 1025 * u.kg / u.m**3,
+    ) -> AirgunSignature:
         """Calibrate a dimensionless shape by peak magnitude or peak-to-peak strength."""
         if wavelet.units != "1":
             raise ValueError("from_wavelet requires a dimensionless shape")
@@ -140,8 +149,13 @@ class AirgunSignature:
         return _AirgunVolumeRate(self.wavelet, self.water_density)
 
     def acquisition(
-        self, coords, *, frequencies, laplace=(0.0,), out_of_plane_thickness=None
-    ):
+        self,
+        coords: Any,
+        *,
+        frequencies: Any,
+        laplace: Any = (0.0,),
+        out_of_plane_thickness: Any = None,
+    ) -> Acquisition:
         """Create acoustic volume sources with this shared calibrated signature.
 
         Planar 2D requires an explicit physical out-of-plane thickness: total

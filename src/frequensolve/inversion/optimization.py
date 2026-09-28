@@ -102,7 +102,7 @@ class _StoppingCriteria:
         self.gradient_threshold = gradient_atol + gradient_rtol * self.reference
         self.objective_threshold = options.obj_abs_tol + objective_rtol * self.reference
         self.momentum = options.objective_tolerance_momentum
-        self.improvement = None
+        self.improvement: Optional[float] = None
 
     def relative(self, value: float) -> float:
         """Report relative progress without imposing a unit-dependent floor."""
