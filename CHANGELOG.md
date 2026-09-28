@@ -5,6 +5,22 @@ prepared.
 
 ## Unreleased
 
+- Deferred the experimental HV and AWI objectives; removed their Python
+  configurations and `ImagingProblem` adapters.
+- Receiver linearization, JVP and VJP cover multiple groups sharing the same
+  PDE solves; group adjoint loads are combined before solving.
+
+- Added frequency-coherent time-reversal focusing objectives:
+  `imaging.Focusing` (Gaussian lag window), `ImagingProblem.focus(...)` /
+  `imaging.FocusingProblem` (a problem view `FWI` accepts, objective
+  `1 - mean focusing ratio`) and `imaging.SourceAperture` for spatial softening
+  with `strategy="linear"` (extended source) or `"pointwise"` (WEFT-style node
+  energies). `Linearization` gains `simulated()`, `observed()`,
+  `residual_sign`, `modeled_vjp(g, per_task=...)` and `vjp_tasks(r)`.
+- Removed `TimeReversalFocus` and `ControlGradientJob(kind="focus")`: Sauce no
+  longer provides the per-frequency `focus` workflow, whose energies were not
+  focusing objectives. Use `imaging.Focusing`.
+
 - Removed the old imaging/FWI job layer in favour of `frequensolve.imaging`,
   which is now re-exported from the root namespace (`fs.ImagingProblem`,
   `fs.Misfit`, `fs.FWI`, ...). Deleted without replacement aliases:

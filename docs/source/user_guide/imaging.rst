@@ -5,8 +5,8 @@ Imaging and Inversion
 short scalar calls and SciPy-style linear operators. One
 :class:`~frequensolve.imaging.ImagingProblem` binds a simulation, a control
 space, observed data, a misfit, the frequencies and a site; gradients,
-Jacobians, normal operators and the :term:`FWI`, :term:`LSRTM`, :term:`RTM`
-and focusing workflows all derive from it.
+Jacobians, normal operators, the :term:`FWI`, :term:`LSRTM` and :term:`RTM`
+workflows and the coherent focusing objectives all derive from it.
 
 .. code-block:: python
 
@@ -40,8 +40,8 @@ The layers, lowest first:
   (:class:`~frequensolve.imaging.Tikhonov`, :class:`~frequensolve.imaging.TV`,
   :class:`~frequensolve.imaging.Diagonal`, :class:`~frequensolve.imaging.Smoothing`).
 - **Workflows** (:class:`~frequensolve.imaging.FWI`, :class:`~frequensolve.imaging.LSRTM`,
-  :func:`~frequensolve.imaging.rtm`, :func:`~frequensolve.imaging.sensitivity_kernel`,
-  :class:`~frequensolve.imaging.TimeReversalFocus`) run the outer loops.
+  :func:`~frequensolve.imaging.rtm`, :func:`~frequensolve.imaging.sensitivity_kernel`)
+  run the outer loops.
 - **Low-level jobs** (:class:`~frequensolve.imaging.FWIOperatorJob`,
   :class:`~frequensolve.imaging.ControlGradientJob`,
   :class:`~frequensolve.imaging.ImageKernelJob`,
@@ -332,7 +332,8 @@ misfit pairs observed and simulated groups by name.
                               source_basis="source_geometry", missing="zero")
 
 The misfit maps one to one onto Sauce's objective terms: a loss (``l2``,
-``huber``, ``student_t``), a comparison (``waveform``, ``phase_derivative``),
+``huber``, ``student_t``), a comparison (``waveform``, ``phase_derivative``,
+``spectral_derivative``),
 a normalization (``observed_rms`` by default, ``explicit``, or
 ``Normalization.balance_artifact(file)`` written by a ``calibrate`` job),
 per-group weights, preprocessing hooks and a receiver projection.
@@ -349,6 +350,182 @@ per-group weights, preprocessing hooks and a receiver projection.
        im.ObjectiveTerm("das", loss="l2", comparison="phase_derivative", weight=0.3),
    )
    misfit = im.Misfit.l2(projection=im.ReceiverProjection.up_down(impedance=1.5e6))
+
+For joint waveform and full-complex frequency-derivative FWI, use independent
+terms. Each term's default normalization uses its own observed RMS; the
+derivative is with respect to Hz at fixed Laplace damping, not a phase quotient.
+Supply matching ``df`` observations and the same source-derivative policy.
+
+.. code-block:: python
+
+   misfit = im.Misfit.terms(
+       im.ObjectiveTerm("seabed", id="u", weight=0.5),
+       im.ObjectiveTerm("seabed", id="uf", weight=0.5,
+                        comparison=im.Comparison.spectral_derivative()),
+   )
+
+The material ``linearize`` receiver-probe diagonal supports both terms under
+the same DPG/frozen-Gram, shared dense receiver, no-preprocessing restrictions.
+It includes the derivative term's triangular adjoint and mixed material/frequency
+contribution; it is not the waveform-only diagonal.
+
+Higher-order derivatives and smooth time windows
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For orders up to four, select the existing spectral-data workflow on the
+problem. It applies the same derivative or polynomial window to every waveform
+term and carries that selection through ``linearize``, ``J``, ``J.H`` and
+``normal``. This is a derivative-data objective, not a derivative of an ordinary
+FWI gradient.
+
+.. code-block:: python
+
+   problem = im.ImagingProblem(
+       simulation, controls=controls, observed=im.ObservedData(observed_job),
+       frequencies=[1.0-0.2j, 2.0-0.2j, 3.0-0.2j],
+       misfit=im.Misfit.l2(), site=site,
+       kernel_derivative={"axis": "fourier", "residual": "derivative", "order": 4},
+   )
+   linearization = problem.linearize(gradient=True)
+
+   # Polynomial coefficients in physical seconds: p(t) = (t / 3 s)^4.
+   windowed = problem.restrict(kernel_derivative={
+       "axis": "fourier", "residual": "window",
+       "window": [0, 0, 0, 0, 1 / 3**4],
+   })
+
+To export separate control gradients for orders 0–4 in one job, use a
+``ControlGradientJob`` on a simulation with bound controls:
+
+.. code-block:: python
+
+   job = im.ControlGradientJob(
+       "spectral_orders", simulation, frequencies, kind="rtm",
+       observed={"seabed": observed_path}, gradient="gradient.h5",
+       objective_file="objective.h5",
+       kernel_derivative={"axis": "fourier", "residual": "derivative",
+                          "order": 4, "source_derivative": "total",
+                          "export_lower_orders": True},
+   )
+   site.run(job, check=True)
+   gradients = [job.gradient_file(derivative_order=k) for k in range(5)]
+
+Each order has its own objective and gradient, aggregated across frequency tasks.
+The forward hierarchy and factorization are shared; independent adjoints still
+require 15 solves, for 20 total instead of 30 across separate jobs. This export
+counts solves per frequency and RHS batch; it does not create multiple saved
+linearizations or matching Hessian diagonals.
+
+Observations must contain the matching orders at the same complex frequencies
+and source-derivative policy. Generate them with a ``forward_df`` job and
+``derivative_order=4``; use its complete trace store as ``observed``. The groups
+are named ``<group>_df``, ``<group>_d2f``, through ``<group>_d4f``. This route
+does not use the first-order ``ObservedData(derivatives={"df": ...})`` binding.
+Canonical time-domain trace stores may instead supply traces from which the
+reader computes the corresponding damped time moments. Physical-shot field
+data need not be pre-encoded:
+
+.. code-block:: python
+
+   observed = im.ObservedData(
+       im.TraceStoreRef("field_traces.h5"), source_basis="source_geometry",
+   )
+   problem = im.ImagingProblem(
+       simulation, controls=controls, observed=observed,
+       frequencies=[1.0-0.2j, 2.0-0.2j, 3.0-0.2j],
+       kernel_derivative={"axis": "fourier", "residual": "derivative", "order": 4},
+   )
+
+The reader applies the simulation's source encoding to each observed order
+using physical source IDs, for both dense and sparse receivers. Encoding
+weights are held fixed during this combination; derivatives of frequency-varying
+encoding weights are not added. Trace geometry, components, units and frequency
+conventions must still match the simulation.
+
+At ``f - i*sigma``, the effective amplitude window is
+``p(t) exp(-2*pi*sigma*t)``. For ``p(t)=t**n``, its peak is at
+``n/(2*pi*sigma)`` seconds. Least squares squares this amplitude weighting;
+a finite sampled frequency band is not an exact full-band time-domain norm.
+Window coefficients are converted to complex Fourier-derivative weights
+automatically. ``axis="laplace"`` instead differentiates the imaginary
+frequency coordinate; it does not enable damping by itself.
+
+For a different polynomial on each receiver/source-field pair, supply an
+explicit degree and HDF5 coefficient tables instead of a common list::
+
+   kernel_derivative={
+       "axis": "fourier", "residual": "window", "order": 4,
+       "window": {"seabed": "windows.h5:/coefficients"},
+   }
+
+Each real table has shape ``(order+1, global_receiver, source_field)`` in
+Python/HDF5 ordering, with ascending powers of seconds and shared coefficients
+across components. Paths resolve from the project. Every objective receiver group
+requires a table. Use unencoded shots for physical offset-dependent windows;
+an encoded shot has no single physical source offset. The solver caches only
+the active source batch and local receivers, and uses the same coefficients
+for observations, predictions and adjoints without extra propagation stages.
+This option requires dense point receivers without averaging, global trace
+preprocessing or frequency/material dependence. It does not support WRI or
+probe diagonals. Keep coefficient files fixed with the saved objective state.
+A shifted polynomial has an earlier lobe: a direct-arrival zero is not a causal
+mute and does not necessarily suppress earlier refracted arrivals.
+
+To specify explicit receiver/shot delays in seconds, prepare the frozen table
+with the SDK helper. Delays can be picked first arrivals, geometric direct
+arrivals, or eikonal receiver times (transpose the source-major eikonal array)::
+
+   table = im.write_receiver_window("windows.h5", delay_seconds)
+   kernel_derivative = {
+       "axis": "fourier", "residual": "window", "order": 4,
+       "window": {"seabed": table},
+   }
+
+``delay_seconds`` has shape ``(global_receiver, source_field)``. An HDF5 dataset
+can be passed directly; preparation streams bounded receiver/source blocks.
+The default polynomial is ``(t-delay)**4``; ``coefficients=[...]`` shifts any
+common polynomial of degree at most four. The helper creates a new file and
+never overwrites existing objective data. This adds no propagation stages.
+
+Instantaneous traveltime inferred from ``u_f/u`` is not automatically a first
+arrival: interfering events and weak amplitudes can make it unreliable. If it
+is used to estimate delays, screen the estimates first and freeze them before
+linearization. The solver does not differentiate receiver-window delays, and
+no automatic instantaneous-traveltime picking is performed by this helper.
+
+This path supports native material controls in acoustic, elastic and coupled
+DPG with frozen Gram derivatives. Sources are fixed; projection, FWIME,
+Galerkin and the shared receiver-probe diagonal are not supported here.
+Separate independently weighted order terms still use separate problem views;
+the existing joint ``u``/``u_f`` comparison remains available as above.
+
+Centered WRI also accepts this selection through ``FWIOperatorJob``:
+
+.. code-block:: python
+
+   job = im.FWIOperatorJob(
+       "windowed_wri", simulation, [1.0-0.2j, 2.0-0.2j, 3.0-0.2j],
+       action="wri", observed=observed, covector="gradient.h5",
+       objective="objective.h5", wri={"penalty": 10.0},
+       kernel_derivative={"residual": "window", "window": [0, 0, 0, 0, 1 / 3**4]},
+   )
+
+This reconstructs the windowed reference prediction against equally windowed
+observations while keeping the base-frequency PDE-energy metric. An identity
+window gives ordinary centered WRI. Degree ``n`` costs ``n+2`` solves for the
+objective/reconstruction, or ``2*(n+1)`` including its gradient, per source batch.
+It requires fixed frequency/material-independent receiver rows. Material gradients
+accept ``gram_derivative="total"``; the default ``"frozen"`` omits material Gram
+terms. Neither option differentiates the Gram matrix in frequency. The original
+formulation and spectral WRI normals/diagonals are not supported.
+
+The default source policy is ``frozen``; supported total source spectra can be
+included for gradients, but Born/GN actions currently require frozen sources.
+The time-window interpretation applies to the complete signal only when the
+source spectrum is constant or its derivatives are included; frozen-source
+derivatives otherwise window the medium response at fixed source amplitude.
+One factorization is reused: an order-``n`` objective/gradient or JVP/VJP takes
+``2*(n+1)`` solves per RHS batch; a GN action takes ``3*(n+1)``.
 
 :class:`~frequensolve.imaging.Preprocess` has one constructor per Sauce hook
 kind. Objective weights (``offset_power``, ``offset_taper``,
@@ -386,7 +563,13 @@ whose segments are objective term IDs and whose coordinates come from the
 saved state. Dense terms preserve source/component/receiver axes; sparse or
 projected terms expose an objective-row axis. Multiple terms can share one
 receiver group. ``lin.objective_residual()`` returns the frozen residual in
-these same weighted comparison coordinates.
+these same weighted comparison coordinates: Sauce's observed-minus-simulated
+comparison error, of which ``lin.jacobian`` is the derivative.
+``lin.simulated()`` and ``lin.observed()`` return the modeled and observed
+values of the same rows (exact for unit-weight waveform terms), and
+``lin.modeled_vjp(g)`` pulls a dual ``g`` on the modeled data back to the
+controls (``per_task=True`` keeps the frequency tasks apart), which is how
+objectives composed in Python, such as :ref:`imaging-focusing`, differentiate.
 
 The problem, linearizations and operators
 -----------------------------------------
@@ -488,6 +671,28 @@ use a tight solver tolerance and the raw ``gradient``. Configured smoothing
 and optimizer preconditioning do not alter this derivative. PML elements are excluded from sensitivities; the PML
 uses the outward extension of the boundary model, which is held fixed.
 
+For meshed materials, low-level ``FWIOperatorJob`` and ``ControlGradientJob``
+default to ``sensitivity_quadrature="wavefield"`` for mutually consistent
+discrete gradients, Jacobian actions and normals. Explicit
+``"material_intersections"`` evaluates volume pullbacks on wavefield/material-cell
+intersections. This experimental option leaves forward
+assembly, JVPs, face quadrature and wavefield DOFs unchanged, so its covector is
+an approximate continuous sensitivity and need not match a finite-difference
+check of the discrete objective. Compare both policies using the same material
+artifact and model; check objective reduction as well as the gradient image.
+Waveform and spectral receiver-probe diagonal contractions use the same selected
+policy as the gradient, with wavefield quadrature as the default. Probe fields
+share a bounded memory cache and spill to run-temporary files as needed;
+contractions tile source columns without changing forward-solve batching. They assemble all
+mixed contributions into the constrained control basis and MPI-reduce before
+squaring each source response separately. With intersections, these are positive
+preconditioner approximations, not exact discrete GN diagonals.
+Born/JVP, normal and WRI curvature/diagonal jobs retain ``"wavefield"`` by default
+and reject an explicit request for intersections. Intersection
+geometry is cached with bounded per-worker storage; uncut elements keep the
+ordinary rule. Coarse material meshes generally incur only the tree lookup,
+while cut-element work grows with the number of intersected leaves.
+
 Regularization, smoothing and preconditioning
 ---------------------------------------------
 
@@ -575,6 +780,70 @@ Preconditioners
 
    preconditioner = im.Diagonal(probe_count=4, relative_damping=1e-2, maximum_inverse_ratio=1e3)
    preconditioner = im.FromOperator(my_inverse_curvature_action)
+
+For shared dense waveform receivers, request a receiver-encoded diagonal during
+the gradient run (requires the matching updated Sauce backend)::
+
+   lin = problem.linearize(receiver_diagonal={})
+   diagonal = lin.receiver_diagonal
+   damping = 0.01 * diagonal.values.max()
+   update = -lin.gradient / (diagonal + damping)
+
+The empty mapping uses ``min(16, encoded source RHS count)`` probes; pass
+``{"probes": 32, "seed": 7}`` to override. Source batching is unchanged.
+The backend contracts complex sensitivities into the actual material basis and
+MPI-reduces before squaring. This initial path requires frozen-Gram DPG,
+quadratic waveform loss, source-independent weights, material-independent
+receiver channels, and no preprocessing. The accessor sums frequency-weighted
+diagonals. Damping above is an explicit example, not an amplitude calibration.
+For additive Vp controls in km/s, the update is in km/s; the gradient is not.
+
+For separate spectral-derivative gradients, request matching diagonals in the
+same job::
+
+   job = im.ControlGradientJob(
+       "orders", simulation, frequencies, kind="rtm", observed=observed,
+       gradient="gradient.h5",
+       kernel_derivative={"axis": "fourier", "residual": "derivative",
+                          "order": 4, "export_lower_orders": True},
+       receiver_diagonal={"probes": 16, "seed": 7},
+   )
+   fourth_order_diagonal = job.diagonal_file(derivative_order=4)
+
+One shared receiver-adjoint hierarchy supplies all five diagonals, including
+each order's observed-data normalization. Mixed spectral/material terms are
+summed in constrained controls and MPI-reduced before squaring each source's
+response separately. Five stages of 16 probe RHS are reused across all source
+batches; contractions and retained test fields add cost and memory. This requires
+common receiver weights up to an order scalar and frequency/material-independent
+channels. Spectral windows are not supported by this shared-diagonal path.
+Postprocessing aggregates each diagonal with the gradient's frequency weights,
+without applying gradient smoothing or an amplitude calibration.
+
+WRI jobs may request ``wri={"penalty": 10, "diagonal": "diagonal.h5"}``.
+Use ``wri={"penalty": 10, "formulation": "original"}`` for the original
+broken-test residual objective; ``"centered"`` is the default. Centered WRI
+subtracts the current model's minimum PDE energy and gradient using an ordinary
+forward reference solve. Both variants reconstruct the same wavefield. The
+fixed-wavefield diagonal remains an uncentered preconditioner, not the Hessian
+of the centered objective.
+
+For a normal action, supply ``direction="direction.h5"``. Centered WRI defaults
+to ``wri={"penalty": ..., "curvature": "metric_frozen"}``, requiring two
+additional solves per source RHS. This positive approximation includes the
+reference-wavefield response and agrees with centered GN at exact self-data.
+Choose ``"exact_gn"`` for the full centered residual normal (four additional
+solves). Both freeze Gram and receiver weights, but differentiate the reference
+and reconstructed normal equations. Original WRI defaults to ``"joint_schur"``;
+explicit ``"fixed_wavefield"`` and ``"joint_schur"`` remain uncentered surrogates
+when used with the centered objective. The local diagonal described below is
+not a diagonal of either new centered action.
+
+``job.diagonal_file(task)`` contains the fixed-wavefield GN diagonal, with the
+same normalization as its gradient. Aggregate both using
+``job.wri_reduction_weights()`` before division. This local approximation
+omits wavefield relaxation; it overestimates the original formulation's reduced
+GN curvature, not necessarily the centered formulation's curvature.
 
 :class:`~frequensolve.imaging.Diagonal` estimates
 :math:`\operatorname{diag}(\operatorname{Re} J^{\mathsf H} W J + R^{\mathsf T} R)`
@@ -813,6 +1082,44 @@ bases, coordinates and transforms. ``transfer_to`` transfers coefficient
 fields; it is not a conversion of raw gradient covectors. If a field transfer
 is ``c_new = T @ c_old``, derivatives pull back with ``T.T``.
 
+For meshed controls, explicitly list the mesh blocks to adapt at a stage boundary:
+
+.. code-block:: python
+
+   im.Stage([5, 8], iterations=15,
+            controls={"vp": im.MeshParameters("vp", "sediment", frequency=8,
+                                              epw=1, transform="log")},
+            mesh_averaging_wavelengths=0.5)
+
+Sauce sizes those blocks from the latest accepted physical material, averaging
+**slowness** within each material. The window half-width is the requested fraction
+of that material's volume-weighted harmonic-mean wavelength, estimated on the old
+basis, at the largest requested control sizing frequency. A positive five-point
+Gauss rule per axis samples a truncated Gaussian window. The window does not
+shrink with candidate cells. EPW applies to this sizing field; it is a resolution
+heuristic, not a forward-solver accuracy guarantee. Averaging suppresses sharp
+local refinement but can spread moderate refinement into neighboring regions; it
+does not guarantee fewer total controls. The forward reference and
+regularization prior are unchanged.
+
+The new immutable artifacts and coefficients are frozen throughout the stage,
+including line searches. FrequenSolve places stage artifacts under the problem's
+work directory using a hash of the accepted state and sizing policy. Naming a mesh
+block again explicitly requests adaptation
+even if its frequency and EPW are unchanged. Omitted blocks retain their bases.
+Checkpoints retain each stage's accepted entry state to reconstruct the same
+sizing input on restart; retain those accompanying ``*.stage_*.h5`` files and the
+property artifacts.
+
+Mesh transfer interpolates transformed coefficient updates at independent native
+nodes, with hanging-node constraints and exact initial-root coordinates. Constants
+and fields represented by both bases are preserved; general coarsening is
+approximate and should be checked for acceptable physical changes. Physical limits
+are applied after transfer. The property, material, transform and block identity
+must remain unchanged. Setup currently runs on one MPI rank; stage solves may use
+MPI. The initial problem's authored mesh declaration keeps its existing sizing
+behavior; use ``Stage(controls=...)`` at stage zero to request averaged sizing there.
+
 Mixed-parameterization plotting example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -920,8 +1227,8 @@ Both display linear cells through leaf vertices, so curved geometry and
 nonlinear interior property variation are approximated between vertices.
 Use solver grid sampling when physical interior values are required.
 
-LSRTM, RTM, kernels and focusing
---------------------------------
+LSRTM, RTM and kernels
+----------------------
 
 .. code-block:: python
 
@@ -930,8 +1237,6 @@ LSRTM, RTM, kernels and focusing
    dm = im.LSRTM(problem, iterations=15, method="cg", damping=1e-3).run()
    kernels = im.sensitivity_kernel(problem, grid, properties=["vp"], condition="fwi")
    kernels.raw["vp"].plot.imshow(x="x", y="z", yincrease=False)
-   focus = im.TimeReversalFocus(problem.restrict(active=["vp"]), softening=12.5 * u.km)
-   focus.value(), focus.gradient()           # at the current state; material blocks only
 
 :func:`~frequensolve.imaging.rtm` returns Sauce's covector, the gradient of the
 misfit with respect to the active blocks (negate it for the classic
@@ -976,27 +1281,79 @@ interface coefficients and every changed source block it can represent:
   components must share one phase, which is applied like a signature.
 
 A mechanism without scaling, ``signature_df`` (an additive per-Hz term),
-reflectivity and mesh blocks raise :class:`NotImplementedError`. Focusing runs
-on the authored simulation and accepts changed material blocks only.
+reflectivity and mesh blocks raise :class:`NotImplementedError`.
 
-:class:`~frequensolve.imaging.TimeReversalFocus` is a data-domain focusing
-objective that needs no modeled forward wavefield. For each frequency Sauce
-back-propagates the observed data and evaluates
+.. _imaging-focusing:
 
-.. math::
+Coherent focusing
+-----------------
 
-   J_f(m) = -\operatorname{Re}\int_\Omega
-   \frac{q_f(x;m)}{\left(\lVert x - x_s\rVert^2 + \epsilon^2\right)^{p/2}}\,dx,
+Time-reversal focusing measures how well the back-propagated observed data
+refocus at each source. By reciprocity the back-propagated field sampled at
+source :math:`s` is :math:`C_{f,s} = \sum_r \overline{d_{f,s}(r)}\,o_{f,s}(r)`;
+summing frequencies coherently in a Gaussian lag window of width
+:math:`\sigma` gives the energy
+:math:`E_s = \operatorname{Re}(C_s^{\mathsf H} K C_s)` with
+:math:`K_{ff'} = e^{-2\pi^2\sigma^2 (f-f')^2}`. The focusing ratio
+:math:`\rho_s = E_s / (\lVert d_s\rVert^2 \lVert o_s\rVert^2)` lies in
+:math:`[0, 1]` and the objective is the mean defocus :math:`J = 1 - \bar\rho`:
 
-where :math:`q_f` is the observed-data adjoint field, :math:`x_s` the encoded
-source-field center and :math:`\epsilon` the ``softening`` length; minimizing
-favors a large, correctly phased focus near the target. The gradient uses a
-second solve with the inverse-distance functional and contracts the focus
-dual field with the saved observed-data field through the native control
-VJP; both solves reuse one factorization. Time reversal conjugates the
-observed coefficients, not the complex frequency, so the PML keeps
-dissipating energy. The objective is polarity sensitive: observed data and
-receiver encodings must share a phase convention.
+.. code-block:: python
+
+   focus = problem.focus(im.Focusing(window=0.1 * u.s))
+   focus.value(), focus.gradient()            # all active controls
+   im.FWI(focus, stages, optimizer=im.LBFGS()).run()
+
+``focus`` is a problem view (``restrict``, ``linearize``, ``value``,
+``gradient``, ``state``, ``space``) whose misfit is a unit-weight waveform L2,
+so Sauce's saved rows are the raw data; inherited ``kernel_derivative``
+selections are cleared. It has no normal operator. Its result cache follows
+the underlying problem's ``cache_capacity``. Point focusing reuses an
+equivalent cached raw-pressure L2 linearization and then requests one ``vjp``.
+Without a matching cache entry it first requests a value-only ``linearize``;
+the baseline L2 gradient is not needed. Receiver-state caching is separate
+from PDE field retention: the native VJP may replay the forward solve.
+The focus is invariant to a common complex amplitude factor per source;
+relative receiver amplitudes and phases still affect it.
+
+:class:`~frequensolve.imaging.SourceAperture` softens the focus spatially with
+a cosine-tapered node grid around every source (one physical source per
+right-hand side with a real encoding weight):
+
+.. code-block:: python
+
+   aperture = im.SourceAperture(0.3 * u.km, 0.05 * u.km,
+                                bounds=[(None, None), (0.001, None)])  # below z = 0
+   linear = problem.focus(im.Focusing(0.1, aperture=aperture, strategy="linear"))
+   weft = problem.focus(im.Focusing(0.1, aperture=aperture, strategy="pointwise"))
+
+``strategy="linear"`` averages, then squares: every source becomes one
+extended source :math:`D_s = \sum_k w_k d_{s,k}` in one encoded right-hand
+side and the ratio above is evaluated on :math:`D` (the cost of the point
+focus). ``strategy="pointwise"`` squares, then integrates, as in WEFT:
+:math:`J = 1 - \operatorname{mean}_s \sum_k \bar w_k E_{s,k} /
+(\lVert d_{s,k}\rVert^2 \lVert o_s\rVert^2)`. Correlations and energies
+are evaluated together on ``coarse`` nodes per axis. Their normalized ratios
+are interpolated to the tapered aperture grid, and the gradient applies the
+transpose of that interpolation. Increasing ``coarse`` converges to the full
+pointwise quadrature without mixing exact correlations with approximate norms.
+Auxiliary sources use sparse named encodings and zero observed data; observations
+are mapped from the original acquisition's encoded rows, including when the
+input observations use the physical-shot basis.
+Source coordinates retain their units and coordinate system, and physical-source
+signature spectra are repeated and reordered with the aperture nodes.
+Pointwise aperture focusing currently requires dense receiver sampling; sparse
+surveys are rejected before submission. Linear aperture focusing retains the
+original sparse receiver layout.
+
+Aperture views require an active material-only space (use
+``problem.restrict(active=["vp", "rho"])`` as appropriate). Inactive source
+and other non-material controls must retain their authored values; changing
+them requires a new simulation. Point focus differentiates every active control.
+
+Both softenings bias the kinematics: an off-center node source is rewarded
+for mimicking the real source, so the point focus is the unbiased objective
+and the aperture is best kept small compared with the wavelength.
 
 .. _imaging-extension:
 
@@ -1029,17 +1386,48 @@ representable in its working precision (single precision in production builds).
    xp.capabilities()                         # real or complex frequencies; waveform terms, no source blocks
    v = xp.vector()                           # active slice of the current state
    xp.value(v), xp.gradient(v)               # reduced objective and background gradient
-   xp.normal(v)                              # reduced Gauss-Newton Schur operator
+   # xp.normal(v) is currently available only for independent/single-frequency fits.
    B = xp.linearize(v).jacobian              # tap-space Jacobian; B.H @ r -> ExtensionVector
    solutions = xp.solve_all(v)               # one (ExtensionVector, ExtensionSolveReport) per frequency
-   taps, report = xp.restrict(frequencies=[3.0]).solve(v)   # a single-frequency inner solve
+   taps, report = xp.solve(v)                # one shared fit over the whole band
    taps.to_xarray()["vp"].sel(lag=0).plot()
    result = im.FWI(xp, stages=stages).run()  # FWIME
 
-One ``solve`` job carries every frequency, and each frequency task solves
-its own inner problem (``solve`` therefore needs a single-frequency view;
-``solve_all`` returns every task's solution); reduced covectors are summed
-with the stage's frequency weights like ordinary gradients.
+``Extension`` defaults to ``frequency_coupling="shared"``. One tap vector is
+fit to all frequencies: weighted data normals and right-hand sides are summed
+before the common solve, with the regularizer added once. This is not an average
+of separately fitted taps. The reduced background gradient uses those same
+shared taps and frequency weights. ``solve_all`` returns per-task copies with
+their individual saved-state identities; ``solve`` returns the common taps and
+aggregate report.
+
+For progress images during an L2 fit, set
+``gradient_checkpoints="iterations/gradient"`` on ``Extension``. Set
+``gradient_checkpoint_interval=10`` to compute and export only every tenth
+accepted CG iterate (default 1); skipped iterations incur no checkpoint solves.
+Selected iterations export ``gradient_cg_<iteration>_<task>.h5`` and a matching JSON
+completion record. These are fixed-tap background covectors, **not** stationary
+reduced gradients until the inner fit converges. They add three propagation
+solves per source batch and frequency per checkpoint. They reuse the existing
+factors and do not restart CG. Aggregate task covectors with the same frequency
+weights as the fit; the JSON data objectives are unweighted per-frequency values.
+
+The first shared implementation supports waveform L2 values and gradients on
+``LocalSite``. It launches one persistent MPI group per frequency, keeping factors
+and incident checkpoints alive during the inner iteration. ``procs_per_job`` is
+the spatial rank count **per frequency**; the site's total thread budget must be
+at least the frequency count times that rank count. Memory is the sum of the
+simultaneously resident frequency workers (including their checkpoint budgets).
+All frequencies must use the same physical control basis, axis and field scales;
+freeze meshed property artifacts and, for profile controls, reference units.
+The solver checks these identities and maps differently partitioned coordinates
+by global control ID. A failed worker fails the band; partial frequency retry or
+reuse is not valid for the shared iteration.
+
+Shared robust-loss fits, shared reduced-Schur actions and automatic remote-site
+launching are not yet supported. Set ``frequency_coupling="independent"`` only
+when separate per-frequency extensions are intentionally wanted; that mode
+retains the existing robust and reduced-Schur workflows.
 
 :class:`~frequensolve.imaging.ReflectivityParameters` is an ordinary block.
 When the space contains one, the problem emits the joint
@@ -1082,8 +1470,8 @@ workflow needs an action the problem does not expose.
      - One action over the shared control registry, including extension,
        reflectivity and WRI.
    * - :class:`~frequensolve.imaging.ControlGradientJob`
-     - ``rtm`` / ``born`` / ``focus`` with ``control_sensitivities``
-     - Native control VJP, Born JVP or focusing objective; ``gram_derivative="total"``
+     - ``rtm`` / ``born`` with ``control_sensitivities``
+     - Native control VJP or Born JVP; ``gram_derivative="total"``
        opts into the total DPG gradient (Gram and trial-to-test terms) for
        verification.
    * - :class:`~frequensolve.imaging.ImageKernelJob`
@@ -1176,7 +1564,7 @@ calibration is rejected. Recalibrate when the observation selection, weights,
 penalty or data scales change, not when the model changes.
 
 ``FWIOperatorJob(action="wri")`` supports full-dimensional coupled acoustic–elastic
-DPG with classic elasticity. Both ``fixed_wavefield`` and ``joint_schur`` curvature
+DPG with classic elasticity. All WRI curvature modes
 require frozen Gram weights and unwindowed material controls; relaxed assembly
 is accepted as an approximation. The PDE objective includes the interface continuity penalties.
 ``gram_derivative="total"`` applies to objective gradients in both the fluid and
@@ -1187,3 +1575,14 @@ complex-frequency extension updates. The unchanged ``fs-job-1`` schema version
 alone does not establish backend support; older executables may reject these
 jobs. The FrequenSolve contract fixture records the targeted compatibility
 updates separately from its historical Sauce pin.
+
+Spectral field storage
+~~~~~~~~~~~~~~~~~~~~~~
+
+For spectral FWI, add ``"field_storage": "disk"`` to the existing
+``kernel_derivative`` mapping. The default is ``"memory"``. Disk mode keeps
+recurrence snapshots and forward trial fields in read-only, demand-paged local
+scratch files without changing precision or adding PDE solves. Use local SSD
+scratch with enough free capacity. The active solve and factors remain in memory,
+and operating-system paging does not impose a strict RSS limit. Scratch fields
+are automatically discarded and are separate from persistent checkpoints.
