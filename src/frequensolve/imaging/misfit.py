@@ -305,16 +305,20 @@ class Comparison:
     ``phase_derivative`` compares the stabilized phase slope with respect to
     physical frequency (instantaneous travel time) and requires observed
     ``df`` derivative traces for every receiver group.
+    ``spectral_derivative`` compares the full complex frequency derivative,
+    retaining amplitude as well as phase information.
     """
 
-    kind: Literal["waveform", "phase_derivative"] = "waveform"
+    kind: Literal["waveform", "phase_derivative", "spectral_derivative"] = "waveform"
     source_derivative: Literal["frozen", "total"] = "frozen"
     relative_amplitude_floor: float = 0.01
 
     def __post_init__(self) -> None:
         kind = str(self.kind).strip().lower()
-        if kind not in {"waveform", "phase_derivative"}:
-            raise ValueError("comparison kind must be 'waveform' or 'phase_derivative'")
+        if kind not in {"waveform", "phase_derivative", "spectral_derivative"}:
+            raise ValueError(
+                "comparison kind must be 'waveform', 'phase_derivative', or 'spectral_derivative'"
+            )
         source_derivative = str(self.source_derivative).strip().lower()
         if source_derivative not in {"frozen", "total"}:
             raise ValueError("source_derivative must be 'frozen' or 'total'")
@@ -350,7 +354,17 @@ class Comparison:
     def requires_derivatives(self) -> Tuple[str, ...]:
         """Return the observed derivative axes this comparison needs."""
 
-        return ("df",) if self.kind == "phase_derivative" else ()
+        return (
+            ("df",) if self.kind in {"phase_derivative", "spectral_derivative"} else ()
+        )
+
+    @classmethod
+    def spectral_derivative(
+        cls, *, source_derivative: Literal["frozen", "total"] = "frozen"
+    ) -> "Comparison":
+        """Compare the full complex derivative with respect to Hz at fixed damping."""
+
+        return cls(kind="spectral_derivative", source_derivative=source_derivative)
 
     @classmethod
     def from_value(cls, value: Any) -> "Comparison":
@@ -371,6 +385,12 @@ class Comparison:
 
         if self.kind == "waveform":
             return {"kind": "waveform"}
+        if self.kind == "spectral_derivative":
+            return {
+                "kind": self.kind,
+                "derivative_axis": "frequency",
+                "source_derivative": self.source_derivative,
+            }
         return {
             "kind": self.kind,
             "derivative_axis": "frequency",

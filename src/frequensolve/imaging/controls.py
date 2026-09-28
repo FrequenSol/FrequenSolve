@@ -2460,11 +2460,22 @@ class ControlSpace:
             if registered is None:
                 raise ValueError(f"manifest does not register block {block.name!r}")
             if block.kind == "mesh":
+                # Native MPI manifests describe rank-local slots, whereas
+                # exported states/covectors use global material coefficient IDs.
+                size = (
+                    registered.global_dofs
+                    if registered.distributed
+                    else registered.size
+                )
+                if size is None or size < 1:
+                    raise ValueError(
+                        f"mesh block {block.name!r} lacks a global DOF count"
+                    )
                 blocks.append(
                     replace(
                         block,
-                        size=registered.size,
-                        baseline=np.zeros(registered.size),
+                        size=size,
+                        baseline=np.zeros(size),
                         basis_identity=registered.basis_identity,
                     )
                 )

@@ -621,6 +621,28 @@ def test_misfit_rejects_phase_derivative_without_observed_df():
         misfit.to_fs({"das": GROUPS["das"]})
 
 
+def test_spectral_waveform_terms_require_df_and_keep_independent_normalization(
+    imaging_validator,
+):
+    derivative = Comparison.spectral_derivative(source_derivative="total")
+    assert derivative.requires_derivatives == ("df",)
+    assert Comparison.from_fs(derivative.to_fs()) == derivative
+    assert "relative_amplitude_floor" not in derivative.to_fs()
+    misfit = Misfit.terms(
+        ObjectiveTerm("hydrophone", id="u", weight=0.5),
+        ObjectiveTerm("hydrophone", id="uf", weight=0.5, comparison=derivative),
+    )
+    payload = misfit.to_fs(GROUPS)
+    _validate(imaging_validator, payload)
+    assert [term["comparison"]["kind"] for term in payload["objective_terms"]] == [
+        "waveform",
+        "spectral_derivative",
+    ]
+    assert misfit.required_derivatives("hydrophone") == ("df",)
+    with pytest.raises(ValueError, match="observed 'df' derivatives"):
+        Misfit.l2(comparison=derivative).to_fs({"das": GROUPS["das"]})
+
+
 def test_misfit_rejects_inconsistent_construction():
     with pytest.raises(ValueError):
         Misfit(loss="l2", terms=[ObjectiveTerm("das")])

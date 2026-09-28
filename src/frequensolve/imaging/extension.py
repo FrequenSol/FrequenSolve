@@ -19,11 +19,12 @@ the problem and exposes Sauce's extension actions:
     the tap-space Jacobian (extension ``jvp`` / ``vjp``) and the unregularized
     ``B*WB`` (extension ``normal``).
 
-Every extension action runs one single-frequency job per saved task of the
-extension linearization, like the derivative actions of
-:class:`~frequensolve.imaging.problem.Linearization`; each frequency has its
-own inner solve (Sauce composes no cross-frequency bands) and reduced
-covectors and objective values are summed with the view's frequency weights.
+By default the inner fit uses one common tap vector across the frequency band.
+Persistent MPI frequency groups reuse their factors, sum the weighted data
+normal actions, and add the tap regularizer once. Background covectors are
+summed with the same frequency weights. This currently supports L2 values and
+gradients on LocalSite; shared reduced-Schur actions are not yet available.
+Set ``frequency_coupling="independent"`` to explicitly request separate fits.
 
 Deviation from the design sketch: ``linearize(v).normal`` is the
 :class:`~frequensolve.imaging.operators.ReducedNormal` on the control space
@@ -57,11 +58,11 @@ from typing import (
 import numpy as np
 
 from frequensolve.imaging._artifacts import (
+    WORKSPACE_DEPRECATION,
     ControlVectorFile,
     ExtensionSolveReport,
     ExtensionVectorField,
     ExtensionVectorFile,
-    WORKSPACE_DEPRECATION,
     ObjectiveReport,
     unqualified_block_name,
 )
@@ -394,6 +395,12 @@ class Extension:
             coordinates ``z`` with ``taps = scale * z``).
         tolerance, absolute_tolerance, max_iterations: Inner CG controls.
         require_convergence: Fail an unconverged inner solve.
+        gradient_checkpoints: Optional output prefix for a fixed-tap model
+            gradient at selected L2 CG iterations. This adds three propagation
+            solves per source batch and frequency per checkpoint; intermediate
+            gradients are not stationary reduced gradients.
+        gradient_checkpoint_interval: Positive CG interval between checkpoints
+            (default 1). Skipped iterations do not compute a model gradient.
         cache_mb: Per-rank incident-checkpoint budget.
         workspace_mb: Deprecated and ignored; the retained source-batch
             workspace is indivisible.
@@ -403,6 +410,8 @@ class Extension:
         reduced_normal: Optional overrides ``{relative_tolerance,
             absolute_tolerance, max_iterations}`` for the Schur response
             solve (defaults inherit the inner solver settings).
+        frequency_coupling: ``"shared"`` (default) fits common taps to the
+            frequency band; ``"independent"`` fits each frequency separately.
     """
 
     fields: Sequence[ExtensionField]
@@ -416,6 +425,8 @@ class Extension:
     absolute_tolerance: float = 0.0
     max_iterations: int = 100
     require_convergence: bool = True
+    gradient_checkpoints: Optional[str] = None
+    gradient_checkpoint_interval: int = 1
     cache_mb: Optional[float] = None
     workspace_mb: Optional[float] = None
     max_outer_iterations: Optional[int] = None
@@ -423,8 +434,25 @@ class Extension:
     gradient_tolerance: Optional[float] = None
     gradient_absolute_tolerance: Optional[float] = None
     reduced_normal: Optional[Mapping[str, Any]] = None
+    frequency_coupling: str = "shared"
 
     def __post_init__(self) -> None:
+        interval = self.gradient_checkpoint_interval
+        if (
+            isinstance(interval, bool)
+            or not isinstance(interval, (int, np.integer))
+            or interval < 1
+        ):
+            raise ValueError("gradient_checkpoint_interval must be a positive integer")
+        if self.gradient_checkpoints is not None:
+            prefix = str(self.gradient_checkpoints).strip()
+            if not prefix:
+                raise ValueError(
+                    "gradient_checkpoints must be a nonempty output prefix"
+                )
+            object.__setattr__(self, "gradient_checkpoints", prefix)
+        if self.frequency_coupling not in {"shared", "independent"}:
+            raise ValueError("frequency_coupling must be 'shared' or 'independent'")
         fields = (
             [self.fields]
             if isinstance(self.fields, (Lags, HalfOffsets))
@@ -562,6 +590,11 @@ class Extension:
             solver["offset_scale"] = dict(self.offset_scale)
         if self.field_scales is not None:
             solver["field_scales"] = list(self.field_scales)
+        if self.gradient_checkpoints is not None:
+            solver["gradient_checkpoints"] = self.gradient_checkpoints
+            solver["gradient_checkpoint_interval"] = int(
+                self.gradient_checkpoint_interval
+            )
         for key, name in (
             ("cache_mb", "cache_mb"),
             ("max_outer_iterations", "max_outer_iterations"),
@@ -1219,7 +1252,7 @@ class ExtensionLinearization:
     # -- inner solve ----------------------------------------------------------
 
     def _solve(self, *, model_gradient: bool = False, **options: Any) -> FWIOperatorJob:
-        """Run one ``solve`` job over every saved task (one inner solve per task)."""
+        """Run the shared-band fit, or explicitly requested independent fits."""
 
         extension = {
             "fields": self.extension_space.fields_fs(),
@@ -1229,6 +1262,8 @@ class ExtensionLinearization:
                 "report": "inner_solve.json",
             },
         }
+        if self.shared_frequency_fit:
+            extension["solver"]["frequency_weights"] = self.frequency_weights.tolist()
         job = self._action_job(
             "solve", extension=extension, model_gradient=model_gradient, **options
         )
@@ -1241,6 +1276,13 @@ class ExtensionLinearization:
         out = []
         for task in range(1, job.n_tasks + 1):
             report = ExtensionSolveReport.load(job.extension_report_file(task))
+            if (
+                self.shared_frequency_fit
+                and report.raw.get("scope") != "frequency_band"
+            ):
+                raise RuntimeError(
+                    "Solver did not produce the requested shared-frequency fit"
+                )
             taps = ExtensionVector.from_file(
                 job.extension_solution_file(task), self.extension_space
             )
@@ -1263,6 +1305,13 @@ class ExtensionLinearization:
             return
         if self._solutions is None:
             self._solutions = self._read_solutions(self._solve())
+
+    @property
+    def shared_frequency_fit(self) -> bool:
+        """Whether this point fits one tap vector across its frequency band."""
+        return self.extension.frequency_coupling == "shared" and (
+            len(self.frequencies) > 1 or np.any(self.frequency_weights != 1.0)
+        )
 
     @property
     def solutions(self) -> List[Tuple[ExtensionVector, ExtensionSolveReport]]:
@@ -1288,6 +1337,18 @@ class ExtensionLinearization:
     def value(self) -> float:
         """Return the reduced objective (weighted sum of the task reports)."""
 
+        if self.shared_frequency_fit:
+            reports = self.solve_reports
+            if all(r.data_objective is not None for r in reports):
+                return float(
+                    np.dot(self.frequency_weights, [r.data_objective for r in reports])
+                    + reports[0].regularization
+                )
+            if reports[0].quadratic_objective is None:
+                raise RuntimeError(
+                    "Shared frequency solve did not report its objective"
+                )
+            return float(reports[0].quadratic_objective)
         return float(
             np.dot(
                 self.frequency_weights,
@@ -1315,6 +1376,9 @@ class ExtensionLinearization:
                     merged[label] = merged.get(label, 0.0) + float(weight) * float(
                         value
                     )
+        if self.shared_frequency_fit:
+            merged["regularization"] = float(self.solve_reports[0].regularization)
+            merged["reduced_objective"] = self.value
         return merged
 
     # -- operators ------------------------------------------------------------
@@ -1339,6 +1403,10 @@ class ExtensionLinearization:
     def normal(self) -> ReducedNormal:
         """Return the reduced GN Schur normal on the control space."""
 
+        if self.shared_frequency_fit:
+            raise NotImplementedError(
+                "Shared-frequency Schur actions are not yet available; the shared fit currently supports L2 values and gradients"
+            )
         if self._normal is None:
             self._normal = ReducedNormal(self.problem, self.point, linearization=self)
         return self._normal
@@ -1527,6 +1595,11 @@ class ExtensionLinearization:
     def apply_reduced_normal(self, dv: Any) -> ControlVector:
         """Return the reduced GN Schur action on ``dv`` (memoized per direction)."""
 
+        if self.shared_frequency_fit:
+            raise NotImplementedError(
+                "Shared-frequency Schur actions are not yet available; "
+                "the shared fit currently supports L2 values and gradients"
+            )
         direction = self._control_vector(dv)
 
         def compute() -> ControlVector:
@@ -1667,7 +1740,12 @@ class ExtendedProblem:
     def extension_space(self) -> ExtensionSpace:
         """Return the tap space (fields resolved on the full control space)."""
 
-        if self._extension_space is None:
+        # Registry discovery replaces provisional mesh blocks with their actual
+        # constrained bases. Never retain the placeholder one-DOF tap layout.
+        if (
+            self._extension_space is None
+            or self._extension_space.space is not self._problem.full_space
+        ):
             self._extension_space = ExtensionSpace(
                 self._problem.full_space, self.extension
             )
@@ -1684,7 +1762,11 @@ class ExtendedProblem:
     def identity(self) -> Dict[str, Any]:
         """Return the state-independent identity (problem view plus extension)."""
 
-        return {**self._problem.identity(), "extension": self.extension.to_fs()}
+        return {
+            **self._problem.identity(),
+            "extension": self.extension.to_fs(),
+            "frequency_coupling": self.extension.frequency_coupling,
+        }
 
     def __repr__(self) -> str:
         return (
@@ -1753,6 +1835,18 @@ class ExtendedProblem:
                 "reduced background actions require L2, Huber or Student-t losses "
                 f"(misfit uses {sorted(losses)})"
             )
+        if self.extension.frequency_coupling == "shared" and (
+            len(problem.frequencies) > 1
+            or np.any(_weights(problem, len(problem.frequencies)) != 1.0)
+        ):
+            if losses - {"l2"}:
+                errors.append(
+                    "shared-frequency extension fits currently require L2 losses"
+                )
+            if self.extension.reduced_normal is not None:
+                errors.append(
+                    "shared-frequency reduced-Schur actions are not yet supported"
+                )
         active = list(problem.space.resolved_blocks)
         bad = [b.name for b in active if b.kind not in MATERIAL_KINDS]
         if bad:
@@ -1947,21 +2041,29 @@ class ExtendedProblem:
         """Return ``(taps, report)`` of the inner solve per frequency task.
 
         One ``solve`` job carries every frequency of the view; Sauce solves
-        the taps of each task on its own and writes them as task-suffixed
-        outputs, returned here in frequency order.
+        one common tap vector by default and writes task-suffixed copies with
+        their individual state identities, returned here in frequency order.
+        Explicit ``frequency_coupling="independent"`` fits each task separately.
         """
 
         return self.linearize(v).solutions
 
     def solve(self, v: Any = None) -> Tuple[ExtensionVector, ExtensionSolveReport]:
-        """Return the solved taps and report of a single-frequency view.
+        """Return the common taps and band report, or a single-frequency fit.
 
-        Each frequency task has its own taps, so a multi-frequency view has no
-        single answer: use :meth:`solve_all` (same one job, every task's
-        result) or restrict the view to one frequency.
+        Independent multi-frequency fits have no single answer: use
+        :meth:`solve_all` or restrict the view to one frequency.
         """
 
         solutions = self.solve_all(v)
+        if self.extension.frequency_coupling == "shared":
+            linearization = self.linearize(v)
+            report = dataclasses.replace(
+                solutions[0][1],
+                reduced_objective=linearization.value,
+                data_objective=linearization.report.get("data_objective"),
+            )
+            return solutions[0][0], report
         if len(solutions) != 1:
             raise ValueError(
                 f"solve() needs a single-frequency view ({len(solutions)} tasks); "

@@ -1,5 +1,18 @@
 # Pinned Sauce contracts (imaging Phase 0)
 
+The 2026-09-28 local shared-FWIME overlay adds
+`fwi_operator.extension.solver.frequency_weights` to fs-job-1. It requires the
+matching native `--frequency-groups` implementation: weighted L2 data actions,
+one common tap vector and regularization counted once. The SDK defaults to this
+mode for multi-frequency extensions on LocalSite; older solver binaries are
+not compatible. This is a targeted working-tree overlay, not a new full pin.
+
+The fs-job-1 schema also adopts the receiver_diagonal and wri.diagonal extensions
+from local Sauce `875f1173` plus the receiver-curvature working changes. These
+fields require the matching rebuilt backend; other snapshot provenance follows.
+The same local overlay adopts `wri.formulation: centered | original`, with
+centered as the default, and the corresponding objective metadata.
+
 Baseline copied from `FrequenSol/Sauce@f533e6fd7dbc907805c92b0e6f3aa38d71c7aaae` (`imaging-api-phase0`, 2026-09-21): `trunk/contracts/fragments`, inputs fs-acquisition-1 fs-acquisition-2 fs-coordinate-system-1 fs-eikonal-1 fs-imaging-1 fs-implicit-geometry-1 fs-job-1 fs-material-model-1 fs-output-config-1 fs-simulation-1 fs-units-1 and the imaging output contracts. Refresh only when FrequenSolve intentionally adopts newer Sauce contracts; keep the SHA explicit.
 
 Changes adopted relative to the previous `sauce-83c7f06` pin:
@@ -27,3 +40,12 @@ interface energy and the classic-elastic total-Gram objective gradient; normals
 remain frozen-Gram. FWIME retains complex-frequency lag amplitudes through its
 adjoints and inner/reduced operators. These jobs require the updated Sauce
 executable; schema validation does not establish compatibility with older builds.
+
+## Receiver operator compatibility overlay
+
+The receiver actions and receiver state/vector contracts, including the new
+`fs-receiver-state-bundle-1` and `fs-receiver-vector-bundle-1` collections, adopt
+local Sauce `875f1173` plus the uncommitted receiver checkpoint and multi-group
+changes (2026-09-27). The input direction/covector implications include
+`receiver_jvp` / `receiver_vjp`. These are targeted working-tree overlays,
+not a verbatim snapshot of that commit, and require the matching rebuilt solver.

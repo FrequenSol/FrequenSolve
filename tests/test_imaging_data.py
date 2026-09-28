@@ -522,3 +522,14 @@ def test_objective_vector_writer_covers_every_rank_including_empty(
         np.testing.assert_array_equal(
             restored.values[layout.indices], vector.values[layout.indices]
         )
+
+
+def test_zero_observed_data_resolves_without_a_trace_file():
+    from types import SimpleNamespace
+
+    data = ObservedData(None)
+    simulation = SimpleNamespace(
+        acquisition=SimpleNamespace(receiver_groups=[SimpleNamespace(name="surface")])
+    )
+    groups = data.resolve(simulation)
+    assert groups[0].to_fs() == {"name": "surface"}

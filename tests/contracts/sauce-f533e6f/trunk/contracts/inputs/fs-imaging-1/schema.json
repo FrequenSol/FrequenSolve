@@ -104,7 +104,8 @@
         "kind": {
           "enum": [
             "waveform",
-            "phase_derivative"
+            "phase_derivative",
+            "spectral_derivative"
           ],
           "default": "waveform",
           "description": "Attribute compared before the radial objective is applied."
@@ -542,7 +543,7 @@
               "comparison": {
                 "required": ["kind"],
                 "properties": {
-                  "kind": {"const": "phase_derivative"}
+                  "kind": {"enum": ["phase_derivative", "spectral_derivative"]}
                 }
               }
             },

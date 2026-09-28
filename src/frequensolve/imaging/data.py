@@ -422,7 +422,7 @@ def _sorted_f_map(metadata: Mapping[str, Any]) -> List[Any]:
 class _ObservedSource:
     """Normalized form of one observed-data argument."""
 
-    kind: Literal["job", "stem", "mapping", "dataset", "ref"]
+    kind: Literal["job", "stem", "mapping", "dataset", "ref", "zero"]
     stem: Optional[Path] = None
     ref: Optional[TraceStoreRef] = None
     groups: Mapping[str, ObservedRef] = field(default_factory=dict)
@@ -439,6 +439,8 @@ class _ObservedSource:
     ) -> Optional[ObservedRef]:
         """Return the reference for ``group`` or ``None`` when unbound."""
 
+        if self.kind == "zero":
+            return None
         if self.kind == "mapping":
             if group not in self.groups:
                 return None
@@ -478,6 +480,8 @@ class _ObservedSource:
 
 
 def _normalize_source(value: Any, *, label: str) -> _ObservedSource:
+    if value is None:
+        return _ObservedSource(kind="zero")
     if isinstance(value, ObservedData):
         raise TypeError(f"{label} cannot be another ObservedData")
     if _is_job(value):
@@ -546,6 +550,8 @@ class ObservedData:
 
     Accepted ``source`` forms:
 
+    * ``None`` for zero observed data with explicitly scaled waveform terms
+      (legacy objectives retain their unit-adjoint sensitivity behavior);
     * a FrequenSolve forward job: its packed trace product (or, before it has
       run, its trace output directory) is the observed path stem and its
       ``f_list`` gives the frequencies;

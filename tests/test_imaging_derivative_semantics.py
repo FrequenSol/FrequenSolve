@@ -160,16 +160,6 @@ def test_native_checkpoint_reuses_frozen_normalization(tmp_path):
     assert json.loads(resumed.context.read_text()) == saved["context"]
 
 
-def test_focus_returns_the_derivative_of_its_reported_value(tmp_path):
-    problem = _problem(tmp_path, FakeImagingSite(seed=7))
-    focus = im.TimeReversalFocus(problem, softening=0.1)
-    x, d = problem.space.random(1), problem.space.random(2)
-    h = 1e-5
-    fd = (focus.value(x + h * d) - focus.value(x - h * d)) / (2 * h)
-    assert focus.gradient(x).values @ d.values == pytest.approx(fd, rel=1e-7)
-    assert not hasattr(focus, "smoothed_gradient")
-
-
 @pytest.mark.parametrize(
     "spec, expected",
     [

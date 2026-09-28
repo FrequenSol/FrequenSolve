@@ -52,11 +52,122 @@ def _space():
 
 
 def _extension(**kwargs):
-    options = dict(damping=0.3, lag_penalty=1.0, lag_scale=20 * u.ms, tolerance=1e-8)
+    options = dict(
+        damping=0.3,
+        lag_penalty=1.0,
+        lag_scale=20 * u.ms,
+        tolerance=1e-8,
+        frequency_coupling="independent",
+    )
     options.update(kwargs)
     return Extension(
         [Lags("vp", count=3, origin=-10 * u.ms, spacing=10 * u.ms)], **options
     )
+
+
+def test_shared_frequency_fit_dispatches_one_grouped_solve(tmp_path, fake, monkeypatch):
+    _, problem = _problem(tmp_path, fake)
+    xp = problem.extend(_extension(frequency_coupling="shared"))
+    lin = xp.linearize()
+    captured = []
+    monkeypatch.setattr(lin.view, "_run_job", captured.append)
+    job = lin._solve(model_gradient=True, covector="gradient.h5")
+    assert captured == [job]
+    assert job.frequency_groups == 2
+    assert job.extension["solver"]["frequency_weights"] == [1.0, 1.0]
+    _assert_valid(job.to_fs())
+
+
+def test_gradient_checkpoint_prefix_reaches_native_solver(tmp_path, fake, monkeypatch):
+    _, problem = _problem(tmp_path, fake)
+    extension = _extension(
+        gradient_checkpoints="iterations/gradient", gradient_checkpoint_interval=10
+    )
+    assert extension.solver_fs()["gradient_checkpoints"] == "iterations/gradient"
+    lin = problem.extend(extension).linearize()
+    monkeypatch.setattr(lin.view, "_run_job", lambda job: None)
+    job = lin._solve(model_gradient=True, covector="gradient.h5")
+    document = job.to_fs()
+    _assert_valid(document)
+    assert (
+        document["fwi_operator"]["extension"]["solver"]["gradient_checkpoint_interval"]
+        == 10
+    )
+    assert str(
+        document["fwi_operator"]["extension"]["solver"]["gradient_checkpoints"]
+    ).endswith("iterations/gradient")
+    with pytest.raises(ValueError, match="nonempty"):
+        _extension(gradient_checkpoints=" ")
+
+
+@pytest.mark.parametrize("interval", [0, -1, 1.5, True, "10"])
+def test_gradient_checkpoint_interval_requires_positive_integer(interval):
+    with pytest.raises(ValueError, match="positive integer"):
+        _extension(gradient_checkpoint_interval=interval)
+
+
+def test_extension_space_refreshes_after_registry_replaces_provisional_basis(setup):
+    sim, problem, xp = setup
+    provisional = xp.extension_space
+    assert provisional.size == 15
+    problem._shared.space = ControlSpace(
+        vp=DepthProfile("vp", "sediment", count=7),
+        rho=DepthProfile("rho", "sediment", count=3),
+    ).bind(sim)
+    assert xp.extension_space is not provisional
+    assert xp.extension_space.size == 21
+    assert xp.extension_space.space is problem.full_space
+
+
+def test_shared_single_frequency_weight_scales_data_not_regularizer(
+    tmp_path, fake, monkeypatch
+):
+    _, problem = _problem(tmp_path, fake)
+    xp = problem.restrict(frequencies=[4.0], weights=[0.7]).extend(
+        _extension(frequency_coupling="shared")
+    )
+    lin = xp.linearize()
+    monkeypatch.setattr(lin.view, "_run_job", lambda job: None)
+    job = lin._solve()
+    assert job.frequency_groups == 1
+    assert job.extension["solver"]["frequency_weights"] == [0.7]
+    _assert_valid(job.to_fs())
+
+
+def test_shared_frequency_objective_counts_regularization_once(tmp_path, fake):
+    _, problem = _problem(tmp_path, fake)
+    lin = problem.extend(_extension(frequency_coupling="shared")).linearize()
+    lin.frequency_weights = np.array([0.7, 1.3])
+    lin._solutions = [
+        (
+            lin.extension_space.zeros(),
+            ExtensionSolveReport(
+                baseline="baseline",
+                fingerprint="fingerprint",
+                damping=1.0,
+                method="cg",
+                iterations=2,
+                converged=True,
+                regularization=3.0,
+                data_objective=value,
+                reduced_objective=value + 3.0,
+                raw={"scope": "frequency_band"},
+            ),
+        )
+        for value in (2.0, 4.0)
+    ]
+    assert lin.value == pytest.approx(9.6)
+    assert lin.report["regularization"] == 3.0
+    assert lin.report["data_objective"] == pytest.approx(6.6)
+    with pytest.raises(NotImplementedError, match="Schur"):
+        _ = lin.normal
+
+
+def test_frequency_coupling_default_and_validation():
+    fields = [Lags("vp", count=3, origin=0, spacing=1)]
+    assert Extension(fields, damping=0.3).frequency_coupling == "shared"
+    with pytest.raises(ValueError, match="frequency_coupling"):
+        Extension(fields, damping=0.3, frequency_coupling="average")
 
 
 def _simulation(tmp_path, *, relaxed=False):

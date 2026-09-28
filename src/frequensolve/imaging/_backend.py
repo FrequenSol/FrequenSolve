@@ -168,6 +168,30 @@ def _require_file(path: Path, what: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def task_covectors(
+    job: FWIOperatorJob,
+    factors: Optional[Sequence[Mapping[str, float]]] = None,
+) -> Iterable[ControlVectorFile]:
+    """Read each unsummed task covector once, in reference coordinates."""
+
+    if factors is not None and len(factors) != job.n_tasks:
+        raise ValueError(f"expected {job.n_tasks} per-task block factor tables")
+    first = None
+    for task in _tasks(job):
+        path = _require_file(job.covector_file(task), f"task {task} covector")
+        part = ControlVectorFile.read(path, native=False)
+        if first is None:
+            first = (part.names, part.sizes)
+        elif (part.names, part.sizes) != first:
+            raise ValueError(f"{path} has a different block layout than task 1")
+        if factors is not None:
+            for name in part.blocks:
+                part.blocks[name] = part.blocks[name] * float(
+                    factors[task - 1].get(name, 1.0)
+                )
+        yield part
+
+
 def reduce_covectors(
     job: FWIOperatorJob,
     weights: Optional[Sequence[float]] = None,
@@ -477,6 +501,12 @@ class Backend:
     def submit(self, job: BaseJob, *, postprocess_only: bool = False) -> RunHandle:
         """Submit ``job`` with the pinned options and return its handle."""
 
+        if getattr(job, "frequency_groups", 1) > 1 and not getattr(
+            self.site, "supports_frequency_groups", False
+        ):
+            raise NotImplementedError(
+                "This site does not yet launch shared-frequency workers; use LocalSite or the native --frequency-groups launcher"
+            )
         return self.site.submit(job, **self._options(postprocess_only=postprocess_only))
 
     def run(

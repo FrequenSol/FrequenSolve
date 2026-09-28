@@ -1,4 +1,10 @@
-"""Objective rows and residuals from Sauce's immutable saved state."""
+"""Objective rows, residuals and simulated data from Sauce's immutable saved state.
+
+Per the ``fs-objective-linearization-3`` contract a term cache stores ``simulated`` (the modeled receiver values in
+objective rows) and ``objective_residual``, the weighted **observed-minus-simulated** comparison error; the Jacobian
+pullback of ``vjp`` is that residual's, i.e. ``-d(simulated)/dm`` for unit weights.  A writer following the opposite
+convention records ``convention = "simulated_minus_observed"`` on the ``objective_residual`` dataset.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,10 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Union
+
+OBSERVED_MINUS_SIMULATED = "observed_minus_simulated"
+SIMULATED_MINUS_OBSERVED = "simulated_minus_observed"
+_CONVENTIONS = (OBSERVED_MINUS_SIMULATED, SIMULATED_MINUS_OBSERVED)
 
 import h5py
 import numpy as np
@@ -53,9 +63,22 @@ class ObjectiveState:
                     )
                     count = int(np.asarray(group["n_global_rows"]).item())
                     residual = None
+                    convention = OBSERVED_MINUS_SIMULATED
                     if "objective_residual" in group:
-                        packed = np.asarray(group["objective_residual"])
+                        dataset = group["objective_residual"]
+                        packed = np.asarray(dataset)
                         residual = (packed[..., 0] + 1j * packed[..., 1]).reshape(-1)
+                        convention = dataset.attrs.get("convention", convention)
+                        if isinstance(convention, bytes):
+                            convention = convention.decode()
+                        if convention not in _CONVENTIONS:
+                            raise ValueError(
+                                f"unknown objective residual convention {convention!r}"
+                            )
+                    simulated = None
+                    if "simulated" in group:
+                        packed = np.asarray(group["simulated"])
+                        simulated = (packed[..., 0] + 1j * packed[..., 1]).reshape(-1)
                 if term["id"] not in self.terms:
                     self.terms[term["id"]] = {
                         "receiver_group": term["receiver_group"],
@@ -64,6 +87,9 @@ class ObjectiveState:
                         "seen": np.zeros(count, bool),
                         "residual": np.zeros(count, complex),
                         "has_residual": True,
+                        "simulated": np.zeros(count, complex),
+                        "has_simulated": True,
+                        "convention": convention,
                     }
                 item = self.terms[term["id"]]
                 if count != item["count"] or keys.shape != (ids.size, 3):
@@ -72,6 +98,12 @@ class ObjectiveState:
                     raise ValueError("objective state has out-of-range row ids")
                 if residual is not None and residual.size != ids.size:
                     raise ValueError("objective residual size differs from saved rows")
+                if simulated is not None and simulated.size != ids.size:
+                    raise ValueError("simulated values differ in size from saved rows")
+                if convention != item["convention"]:
+                    raise ValueError(
+                        "objective residual conventions differ between shards"
+                    )
                 indices = ids - 1
                 repeated = item["seen"][indices]
                 if np.any(item["keys"][indices[repeated]] != keys[repeated]):
@@ -87,6 +119,10 @@ class ObjectiveState:
                     item["residual"][indices] = residual
                 else:
                     item["has_residual"] = False
+                if simulated is not None:
+                    item["simulated"][indices] = simulated
+                else:
+                    item["has_simulated"] = False
                 item["keys"][indices] = keys
                 item["seen"][indices] = True
         if not self.terms or any(not np.all(t["seen"]) for t in self.terms.values()):
@@ -187,3 +223,31 @@ def objective_residual(
                 )
             values[layout.indices] = term["residual"][layout.row_ids - 1]
     return DataVector(values, space)
+
+
+def objective_simulated(
+    space: DataSpace, states: Sequence[ObjectiveState]
+) -> DataVector:
+    """Return the modeled receiver values of every objective row."""
+
+    values = np.zeros(space.size, dtype=space.dtype)
+    for frequency, state in zip(space.frequencies, states):
+        for layout in space.term_layouts(frequency=frequency):
+            term = state.terms[layout.id]
+            if not term["has_simulated"]:
+                raise NotImplementedError(
+                    "saved state has no simulated values; regenerate it with current Sauce"
+                )
+            values[layout.indices] = term["simulated"][layout.row_ids - 1]
+    return DataVector(values, space)
+
+
+def residual_sign(states: Sequence[ObjectiveState]) -> float:
+    """Return ``s`` with ``residual = s * (observed - simulated)`` shared by every term."""
+
+    conventions = {
+        term["convention"] for state in states for term in state.terms.values()
+    }
+    if len(conventions) != 1:
+        raise ValueError("objective terms mix residual conventions")
+    return 1.0 if conventions.pop() == OBSERVED_MINUS_SIMULATED else -1.0
