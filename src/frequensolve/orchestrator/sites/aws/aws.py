@@ -103,7 +103,8 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
-    execution_site_id: str = "managed-slurm"
+    execution_site_id: Optional[str] = None
+    compute_profile: Optional[str] = None
     execution_resources: Optional[dict[str, int]] = None
 
     @classmethod
@@ -268,6 +269,7 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
+        compute_profile: Optional[str] = None,
         execution_site_id: Optional[str] = None,
         execution_resources: Optional[dict[str, int]] = None,
     ):
@@ -300,6 +302,7 @@ class AWSSite(BaseSite):
         profile_values = {
             name: value
             for name, value in {
+                "compute_profile": compute_profile,
                 "execution_site_id": execution_site_id,
                 "execution_resources": execution_resources,
             }.items()
@@ -317,6 +320,7 @@ class AWSSite(BaseSite):
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
+        config.compute_profile = self.execution_profile.compute_profile
         config.execution_site_id = self.execution_profile.execution_site_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
 
@@ -490,6 +494,7 @@ class AWSSite(BaseSite):
 
         # A domain-config refresh replaces the dataclass instance, so reapply
         # the immutable named-profile selection before exposing it.
+        config.compute_profile = self.execution_profile.compute_profile
         config.execution_site_id = self.execution_profile.execution_site_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
         self.config = config
@@ -984,7 +989,7 @@ class AWSSite(BaseSite):
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
-        Uses the registered managed Slurm execution site.
+        Resolves the selected Cloud compute profile before preparing or reusing work.
 
         Submits through the authenticated GraphQL API.
 
@@ -1010,6 +1015,7 @@ class AWSSite(BaseSite):
             RuntimeError: If job submission fails.
         """
         unsupported = kwargs.keys() - {
+            "compute_profile",
             "name",
             "send_simulation_status_email",
             "allow_cpu_sharing",
@@ -1033,6 +1039,12 @@ class AWSSite(BaseSite):
         if type(allow_cpu_sharing) is not bool:
             raise ValueError("allow_cpu_sharing must be a boolean")
         execution_arguments = self.execution_profile.graphql_arguments()
+        if "compute_profile" in kwargs:
+            from .execution_profile import validate_compute_profile_name
+
+            override = validate_compute_profile_name(kwargs.pop("compute_profile"))
+            execution_arguments.pop("execution_site_id", None)
+            execution_arguments["compute_profile"] = override
         resources = execution_arguments["execution_resources"]
         if allow_cpu_sharing and (
             resources["nodes"] != 1 or resources["mpiRanks"] != 1
@@ -1059,8 +1071,27 @@ class AWSSite(BaseSite):
                 "FrequenSolve Cloud requires Cognito authentication and the "
                 "GraphQL API. Recreate this Site with a current Cloud profile."
             )
+        # Resolve before any local reuse decision. The server revalidates at submit.
+        resolved_compute = self.graphql_client.resolve_compute_profile(
+            compute_profile=execution_arguments.get("compute_profile"),
+            execution_site_id=execution_arguments.get("execution_site_id"),
+        )
+        execution_arguments["expected_compute_identity"] = resolved_compute[
+            "executionIdentity"
+        ]
         self.prepare_job(job, validate=validate)
-        if not fresh_run and not retry and job.is_run_current():
+        reusable_execution = False
+        if not fresh_run and not retry and job._job_id and job.is_run_current():
+            previous = self.graphql_client.get_simulation_status_details(
+                str(job._job_id)
+            )
+            reusable_execution = (
+                previous.get("executionSiteId") == resolved_compute["executionSiteId"]
+                and previous.get("executionRegistrationFingerprint")
+                == resolved_compute["executionIdentity"]
+                and previous.get("status") in {"SUCCEEDED", "COMPLETED"}
+            )
+        if reusable_execution:
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             result_job = (
@@ -1128,7 +1159,11 @@ class AWSSite(BaseSite):
                 backend={
                     key: value
                     for key, value in {
-                        "executionSiteId": self.execution_profile.execution_site_id,
+                        "executionSiteId": result.get("executionSiteId")
+                        or resolved_compute["executionSiteId"],
+                        "executionRegistrationFingerprint": result.get(
+                            "executionRegistrationFingerprint"
+                        ),
                         "logicalAttemptId": result.get("logicalAttemptId")
                         or f"{simulation_id}:1",
                         "providerJobId": result.get("providerJobId"),
@@ -1163,8 +1198,7 @@ class AWSSite(BaseSite):
             mode="aws",
             poll_interval=poll_interval,
             check=check,
-            backend=backend
-            or {"executionSiteId": "managed-slurm", "logicalAttemptId": f"{job_id}:1"},
+            backend=backend or {"logicalAttemptId": f"{job_id}:1"},
             _logs_fn=lambda run, **options: self.fetch_logs(
                 run.job, simulation_id=str(run.id), **options
             ),
@@ -1280,6 +1314,7 @@ class AWSSite(BaseSite):
             "requestedResources",
             "allocatedResources",
             "executionSiteId",
+            "executionRegistrationFingerprint",
             "logicalAttemptId",
             "providerJobId",
             "executionState",

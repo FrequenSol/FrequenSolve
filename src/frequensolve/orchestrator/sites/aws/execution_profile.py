@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 MANAGED_EXECUTION_PROFILE_FIELDS = frozenset(
-    {"execution_site_id", "execution_resources"}
+    {"execution_site_id", "execution_resources", "compute_profile"}
 )
 
 
@@ -18,7 +19,7 @@ class ManagedExecutionProfileError(ValueError):
 class ManagedExecutionProfile:
     """Execution settings sourced from one named site profile."""
 
-    execution_site_id: str = "managed-slurm"
+    execution_site_id: str | None = None
     execution_resources: dict[str, Any] = field(
         default_factory=lambda: {
             "nodes": 1,
@@ -26,6 +27,8 @@ class ManagedExecutionProfile:
             "wall_time_seconds": 3600,
         }
     )
+
+    compute_profile: str | None = None
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "ManagedExecutionProfile":
@@ -35,11 +38,20 @@ class ManagedExecutionProfile:
             raise ManagedExecutionProfileError(
                 "Use execution_site_id and execution_resources for managed execution"
             )
-        site_id = values.get("execution_site_id", "managed-slurm")
-        if site_id != "managed-slurm":
+        site_id = values.get("execution_site_id")
+        compute_profile = values.get("compute_profile")
+        if site_id is not None and compute_profile is not None:
             raise ManagedExecutionProfileError(
-                "execution_site_id must be managed-slurm"
+                "Select compute_profile or execution_site_id, not both"
             )
+        if site_id is not None and (
+            not isinstance(site_id, str)
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", site_id)
+            or site_id == "managed-batch"
+        ):
+            raise ManagedExecutionProfileError("Invalid execution_site_id")
+        if compute_profile is not None:
+            validate_compute_profile_name(compute_profile)
         resources = values.get("execution_resources")
         if resources is None:
             resources = {"nodes": 1, "mpi_ranks": 1, "wall_time_seconds": 3600}
@@ -94,7 +106,9 @@ class ManagedExecutionProfile:
                 or (nodes > 1 and pool.partition != "cpu-efa")
             ):
                 raise ManagedExecutionProfileError("Unsupported managed adaptive pool")
-            return cls(site_id, {**resources, "pool": dict(resources["pool"])})
+            return cls(
+                site_id, {**resources, "pool": dict(resources["pool"])}, compute_profile
+            )
         if (
             resources.get("mode", "independent-frequency.v1")
             != "independent-frequency.v1"
@@ -123,7 +137,11 @@ class ManagedExecutionProfile:
             raise ManagedExecutionProfileError(
                 "Unsupported node/MPI-rank combination at managed-slurm"
             )
-        return cls(execution_site_id=site_id, execution_resources=validated)
+        return cls(
+            execution_site_id=site_id,
+            execution_resources=validated,
+            compute_profile=compute_profile,
+        )
 
     def graphql_arguments(self) -> dict[str, Any]:
         """Return the hosted submitJob arguments for this profile."""
@@ -134,7 +152,16 @@ class ManagedExecutionProfile:
             "planner_memory_mib": "plannerMemoryMiB",
         }
         return {
-            "execution_site_id": self.execution_site_id,
+            **(
+                {"execution_site_id": self.execution_site_id}
+                if self.execution_site_id is not None
+                else {}
+            ),
+            **(
+                {"compute_profile": self.compute_profile}
+                if self.compute_profile is not None
+                else {}
+            ),
             "execution_resources": {
                 names.get(k, k): (
                     {
@@ -158,5 +185,18 @@ def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
     ):
         raise ManagedExecutionProfileError(
             f"unsupported Slurm resource shape: {name} must be from {minimum} through {maximum}"
+        )
+    return value
+
+
+def validate_compute_profile_name(value: Any) -> str:
+    """Validate a Cloud-owned profile selector without normalizing its identity."""
+    if (
+        not isinstance(value, str)
+        or len(value) > 64
+        or not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", value)
+    ):
+        raise ManagedExecutionProfileError(
+            "compute_profile must use up to 64 lowercase letters, numbers and single hyphens"
         )
     return value

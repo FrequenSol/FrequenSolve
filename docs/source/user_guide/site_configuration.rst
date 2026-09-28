@@ -122,9 +122,9 @@ rest of the profile. For example, this keeps the local profile's configured
 
    local = fs.Site(profile="local", n_workers=1, threads_per_worker=16)
 
-Managed Cloud execution selection and resource shape are the exception: they
-are accepted only from a named ``site.toml`` profile. They cannot be overridden
-on ``fs.Site(...)`` or ``submit(...)``.
+Cloud resource shapes are accepted only from a named ``site.toml`` profile.
+They cannot be overridden on ``fs.Site(...)`` or ``submit(...)``. A Cloud
+``compute_profile`` can also be selected for an individual submission as below.
 
 Set ``FREQUENSOLVE_SITE_CONFIG`` or pass ``fs.Site(config_path=...)`` when a
 test, notebook, or shared workstation should use a different config file:
@@ -137,6 +137,45 @@ Direct constructors such as ``fs.LocalSite(...)`` and ``fs.AWSSite(...)``
 remain available when code intentionally targets one backend.
 ``fs.Stampede3Site(...)`` remains as a compatibility adapter for existing code
 and persisted run records.
+
+Cloud Compute Profiles
+----------------------
+
+Create a personal profile in the Cloud application's **Compute** page to name
+an authorized cluster. This profile is separate from the local TOML profile:
+``fs.Site(profile="cloud")`` selects your connection settings; ``compute_profile``
+selects the cluster shortcut saved in your Cloud account.
+
+.. code-block:: toml
+
+   [sites.cloud]
+   type = "aws"
+   domain = "app.frequensol.com"
+   compute_profile = "research-cluster"
+
+Override that selection for one run:
+
+.. code-block:: python
+
+   site = fs.Site(profile="cloud")
+   run = site.submit(job, compute_profile="shared")
+
+Selection uses the submit override, then the configured ``compute_profile``,
+then your personal Cloud default. If none is selected, Cloud checks access to
+the legacy ``managed-slurm`` default. An explicit missing, unavailable, or
+unauthorized profile fails without falling back to another cluster.
+
+An explicit ``execution_site_id`` remains supported for existing configurations.
+Do not combine it with ``compute_profile`` in the same configuration or API
+request. Remove an implicit ``execution_site_id = "managed-slurm"`` from older
+configuration files if you want to follow your personal Cloud default.
+
+Profile resolution happens before local output reuse. The SDK checks the
+previous run's registered cluster identity, and Cloud revalidates that identity
+before submission. If it changed during preparation, retry after reviewing the
+profile in Compute. Profile deletion does not redirect existing run handles;
+logs, results, and cancellation continue to use their simulation identifier.
+This requires a Cloud backend with Compute profile resolution support.
 
 .. _site-config-spec:
 
@@ -258,8 +297,13 @@ site before submission. The SDK never creates a cluster.
    * - ``email`` / ``password``
      - Accepted for non-interactive login. Prefer cached login state or a secrets
        manager instead of storing credentials in ``site.toml``.
+   * - ``compute_profile``
+     - Optional stable name of a personal profile created in Cloud Compute.
+       Omit to follow the personal default.
    * - ``execution_site_id``
-     - ``managed-slurm``, the supported hosted execution site.
+     - An explicitly authorized Cloud execution-site identifier. Existing
+       ``managed-slurm`` configurations retain their meaning. Omit when
+       selecting a personal ``compute_profile``.
    * - ``execution_resources``
      - ``nodes``, ``mpi_ranks``, and ``wall_time_seconds`` are required together.
        The managed site supports one node with one MPI rank, or two nodes with
