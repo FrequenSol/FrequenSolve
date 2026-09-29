@@ -1041,6 +1041,7 @@ class ImagingProblem:
         *,
         state: Optional[ControlState] = None,
         mesh_averaging_wavelengths: float = 0.5,
+        discovery_frequencies: Optional[Iterable[Any]] = None,
     ) -> "ImagingProblem":
         """Return a problem over another control layout (resolution change).
 
@@ -1063,6 +1064,9 @@ class ImagingProblem:
             state: The initial state.  ``None`` transfers the current state;
                 a state on this problem's layout is transferred; a state on
                 the new layout is adopted as is.
+            discovery_frequencies: Restrict native registry discovery to these
+                frequencies when changing layout. The returned problem still
+                supports the complete frequency schedule.
 
         The transfer is block-wise: blocks whose layout is unchanged are
         copied, material profile / lattice blocks are projected with
@@ -1144,7 +1148,12 @@ class ImagingProblem:
         problem._shared = derived
         problem._init_view()
         if derived.pending_manifest:
-            problem._ensure_registry()
+            discovery = (
+                problem
+                if discovery_frequencies is None
+                else problem.restrict(frequencies=discovery_frequencies)
+            )
+            discovery._ensure_registry()
         new_full = derived.space.without_support()
         if state is None:
             state = self._require_state()

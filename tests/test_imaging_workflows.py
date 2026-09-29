@@ -534,7 +534,7 @@ def test_fwi_native_tikhonov_uses_composite_objective(problem, fake, optimizer, 
     for index in (0, 1):
         losses = _stage_losses(result.history, index)
         assert len(losses) >= 2 and np.all(np.diff(losses) <= 1e-9)
-    assert result.stages[1].metrics["optimizer"] == "proximal_gradient"
+    assert result.stages[1].metrics["optimizer"] == optimizer.kind
 
 
 @pytest.mark.parametrize(
@@ -1418,3 +1418,19 @@ def test_with_controls_projects_same_count_basis_changes(tmp_path, fake):
         problem.with_controls(
             {"vp": DepthProfile("vp", "sediment", count=5, transform="log")}
         )
+
+
+def test_spectral_stage_does_not_change_neighboring_waveform_stage(problem):
+    derivative = {
+        "axis": "fourier",
+        "residual": "derivative",
+        "order": 1,
+        "source_derivative": "total",
+    }
+    spectral = Stage([6.0], 3, kernel_derivative=derivative).view(problem)
+    waveform = Stage([6.0], 3).view(problem)
+    assert spectral.kernel_derivative["order"] == 1
+    assert spectral.kernel_derivative["residual"] == "derivative"
+    assert waveform.kernel_derivative is None
+    assert problem.kernel_derivative is None
+    assert spectral.identity() != waveform.identity()

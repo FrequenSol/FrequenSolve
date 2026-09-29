@@ -22,6 +22,7 @@ from .regularization import (
     Scaled,
     Sum,
     Tikhonov,
+    _SymmetricModelOperator,
 )
 
 
@@ -102,6 +103,7 @@ class BoundNativeRegularization(BoundRegularization):
         self.source.simulation.name = problem.backend.job_name("regularization_model")
         self.source.simulation.save()
         self._value_cache: dict[bytes, float] = {}
+        self._gradient_cache: dict[bytes, np.ndarray] = {}
         job = self._run("prepare", self.baseline.values, context=None)
         self.context = job.context
         self.context_identity = json.loads(self.context.read_text())
@@ -129,6 +131,7 @@ class BoundNativeRegularization(BoundRegularization):
         self.context_identity = previous
         self.context.write_text(json.dumps(previous))
         self._value_cache.clear()
+        self._gradient_cache.clear()
 
     def _model_file(self, full: np.ndarray) -> ControlVectorFile:
         space = self.baseline.space
@@ -197,9 +200,61 @@ class BoundNativeRegularization(BoundRegularization):
         full = self._full(v) - self.reference
         key = hashlib.sha256(full.tobytes()).digest()
         if key not in self._value_cache:
-            job = self._run("value", full, context=self.context)
+            job = self._run(
+                "gradient" if self.is_smooth else "value", full, context=self.context
+            )
+            if self.is_smooth:
+                self._gradient_cache = {key: self._read_gradient(job)}
             self._value_cache[key] = self._read_value(job)
         return self.factor * self._value_cache[key]
+
+    @property
+    def is_smooth(self) -> bool:
+        """Tikhonov has an exact native quadratic gradient; TV/TGV use prox."""
+        return self.regularization.smoothing.kind == "tikhonov"
+
+    def _read_gradient(self, job: RegularizationJob) -> np.ndarray:
+        result = ControlVectorFile.read(job.gradient_file(), native=True)
+        gradient = np.zeros(self.space.size)
+        for block in self.space.resolved_blocks:
+            if block.name.startswith("model."):
+                gradient[self.space.slices[block.name]] = result[block.name][
+                    self.space._mask_of(block)
+                ]
+        return gradient
+
+    def gradient(self, v: Any) -> ControlVector:
+        if not self.is_smooth:
+            raise ValueError("TV/TGV require their proximal callback")
+        full = self._full(v) - self.reference
+        key = hashlib.sha256(full.tobytes()).digest()
+        if key not in self._gradient_cache:
+            job = self._run("gradient", full, context=self.context)
+            self._value_cache[key] = self._read_value(job)
+            self._gradient_cache = {key: self._read_gradient(job)}
+        return self._wrap(self.factor * self._gradient_cache[key])
+
+    def hessian_operator(self, v: Any = None) -> Any:
+        if not self.is_smooth:
+            raise ValueError("TV/TGV require their proximal callback")
+
+        def action(direction: np.ndarray) -> np.ndarray:
+            # Tangents have zero fixed entries, unlike full model values.
+            full = self._full(direction) - self._full(np.zeros(self.space.size))
+            job = self._run("gradient", full, context=self.context)
+            self._read_value(job)
+            return self.factor * self._read_gradient(job)
+
+        return _SymmetricModelOperator(action, self.space)
+
+    def curvature_diagonal(self, v: Any = None) -> np.ndarray:
+        if not self.is_smooth:
+            raise ValueError("TV/TGV require their proximal callback")
+        job = self._run(
+            "diagonal", np.zeros_like(self.baseline.values), context=self.context
+        )
+        self._read_value(job)
+        return self.factor * self._read_gradient(job)
 
     def prox(
         self,

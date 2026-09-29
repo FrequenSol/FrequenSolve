@@ -672,8 +672,9 @@ and optimizer preconditioning do not alter this derivative. PML elements are exc
 uses the outward extension of the boundary model, which is held fixed.
 
 For meshed materials, low-level ``FWIOperatorJob`` and ``ControlGradientJob``
-default to ``sensitivity_quadrature="wavefield"`` for mutually consistent
-discrete gradients, Jacobian actions and normals. Explicit
+default to ``sensitivity_quadrature="auto"``, which retains wavefield quadrature
+for meshed materials and consistent discrete Jacobian actions. Tensor volume
+pullbacks instead default to nodal sensitivities (see below). Explicit
 ``"material_intersections"`` evaluates volume pullbacks on wavefield/material-cell
 intersections. This experimental option leaves forward
 assembly, JVPs, face quadrature and wavefield DOFs unchanged, so its covector is
@@ -733,8 +734,11 @@ its native integral. Non-material controls can receive separate custom terms,
 such as ``Quadratic``.
 
 Sauce evaluates the energy at every line-search trial and solves the constrained
-proximal update in the optimizer's metric. Native regularization selects
-proximal-gradient backtracking instead of a Newton-CG or L-BFGS step; history
+proximal update in the optimizer's metric. In FWI, Tikhonov uses native exact
+coefficient gradient and Hessian callbacks and preserves the requested L-BFGS
+or Newton-CG optimizer. This requires a solver supporting the native
+``gradient`` regularization operation. TV/TGV (and native LSRTM terms) select
+proximal-gradient backtracking; history
 records the effective optimizer. Newton/L-BFGS preconditioners do not apply to
 this path; use coordinate ``scaling`` to set its diagonal metric. Bounds and
 frozen coefficients enter the
@@ -1579,10 +1583,66 @@ updates separately from its historical Sauce pin.
 Spectral field storage
 ~~~~~~~~~~~~~~~~~~~~~~
 
-For spectral FWI, add ``"field_storage": "disk"`` to the existing
-``kernel_derivative`` mapping. The default is ``"memory"``. Disk mode keeps
+Spectral FWI defaults to ``"field_storage": "auto"`` in ``kernel_derivative``.
+After building and solving with the solver, Sauce estimates the entire retained
+field hierarchy from the DOF layout and RHS batch size. It switches to disk if
+that payload exceeds 80% of currently available memory, conservatively shared
+among MPI ranks on the host. Set ``field_memory_fraction`` in [0,1] to adjust
+headroom, or use explicit ``"memory"`` / ``"disk"`` overrides. Unknown memory
+availability selects disk. This is a budget check, not a memory reservation.
+Disk mode keeps
 recurrence snapshots and forward trial fields in read-only, demand-paged local
 scratch files without changing precision or adding PDE solves. Use local SSD
 scratch with enough free capacity. The active solve and factors remain in memory,
 and operating-system paging does not impose a strict RSS limit. Scratch fields
 are automatically discarded and are separate from persistent checkpoints.
+
+Tensor-point sensitivities
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The default ``sensitivity_quadrature="auto"`` samples tensor-hat volume
+sensitivities at control nodes without cell-volume weights for RTM and FWI
+pullbacks. The gridded-image mapper supports curved elements and averages shared
+samples. These are approximate nodal sensitivities, not integrated coefficient
+covectors, expressed per physical km^D rather than solver-coordinate volume.
+Tensor controls must be full-dimensional Cartesian grids sharing one
+layout per material layer. Depth-only layers keep native quadrature; mixed
+tensor/depth controls within a layer are rejected pending strip integration.
+
+Use explicit ``"wavefield"`` for discrete coefficient derivatives and transpose
+tests. Auto keeps Born/JVP, normal and WRI curvature actions discrete. Forward
+assembly and face terms are unchanged. Smoothing generated tensor sensitivities
+uses nodal input; explicit input vectors retain their configured input role.
+
+Material-aware volume assembly
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For meshed-material seismic models, opt in with
+``fs.Discretization(material_quadrature="material_intersections")`` and
+``Solver.forms_backend="cpu"`` (the default). This uses the common material/wave
+cell rule for volume assembly and coefficient derivatives, including curved
+geometry. Standard assembly remains the default. Faces retain their native rule;
+tensor/depth partitions are not implemented. Leave sensitivity quadrature at
+``auto`` or ``wavefield`` to inherit the assembly rule. Total DPG Gram/test-map
+derivatives still require the separately supported ``gram_derivative="total"``.
+
+
+Native material mass metric
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``im.NativeMass()`` supplies ``gamma*M^{-1}`` as the inverse metric for L-BFGS
+or Newton-CG, using the consistent mass matrix on the native material geometry
+and constrained basis. The objective still returns raw coefficient derivatives;
+line searches and secant products retain their coefficient-space pairings.
+By default, ``gamma`` is calibrated once per stage from a directional
+Gauss-Newton-plus-regularization curvature. ``curvature_scale=False`` uses one.
+With ``approximation="diagonal"``, assemble ``D=diag(M)`` over native material
+elements, including constrained-basis contributions. Cache this positive array
+by native basis identity and coefficient layout across frequency stages; apply
+``gamma*g/D`` without native calls or iterative solves. A changed basis/geometry
+identity triggers reassembly. This Jacobi approximation is not row-sum lumping.
+The bound object's ``riesz`` method returns the unscaled L2 gradient in consistent
+mode and its diagonal approximation otherwise; ``mass`` always applies ``M``. Completely active material blocks are
+required; partial support masks and non-material controls are rejected.
+A solver supporting native ``mass`` and ``mass_inverse`` callbacks is required
+for consistent mode; diagonal mode requires ``mass_diagonal``.

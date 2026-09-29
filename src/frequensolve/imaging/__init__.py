@@ -16,6 +16,7 @@ Import it as ``from frequensolve import imaging as im``.
 from frequensolve._exports import unique_exports
 from frequensolve.imaging._artifacts import *  # noqa: F403
 from frequensolve.imaging._artifacts import __all__ as _artifacts_all
+from frequensolve.imaging._native_mass import NativeMass as NativeMass
 from frequensolve.imaging._native_regularization import (
     NativeRegularization as NativeRegularization,
 )
@@ -46,7 +47,13 @@ from frequensolve.imaging.workflows import *  # noqa: F403
 from frequensolve.imaging.workflows import __all__ as _workflows_all
 
 __all__ = unique_exports(
-    ["PropertyMesh", "NativeRegularization", "SourceEnergy", "write_receiver_window"],
+    [
+        "PropertyMesh",
+        "NativeMass",
+        "NativeRegularization",
+        "SourceEnergy",
+        "write_receiver_window",
+    ],
     _controls_all,
     _data_all,
     _misfit_all,

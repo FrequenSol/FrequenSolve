@@ -67,7 +67,7 @@ from frequensolve.imaging.controls import (
     _BlockSpec,
 )
 from frequensolve.imaging.data import DataVector, TraceStoreRef
-from frequensolve.imaging.jobs import ImageKernelJob, ImageSpec
+from frequensolve.imaging.jobs import ImageKernelJob, ImageSpec, _kernel_derivative
 from frequensolve.imaging.misfit import Loss, Misfit
 from frequensolve.imaging.problem import ImagingProblem, Linearization, _MisfitPayload
 from frequensolve.imaging.results import FWIResult, StageResult
@@ -291,6 +291,8 @@ class Stage:
             :meth:`ImagingProblem.with_controls`, transferring the accepted
             state of the previous stage; later stages keep the new layout
             until another stage changes it.
+        kernel_derivative: Spectral-data selection for this stage, using
+            ``residual="derivative"`` or ``"window"``. Defaults to the problem's selection.
     """
 
     frequencies: Tuple[Any, ...]
@@ -307,8 +309,17 @@ class Stage:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     controls: Any = None
     mesh_averaging_wavelengths: float = 0.5
+    kernel_derivative: Optional[Mapping[str, Any]] = None
 
     def __post_init__(self) -> None:
+        if self.kernel_derivative is not None:
+            object.__setattr__(
+                self,
+                "kernel_derivative",
+                _kernel_derivative(
+                    self.kernel_derivative, residuals=("derivative", "window")
+                ),
+            )
         if (
             not np.isfinite(self.mesh_averaging_wavelengths)
             or self.mesh_averaging_wavelengths <= 0
@@ -517,6 +528,8 @@ class Stage:
             kwargs["min_support"] = self.min_support
         if self.weights is not None:
             kwargs["weights"] = self.weights
+        if self.kernel_derivative is not None:
+            kwargs["kernel_derivative"] = self.kernel_derivative
         return problem.restrict(
             frequencies=self.frequencies,
             active=None if self.active is None else list(self.active),
@@ -1233,6 +1246,7 @@ class FWI:
             problem = previous.with_controls(
                 stage.controls,
                 mesh_averaging_wavelengths=stage.mesh_averaging_wavelengths,
+                discovery_frequencies=stage.frequencies,
             )
         else:
             problem = previous.with_controls(stage.controls)
@@ -1638,6 +1652,18 @@ class FWI:
             if native_regularization is None
             else native_regularization.checkpoint()
         )
+        # Preserve native contexts in checkpoints, while smooth Tikhonov uses
+        # the requested optimizer and its exact coefficient gradient/Hessian.
+        if native_regularization is not None and native_regularization.is_smooth:
+            if bound_regularization is None:
+                bound_regularization = native_regularization
+            else:
+                from .regularization import _BoundSum
+
+                bound_regularization = _BoundSum(
+                    regularization, space, [bound_regularization, native_regularization]
+                )
+            native_regularization = None
         metrics = self._stage_metrics(index, stage, space, optimizer, regularization)
         if native_regularization is not None:
             metrics["optimizer"] = "proximal_gradient"

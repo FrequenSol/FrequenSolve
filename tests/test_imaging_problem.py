@@ -132,6 +132,33 @@ def test_spectral_window_stage_identity_and_control_layout(tmp_path, fake):
         )
 
 
+@pytest.mark.parametrize("action", ["jvp", "normal"])
+def test_first_spectral_action_accepts_total_source_derivative(tmp_path, fake, action):
+    _, problem = _problem(
+        tmp_path,
+        fake,
+        kernel_derivative={
+            "residual": "derivative",
+            "order": 1,
+            "source_derivative": "total",
+        },
+    )
+    outputs = (
+        {"objective_vector": "jvp.json"}
+        if action == "jvp"
+        else {"covector": "normal.h5"}
+    )
+    job = problem._operator_job(
+        problem.space,
+        action,
+        frequencies=problem.frequencies,
+        state="state.json",
+        direction="direction.h5",
+        **outputs,
+    )
+    assert job.to_fs()["kernel_derivative"]["source_derivative"] == "total"
+
+
 def test_spectral_fwi_accepts_physical_shot_trace_store(tmp_path, fake):
     observed_file = tmp_path / "field_traces.h5"
     observed = ObservedData(
@@ -1120,7 +1147,14 @@ def test_mechanism_reference_scale_is_fixed_across_stages_and_layouts(tmp_path):
 
     # a layout change keeps s_ref, even when the new problem's own
     # discovery runs in a 6 Hz stage
-    finer = problem.with_controls({"vp": DepthProfile("vp", "sediment", count=6)})
+    before = len(fake.jobs)
+    finer = problem.with_controls(
+        {"vp": DepthProfile("vp", "sediment", count=6)},
+        discovery_frequencies=[6.0],
+    )
+    # These specs are already resolved, so no discovery solve is needed.
+    assert len(fake.jobs) == before
+    assert finer.frequencies == problem.frequencies
     assert finer.mechanism_scaling == s_ref
     finer.restrict(frequencies=[6.0]).linearize(gradient=False)
     assert finer.mechanism_scaling == s_ref

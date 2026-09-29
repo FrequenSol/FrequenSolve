@@ -1250,11 +1250,14 @@ class FakeImagingSite(BaseSite):
         if job.operation == "prepare":
             context = {
                 name: {
+                    "identity": source.control_spaces.get(
+                        name, f"fake-native-{name}-{len(v)}"
+                    ),
                     "amplitude": (
                         max(1.0, float(np.max(np.abs(v))))
                         if job.smoothing.normalize_amplitude
                         else 1.0
-                    )
+                    ),
                 }
                 for name, v in source.blocks.items()
             }
@@ -1265,6 +1268,21 @@ class FakeImagingSite(BaseSite):
         blocks = dict(source.blocks)
         value = 0.0
         for name, v in blocks.items():
+            if job.operation in {"mass", "mass_inverse", "mass_diagonal"}:
+                # Nonuniform SPD surrogate; different support sizes matter.
+                matrix = np.diag(np.linspace(0.5, 2.0, len(v)))
+                if len(v) > 1:
+                    matrix += np.diag(np.full(len(v) - 1, 0.05), 1)
+                    matrix += np.diag(np.full(len(v) - 1, 0.05), -1)
+                if job.operation == "mass_diagonal":
+                    blocks[name] = matrix.diagonal().copy()
+                else:
+                    blocks[name] = (
+                        matrix @ v
+                        if job.operation == "mass"
+                        else np.linalg.solve(matrix, v)
+                    )
+                continue
             a = context[name]["amplitude"]
             weight = np.sqrt(alpha) * a if job.smoothing.kind == "tv" else alpha
             if job.operation == "proximal":
@@ -1281,6 +1299,10 @@ class FakeImagingSite(BaseSite):
                 )
                 v = np.clip(v, lower, upper)
                 blocks[name] = v
+            if job.operation == "gradient":
+                blocks[name] = weight * v
+            if job.operation == "diagonal":
+                blocks[name] = np.full_like(v, weight)
             value += weight * float(
                 np.abs(v).sum() if job.smoothing.kind == "tv" else 0.5 * (v @ v)
             )
