@@ -130,9 +130,16 @@
         },
         "field_storage": {
           "type": "string",
-          "enum": ["memory", "disk"],
-          "default": "memory",
-          "description": "Retained recurrence and forward trial fields use heap memory or read-only, demand-paged rank-local scratch files. Disk mode changes storage only; it is not a persistent checkpoint or a strict RSS limit."
+          "enum": ["auto", "memory", "disk"],
+          "default": "auto",
+          "description": "Auto estimates the complete retained recurrence and forward trial payload after the base solve and uses read-only, demand-paged rank-local scratch when it exceeds the available-memory budget. Explicit memory and disk override selection. Disk mode changes storage only; it is not a persistent checkpoint or a strict RSS limit."
+        },
+        "field_memory_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.8,
+          "description": "Fraction of currently available host/cgroup memory reserved for retained spectral fields in auto mode, divided conservatively among MPI ranks sharing the host. Zero forces scratch for nonempty hierarchies. Unknown availability selects disk. Does not limit solver or process RSS."
         },
         "export_lower_orders": {
           "type": "boolean",
@@ -276,9 +283,9 @@
         },
         "quadrature": {
           "type": "string",
-          "enum": ["wavefield", "material_intersections"],
-          "default": "wavefield",
-          "description": "Volume sensitivity integration policy. Defaults to wavefield for mutually consistent discrete gradients, JVPs and normal actions. Explicit material_intersections is an approximate continuous pullback. material_intersections intersects wavefield and meshed-material leaves in initial-root coordinates for material pullbacks only. Forward assembly, face terms and JVP quadrature are unchanged, so the result is not the exact discrete objective gradient. Supports RTM and FWI linearize/vjp/receiver_vjp/wri, including receiver-probe diagonal contractions as preconditioner approximations; excludes normal, Born/JVP and WRI curvature/diagonal export."
+          "enum": ["auto", "wavefield", "material_intersections", "tensor_points"],
+          "default": "auto",
+          "description": "Volume sensitivity integration policy. With Discretization/material_quadrature=material_intersections, auto, wavefield and material_intersections inherit matched assembly quadrature for coefficient derivatives; tensor_points is rejected. The following sensitivity-only behavior applies to standard wavefield assembly. Defaults to auto: tensor-node volume sensitivities for RTM and FWI pullback actions, with native quadrature for other controls and discrete Born/JVP, normal and WRI curvature actions. Explicit wavefield retains matched discrete coefficient derivatives. material_intersections is an approximate continuous pullback; tensor_points returns approximate unweighted nodal volume sensitivities. tensor_points samples full-dimensional axis-aligned Cartesian tensor nodes through the gridded-image mapper, including curved elements, with cached reference locations and shared-element averaging, without tensor-cell volume weights. These values are not integrated coefficient covectors. Tensor controls must share a layout within each material layer; depth-only layers retain native quadrature and mixed tensor/other active controls in a layer are rejected. material_intersections intersects wavefield and meshed-material leaves in initial-root coordinates for material pullbacks only. Forward assembly, face terms and JVP quadrature are unchanged, so the result is not the exact discrete objective gradient. Supports RTM and FWI linearize/vjp/receiver_vjp/wri, including receiver-probe diagonal contractions as preconditioner approximations; excludes normal, Born/JVP and WRI curvature/diagonal export."
         },
         "gram_derivative": {
           "type": "string",
@@ -558,12 +565,17 @@
               "enum": [
                 "prepare",
                 "value",
+                "gradient",
+                "diagonal",
+                "mass",
+                "mass_inverse",
+                "mass_diagonal",
                 "proximal"
               ]
             },
             "context": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-              "description": "Prepared stage context: output for prepare, immutable input for value/proximal."
+              "description": "Prepared stage context: output for prepare, immutable input for value/gradient/diagonal/proximal."
             },
             "result": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
@@ -2149,7 +2161,14 @@
               "export_lower_orders"
             ],
             "properties": {
-              "export_lower_orders": {
+              "field_memory_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.8,
+          "description": "Fraction of currently available host/cgroup memory reserved for retained spectral fields in auto mode, divided conservatively among MPI ranks sharing the host. Zero forces scratch for nonempty hierarchies. Unknown availability selects disk. Does not limit solver or process RSS."
+        },
+        "export_lower_orders": {
                 "const": true
               }
             }

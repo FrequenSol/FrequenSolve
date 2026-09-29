@@ -257,8 +257,10 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   [coupled WRI example](examples/fwi-operator-wri-coupled.json), which assumes
   the referenced simulation defines the listed fluid and solid material controls.
   See [WRI curvature and costs](../../../docs/imaging/wri.md).
-- `control_sensitivities.quadrature` defaults to `wavefield` for all actions, keeping
-  gradients and Jacobian actions consistent with the discrete forward operator.
+- `control_sensitivities.quadrature` defaults to `auto`: unweighted tensor-node
+  volume sensitivities for RTM/FWI pullbacks, with native quadrature for other
+  controls and discrete JVP/normal actions. Use explicit `wavefield` for exact
+  coefficient derivatives and transpose tests.
   Explicit `material_intersections` subdivides volume material pullbacks at material-cell
   boundaries; assembly, face rules and JVPs remain unchanged. These covectors
   approximate continuous sensitivities rather than the exact discrete objective
@@ -410,8 +412,19 @@ discrete toroidal harmonic and does not consume `k_list` or `k_weights`.
 
 An `rtm` or `fwi_operator` job may add `"kernel_derivative": {"order": 4, "axis": "fourier"}`.
 
-Retained spectral recurrence and forward trial fields can use
-`kernel_derivative.field_storage: "disk"` (default: `"memory"`). Disk mode writes
+Retained spectral recurrence and forward trial fields default to
+`kernel_derivative.field_storage: "auto"`. After the base solve, Sauce predicts
+`n` recurrence snapshots plus `n+1` element-local forward trial planes from the
+actual DOF layout, precision and RHS batch size. This does not assemble forms.
+If that payload exceeds the remaining memory budget, all ranks use disk.
+`field_memory_fraction` defaults to `0.8`, leaving 20% headroom; zero selects disk
+for any nonempty hierarchy. Available host memory (and visible Linux cgroup
+limits under standard mounts) is conservatively divided among ranks on each host.
+Unknown availability selects disk. Explicit `"memory"` and `"disk"` override auto.
+The estimate, summed rank budgets and selected mode appear in result diagnostics
+as `spectral_estimated_field_bytes`, `spectral_field_budget_bytes` and
+`spectral_fields_on_disk`. These are snapshots, not reservations against other jobs.
+Disk mode writes
 immutable fields to rank-local scratch files under `--tmp-directory` and maps
 them read-only. Pages are loaded on access and are reclaimable by the operating
 system; this is not a fixed process-RSS limit. The active solve, solver factors,
@@ -772,7 +785,20 @@ is retained. This policy does not delete user-selected FWI checkpoint stems.
 `control_sensitivities.Regularization` uses the `--smooth` entry point with an
 explicit `input` full-model vector and `gradient` output. `operation="prepare"`
 resolves weights/amplitude scales and writes `context`; `value` evaluates the
-same native energy with that context; `proximal` minimizes metric fidelity plus
+same native energy with that context; `gradient` returns the exact Tikhonov
+coefficient covector and its energy (no mass inversion). The latter operation
+rejects TV/TGV; on a zero-padded tangent it applies the Tikhonov Hessian.
+`diagonal` returns the exact coefficient Hessian diagonal for Tikhonov, with
+zero reported energy; its input values are ignored. Both derivative operations
+include constrained-basis assembly and use the frozen context weights.
+`mass` applies the consistent material mass matrix to primal coefficients;
+`mass_inverse` solves the mass system for an input coefficient covector.
+`mass_diagonal` returns the positive diagonal of the consistent mass matrix,
+including constrained-basis cross terms; its input values are ignored. These
+operations use native geometry and the constrained basis, ignore regularization
+weights/amplitude, and report zero energy. The inverse uses `iterations`,
+`relative_tolerance` and `absolute_tolerance`, and fails on nonconvergence.
+`proximal` minimizes metric fidelity plus
 `tau` times that energy with full coefficient `lower`/`upper` bounds. Equal bounds
 fix coefficients. `metric` is a positive coefficient diagonal. All vectors must
 carry matching mesh `control_spaces` identities when applicable. They contain
@@ -850,3 +876,28 @@ coefficient updates; general coarsening is approximate. This is not a gradient
 transfer or a regularization callback. Artifacts must use immutable paths keyed
 by the source state and sizing policy; retain them for all stage evaluations and
 restarts. The result follows `fs-control-mesh-adaptation-result-1`.
+
+The default `control_sensitivities.quadrature: "auto"` evaluates tensor-hat
+**volume sensitivities at tensor nodes without cell-volume weights** for RTM and
+FWI pullbacks (`linearize`, `vjp`, `receiver_vjp`, and gradient-only `wri`). This
+avoids missing fine control nodes. The gridded-image mapper supports curved
+wavefield elements; cached reference points and shared-element averaging prevent
+double counting. These are approximate nodal sensitivity values, not integrated
+coefficient covectors. Densities use physical km coordinates (per km^D),
+independent of solver nondimensionalization. Their Euclidean dot product is not an exact directional
+derivative of the discrete objective.
+
+Explicit `"tensor_points"` requests the same sampling. Explicit `"wavefield"`
+retains the discrete coefficient gradient for derivative/transpose tests. Auto
+keeps native quadrature for depth-only and other non-tensor layers, Born/JVP,
+normal actions, and WRI curvature/diagonal actions. Forward assembly and face
+terms remain unchanged. Full-dimensional axis-aligned Cartesian tensor controls
+must share one layout per material layer; mixed tensor/other active controls
+within a layer are rejected. Depth-strip integration is deferred.
+
+Diagnostics include `tensor_nodal_sensitivity`, `control_quadrature_points`,
+`control_quadrature_original_points`, `control_quadrature_cache_bytes`,
+`control_quadrature_setup_us`, and `control_quadrature_reuse`. Cache bytes count
+reference-point and averaging-weight payload only. Smoothing of generated tensor
+sensitivities uses nodal (primal) input; explicit input vectors retain their
+requested input role.

@@ -194,7 +194,7 @@ def test_model_specifications_dispatch_to_sauce(tmp_path, spec, expected):
     native.prox(x, 0.3, np.ones(x.size), lin.space.bounds)
     assert [j.operation for j in site.jobs if isinstance(j, RegularizationJob)] == [
         "prepare",
-        "value",
+        "gradient" if isinstance(spec, im.Tikhonov) else "value",
         "proximal",
     ]
     assert site.jobs[-1].tau == pytest.approx(0.6)
@@ -209,3 +209,70 @@ def test_native_specification_preserves_reference_state(tmp_path):
         im.TV(0.04, reference=reference), lin.space, problem, lin
     )
     assert native.value(reference.vector(lin.space)) == pytest.approx(0.0)
+
+
+def test_native_tikhonov_derivatives_with_reference_and_frozen_dofs(tmp_path):
+    site = FakeImagingSite(seed=7, support_masks={"model.vp": [1, 0, 1, 1, 0]})
+    problem = _problem(tmp_path, site)
+    problem.state = problem.state_from(np.arange(1.0, 9.0))
+    lin = problem.linearize()
+    reference = im.ControlState(lin.state.space, lin.state.values * 0.2)
+    _, native = bind_workflow_regularization(
+        2 * im.Tikhonov(0.3, reference=reference), lin.space, problem, lin
+    )
+    x = lin.point.values
+    direction = lin.space.random(17).values
+    h = 1e-4
+    fd = (native.value(x + h * direction) - native.value(x - h * direction)) / (2 * h)
+    assert native.gradient(x).values @ direction == pytest.approx(fd, rel=1e-9)
+    fdg = (
+        native.gradient(x + h * direction).values
+        - native.gradient(x - h * direction).values
+    ) / (2 * h)
+    np.testing.assert_allclose(native.hessian_operator() @ direction, fdg, rtol=1e-9)
+    np.testing.assert_allclose(fdg, 0.6 * direction, rtol=1e-9)
+    np.testing.assert_allclose(native.curvature_diagonal(), 0.6)
+
+
+def test_fwi_tikhonov_keeps_lbfgs_and_adds_energy_once(tmp_path):
+    site = FakeImagingSite(seed=7)
+    problem = _problem(tmp_path, site)
+    result = im.FWI(
+        problem,
+        im.Stage(FREQUENCIES, 100),
+        regularization=im.Tikhonov(0.3),
+        optimizer=im.LBFGS(
+            objective_tolerance=0, step_tolerance=0, gradient_tolerance=1e-7
+        ),
+    ).run()
+    x = result.state.vector(problem.space).values
+    np.testing.assert_allclose(problem.gradient(x).values + 0.3 * x, 0, atol=3e-6)
+    assert result.loss.regularization == pytest.approx(0.15 * (x @ x))
+    jobs = [j for j in site.jobs if isinstance(j, RegularizationJob)]
+    assert {j.operation for j in jobs} == {"prepare", "gradient"}
+    assert all(e.metrics["optimizer"] == "lbfgs" for e in result.history.iterations)
+
+
+def test_smooth_native_tikhonov_resumes_with_context(tmp_path):
+    site = FakeImagingSite(seed=7)
+    problem = _problem(tmp_path, site)
+    options = dict(
+        regularization=im.Tikhonov(0.3),
+        optimizer=im.LBFGS(
+            objective_tolerance=0, step_tolerance=0, gradient_tolerance=1e-7
+        ),
+        checkpoint=tmp_path / "checkpoint.h5",
+        history=tmp_path / "history.json",
+    )
+
+    def interrupt(event):
+        if event.stage_iteration == 2:
+            raise RuntimeError("intentional interruption")
+
+    with pytest.raises(RuntimeError, match="intentional interruption"):
+        im.FWI(problem, im.Stage(FREQUENCIES, 100), callback=interrupt, **options).run()
+    result = im.FWI(problem, im.Stage(FREQUENCIES, 100), **options).run(resume=True)
+    x = result.state.vector(problem.space).values
+    np.testing.assert_allclose(problem.gradient(x).values + 0.3 * x, 0, atol=3e-6)
+    assert result.stages[0].resumed
+    assert result.stages[0].metrics["optimizer"] == "lbfgs"

@@ -129,6 +129,15 @@
     "Discretization": {
       "type": "object",
       "properties": {
+        "material_quadrature": {
+          "type": "string",
+          "enum": [
+            "wavefield",
+            "material_intersections"
+          ],
+          "default": "wavefield",
+          "description": "Seismic compiled Forms volume integration. material_intersections partitions wavefield cells at loaded meshed-property boundaries, including curved physical geometry; uses CPU assembly and matching coefficient JVP/VJP integration. Faces keep their native rule. Requires meshed property spaces; tensor/depth partitions are not added. DPG total Gram differentiation remains a separate setting."
+        },
         "order": {
           "description": "Deprecated and no longer accepted. Use Mesh/adapt/order.",
           "deprecated": true,

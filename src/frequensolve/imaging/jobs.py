@@ -360,6 +360,7 @@ def _kernel_derivative(
         "source_derivative",
         "export_lower_orders",
         "field_storage",
+        "field_memory_fraction",
     }
     unknown = sorted(set(value).difference(allowed))
     if unknown:
@@ -368,9 +369,23 @@ def _kernel_derivative(
         )
     payload: Dict[str, Any] = {}
     if "field_storage" in value:
-        if value["field_storage"] not in ("memory", "disk"):
-            raise ValueError("kernel_derivative field_storage must be memory or disk")
+        if value["field_storage"] not in ("auto", "memory", "disk"):
+            raise ValueError(
+                "kernel_derivative field_storage must be auto, memory or disk"
+            )
         payload["field_storage"] = value["field_storage"]
+    if "field_memory_fraction" in value:
+        fraction = value["field_memory_fraction"]
+        if (
+            isinstance(fraction, bool)
+            or not isinstance(fraction, (int, float))
+            or not math.isfinite(fraction)
+            or not 0 <= fraction <= 1
+        ):
+            raise ValueError(
+                "kernel_derivative field_memory_fraction must be a finite number in [0,1]"
+            )
+        payload["field_memory_fraction"] = float(fraction)
 
     if "order" in value:
         order = int(value["order"])
@@ -1158,7 +1173,7 @@ class FWIOperatorJob(_ImagingJobBase):
             postprocess to the covector task parts.
         weights: Optional per-frequency weights for that postprocess.
         control_active: Unqualified names for ``control_sensitivities.active``.
-        sensitivity_quadrature: Defaults to ``"wavefield"`` for discrete derivatives.
+        sensitivity_quadrature: Defaults to ``"auto"``: unweighted tensor-node sensitivities for pullbacks.
             Explicit ``"material_intersections"`` selects approximate continuous pullbacks.
         gram_derivative: Optional ``control_sensitivities.gram_derivative``.
         outputs: Optional output requests.
@@ -1312,24 +1327,31 @@ class FWIOperatorJob(_ImagingJobBase):
         self.gram_derivative = gram_derivative
         self._sensitivity_quadrature_explicit = sensitivity_quadrature is not None
         if sensitivity_quadrature is None:
-            sensitivity_quadrature = "wavefield"
-        if sensitivity_quadrature not in {"wavefield", "material_intersections"}:
+            sensitivity_quadrature = "auto"
+        if sensitivity_quadrature not in {
+            "auto",
+            "wavefield",
+            "material_intersections",
+            "tensor_points",
+        }:
             raise ValueError(
-                "sensitivity_quadrature must be 'wavefield' or 'material_intersections'"
+                "sensitivity_quadrature must be 'auto', 'wavefield', 'material_intersections' or 'tensor_points'"
             )
         self.sensitivity_quadrature = sensitivity_quadrature
-        if sensitivity_quadrature == "material_intersections":
+        if sensitivity_quadrature in {"material_intersections", "tensor_points"}:
             if extension is not None:
-                raise ValueError("extension jobs cannot carry material_intersections")
+                raise ValueError(
+                    f"extension jobs cannot carry {sensitivity_quadrature}"
+                )
             if action not in {"linearize", "vjp", "receiver_vjp", "wri"}:
                 raise ValueError(
-                    "material_intersections supports pullbacks, not JVP or normal actions"
+                    f"{sensitivity_quadrature} supports pullbacks, not JVP or normal actions"
                 )
             if (wri and {"diagonal", "curvature"}.intersection(wri)) or (
                 action == "wri" and direction is not None
             ):
                 raise ValueError(
-                    "material_intersections does not support curvature or diagonal export"
+                    f"{sensitivity_quadrature} does not support curvature or diagonal export"
                 )
         self._validate()
 
@@ -1392,12 +1414,17 @@ class FWIOperatorJob(_ImagingJobBase):
                 )
             if self.gram_derivative == "total" and action != "wri":
                 raise ValueError("kernel_derivative requires frozen Gram derivatives")
+            window = self.kernel_derivative.get("window")
+            spectral_order = self.kernel_derivative.get(
+                "order", len(window) - 1 if isinstance(window, list) else 1
+            )
             if (
                 action in {"jvp", "normal"}
                 and self.kernel_derivative.get("source_derivative") == "total"
+                and spectral_order > 1
             ):
                 raise ValueError(
-                    "spectral JVP/normal actions require a frozen source spectrum"
+                    "higher-order spectral JVP/normal actions require a frozen source spectrum"
                 )
         if self.receiver_diagonal is not None:
             if action != "linearize" or has_extension or self.reflectivity is not None:
@@ -2308,7 +2335,7 @@ class ControlGradientJob(_ImagingJobBase):
         direction: Native control direction input (``born``).
         objective_file: Scalar objective output
             (``control_sensitivities.objective``; ``rtm`` only).
-        sensitivity_quadrature: Defaults to ``"wavefield"`` for discrete derivatives,
+        sensitivity_quadrature: Defaults to ``"auto"`` for tensor-node RTM sensitivities,
             including receiver-probe diagonals. Explicit ``"material_intersections"``
             selects approximate continuous RTM pullbacks.
         gram_derivative: ``"frozen"`` or ``"total"`` DPG Gram dependence.
@@ -2383,15 +2410,20 @@ class ControlGradientJob(_ImagingJobBase):
             raise ValueError("gram_derivative must be 'frozen' or 'total'")
         self.gram_derivative = gram_derivative
         if sensitivity_quadrature is None:
-            sensitivity_quadrature = "wavefield"
-        if sensitivity_quadrature not in {"wavefield", "material_intersections"}:
+            sensitivity_quadrature = "auto"
+        if sensitivity_quadrature not in {
+            "auto",
+            "wavefield",
+            "material_intersections",
+            "tensor_points",
+        }:
             raise ValueError(
-                "sensitivity_quadrature must be 'wavefield' or 'material_intersections'"
+                "sensitivity_quadrature must be 'auto', 'wavefield', 'material_intersections' or 'tensor_points'"
             )
         self.sensitivity_quadrature = sensitivity_quadrature
-        if sensitivity_quadrature == "material_intersections":
+        if sensitivity_quadrature in {"material_intersections", "tensor_points"}:
             if kind != "rtm":
-                raise ValueError("material_intersections requires an RTM pullback")
+                raise ValueError(f"{sensitivity_quadrature} requires an RTM pullback")
         self.current = _input_path(current, simulation)
         self.active = _active_controls(active)
         self.source_taper = _source_taper(source_taper)
@@ -3796,9 +3828,18 @@ class RegularizationJob(SmoothJob):
             gradient=gradient,
             name=name,
         )
-        if operation not in {"prepare", "value", "proximal"}:
+        if operation not in {
+            "prepare",
+            "value",
+            "gradient",
+            "diagonal",
+            "mass",
+            "mass_inverse",
+            "mass_diagonal",
+            "proximal",
+        }:
             raise ValueError(
-                "regularization operation must be prepare, value or proximal"
+                "regularization operation must be prepare, value, gradient, diagonal, mass, mass_inverse, mass_diagonal or proximal"
             )
         if operation != "prepare" and context is None:
             raise ValueError("regularization requires a prepared context")
