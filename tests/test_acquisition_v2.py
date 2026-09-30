@@ -28,6 +28,32 @@ from frequensolve.seismic.sparse_survey import (
     SparseTraceTable,
 )
 from frequensolve.units import ureg
+
+
+@pytest.mark.parametrize("selected", [[], [0], [4], [1, 1], [True], [1.5]])
+def test_active_physical_source_ids_reject_invalid_selection(selected):
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=[[0, 0]] * 3),
+        active_sources=selected,
+    )
+    with pytest.raises(ValueError, match="source IDs"):
+        acquisition.to_fs()
+
+
+def test_active_physical_source_ids_preserve_catalog_and_roundtrip():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar", coords=[[0, 0], [1, 0], [2, 0]]
+        ),
+        active_sources=[1, 3],
+    )
+    payload = acquisition.to_fs()
+    _sauce_acquisition_validator().validate(payload)
+    restored = Acquisition.from_fs(payload)
+    assert restored.known_source_field_count() == 3
+    assert restored.extra["active_sources"] == [1, 3]
+
+
 from frequensolve.util.mixins import ExportContext
 from frequensolve.util.store import SimulationStore
 

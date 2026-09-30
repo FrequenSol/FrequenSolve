@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import warnings
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
@@ -360,6 +361,29 @@ class Acquisition(ExtraFieldsMixin):
         loadings = list(
             self.boundary_loadings if boundary_loadings is None else boundary_loadings
         )
+        selected = self.extra.get("active_sources")
+        if selected is not None:
+            count = self.known_source_field_count()
+            if self.source_encoding is not None or loadings:
+                raise ValueError(
+                    "Active source selection requires physical point shots"
+                )
+            if (
+                not isinstance(selected, (list, tuple))
+                or not selected
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, Integral)
+                    or value < 1
+                    or (count is not None and value > count)
+                    for value in selected
+                )
+            ):
+                raise ValueError(
+                    "active_sources requires nonempty valid physical source IDs"
+                )
+            if len(set(selected)) != len(selected):
+                raise ValueError("Active source IDs must be unique")
         for loading in loadings:
             if not _loading_boundary_name(loading):
                 raise ValueError(
