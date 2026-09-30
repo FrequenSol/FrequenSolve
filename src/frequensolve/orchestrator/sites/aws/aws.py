@@ -1,6 +1,7 @@
 """FrequenSol cloud execution site backed by Cognito, AppSync, S3, and managed Slurm."""
 
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -1255,6 +1256,17 @@ class AWSSite(BaseSite):
             snapshot._frozen_staged_provenance = {
                 "AWSSite": deepcopy(job._read_staged_provenance("AWSSite"))
             }
+            staged = authored / "_fs_run" / "remote" / "AWSSite" / f"{job.name}.json"
+            if staged.is_file():
+                descriptor = staged.read_bytes()
+                digest = "sha256:" + hashlib.sha256(descriptor).hexdigest()
+                provenance = snapshot._frozen_staged_provenance["AWSSite"]
+                if provenance.get("job", {}).get("digest") != digest:
+                    raise RuntimeError(
+                        "Cloud staged descriptor does not match its provenance; "
+                        "prepare the job again before submitting"
+                    )
+                snapshot._cloud_staged_job_payload = json.loads(descriptor)
         return snapshot
 
     @staticmethod
@@ -1265,6 +1277,43 @@ class AWSSite(BaseSite):
                 "Cloud results require a valid simulation id from submission"
             )
         authored = Path(result._result_path).resolve()
+        payload = getattr(result, "_cloud_staged_job_payload", None)
+        if payload is not None:
+            # Managed Slurm verifies the uploaded descriptor, then privately
+            # scopes its output paths to the accepted run before invoking the
+            # solver. Match those exact bytes, never a fingerprint supplied by
+            # the remote result itself. Other staged fingerprints stay intact.
+            project = Path(result.project_path).resolve()
+            authored_relative = authored.relative_to(project).as_posix()
+
+            def project_relative(value: str) -> str:
+                return value.strip("/").removeprefix(project.name + "/")
+
+            if (
+                project_relative(payload.get("result_path", "results"))
+                != authored_relative
+            ):
+                raise ValueError(
+                    "Cloud staged result path differs from the authored job"
+                )
+            scoped = deepcopy(payload)
+            scoped["result_path"] = f"{authored_relative}/runs/{simulation_id}"
+            image = scoped.get("Image")
+            if isinstance(image, dict) and image.get("save_path"):
+                image_path = project_relative(image["save_path"])
+                if not image_path.startswith(authored_relative + "/"):
+                    raise ValueError(
+                        "Cloud staged imaging path escapes the job results"
+                    )
+                image["save_path"] = (
+                    scoped["result_path"]
+                    + "/"
+                    + image_path.removeprefix(authored_relative + "/")
+                )
+            descriptor = (json.dumps(scoped, sort_keys=True) + "\n").encode()
+            result._frozen_staged_provenance["AWSSite"]["job"] = {
+                "digest": "sha256:" + hashlib.sha256(descriptor).hexdigest()
+            }
         result._result_path_override = authored / "runs" / simulation_id
         result._job_id = simulation_id
         result._cloud_result_run_id = simulation_id
