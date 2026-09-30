@@ -115,7 +115,7 @@ class ReceiverState:
                     raise ValueError(
                         "receiver keys must be positive integer (shot, receiver, component) rows"
                     )
-                columns = []
+                columns: list[np.ndarray] = []
                 for name in ("predicted", "predicted_df", "observed", "observed_df"):
                     if manifest["channel"] == "base" and name.endswith("_df"):
                         columns.append(np.zeros(len(k), complex))
