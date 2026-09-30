@@ -840,7 +840,8 @@ def test_fwi_decreases_the_reduced_objective(setup, fake, regularization_weight)
             initial_forcing=1e-8,
             minimum_forcing=1e-8,
             maximum_forcing=1e-8,
-            gradient_tolerance=1e-9,
+            # Match the inner forcing accuracy; smaller residuals vary across BLAS.
+            gradient_tolerance=1e-8,
             objective_tolerance=0.0,
             step_tolerance=0.0,
         ),

@@ -128,7 +128,10 @@ def combine_proposals(
     if step_limit is not None:
         from .workflows import rms_step_limit
 
-        increment *= rms_step_limit(increment, tuple(space.slices.values()), step_limit)
+        scale = min(
+            1.0, rms_step_limit(increment, tuple(space.slices.values()), step_limit)
+        )
+        increment *= scale
     return baseline.with_update(ControlVector(current.values + increment, space))
 
 

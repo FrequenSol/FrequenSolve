@@ -203,3 +203,18 @@ def test_local_orchestration_baselines_and_combined_increase_are_retained(
     assert combined[0].metrics["objective_change"] > 0
     assert len(callbacks) == 2 and all(e.mode == mode for e in callbacks)
     assert checkpoints[-1]["completed"]
+
+
+@pytest.mark.parametrize("increment", [0.0, 0.02])
+def test_parallel_step_cap_preserves_zero_and_small_updates(problem, increment):
+    baseline = ControlState(problem.full_space, np.full(4, 0.1))
+    proposal = ControlState(problem.full_space, baseline.values + increment)
+    accepted = combine_proposals(
+        baseline,
+        [proposal],
+        [{"model.vp": np.ones(4, dtype=bool)}],
+        problem.space,
+        step_limit=0.05,
+    )
+    assert np.isfinite(accepted.values).all()
+    np.testing.assert_allclose(accepted.values, proposal.values, rtol=0, atol=1e-15)

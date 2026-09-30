@@ -4,6 +4,7 @@ import h5py
 import numpy as np
 import pytest
 
+from frequensolve.seismic.spectra import GainDelay, SampledWavelet
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.seismic.wavelet import RickerWavelet
 
@@ -102,3 +103,23 @@ def test_traces_without_recorded_strength_keep_data_units(tmp_path):
 
     assert fd.attrs["units"] == "Pa"
     assert not any(key.startswith("source_strength") for key in fd.attrs)
+
+
+@pytest.mark.parametrize("varying", [False, True])
+@pytest.mark.parametrize("sampled", [False, True])
+def test_fd_filter_uses_each_stored_laplace_coordinate(tmp_path, varying, sampled):
+    path = tmp_path / "damped-traces.h5"
+    _write_traces(path)
+    laplace = np.linspace(-0.2, -0.8, 25) if varying else np.full(25, -0.2)
+    with h5py.File(path, "a") as h5:
+        h5["laplace"][...] = laplace
+    response = (
+        SampledWavelet([0, 2, 0], dt=0.01) if sampled else GainDelay(gain=2, delay=0.01)
+    )
+    filtered = TraceDataset.open(path).fd("surface", "p", source=1, wavelet=response)
+    frequency = filtered.frequency.values
+    expected = 2 * np.exp(-2j * np.pi * (frequency + 1j * laplace) * 0.01)
+    np.testing.assert_allclose(
+        filtered.squeeze().values, expected, rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_array_equal(filtered.laplace.values, laplace)

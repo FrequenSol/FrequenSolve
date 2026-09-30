@@ -2178,8 +2178,21 @@ class TraceStore:
             raise ValueError(
                 "Trace filtering requires a dimensionless spectral response"
             )
+        frequencies = fd.frequency.values
+        laplace = np.broadcast_to(
+            np.asarray(fd.coords["laplace"].values if "laplace" in fd.coords else 0.0),
+            frequencies.shape,
+        )
+        if not np.isfinite(laplace).all():
+            raise ValueError("Trace Laplace coordinates must be finite")
+        values = np.empty(frequencies.shape, dtype=np.complex128)
+        for coordinate in np.unique(laplace):
+            selected = laplace == coordinate
+            values[selected] = response.at_frequencies(
+                frequencies[selected], laplace=float(coordinate)
+            )
         w = DataArray(
-            response.at_frequencies(fd.frequency.values),
+            values,
             dims=["frequency"],
             coords={"frequency": fd.frequency},
         )
