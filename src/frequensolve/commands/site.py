@@ -57,13 +57,7 @@ def site() -> None:
     """Configure and connect to FrequenSolve execution sites."""
 
 
-@site.command("check")
-@click.option("--profile", help="Existing site.toml profile to check.")
-@click.option(
-    "--config", "config_path", type=click.Path(path_type=Path, dir_okay=False),
-    help="Existing config file (defaults to ~/.frequensolve/site.toml).",
-)
-def check(profile: Optional[str], config_path: Optional[Path]) -> None:
+def check_local_configuration(profile: Optional[str], config_path: Optional[Path]) -> None:
     """Check local configuration without creating files, logging in or running work."""
     path = site_config_path(config_path)
     if not path.is_file():
@@ -342,8 +336,13 @@ def disconnect(
     type=click.Path(path_type=Path, dir_okay=False),
     help="Site config path (defaults to ~/.frequensolve/site.toml).",
 )
-def check(profile: Optional[str], config_path: Optional[Path]) -> None:
+@click.option("--local", "local_only", is_flag=True, help="Validate local TOML only; no network, login or solver checks.")
+def check(profile: Optional[str], config_path: Optional[Path], local_only: bool = False) -> None:
     """Verify an SSH-backed site and its configured solver."""
+
+    if local_only:
+        check_local_configuration(profile, config_path)
+        return
 
     execution_site = None
     try:

@@ -174,7 +174,7 @@ Check :term:`site configuration file` setup without logging in or running a solv
 
 .. code-block:: console
 
-   frequensolve site check --profile cloud
+   frequensolve site check --local --profile cloud
 
 This reads an existing TOML file only. Copy the configuration from Cloud
 **Compute** first. A valid local configuration does not prove Cloud access or

@@ -56,7 +56,7 @@ def test_submit_uses_prepared_job_and_keeps_failure_diagnostics(starter, tmp_pat
 
 def test_site_check_missing_configuration_has_no_side_effects(tmp_path):
     path = tmp_path / "missing.toml"
-    result = CliRunner().invoke(main, ["site", "check", "--config", str(path)])
+    result = CliRunner().invoke(main, ["site", "check", "--local", "--config", str(path)])
     assert result.exit_code != 0
     assert "Copy the configuration" in result.output
     assert not path.exists()
@@ -70,7 +70,7 @@ def test_site_check_validates_configuration_without_authentication(tmp_path, dom
     path = tmp_path / "site.toml"
     path.write_text(f'default = "cloud"\n[sites.cloud]\ntype = "aws"\ndomain = "{domain}"\ncompute_profile = "shared"\n')
     original = path.read_bytes()
-    result = CliRunner().invoke(main, ["site", "check", "--config", str(path), "--profile", "cloud"])
+    result = CliRunner().invoke(main, ["site", "check", "--local", "--config", str(path), "--profile", "cloud"])
     assert result.exit_code == 0, result.output
     assert "No login, network request or solver run" in result.output
     assert path.read_bytes() == original
@@ -85,7 +85,7 @@ def test_site_check_validates_configuration_without_authentication(tmp_path, dom
 def test_site_check_rejects_unsafe_or_conflicting_selection(tmp_path, extra):
     path = tmp_path / "site.toml"
     path.write_text(f'default = "cloud"\n[sites.cloud]\ntype = "aws"\n{extra}\n')
-    result = CliRunner().invoke(main, ["site", "check", "--config", str(path)])
+    result = CliRunner().invoke(main, ["site", "check", "--local", "--config", str(path)])
     assert result.exit_code != 0
     assert "password" not in result.output
     assert "secret" not in result.output

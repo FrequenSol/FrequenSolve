@@ -61,7 +61,7 @@ Keep passwords and tokens out of TOML and notebooks.
 
 .. code-block:: console
 
-   frequensolve site check --profile cloud
+   frequensolve site check --local --profile cloud
 
 This validates local TOML and selection settings without creating a config,
 authenticating or contacting Cloud. Success does not prove your subscription,
