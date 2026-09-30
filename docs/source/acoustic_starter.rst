@@ -51,7 +51,7 @@ modeling decision. One 10 Hz frequency creates one solver task and requests
 receiver responses plus a domain pressure VTK output.
 
 3. Check access and configure Cloud
-----------------------------------
+-----------------------------------
 
 Sign in to Cloud, open **Compute**, and copy the Python configuration for your
 ready shared profile into ``~/.frequensolve/site.toml``. Use the host and profile
@@ -88,7 +88,7 @@ No fixed runtime or Credit price is promised: queue time and performed work
 vary. Use the run's usage record after completion for the actual charge.
 
 5. Read and interpret the result
--------------------------------
+--------------------------------
 
 A successful run prints receiver metadata and the domain VTK filenames. In
 Cloud open the run's **Results** and inspect the pressure field, receiver

@@ -7,10 +7,10 @@ import os
 import shlex
 import shutil
 import subprocess
-from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional
+from urllib.parse import urlparse
 
 import click
 import toml
@@ -57,7 +57,9 @@ def site() -> None:
     """Configure and connect to FrequenSolve execution sites."""
 
 
-def check_local_configuration(profile: Optional[str], config_path: Optional[Path]) -> None:
+def check_local_configuration(
+    profile: Optional[str], config_path: Optional[Path]
+) -> None:
     """Check local configuration without creating files, logging in or running work."""
     path = site_config_path(config_path)
     if not path.is_file():
@@ -72,27 +74,49 @@ def check_local_configuration(profile: Optional[str], config_path: Optional[Path
         site_type = _normalize_site_type(raw_type)
         if site_type in {"aws", "cloud", "awssite"}:
             from frequensolve.orchestrator.sites.aws.execution_profile import (
-                MANAGED_EXECUTION_PROFILE_FIELDS, ManagedExecutionProfile,
+                MANAGED_EXECUTION_PROFILE_FIELDS,
+                ManagedExecutionProfile,
             )
+
             domain = settings.get("domain")
             if not isinstance(domain, str) or not domain.strip():
-                raise ValueError("The Cloud profile needs a domain copied from Compute.")
+                raise ValueError(
+                    "The Cloud profile needs a domain copied from Compute."
+                )
             url = urlparse(domain if "://" in domain else "https://" + domain)
-            if (not url.hostname or url.username or url.password or url.query or url.fragment
-                    or url.path not in {"", "/"}
-                    or url.scheme not in {"http", "https"}
-                    or (url.scheme == "http" and url.hostname not in {"localhost", "127.0.0.1", "::1"})):
-                raise ValueError("Use a Cloud host without credentials, a path or query parameters.")
-            ManagedExecutionProfile.from_mapping({
-                key: value for key, value in settings.items()
-                if key in MANAGED_EXECUTION_PROFILE_FIELDS
-            })
+            if (
+                not url.hostname
+                or url.username
+                or url.password
+                or url.query
+                or url.fragment
+                or url.path not in {"", "/"}
+                or url.scheme not in {"http", "https"}
+                or (
+                    url.scheme == "http"
+                    and url.hostname not in {"localhost", "127.0.0.1", "::1"}
+                )
+            ):
+                raise ValueError(
+                    "Use a Cloud host without credentials, a path or query parameters."
+                )
+            ManagedExecutionProfile.from_mapping(
+                {
+                    key: value
+                    for key, value in settings.items()
+                    if key in MANAGED_EXECUTION_PROFILE_FIELDS
+                }
+            )
         elif site_type not in {"local", "localsite", *SSH_SITE_TYPES}:
             raise ValueError("Choose a supported Cloud, local or Slurm site type.")
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from None
-    click.echo("Local profile configuration is valid. No login, network request or solver run occurred.")
-    click.echo("Cloud access, available Credits and compute readiness are checked separately in the app.")
+    click.echo(
+        "Local profile configuration is valid. No login, network request or solver run occurred."
+    )
+    click.echo(
+        "Cloud access, available Credits and compute readiness are checked separately in the app."
+    )
 
 
 @site.command("configure")
@@ -336,8 +360,15 @@ def disconnect(
     type=click.Path(path_type=Path, dir_okay=False),
     help="Site config path (defaults to ~/.frequensolve/site.toml).",
 )
-@click.option("--local", "local_only", is_flag=True, help="Validate local TOML only; no network, login or solver checks.")
-def check(profile: Optional[str], config_path: Optional[Path], local_only: bool = False) -> None:
+@click.option(
+    "--local",
+    "local_only",
+    is_flag=True,
+    help="Validate local TOML only; no network, login or solver checks.",
+)
+def check(
+    profile: Optional[str], config_path: Optional[Path], local_only: bool = False
+) -> None:
     """Verify an SSH-backed site and its configured solver."""
 
     if local_only:
