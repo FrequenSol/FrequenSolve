@@ -48,6 +48,8 @@ class FrequencyDomainJob(BaseJob):
         k_list: Optional signed physical Fourier wavenumbers for 2.5D jobs.
         k_weights: Optional quadrature weights paired with ``k_list``.
         k_units: Optional units for ``k_list`` and ``k_weights``.
+        patches: Optional ``PatchSet`` dispatched by ``site.run`` into ordinary
+            child jobs. The returned composite exposes ``jobs`` and ``runs``.
 
         phase_derivatives: Highest physical-frequency derivative to compute,
             from zero (the default) through four. A positive value selects the
@@ -71,8 +73,17 @@ class FrequencyDomainJob(BaseJob):
         phase_derivatives: int = 0,
         *,
         preserve_task_outputs: bool = False,
+        patches=None,
     ):
         phase_derivatives = _phase_derivative_order(phase_derivatives)
+        if patches is not None:
+            from frequensolve.mesh.patches import PatchSet
+
+            if not isinstance(patches, PatchSet):
+                raise TypeError("patches must be a PatchSet")
+            if simulation.mesh.root_patch is not None:
+                raise ValueError("Patch forward jobs require the parent simulation")
+        self.patches = patches
 
         workflow = "forward_df" if phase_derivatives else "forward"
         frequencies = np.asarray(f_list)
@@ -99,7 +110,40 @@ class FrequencyDomainJob(BaseJob):
         payload = super().to_fs(ctx, project_relative=project_relative)
         if self.phase_derivatives:
             payload["derivative_order"] = self.phase_derivatives
+        if self.patches is not None:
+            payload["patches"] = self.patches.to_dict()
         return payload
+
+    def _run_composite(
+        self, site, *, timeout=None, poll_interval=None, check=False, **kwargs
+    ):
+        """Prepare valid root selections and run ordinary child jobs through the site."""
+        from frequensolve.simulation.jobs._patches import PatchRunResult
+
+        self.save()
+        prepared = self.patches.prepare(self.simulation, self.f_list, site=site)
+        children = prepared.simulations(name=f"{self.simulation.name}_{self.name}")
+        jobs = tuple(
+            FrequencyDomainJob(
+                self.name,
+                child,
+                self.f_list,
+                outputs=self.outputs,
+                k_list=self.k_list,
+                k_weights=self.k_weights,
+                k_units=self.k_units,
+                phase_derivatives=self.phase_derivatives,
+                preserve_task_outputs=self.preserve_task_outputs,
+            )
+            for child in children
+        )
+        runs = tuple(
+            site.run(
+                job, timeout=timeout, poll_interval=poll_interval, check=check, **kwargs
+            )
+            for job in jobs
+        )
+        return PatchRunResult(jobs, runs, prepared)
 
     @classmethod
     def from_fs(
@@ -141,12 +185,30 @@ class FrequencyDomainJob(BaseJob):
             k_weights=d.get("k_weights"),
             k_units=d.get("k_units"),
             phase_derivatives=phase_derivatives,
+            patches=(
+                None if d.get("patches") is None else cls._restore_patches(d["patches"])
+            ),
         )
         job.preserve_task_outputs = d.get("preserve_task_outputs", False)
         if not isinstance(job.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")
         job._job_id = d.get("job_id")
         return job
+
+    @staticmethod
+    def _restore_patches(payload):
+        from frequensolve.mesh.patches import PatchSet
+
+        return PatchSet.from_dict(payload)
+
+    @staticmethod
+    def _fingerprint_job_payload(job_data, *, include_frequencies=False):
+        payload = BaseJob._fingerprint_job_payload(
+            job_data, include_frequencies=include_frequencies
+        )
+        if "patches" in job_data:
+            payload["patches"] = job_data["patches"]
+        return payload
 
 
 @register_class

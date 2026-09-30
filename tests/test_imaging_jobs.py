@@ -2408,7 +2408,19 @@ def test_original_wri_rejects_centered_curvature(tmp_path):
         )
 
 
-def test_mesh_adaptation_job_preserves_accepted_basis_and_round_trips(tmp_path):
+@pytest.mark.parametrize(
+    "transfer,length,wavelengths,frequency",
+    [
+        ("nodal", 0.0, None, None),
+        ("l2", 0.0, None, None),
+        ("l2", 125.0, None, None),
+        ("l2", 0.0, 0.1, 3.0),
+        ("l2", 0.0, 0.2, None),
+    ],
+)
+def test_mesh_adaptation_job_preserves_accepted_basis_and_round_trips(
+    tmp_path, transfer, length, wavelengths, frequency
+):
     from frequensolve.imaging.jobs import MeshAdaptationJob
 
     source = FWIOperatorJob(
@@ -2435,9 +2447,15 @@ def test_mesh_adaptation_job_preserves_accepted_basis_and_round_trips(tmp_path):
         },
         source_identity="accepted-state",
         frequency=8.0,
+        transfer=transfer,
+        smoothing_length=length,
+        smoothing_wavelengths=wavelengths,
+        smoothing_frequency=frequency,
     )
     payload = _assert_valid(job.to_fs())
     request = payload["control_sensitivities"]["MeshAdaptation"]
+    assert request["transfer"] == transfer
+    assert request["smoothing_length_m"] == length
     assert request["averaging_wavelengths"] == 0.5
     assert "Smoothing" not in payload["control_sensitivities"]
     assert ControlVectorFile.read(job.input_vector).control_spaces == {
@@ -2446,6 +2464,13 @@ def test_mesh_adaptation_job_preserves_accepted_basis_and_round_trips(tmp_path):
     loaded = _round_trip(job)
     assert isinstance(loaded, MeshAdaptationJob)
     assert loaded.property_spaces == job.property_spaces
+    if wavelengths is not None:
+        assert request["smoothing_wavelengths"] == wavelengths
+        assert request["smoothing_frequency_hz"] == (frequency or job.frequency)
+        assert loaded.smoothing_wavelengths == wavelengths
+        assert loaded.smoothing_frequency == (frequency or job.frequency)
+    assert loaded.transfer == transfer
+    assert loaded.smoothing_length == length
     assert loaded.source_identity == job.source_identity
     assert loaded.postprocess_fetch_files() == job.postprocess_fetch_files()
 

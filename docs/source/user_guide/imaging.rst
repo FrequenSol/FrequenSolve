@@ -54,6 +54,71 @@ generic optimizer toolkit (:mod:`frequensolve.inversion`: L-BFGS, Newton-CG,
 continuation schedules, history, derivative checks) is reused underneath and
 remains available on its own.
 
+Root patch FWI
+--------------
+
+``ImagingProblem(patches=...)`` evaluates assigned physical shots and per-shot
+receiver apertures through a composite linearization:
+
+.. code-block:: python
+
+   patches = fs.PatchSet.around_sources(
+       shots_per_patch=4, max_offset=4 * u.km, padding=2 * u.km,
+   )
+   problem = im.ImagingProblem(
+       sim, controls=controls, observed=observed,
+       frequencies=[3, 7.5], patches=patches, site=site,
+   )
+   prepared = problem.prepare_patches()
+   prepared.plot()
+   lin = problem.linearize()
+   children = lin.jobs
+   result = im.FWI(problem, [im.Stage([3, 7.5], 10)], optimizer=im.LBFGS()).run()
+
+Preparation inspects geometry and acquisition without wave solves. Named meshed
+material artifacts must already exist when explicitly preparing; ordinary
+linearization first discovers the full-parent registry and material basis.
+The first stage evaluation also resolves objective scales and reduction mass
+on the full parent. Children inherit those values. Original observation keys
+determine canonical data rows, and shared coefficients receive contributions
+from every applicable patch. Global regularization is evaluated once.
+
+Each stage pins its complete baseline materials for PML and captures a separate
+realized wave mesh for every patch/frequency pair. Candidates retain those
+meshes and PML values; a stage transition refreshes them. ``Stage(patches=...)``
+overrides a problem policy. ``problem.restrict(patches=None)`` selects full-domain
+execution. ``lin.jobs`` exposes every child; ``lin.job`` requires a single child.
+
+To optimize only each patch's requested material core, pass:
+
+.. code-block:: python
+
+   updates = im.PatchUpdates(mode="local_serial", local_steps=1, check_every=1)
+   result = im.FWI(problem, stages, optimizer=im.LBFGS(), patch_updates=updates).run()
+
+Serial mode visits patches in prepared order and publishes accepted core changes
+before the next patch. ``mode="local_parallel"`` starts all proposals from one
+sweep baseline and averages overlap increments in native control coordinates,
+including log controls. Coefficients outside participating cores stay fixed;
+restricted regularization retains their connections to core coefficients.
+Bounds and step limits also apply to the combined parallel result.
+
+One local stage iteration is one sweep. Combined objective checks run after each
+sweep by default; increases are recorded and updates retained. ``check_every=None``
+disables periodic checks while retaining endpoint evaluations. History labels
+local patch iterations separately from combined objective evaluations.
+
+Patch checkpoints preserve immutable stages, frequency meshes, model epochs,
+global L-BFGS history and partial local visits/proposals. Resume verifies those
+artifacts and reopens the interrupted stage. Preserve the checkpoint's referenced
+state files and the stage bundle when moving or archiving a run.
+
+The current path accepts global Cartesian physical point shots, dense parent
+point-receiver groups and independent waveform terms. Geometry/source-position
+controls, globally encoded sources, preprocessing, receiver transforms and
+receiver-diagonal probes are rejected. Local updates require material controls
+and L-BFGS. PML certification and automatic construction retries remain deferred.
+
 Control spaces
 --------------
 
@@ -944,6 +1009,34 @@ enters as a negative imaginary part.
 
 The problem must be declared with every complex frequency the stages use.
 
+Spectral selection per stage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``Stage(kernel_derivative=...)`` selects derivative-only data or a polynomial
+window for that stage. The selection contributes to the linearization identity
+and does not modify the parent problem or neighboring stages. For a waveform
+problem, this schedule returns to ordinary data after a derivative stage:
+
+.. code-block:: python
+
+   stages = [
+       im.Stage([2, 3], iterations=8),
+       im.Stage([2, 3], iterations=8, kernel_derivative={
+           "axis": "fourier", "residual": "derivative", "order": 1,
+           "source_derivative": "total",
+       }),
+       im.Stage([2, 3], iterations=8),
+   ]
+
+An omitted stage selection inherits the problem's selection. If the parent is
+already spectral, first use ``problem.restrict(kernel_derivative=None)`` to
+obtain a waveform parent; ``Stage(kernel_derivative=None)`` means inherit.
+Observations must contain the matching derivative orders. First-order total-source
+spectral Born and normal actions require the supported fixed-source acoustic DPG
+configuration and frozen Gram derivatives; higher-order Born actions require
+``source_derivative="frozen"``. Changing this selection changes the objective,
+so each stage starts fresh optimizer history.
+
 Optimizer stopping tolerances
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1115,13 +1208,69 @@ Checkpoints retain each stage's accepted entry state to reconstruct the same
 sizing input on restart; retain those accompanying ``*.stage_*.h5`` files and the
 property artifacts.
 
-Mesh transfer interpolates transformed coefficient updates at independent native
-nodes, with hanging-node constraints and exact initial-root coordinates. Constants
-and fields represented by both bases are preserved; general coarsening is
-approximate and should be checked for acceptable physical changes. Physical limits
-are applied after transfer. The property, material, transform and block identity
-must remain unchanged. Setup currently runs on one MPI rank; stage solves may use
-MPI. The initial problem's authored mesh declaration keeps its existing sizing
+Mesh transfer defaults to nodal interpolation, available explicitly as
+``transfer=im.Transfer.nodal()``. To project onto **either a finer or a coarser
+mesh**, use ``transfer=im.Transfer.l2()``. Add ``smooth`` to smooth the transferred
+field, with a length quantity or a bare number in meters:
+
+.. code-block:: python
+
+   from frequensolve.units import ureg as u
+
+   projected = problem.with_controls(
+       {"vp": im.MeshParameters("vp", "sediment", frequency=3,
+                                epw=2, transform="log")},
+       transfer=im.Transfer.l2(smooth=100 * u.m),
+   )
+
+The same policy works in continuation stages:
+
+.. code-block:: python
+
+   stage = im.Stage(
+       [3, 4], iterations=15, controls={"vp": target_mesh},
+       transfer=im.Transfer.l2(smooth=100 * u.m),
+   )
+
+``im.Transfer.l2()`` omits smoothing; ``im.Transfer.nodal()`` selects
+interpolation. The legacy ``mesh_transfer`` and ``mesh_smoothing_length``
+keywords remain supported, but cannot be combined with ``transfer``.
+
+For wavespeed-dependent smoothing, use a fraction of the **local accepted
+wavelength** instead of a fixed length:
+
+.. code-block:: python
+
+   transfer = im.Transfer.l2(smooth_wavelengths=0.1, frequency=3 * u.Hz)
+
+The physical smoothing length is ``0.1 * v(x) / f``: higher-velocity regions
+receive more smoothing, lower-velocity regions less. ``v(x)`` is sampled from
+the accepted source model and frozen for the entire transfer, before any
+coarsening. For acoustics this is Vp; elastic models use the native minimum
+propagating wavespeed. Omit ``frequency`` to use the largest target material-mesh
+sizing frequency. ``smooth`` and ``smooth_wavelengths`` are mutually exclusive.
+The variable coefficient stays inside the stiffness integral, preserving symmetry
+and positive definiteness; this is not pointwise rescaling after smoothing.
+
+Projection solves
+``(M_target + length**2 K_target) c_target = B_target,source c_source``;
+zero length gives ordinary L2 projection. Native quadrature integrates both
+constrained bases on source/target cell intersections using the physical geometry.
+The matrix-free conjugate-gradient solve checks its true residual. Affine-cell
+polynomial integrands are integrated to quadrature accuracy; curved geometry
+retains numerical quadrature error. There is no global dense mass matrix.
+Smoothing and projection occur only when the layout is explicitly replaced.
+
+This transfers model coefficients, **not gradient covectors**. For log controls
+it smooths the log update while retaining the original reference model. Constants
+are preserved; unsmoothed projection also preserves any field representable in
+both spaces. General coarsening loses unresolved detail, and smoothing deliberately
+changes nonconstant fields. Neither operation enforces pointwise bounds; physical
+limits are applied afterward and may change conservation. The property, material,
+transform and block identity must remain unchanged. Setup runs on one MPI rank;
+subsequent stage solves may use MPI. New basis identities invalidate cached
+operators, and each optimization stage starts with fresh optimizer state.
+The initial problem's authored mesh declaration keeps its existing sizing
 behavior; use ``Stage(controls=...)`` at stage zero to request averaged sizing there.
 
 Mixed-parameterization plotting example
@@ -1548,7 +1697,7 @@ frequencies and requires waveform comparisons and no active source or geometry
 blocks; relaxed assembly is accepted as an approximation.
 
 WRI observed-data calibration
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 WRI defaults to ``objective_normalization="observed_energy"``: a common
 observed-energy divisor scales the objective, gradient and curvature without

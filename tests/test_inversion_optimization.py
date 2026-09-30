@@ -1257,3 +1257,58 @@ def test_regularization_history_checkpoint_and_result_round_trip(tmp_path):
 def test_optimization_model_vectors_reject_complex_values(factory):
     with pytest.raises(ValueError, match="real-valued"):
         factory()
+
+
+def test_lbfgs_restart_reproduces_uninterrupted_accepted_models():
+    """Curvature pairs and stopping momentum survive an atomic checkpoint."""
+    from scipy.optimize import rosen, rosen_der
+
+    from frequensolve.inversion.optimization import LBFGSOptions, minimize_lbfgs
+
+    options = LBFGSOptions(
+        max_iterations=8, gradient_tolerance=0, objective_tolerance=0, step_tolerance=0
+    )
+    initial = np.array([-1.2, 1.0])
+    whole = []
+    minimize_lbfgs(rosen, rosen_der, initial, options=options, callback=whole.append)
+    saved = []
+
+    class Interrupted(RuntimeError):
+        pass
+
+    def checkpoint(event):
+        if event.iteration == 3:
+            saved.append(event)
+            raise Interrupted()
+
+    with pytest.raises(Interrupted):
+        minimize_lbfgs(rosen, rosen_der, initial, options=options, callback=checkpoint)
+    resumed = []
+    state = saved[0].optimizer_state
+    assert len(state["pairs"]) > 0
+    import dataclasses
+
+    minimize_lbfgs(
+        rosen,
+        rosen_der,
+        saved[0].model,
+        options=dataclasses.replace(options, max_iterations=5),
+        restart=state,
+        callback=resumed.append,
+    )
+    for expected, actual in zip(whole[3:], resumed):
+        np.testing.assert_array_equal(expected.model, actual.model)
+        if actual.iteration:
+            assert (
+                actual.objective_reduction_momentum
+                == expected.objective_reduction_momentum
+            )
+    with pytest.raises(ValueError, match="different model"):
+        minimize_lbfgs(
+            rosen, rosen_der, saved[0].model + 0.01, options=options, restart=state
+        )
+    invalid = dict(state, pairs=[dict(step=[1.0, 0.0], difference=[-1.0, 0.0])])
+    with pytest.raises(ValueError, match="positive finite curvature"):
+        minimize_lbfgs(
+            rosen, rosen_der, saved[0].model, options=options, restart=invalid
+        )

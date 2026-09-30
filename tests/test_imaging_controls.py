@@ -810,6 +810,26 @@ def test_saved_file_backed_reference_is_read_from_the_project(simulation):
     np.testing.assert_allclose(bound.block("vp").upper, np.log(3000.0 / r))
 
 
+@pytest.mark.parametrize("datum", ["top", "global", "bottom"])
+def test_saved_curved_horizons_preserve_profile_extents(simulation, datum):
+    from frequensolve.model.property import Property
+
+    for name, values in (("seabed", [100.0, 300.0]), ("bottom", [1400.0, 1600.0])):
+        simulation.model.surfaces[name].depth = Property(
+            xr.DataArray(values, dims=["x"], coords={"x": list(X_LIMITS)})
+        )
+    controls = im.ControlSpace(
+        vp=im.DepthProfile("vp", "sediment", datum=datum, count=4)
+    )
+    expected = controls.bind(simulation).block("vp").control.coordinates
+    simulation.save()
+    saved = simulation.copy("saved_curved")
+    assert saved.model.surfaces["seabed"].depth.data is None
+    actual = controls.bind(saved).block("vp").control.coordinates
+    np.testing.assert_allclose(actual, expected)
+    assert saved.model.surfaces["seabed"].depth.data is None
+
+
 def test_limits_on_an_unreadable_reference_name_the_block(simulation, tmp_path):
     from frequensolve.model.property import Property
 

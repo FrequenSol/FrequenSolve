@@ -1095,6 +1095,10 @@ class BaseSite:
             The same job object, for fluent site implementations.
         """
 
+        if getattr(job, "patches", None) is not None:
+            raise ValueError(
+                "Patch jobs require site.run(job) to dispatch their child jobs"
+            )
         if validate and hasattr(job, "validate"):
             report = job.validate(
                 raise_errors=True,
@@ -1544,6 +1548,14 @@ class BaseSite:
         Returns:
             Final ``RunResult``.
         """
+        if getattr(job, "patches", None) is not None:
+            return job._run_composite(
+                self,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                check=check,
+                **submit_kwargs,
+            )
         return self.submit(job, **submit_kwargs).wait(
             timeout,
             poll_interval,

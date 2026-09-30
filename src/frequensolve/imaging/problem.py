@@ -123,6 +123,7 @@ from frequensolve.imaging.jobs import (
 )
 from frequensolve.imaging.misfit import Loss, Misfit
 from frequensolve.imaging.operators import Jacobian, Normal
+from frequensolve.imaging.transfer import Transfer, resolve_transfer
 from frequensolve.inversion.validation import gradient_taylor_test, real_adjoint_test
 from frequensolve.orchestrator.sites.base import BaseSite
 
@@ -193,6 +194,9 @@ def _resolve_path(value: Any, project: Path) -> Path:
 def _vector_from_file(file: ControlVectorFile, space: ControlSpace) -> ControlVector:
     """Read a covector file onto ``space`` without adopting its support masks."""
 
+    from .controls import _check_artifact_basis
+
+    _check_artifact_basis(file, space)
     full = np.zeros(space.full_size, dtype=np.float64)
     for name, sl in space.full_slices.items():
         try:
@@ -653,7 +657,15 @@ class ImagingProblem:
         submit_options: Optional[Mapping[str, Any]] = None,
         cache_capacity: int = 2,
         kernel_derivative: Optional[Mapping[str, Any]] = None,
+        patches: Any = None,
     ) -> None:
+        from frequensolve.mesh.patches import PatchSet
+
+        if patches is not None and not isinstance(patches, PatchSet):
+            raise TypeError("patches must be a PatchSet")
+        self._patches = patches
+        self._patch_runtime = None
+        self._prepared_patches = None
         self._shared = _Shared(
             simulation,
             controls=controls,
@@ -674,6 +686,11 @@ class ImagingProblem:
     def _init_view(self) -> None:
         """Initialize the view-level attributes of a full (unrestricted) problem."""
 
+        if not hasattr(self, "_patches"):
+            self._patches = None
+            self._patch_runtime = None
+            self._prepared_patches = None
+        self._patch_selection = None
         self._active: Optional[Tuple[str, ...]] = None
         self._frequencies: Tuple[Any, ...] = tuple(self._shared.frequencies)
         self._masks: Dict[str, np.ndarray] = {}
@@ -689,6 +706,20 @@ class ImagingProblem:
                 "imaging problem is not supported by Sauce: "
                 + "; ".join(report["errors"])
             )
+
+    @property
+    def patches(self):
+        """Reusable patch selection policy, or ``None`` for full-domain execution."""
+        return self._patches
+
+    def prepare_patches(self):
+        """Prepare and inspect patch geometry/acquisition without wave solves."""
+        if self.patches is None:
+            raise ValueError("this imaging problem has no patches")
+        self._prepared_patches = self.patches.prepare(
+            self.simulation, self.frequencies, site=self.site
+        )
+        return self._prepared_patches
 
     # -- identity -------------------------------------------------------------
 
@@ -786,6 +817,12 @@ class ImagingProblem:
 
         return {
             **self._shared.identity(),
+            **({"patches": self.patches.to_dict()} if self.patches is not None else {}),
+            **(
+                {"patch_selection": self._patch_selection}
+                if self._patch_selection is not None
+                else {}
+            ),
             "active": list(self.space.blocks),
             "frequencies": list(self._frequencies),
             **self._override_identity(),
@@ -848,6 +885,8 @@ class ImagingProblem:
 
     @property
     def data_space(self) -> DataSpace:
+        if self.patches is not None:
+            return self.linearize(gradient=False).data_space
         if self._data_space is None:
             self._data_space = DataSpace.from_simulation(
                 self.simulation, frequencies=self._frequencies
@@ -919,6 +958,7 @@ class ImagingProblem:
         weights: Any = _UNSET,
         kernel_derivative: Any = _UNSET,
         support: str = "inherit",
+        patches: Any = _UNSET,
     ) -> "ImagingProblem":
         """Return a stage view sharing state, cache, backend and simulation.
 
@@ -953,6 +993,23 @@ class ImagingProblem:
             raise ValueError("pass either misfit or loss, not both")
         view = object.__new__(ImagingProblem)
         view._shared = self._shared
+        from frequensolve.mesh.patches import PatchSet
+
+        view._patches = self.patches if patches is _UNSET else patches
+        if view._patches is not None and not isinstance(view._patches, PatchSet):
+            raise TypeError("patches must be a PatchSet")
+        same_patches = patches is _UNSET or patches is self.patches
+        view._patch_runtime = (
+            self._patch_runtime
+            if same_patches
+            and support == "inherit"
+            and misfit is None
+            and loss is None
+            and kernel_derivative is _UNSET
+            else None
+        )
+        view._patch_selection = self._patch_selection
+        view._prepared_patches = self._prepared_patches if same_patches else None
         view._data_space = None
         view._overrides = dict(self._overrides)
         view._misfit_payload_cache = None
@@ -1041,6 +1098,9 @@ class ImagingProblem:
         *,
         state: Optional[ControlState] = None,
         mesh_averaging_wavelengths: float = 0.5,
+        mesh_transfer: Optional[str] = None,
+        mesh_smoothing_length: Optional[float] = None,
+        transfer: Optional[Transfer] = None,
         discovery_frequencies: Optional[Iterable[Any]] = None,
     ) -> "ImagingProblem":
         """Return a problem over another control layout (resolution change).
@@ -1061,6 +1121,19 @@ class ImagingProblem:
             mesh_averaging_wavelengths: Half-width of the sizing-only averaging
                 window in material-average wavelengths (default 0.5). Used when
                 explicitly replacing mesh blocks.
+            transfer: ``im.Transfer.nodal()`` (default) or
+                ``im.Transfer.l2(smooth=100 * u.m)`` for integral projection
+                with optional model smoothing. Bare smoothing lengths are meters.
+                Use ``smooth_wavelengths`` instead for accepted-wavespeed-dependent smoothing.
+                Cannot be combined with the legacy mesh transfer keywords.
+            mesh_transfer: Legacy spelling: ``"nodal"`` (default) or ``"l2"``. L2 transfer
+                integrates the source and target constrained bases on their
+                common partition, for refinement or coarsening.
+            mesh_smoothing_length: Nonnegative smoothing length in meters for
+                L2 transfer. Zero gives an L2 projection; positive values solve
+                the target mass-plus-length-squared-stiffness system. Smooths
+                control coefficients (log updates for log controls), not the
+                authored reference. Requires ``mesh_transfer="l2"``.
             state: The initial state.  ``None`` transfers the current state;
                 a state on this problem's layout is transferred; a state on
                 the new layout is adopted as is.
@@ -1074,8 +1147,9 @@ class ImagingProblem:
         represents, e.g. a hat profile refined by node bisection), blocks
         absent from this problem take the new problem's authored values, and
         mesh blocks explicitly listed in ``controls`` are rebuilt by Sauce from
-        the accepted, spatially averaged material and transferred by native nodal
-        interpolation. Their material, reference and transform remain fixed.
+        the accepted, spatially averaged material and transferred by the selected
+        native interpolation or projection method. Their material, reference and
+        transform remain fixed.
         Interface, source, reflectivity and registry blocks must keep their layout.
         General mesh coarsening is approximate; native setup currently uses one
         MPI rank, while subsequent solves may use distributed controls.
@@ -1085,6 +1159,8 @@ class ImagingProblem:
             ValueError: The layouts cannot be transferred.
         """
 
+        policy = resolve_transfer(transfer, mesh_transfer, mesh_smoothing_length)
+        mesh_transfer, mesh_smoothing_length = policy.method, policy.smoothing_length
         shared = self._shared
         self._ensure_registry()
         old_full = shared.space
@@ -1104,13 +1180,17 @@ class ImagingProblem:
             space = controls
         else:
             space = ControlSpace(controls)
-        mesh_transfer = None
+        transferred_mesh = None
         mesh_keys = {
             key
             for key, spec in space.specs.items()
             if isinstance(spec, MeshParameters)
             and (explicit_keys is None or key in explicit_keys)
         }
+        if not mesh_keys and (mesh_transfer != "nodal" or mesh_smoothing_length):
+            raise ValueError(
+                "mesh transfer options require an explicit MeshParameters replacement"
+            )
         if mesh_keys:
             from ._mesh_adaptation import adapt_meshes
 
@@ -1120,8 +1200,22 @@ class ImagingProblem:
                 raise ValueError(
                     "mesh adaptation needs the accepted state on the previous layout"
                 )
-            space, mesh_transfer = adapt_meshes(
-                self, space, state, mesh_averaging_wavelengths, mesh_keys
+            space, transferred_mesh = adapt_meshes(
+                self,
+                space,
+                state,
+                mesh_averaging_wavelengths,
+                mesh_keys,
+                transfer=mesh_transfer,
+                smoothing_length=mesh_smoothing_length,
+                **(
+                    {
+                        "smoothing_wavelengths": policy.smoothing_wavelengths,
+                        "smoothing_frequency": policy.frequency,
+                    }
+                    if policy.smoothing_wavelengths is not None
+                    else {}
+                ),
             )
         layout = fingerprint(
             space=[[key, repr(spec)] for key, spec in space.specs.items()]
@@ -1146,6 +1240,9 @@ class ImagingProblem:
         )
         problem = object.__new__(ImagingProblem)
         problem._shared = derived
+        problem._patches = self.patches
+        problem._patch_runtime = None
+        problem._prepared_patches = None
         problem._init_view()
         if derived.pending_manifest:
             discovery = (
@@ -1164,7 +1261,9 @@ class ImagingProblem:
         if state.space.without_support().equivalent(new_full):
             derived.set_state(state)
         else:
-            derived.set_state(_transfer_state(state, old_full, derived, mesh_transfer))
+            derived.set_state(
+                _transfer_state(state, old_full, derived, transferred_mesh)
+            )
         return problem
 
     # -- states and vectors ---------------------------------------------------
@@ -1729,7 +1828,8 @@ class ImagingProblem:
         """
 
         shared = self._shared
-        self._linearize_state(shared.authored, gradient=False)
+        parent = self if self.patches is None else self.restrict(patches=None)
+        parent._linearize_state(shared.authored, gradient=False)
         assert shared.baseline is not None
 
     def linearize(
@@ -1765,6 +1865,15 @@ class ImagingProblem:
         is one job over the view's frequencies (one task per frequency).
         """
 
+        if self.patches is not None:
+            from ._patch_problem import linearize_patches
+
+            return linearize_patches(
+                self,
+                self._linearization_point(v),
+                gradient=gradient,
+                receiver_diagonal=receiver_diagonal,
+            )
         return self._linearize_state(
             self._linearization_point(v),
             gradient=gradient,
@@ -1804,6 +1913,8 @@ class ImagingProblem:
         on :meth:`simulation_at` and its traces are packed.
         """
 
+        if self.patches is not None:
+            return self.linearize(v, gradient=False).simulated()
         state = self._state_at(v)
         hook = getattr(self.site, "forward", None)
         if callable(hook):
@@ -1837,6 +1948,10 @@ class ImagingProblem:
         the workflow layer.
         """
 
+        if self.patches is not None:
+            from ._patch_problem import patch_observed_vector
+
+            return patch_observed_vector(self)
         hook = getattr(self.site, "observed", None)
         space = self.space
         if callable(hook):
@@ -2033,7 +2148,7 @@ class ImagingProblem:
         phase = sorted(comparisons - {"waveform"})
         if phase:
             errors.append(
-                "reflectivity requires waveform comparisons " f"(misfit uses {phase})"
+                f"reflectivity requires waveform comparisons (misfit uses {phase})"
             )
         interface = [b.name for b in blocks if b.kind == "interface"]
         if interface:
@@ -2147,6 +2262,8 @@ class ImagingProblem:
 
         self._shared.forget(self._shared.cache.clear())
         self._shared.linearizations.clear()
+        if self._patch_runtime is not None:
+            self._patch_runtime.cache.clear()
 
     def extend(self, extension: Any) -> Any:
         """Return an :class:`~frequensolve.imaging.extension.ExtendedProblem`.
@@ -2669,6 +2786,16 @@ class Linearization:
         )
 
     # -- descriptors ----------------------------------------------------------
+
+    @property
+    def regularization_job(self):
+        """Full physical model context for one global regularization term."""
+        return self.job
+
+    @property
+    def jobs(self):
+        """Native child jobs in execution order."""
+        return (self.job,)
 
     @property
     def receiver_diagonal(self) -> ControlVector:

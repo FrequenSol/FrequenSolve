@@ -42,6 +42,9 @@ class ObjectiveState:
         if self.n_ranks < 1 or len(manifest["shards"]) != self.n_ranks:
             raise ValueError("objective state has an inconsistent rank partition")
         self.terms: Dict[str, Dict[str, Any]] = {}
+        # Keep the resolved objective configuration as well as its rows.
+        # Patch restriction must preserve parent normalization across ranks.
+        self.term_configs: Dict[str, List[Dict[str, Any]]] = {}
         hashes: Dict[Path, str] = {}
         for entry in manifest["shards"]:
             shard = _resolve(self.path.parent, entry["file"])
@@ -49,6 +52,7 @@ class ObjectiveState:
                 raise ValueError("objective state shard hash mismatch")
             payload = json.loads(shard.read_text())
             for term in payload["terms"]:
+                self.term_configs.setdefault(term["id"], []).append(term)
                 cache = _resolve(shard.parent, term["cache"]["file"])
                 expected = term["runtime"]["cache_fingerprint"]
                 if cache not in hashes:

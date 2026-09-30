@@ -42,6 +42,7 @@ from frequensolve.imaging.regularization import *  # noqa: F403
 from frequensolve.imaging.regularization import __all__ as _regularization_all
 from frequensolve.imaging.results import *  # noqa: F403
 from frequensolve.imaging.results import __all__ as _results_all
+from frequensolve.imaging.transfer import Transfer as Transfer
 from frequensolve.imaging.windows import write_receiver_window as write_receiver_window
 from frequensolve.imaging.workflows import *  # noqa: F403
 from frequensolve.imaging.workflows import __all__ as _workflows_all
@@ -49,6 +50,7 @@ from frequensolve.imaging.workflows import __all__ as _workflows_all
 __all__ = unique_exports(
     [
         "PropertyMesh",
+        "Transfer",
         "NativeMass",
         "NativeRegularization",
         "SourceEnergy",

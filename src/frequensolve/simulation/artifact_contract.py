@@ -35,7 +35,17 @@ ARTIFACT_CONTRACT_VERSION = "fs-task-result-2"
 COLLECTION_CONTRACT_VERSION = "fs-sharded-array-1"
 OPERATION_CONTRACT_VERSION = "fs-operation-result-1"
 OPERATION_NAMES = frozenset(
-    {"pack", "smooth", "raytrace", "size", "validate", "init", "eikonal", "transient"}
+    {
+        "pack",
+        "smooth",
+        "raytrace",
+        "size",
+        "validate",
+        "init",
+        "eikonal",
+        "transient",
+        "patch_prepare",
+    }
 )
 _HASH_PATTERN = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
 _RETENTION = frozenset({"transient", "cache", "durable"})

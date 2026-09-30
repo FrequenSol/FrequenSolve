@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import copy
 import inspect
+import json
 import math
 import warnings
 from dataclasses import replace
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     ClassVar,
@@ -58,6 +60,10 @@ from frequensolve.simulation.outputs import JobOutputs, Output
 from frequensolve.simulation.simulation import BaseSimulation
 from frequensolve.util.class_registry import register_class
 from frequensolve.util.mixins import ExportContext
+
+if TYPE_CHECKING:
+    from frequensolve.mesh._stage_mesh import PatchStageMesh
+    from frequensolve.mesh._stage_snapshot import PatchStageSnapshot
 
 __all__ = [
     "FWIOperatorJob",
@@ -1151,6 +1157,13 @@ class FWIOperatorJob(_ImagingJobBase):
             (``vjp``, optional ``solve`` target).
         objective: Optional scalar objective report output.
         control_state: ``fs-control-state-1`` baseline input.
+        pml_stage: Experimental immutable patch stage bundle or its manifest/identity
+            mapping. Requires an explicit candidate ``control_state`` and a
+            simulation loaded from the bundle. Controlled patch PML remains gated.
+        stage_mesh: Experimental frequency-mesh companion, or ``"capture"`` with
+            ``action="linearize"`` and the canonical stage baseline. Capture stops
+            after hierarchy construction; publish its task-local manifest through
+            ``pml_stage.publish_mesh``. Uses one frequency per job.
         state_output: ``fs-control-state-1`` baseline output (exact name in a
             single-task job, ``<stem>_<task><ext>`` per task otherwise).
         manifest: ``fs-control-registry-1`` output (same naming rule).
@@ -1201,6 +1214,8 @@ class FWIOperatorJob(_ImagingJobBase):
         objective_vector: Optional[Union[str, Path]] = None,
         objective: Optional[Union[str, Path]] = None,
         control_state: Optional[Union[str, Path]] = None,
+        pml_stage: Optional[Union[PatchStageSnapshot, Mapping[str, Any]]] = None,
+        stage_mesh: Optional[Union[str, PatchStageMesh, Mapping[str, Any]]] = None,
         state_output: Optional[Union[str, Path]] = None,
         manifest: Optional[Union[str, Path]] = None,
         min_support: Optional[float] = None,
@@ -1275,6 +1290,63 @@ class FWIOperatorJob(_ImagingJobBase):
         )
         self.objective = _output_path(objective, result_dir)
         self.control_state = _input_path(control_state, simulation)
+        self.pml_stage = None
+        if pml_stage is not None:
+            from frequensolve.mesh._stage_snapshot import PatchStageSnapshot
+
+            if self.control_state is None:
+                raise ValueError(
+                    "pml_stage requires an explicit candidate control_state"
+                )
+            if isinstance(pml_stage, PatchStageSnapshot):
+                self.pml_stage = pml_stage.verify()
+            else:
+                if set(pml_stage) != {"manifest", "identity"}:
+                    raise ValueError("pml_stage requires manifest and identity")
+                self.pml_stage = PatchStageSnapshot.read(
+                    _input_path(pml_stage["manifest"], simulation),
+                    identity=pml_stage["identity"],
+                )
+        self.stage_mesh = None
+        if stage_mesh is not None:
+            from frequensolve.mesh._stage_mesh import PatchStageMesh
+
+            if self.pml_stage is None:
+                raise ValueError("stage_mesh requires pml_stage")
+            if len(self.f_list) != 1:
+                raise ValueError("stage_mesh requires one frequency per job")
+            band = json.loads(self.pml_stage.manifest.read_text())["frequencies"]
+            if complex(self.f_list[0]) not in {complex(*pair) for pair in band}:
+                raise ValueError(
+                    "Stage mesh frequency is outside the pinned stage band"
+                )
+            if isinstance(stage_mesh, str):
+                if stage_mesh != "capture":
+                    raise ValueError("stage_mesh string must be 'capture'")
+                if action != "linearize":
+                    raise ValueError("Stage mesh capture requires action='linearize'")
+                from frequensolve.mesh._stage_snapshot import _digest
+
+                if _digest(self.control_state) != _digest(self.pml_stage.control_state):
+                    raise ValueError(
+                        "Stage mesh capture requires the canonical stage baseline"
+                    )
+                self.stage_mesh = "capture"
+            elif isinstance(stage_mesh, PatchStageMesh):
+                self.stage_mesh = stage_mesh.verify(stage=self.pml_stage)
+            else:
+                if (
+                    set(stage_mesh) != {"mode", "manifest", "identity"}
+                    or stage_mesh["mode"] != "replay"
+                ):
+                    raise ValueError(
+                        "Stage mesh replay requires mode, manifest and identity"
+                    )
+                self.stage_mesh = PatchStageMesh.read(
+                    _input_path(stage_mesh["manifest"], simulation),
+                    identity=stage_mesh["identity"],
+                    stage=self.pml_stage,
+                )
         self.state_output = _output_path(state_output, result_dir)
         self.manifest = _output_path(manifest, result_dir)
         self.min_support = _min_support(min_support)
@@ -2083,6 +2155,18 @@ class FWIOperatorJob(_ImagingJobBase):
             controls: Dict[str, Any] = {"active": list(self.active or [])}
             if self.control_state is not None:
                 controls["state"] = _job_path(self.control_state, ctx, False)
+            if self.pml_stage is not None:
+                controls["pml_stage"] = self.pml_stage.to_fs()
+                controls["pml_stage"]["manifest"] = _job_path(
+                    self.pml_stage.manifest, ctx, False
+                )
+            if self.stage_mesh == "capture":
+                controls["stage_mesh"] = {"mode": "capture"}
+            elif self.stage_mesh is not None:
+                controls["stage_mesh"] = self.stage_mesh.to_fs()
+                controls["stage_mesh"]["manifest"] = _job_path(
+                    self.stage_mesh.manifest, ctx, False
+                )
             if self.state_output is not None:
                 controls["state_output"] = _job_path(self.state_output, ctx, False)
             if self.manifest is not None:
@@ -2201,11 +2285,44 @@ class FWIOperatorJob(_ImagingJobBase):
             )
         if self.control_state is not None:
             inputs["control_state"] = self._path_content_fingerprint(self.control_state)
+        if self.pml_stage is not None:
+            self.pml_stage.verify()
+            inputs["pml_stage"] = self.pml_stage.identity
+        if self.stage_mesh == "capture":
+            inputs["stage_mesh"] = "capture"
+        elif self.stage_mesh is not None:
+            self.stage_mesh.verify(stage=self.pml_stage)
+            inputs["stage_mesh"] = self.stage_mesh.identity
         if self.extension is not None and self.extension.get("direction") is not None:
             inputs["extension_direction"] = self._resolved_input_fingerprint(
                 Path(self.extension["direction"])
             )
         return inputs
+
+    def remote_input_files(self, remote_project):
+        """Stage complete immutable patch bundles with their relative layout intact."""
+        files = super().remote_input_files(remote_project)
+        if self.pml_stage is None:
+            return files
+        inputs = list(self.pml_stage.input_files())
+        inputs.append(Path(self.control_state))
+        if self.stage_mesh not in (None, "capture"):
+            self.stage_mesh.verify(stage=self.pml_stage)
+            inputs.extend(self.stage_mesh.input_files())
+        project = Path(self.project_path).resolve()
+        seen = {(Path(local).resolve(), Path(remote)) for local, remote in files}
+        for path in inputs:
+            local = Path(path).resolve(strict=True)
+            if not local.is_relative_to(project):
+                raise ValueError(
+                    "Remote patch inputs must be inside the job project; "
+                    f"relocate the verified bundle or candidate before staging: {local}"
+                )
+            pair = (local, Path(remote_project) / local.relative_to(project))
+            if pair not in seen:
+                files.append(pair)
+                seen.add(pair)
+        return files
 
     def _resolved_input_fingerprint(self, path: Path) -> Any:
         """Hash a per-task operator input as each task resolves it.
@@ -2247,6 +2364,15 @@ class FWIOperatorJob(_ImagingJobBase):
         op = data["fwi_operator"]
         action = str(op["action"])
         controls = op.get("controls") or {}
+        pml_stage = copy.deepcopy(controls.get("pml_stage"))
+        if pml_stage is not None:
+            pml_stage["manifest"] = resolve(pml_stage["manifest"])
+        stage_mesh = copy.deepcopy(controls.get("stage_mesh"))
+        if stage_mesh is not None:
+            if stage_mesh.get("mode") == "capture":
+                stage_mesh = "capture"
+            else:
+                stage_mesh["manifest"] = resolve(stage_mesh["manifest"])
         imaging = data.get("Imaging") or data.get("Image") or {}
         sensitivities = data.get("control_sensitivities") or {}
         extension = copy.deepcopy(op.get("extension"))
@@ -2284,6 +2410,8 @@ class FWIOperatorJob(_ImagingJobBase):
             objective_vector=resolve(op.get("objective_vector")),
             objective=resolve(op.get("objective")),
             control_state=resolve(controls.get("state")),
+            pml_stage=pml_stage,
+            stage_mesh=stage_mesh,
             state_output=resolve(controls.get("state_output")),
             manifest=resolve(controls.get("manifest")),
             min_support=controls.get("min_support"),
@@ -3709,6 +3837,10 @@ class MeshAdaptationJob(SmoothJob):
         source_identity: str,
         frequency: float,
         averaging_wavelengths: float = 0.5,
+        transfer: str = "nodal",
+        smoothing_length: float = 0.0,
+        smoothing_wavelengths: Optional[float] = None,
+        smoothing_frequency: Optional[float] = None,
         gradient: Union[str, Path] = "transferred.h5",
         name: Optional[str] = None,
     ) -> None:
@@ -3732,6 +3864,15 @@ class MeshAdaptationJob(SmoothJob):
             raise ValueError(
                 "adaptation frequency and averaging window must be positive"
             )
+        from .transfer import Transfer
+
+        policy = Transfer(
+            transfer, smoothing_length, smoothing_wavelengths, smoothing_frequency
+        )
+        self.transfer = policy.method
+        self.smoothing_length = policy.smoothing_length
+        self.smoothing_wavelengths = policy.smoothing_wavelengths
+        self.smoothing_frequency = policy.frequency
         self.result = self._result_path / "mesh_adaptation.json"
 
     def to_fs(
@@ -3742,11 +3883,18 @@ class MeshAdaptationJob(SmoothJob):
         controls.pop("Smoothing", None)
         controls["MeshAdaptation"] = {
             "source_identity": self.source_identity,
+            "transfer": self.transfer,
+            "smoothing_length_m": self.smoothing_length,
             "frequency": self.frequency,
             "averaging_wavelengths": self.averaging_wavelengths,
             "model": {"property_spaces": self.property_spaces},
             "result": _job_path(self.result, ctx, False),
         }
+        if self.smoothing_wavelengths is not None:
+            controls["MeshAdaptation"].update(
+                smoothing_wavelengths=self.smoothing_wavelengths,
+                smoothing_frequency_hz=self.smoothing_frequency or self.frequency,
+            )
         payload.pop("kernel_derivative", None)
         return payload
 
@@ -3786,6 +3934,10 @@ class MeshAdaptationJob(SmoothJob):
             input_vector=resolve(controls["input"]),
             property_spaces=request["model"]["property_spaces"],
             source_identity=request["source_identity"],
+            transfer=request.get("transfer", "nodal"),
+            smoothing_length=request.get("smoothing_length_m", 0.0),
+            smoothing_wavelengths=request.get("smoothing_wavelengths"),
+            smoothing_frequency=request.get("smoothing_frequency_hz"),
             frequency=request["frequency"],
             averaging_wavelengths=request["averaging_wavelengths"],
             gradient=resolve(controls["gradient"]),

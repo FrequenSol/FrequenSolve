@@ -96,10 +96,13 @@ class BoundNativeRegularization(BoundRegularization):
             ):
                 raise ValueError("native reference has a different full control layout")
             self.reference = reference.values.copy()
-        self.source = copy.copy(linearization.job)
+        source = getattr(linearization, "regularization_job", None)
+        if source is None:
+            source = linearization.job
+        self.source = copy.copy(source)
         # The native basis and material wavelengths belong to this stage, not
         # the mutable simulation last installed by a rejected PDE trial.
-        self.source.simulation = copy.deepcopy(linearization.job.simulation)
+        self.source.simulation = copy.deepcopy(self.source.simulation)
         self.source.simulation.name = problem.backend.job_name("regularization_model")
         self.source.simulation.save()
         self._value_cache: dict[bytes, float] = {}

@@ -344,11 +344,6 @@ def _constant_value(prop: Property) -> Optional[float]:
     return low if low == high else None
 
 
-def _surface_extrema(surface: Any) -> Tuple[float, float]:
-    low, high = surface.extrema
-    return float(np.asarray(low)), float(np.asarray(high))
-
-
 def _fit_uniform(extent: Tuple[float, float], spacing: float) -> Tuple[int, float]:
     """Return ``(count, spacing)`` for uniform nodes ending exactly at the extent.
 
@@ -668,9 +663,14 @@ class _BindContext:
             limits = self.model.z_limits
             return float(limits[0]), float(limits[1])
         layer = self.layer(subdomain)
-        top = _surface_extrema(layer.upper)[0]
-        bottom = _surface_extrema(layer.lower)[1]
+        top = self._surface_extrema(layer.upper)[0]
+        bottom = self._surface_extrema(layer.lower)[1]
         return top, bottom
+
+    def _surface_extrema(self, surface: Any) -> Tuple[float, float]:
+        """Read local saved horizon data without mutating the authored surface."""
+        low, high = self._loaded_reference(surface.depth).extrema
+        return float(np.asarray(low)), float(np.asarray(high))
 
     def is_global(self, name: str) -> bool:
         """Return whether ``name`` is the global Cartesian system."""
@@ -796,15 +796,15 @@ class _BindContext:
         """Return the subdomain's span in the datum frame."""
 
         layer = self.layer(subdomain)
-        upper = _surface_extrema(layer.upper)
-        lower = _surface_extrema(layer.lower)
+        upper = self._surface_extrema(layer.upper)
+        lower = self._surface_extrema(layer.lower)
         if datum.surface is None:
             # global (or a Cartesian system sharing the global vertical axis)
             return (upper[0], lower[1])
         if datum.surface is layer.upper or datum.surface.name == layer.upper.name:
             if datum.positive == "down":
                 return (0.0, lower[1] - upper[0])
-        ref = _surface_extrema(datum.surface)
+        ref = self._surface_extrema(datum.surface)
         if datum.positive == "down":
             return (upper[0] - ref[1], lower[1] - ref[0])
         return (ref[0] - lower[1], ref[1] - upper[0])

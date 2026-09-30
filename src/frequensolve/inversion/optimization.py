@@ -362,6 +362,7 @@ class InexactNewtonIteration:
     objective_evaluations: int
     gradient_evaluations: int
     hessian_products: int
+    optimizer_state: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -1102,6 +1103,7 @@ def minimize_lbfgs(
     step_limit: Optional[StepLimit] = None,
     step_transform: Optional[StepTransform] = None,
     callback: Optional[IterationCallback] = None,
+    restart: Optional[dict[str, Any]] = None,
 ) -> InexactNewtonResult:
     """Minimize a real objective with projected limited-memory BFGS.
 
@@ -1198,8 +1200,75 @@ def minimize_lbfgs(
             )
         return result
 
+    steps: list[np.ndarray] = []
+    gradient_differences: list[np.ndarray] = []
+    inverse_curvatures: list[float] = []
+    accepted_before = 0
+    if restart is not None:
+        if restart.get("schema") != "fs-lbfgs-restart-1":
+            raise ValueError("Unsupported L-BFGS restart state")
+        if not np.array_equal(
+            _finite_vector(restart["model"], name="restart model", size=model.size),
+            model,
+        ):
+            raise ValueError("L-BFGS restart belongs to a different model or scaling")
+        if restart["history_size"] != options.history_size:
+            raise ValueError("L-BFGS restart history size changed")
+        pairs = restart["pairs"]
+        if len(pairs) > options.history_size:
+            raise ValueError("L-BFGS restart exceeds its history size")
+        for pair in pairs:
+            step = _finite_vector(pair["step"], name="restart step", size=model.size)
+            difference = _finite_vector(
+                pair["difference"], name="restart difference", size=model.size
+            )
+            curvature = float(np.dot(step, difference))
+            if not np.isfinite(curvature) or curvature <= 0:
+                raise ValueError("L-BFGS restart requires positive finite curvature")
+            steps.append(step)
+            gradient_differences.append(difference)
+            inverse_curvatures.append(1.0 / curvature)
+        accepted_before = int(restart["accepted_iterations"])
+        if accepted_before < 0:
+            raise ValueError("L-BFGS restart has a negative iteration count")
+
     value = evaluate(model)
-    stopping = _StoppingCriteria(options, value)
+    reference = (
+        value
+        if restart is None
+        else _positive(
+            restart["initial_objective"], "restart initial objective", allow_zero=True
+        )
+    )
+    if (
+        restart is not None
+        and options.initial_objective is not None
+        and abs(options.initial_objective) != reference
+    ):
+        raise ValueError("L-BFGS restart initial objective changed")
+    stopping = _StoppingCriteria(options, reference)
+    if restart is not None:
+        improvement = restart.get("improvement")
+        if improvement is not None and (
+            not np.isfinite(improvement) or improvement < 0
+        ):
+            raise ValueError("L-BFGS restart has invalid stopping momentum")
+        stopping.improvement = improvement
+
+    def restart_state(iteration):
+        return {
+            "schema": "fs-lbfgs-restart-1",
+            "model": model.tolist(),
+            "history_size": options.history_size,
+            "accepted_iterations": accepted_before + iteration,
+            "improvement": stopping.improvement,
+            "initial_objective": stopping.reference,
+            "pairs": [
+                {"step": step.tolist(), "difference": difference.tolist()}
+                for step, difference in zip(steps, gradient_differences)
+            ],
+        }
+
     grad = evaluate_gradient(model)
     free, projected_gradient = _free_variables(
         model, grad, lower, upper, options.bound_tolerance
@@ -1234,6 +1303,7 @@ def minimize_lbfgs(
                 objective_evaluations=objective_evaluations,
                 gradient_evaluations=gradient_evaluations,
                 hessian_products=0,
+                optimizer_state=restart_state(0),
             )
         )
     if options.objective_target is not None and value <= options.objective_target:
@@ -1271,9 +1341,6 @@ def minimize_lbfgs(
             steepest_descent_fallbacks,
         )
 
-    steps: list[np.ndarray] = []
-    gradient_differences: list[np.ndarray] = []
-    inverse_curvatures: list[float] = []
     for iteration in range(1, options.max_iterations + 1):
         direction = -inverse_hessian_action(projected_gradient)
         if free is not None:
@@ -1496,6 +1563,7 @@ def minimize_lbfgs(
                     objective_evaluations=objective_evaluations,
                     gradient_evaluations=gradient_evaluations,
                     hessian_products=0,
+                    optimizer_state=restart_state(iteration),
                 )
             )
 
@@ -1510,7 +1578,7 @@ def minimize_lbfgs(
         ):
             status, message = 3, "step tolerance reached"
         elif (
-            iteration >= options.objective_minimum_iterations
+            accepted_before + iteration >= options.objective_minimum_iterations
             and stopping.objective_converged()
         ):
             status, message = 2, "objective tolerance reached"

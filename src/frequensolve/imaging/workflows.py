@@ -35,6 +35,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import (
     Any,
     Callable,
@@ -71,6 +72,7 @@ from frequensolve.imaging.jobs import ImageKernelJob, ImageSpec, _kernel_derivat
 from frequensolve.imaging.misfit import Loss, Misfit
 from frequensolve.imaging.problem import ImagingProblem, Linearization, _MisfitPayload
 from frequensolve.imaging.results import FWIResult, StageResult
+from frequensolve.imaging.transfer import Transfer, resolve_transfer
 from frequensolve.inversion.continuation import (
     ContinuationSchedule,
     ContinuationStage,
@@ -98,6 +100,7 @@ __all__ = [
     "LBFGS",
     "LSRTM",
     "NewtonCG",
+    "PatchUpdates",
     "Stage",
     "block_curvatures",
     "curvature_scaling",
@@ -106,6 +109,8 @@ __all__ = [
     "sensitivity_kernel",
     "sensitivity_kernel_job",
 ]
+
+from ._patch_updates import PatchUpdates
 
 CHECKPOINT_SCHEMA = "fs-imaging-fwi-checkpoint-1"
 
@@ -148,6 +153,17 @@ def _frequency_pairs(values: Sequence[Any]) -> List[List[float]]:
 def _digest(values: Any) -> str:
     array = np.ascontiguousarray(np.asarray(values, dtype=np.float64))
     return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _state_epoch(state: ControlState) -> str:
+    """Identify complete coefficients together with their basis and reference scales."""
+    saved = state.to_file()
+    return fingerprint(
+        blocks=saved.blocks,
+        control_spaces=saved.control_spaces,
+        scaling=saved.scaling,
+        scaling_units=saved.scaling_units,
+    ).removeprefix("sha256:")
 
 
 def _real_vector(value: Any, *, size: Optional[int] = None, name: str) -> np.ndarray:
@@ -277,12 +293,19 @@ class Stage:
         optimizer: :class:`LBFGS` / :class:`NewtonCG` overriding the
             workflow optimizer.
         weights: One nonnegative objective weight per stage frequency.
+        patches: PatchSet overriding the problem's patch policy for this stage.
         name: Stage label (default ``stage_<index>``).
         min_support: Relative support threshold for the stage.
         metadata: Free-form scalar metadata recorded with the stage.
         mesh_averaging_wavelengths: Half-width of the material-aware slowness
             averaging window for explicit mesh changes, in material-average
             wavelengths at the largest requested control sizing frequency.
+        transfer: ``im.Transfer.nodal()`` (default) or
+            ``im.Transfer.l2(smooth=100 * u.m)`` for explicit mesh changes.
+            Smoothing lengths accept length quantities or numbers in meters.
+        mesh_transfer: Legacy spelling: ``"nodal"`` or ``"l2"``.
+        mesh_smoothing_length: L2 projection smoothing length in meters (zero
+            for unsmoothed projection). Applied once at the stage boundary.
         controls: Change the control layout from this stage on: a complete
             :class:`~frequensolve.imaging.controls.ControlSpace` or a mapping
             ``{block key: new block spec}`` replacing those blocks (e.g.
@@ -309,9 +332,25 @@ class Stage:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     controls: Any = None
     mesh_averaging_wavelengths: float = 0.5
+    mesh_transfer: Optional[str] = None
+    mesh_smoothing_length: Optional[float] = None
     kernel_derivative: Optional[Mapping[str, Any]] = None
+    transfer: Optional[Transfer] = None
+    patches: Any = None
 
     def __post_init__(self) -> None:
+        if self.patches is not None:
+            from frequensolve.mesh.patches import PatchSet
+
+            if not isinstance(self.patches, PatchSet):
+                raise TypeError("stage patches must be a PatchSet")
+        policy = resolve_transfer(
+            self.transfer, self.mesh_transfer, self.mesh_smoothing_length
+        )
+        if self.controls is None and (
+            policy.method != "nodal" or policy.smoothing_length
+        ):
+            raise ValueError("mesh transfer options require stage controls")
         if self.kernel_derivative is not None:
             object.__setattr__(
                 self,
@@ -530,6 +569,8 @@ class Stage:
             kwargs["weights"] = self.weights
         if self.kernel_derivative is not None:
             kwargs["kernel_derivative"] = self.kernel_derivative
+        if self.patches is not None:
+            kwargs["patches"] = self.patches
         return problem.restrict(
             frequencies=self.frequencies,
             active=None if self.active is None else list(self.active),
@@ -707,6 +748,7 @@ class _OptimizerConfig:
         scaling: Optional[Any] = None,
         block_slices: Optional[Sequence[slice]] = None,
         space: Optional[ControlSpace] = None,
+        restart: Optional[Dict[str, Any]] = None,
     ) -> InexactNewtonResult:
         """Minimize ``objective`` from ``x0``.
 
@@ -886,7 +928,7 @@ class _OptimizerConfig:
                 step_limit=None if limit is None else step_limit_fn,
             )
         elif self.kind == "lbfgs":
-            result = minimize_lbfgs(f, g, y0, **kwargs)
+            result = minimize_lbfgs(f, g, y0, restart=restart, **kwargs)
         else:
             if curvature_fn is None:
                 raise ValueError("NewtonCG requires a hessian_action")
@@ -1085,6 +1127,9 @@ class FWIIteration:
     loss: LossTerms
     record: OptimizationRecord
     diagnostics: InexactNewtonIteration
+    mode: str = "global"
+    patch_name: Optional[str] = None
+    sweep: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -1155,9 +1200,18 @@ class FWI:
         checkpoint: Optional[Union[str, Path]] = None,
         history: Any = None,
         callback: Optional[Callable[[FWIIteration], None]] = None,
+        patch_updates: Optional[PatchUpdates] = None,
     ) -> None:
+        if patch_updates is not None and not isinstance(patch_updates, PatchUpdates):
+            raise TypeError("patch_updates must be a PatchUpdates configuration")
+        self.patch_updates = patch_updates
         self.problem = problem
         self.stages: List[Stage] = _stage_list(stages)
+        if patch_updates is not None and any(
+            stage.patches is None and getattr(problem, "patches", None) is None
+            for stage in self.stages
+        ):
+            raise ValueError("Local patch updates require patches in every stage")
         self.optimizer = LBFGS() if optimizer is None else optimizer
         if not callable(getattr(self.optimizer, "solve", None)):
             raise TypeError("optimizer must provide solve()")
@@ -1246,6 +1300,9 @@ class FWI:
             problem = previous.with_controls(
                 stage.controls,
                 mesh_averaging_wavelengths=stage.mesh_averaging_wavelengths,
+                transfer=resolve_transfer(
+                    stage.transfer, stage.mesh_transfer, stage.mesh_smoothing_length
+                ),
                 discovery_frequencies=stage.frequencies,
             )
         else:
@@ -1415,20 +1472,49 @@ class FWI:
         state = view.state_from(ControlVector(model, space))
         assert self.state_path is not None
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        state.save(self.state_path)
+        state_path = self.state_path
+        if getattr(view, "patches", None) is not None:
+            # Publish a new immutable state before changing the checkpoint
+            # pointer, so an interrupted write cannot change an older epoch.
+            epoch = _state_epoch(state)[:20]
+            state_path = state_path.with_name(
+                f"{state_path.stem}_{epoch}{state_path.suffix}"
+            )
+        state.save(state_path)
+        metadata = self._checkpoint_metadata(
+            index,
+            stage,
+            space,
+            stage_iteration=stage_iteration,
+            completed=completed,
+            history=history,
+        )
+        metadata["state_path"] = str(state_path)
+        if getattr(view, "patches", None) is not None:
+            metadata["stage_identity"] = self._identity(view)
+            metadata["patch_runtime"] = json.dumps(
+                view._patch_runtime.checkpoint(), sort_keys=True
+            )
+            metadata["model_epoch"] = epoch
+            metadata["optimizer_restart"] = json.dumps(
+                getattr(self, "_optimizer_checkpoint", None)
+            )
+            metadata["optimizer_config"] = getattr(self, "_optimizer_config", None)
+            metadata["optimizer_scaling"] = json.dumps(
+                getattr(self, "_optimizer_scaling", None)
+            )
+            metadata["patch_updates"] = json.dumps(
+                None if self.patch_updates is None else self.patch_updates.to_dict()
+            )
+            metadata["local_updates"] = json.dumps(
+                getattr(self, "_local_checkpoint", None)
+            )
         OptimizationCheckpoint(
             model=model,
             iteration=history.iteration_count,
             evaluations=history.evaluation_count,
             loss=loss,
-            metadata=self._checkpoint_metadata(
-                index,
-                stage,
-                space,
-                stage_iteration=stage_iteration,
-                completed=completed,
-                history=history,
-            ),
+            metadata=metadata,
         ).save(self.checkpoint_path)
 
     # -- resume ---------------------------------------------------------------
@@ -1460,6 +1546,32 @@ class FWI:
         # ``controls`` of every stage up to it) before comparing layouts.
         self._stage_inputs = json.loads(meta.get("stage_inputs", "{}"))
         problem = self._problem_for(index)
+        patch_record = meta.get("patch_runtime")
+        if patch_record is not None:
+            configured = (
+                None if self.patch_updates is None else self.patch_updates.to_dict()
+            )
+            if json.loads(meta.get("patch_updates", "null")) != configured:
+                raise ValueError("Checkpoint patch-update mode or settings changed")
+            self._resume_local = (index, json.loads(meta.get("local_updates", "null")))
+        if patch_record is not None:
+            from ._patch_problem import _PatchRuntime
+
+            self._resume_optimizer = (
+                index,
+                json.loads(meta.get("optimizer_restart", "null")),
+                meta.get("optimizer_config"),
+                json.loads(meta.get("optimizer_scaling", "null")),
+            )
+            view = self.stages[index].view(problem)
+            runtime = _PatchRuntime.restore(view, json.loads(patch_record))
+            if meta.get("stage_identity") != self._identity(view):
+                raise ValueError("Checkpoint patch stage objective or settings changed")
+            view._patch_runtime = runtime
+            runtime.problem = view
+            self._views[self.stages[index].label(index)] = view
+        elif getattr(problem, "patches", None) is not None:
+            raise ValueError("Patch checkpoint omits its frozen stage and meshes")
         control_ids, control_sizes = self._layout(problem)
         if meta.get("control_ids") != control_ids:
             raise ValueError(
@@ -1495,6 +1607,11 @@ class FWI:
                 f"checkpoint {path} references a missing control state {state_path}"
             )
         state = ControlState.load(state_path, problem.full_space.without_support())
+        if (
+            patch_record is not None
+            and meta.get("model_epoch") != _state_epoch(state)[:20]
+        ):
+            raise ValueError("Checkpoint complete model epoch changed")
         recorded = meta.get("mechanism_scaling")
         if recorded:
             scaling = {str(k): float(v) for k, v in json.loads(recorded).items()}
@@ -1587,6 +1704,7 @@ class FWI:
         *,
         expected_model: Optional[np.ndarray] = None,
     ) -> StageResult:
+        stage_started = perf_counter()
         problem = self._problem_for(index)
         history = self._history
         assert history is not None
@@ -1664,6 +1782,20 @@ class FWI:
                     regularization, space, [bound_regularization, native_regularization]
                 )
             native_regularization = None
+        if self.patch_updates is not None:
+            from ._patch_updates import solve_local_stage
+
+            return solve_local_stage(
+                self,
+                index,
+                stage,
+                start_iteration,
+                view,
+                first,
+                bound_regularization,
+                native_regularization,
+                stage_started=stage_started,
+            )
         metrics = self._stage_metrics(index, stage, space, optimizer, regularization)
         if native_regularization is not None:
             metrics["optimizer"] = "proximal_gradient"
@@ -1703,6 +1835,31 @@ class FWI:
             preconditioner = bound_preconditioner
         refresh = getattr(optimizer, "preconditioner_refresh", None)
         scaling = self._scaling_for(objective.linearization(x0), space)
+        optimizer_restart = None
+        if getattr(view, "patches", None) is not None:
+            if isinstance(scaling, Mapping):
+                scaling = curvature_scaling(
+                    scaling, space, max_ratio=optimizer.scaling_max_ratio
+                )
+            resumed_optimizer = getattr(self, "_resume_optimizer", None)
+            if (
+                resumed_optimizer is not None
+                and resumed_optimizer[0] == index
+                and start_iteration > 0
+            ):
+                if resumed_optimizer[2] != repr(optimizer):
+                    raise ValueError("Checkpoint optimizer configuration changed")
+                optimizer_restart = resumed_optimizer[1]
+                scaling = (
+                    None
+                    if resumed_optimizer[3] is None
+                    else np.asarray(resumed_optimizer[3])
+                )
+            self._optimizer_checkpoint = optimizer_restart
+            self._optimizer_config = repr(optimizer)
+            self._optimizer_scaling = (
+                None if scaling is None else np.asarray(scaling).tolist()
+            )
         step_limit = self.step_limit
         if step_limit is None:
             step_limit = getattr(optimizer, "step_limit", None)
@@ -1720,6 +1877,8 @@ class FWI:
         )
 
         def on_iteration(it: InexactNewtonIteration) -> None:
+            if getattr(view, "patches", None) is not None:
+                self._optimizer_checkpoint = it.optimizer_state
             loss = objective.loss(it.model)
             stage_iteration = start_iteration + it.iteration
             record = history.record_iteration(
@@ -1794,6 +1953,12 @@ class FWI:
             step_limit=step_limit,
             scaling=scaling,
             space=space,
+            **(
+                {"restart": optimizer_restart}
+                if getattr(view, "patches", None) is not None
+                and getattr(optimizer, "kind", None) == "lbfgs"
+                else {}
+            ),
         )
         final = ControlVector(result.model, space)
         problem.state = view.state_from(final)
@@ -1832,6 +1997,8 @@ class FWI:
             space=space,
             metrics={
                 "optimizer": metrics["optimizer"],
+                "elapsed_seconds": perf_counter() - stage_started,
+                "elapsed_scope": "stage preparation, evaluations, reductions and checkpoint writes",
                 "gradient_evaluations": int(result.gradient_evaluations),
                 "hessian_products": int(result.hessian_products),
                 "cg_iterations": int(result.cg_iterations),
@@ -1918,8 +2085,10 @@ class FWI:
         )
         first_stage = self.stages[start]
         first_problem = self._problem_for(start)
-        first_view = first_stage.view(first_problem)
-        self._views[first_stage.label(start)] = first_view
+        first_view = self._views.get(first_stage.label(start))
+        if first_view is None:
+            first_view = first_stage.view(first_problem)
+            self._views[first_stage.label(start)] = first_view
         assert first_problem.state is not None
         initial = first_view.vector(first_problem.state).values
 

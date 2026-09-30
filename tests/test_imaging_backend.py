@@ -242,6 +242,29 @@ def test_linearize_reduces_task_covectors_reports_state_and_manifest(setup):
     assert manifest.state_size == sum(SIZES.values())
 
 
+def test_covector_reduction_preserves_material_basis_identities(setup):
+    sim, _, backend = setup
+    job = _linearize(backend, sim)
+    identities = {"model.vp": "sha256:" + "a" * 64}
+    for task in (1, 2):
+        part = ControlVectorFile.read(job.covector_file(task))
+        part.control_spaces = identities
+        part.write(job.covector_file(task))
+    assert reduce_covectors(job).control_spaces == identities
+
+
+@pytest.mark.parametrize("other", [{}, {"model.vp": "sha256:" + "b" * 64}])
+def test_covector_reduction_rejects_incompatible_material_bases(setup, other):
+    sim, _, backend = setup
+    job = _linearize(backend, sim)
+    for task, identities in ((1, {"model.vp": "sha256:" + "a" * 64}), (2, other)):
+        part = ControlVectorFile.read(job.covector_file(task))
+        part.control_spaces = identities
+        part.write(job.covector_file(task))
+    with pytest.raises(ValueError, match="material basis identities"):
+        reduce_covectors(job)
+
+
 def test_linearize_without_control_state_uses_zero_baseline(setup):
     sim, fake, backend = setup
     job = _linearize(backend, sim)

@@ -206,8 +206,8 @@ def reduce_covectors(
     task's coordinates, and FrequenSolve converts each task's part to its
     reference coordinates with ``s_ref / s_task``.  Sauce fingerprints every
     task's saved state on its own (per-frequency mesh adaptation makes them
-    differ), so only the block layout must agree; the reduced file carries
-    task 1's fingerprints.
+    differ), so the block layout and material-basis identities must agree;
+    the reduced file preserves those identities and carries task 1's fingerprints.
     """
 
     weight = frequency_weights(job, weights)
@@ -238,6 +238,10 @@ def reduce_covectors(
             continue
         if part.names != first.names or part.sizes != first.sizes:
             raise ValueError(f"{path} has a different block layout than task 1")
+        if part.control_spaces != first.control_spaces:
+            raise ValueError(
+                f"{path} has different material basis identities than task 1"
+            )
         for name, values in part.blocks.items():
             blocks[name] = blocks[name] + scale(task, name) * values
             support[name] = support[name] & part.support_mask(name)
@@ -248,6 +252,7 @@ def reduce_covectors(
         control_registry_fingerprint=first.control_registry_fingerprint,
         support={name: mask for name, mask in support.items() if not mask.all()},
         support_min_support=first.support_min_support,
+        control_spaces=dict(first.control_spaces),
     )
 
 

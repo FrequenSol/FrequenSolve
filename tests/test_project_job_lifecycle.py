@@ -50,6 +50,32 @@ def _project_with_trace_simulation(tmp_path):
     return project, sim
 
 
+@pytest.mark.parametrize("frequencies", [[3], [3, 7.5], [3 - 0.5j]])
+@pytest.mark.parametrize("grading", [{}, {"adapt_sources": 0, "adapt_receivers": 2}])
+def test_saved_job_reload_preserves_exact_input_fingerprints(
+    tmp_path, frequencies, grading
+):
+    _, simulation = _project_with_trace_simulation(tmp_path)
+    simulation.mesh.set_adapt(elems_per_wave=0.5, order=2, **grading)
+    job = FrequencyDomainJob("stable", simulation, frequencies)
+    job.save()
+    _commit_task_result(job, 1)
+    fingerprints = job._artifact_contract_fingerprints()
+    simulation_bytes = simulation._file.read_bytes()
+    job_bytes = job.job_file.read_bytes()
+
+    restored = FrequencyDomainJob.load(job.job_file)
+    restored.save()
+
+    assert restored.simulation._file.read_bytes() == simulation_bytes
+    assert restored.job_file.read_bytes() == job_bytes
+    assert restored._artifact_contract_fingerprints() == fingerprints
+    assert restored.plan_tasks()["strict_current_tasks"] == [1]
+    restored.simulation.mesh.adapt.order += 1
+    restored.save()
+    assert restored.plan_tasks()["strict_current_tasks"] == []
+
+
 def _commit_task_result(
     job,
     task,

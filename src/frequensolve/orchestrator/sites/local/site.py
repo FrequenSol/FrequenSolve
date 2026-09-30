@@ -52,7 +52,9 @@ from frequensolve.orchestrator.utils.environment import (
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.artifact_contract import (
     ArtifactContractError,
+    OperationResult,
     TaskResult,
+    load_operation_result,
     task_result_path,
 )
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
@@ -150,7 +152,9 @@ def _job_task_frequency(job_file: Union[str, Path], task_id: int) -> Optional[co
         ) from exc
 
 
-def _read_task_result(job_file: Union[str, Path], task_id: int) -> Optional[TaskResult]:
+def _read_task_result(
+    job_file: Union[str, Path], task_id: int
+) -> Optional[Union[TaskResult, OperationResult]]:
     """Read the fixed-path committed result for one local frequency task."""
 
     if task_id < 0:
@@ -158,6 +162,11 @@ def _read_task_result(job_file: Union[str, Path], task_id: int) -> Optional[Task
     result_path = _job_result_path(job_file)
     if result_path is None:
         return None
+    job_data = json.loads(Path(job_file).read_text(encoding="utf-8"))
+    if job_data.get("workflow") == "patch_prepare":
+        if task_id != 0:
+            raise ArtifactContractError("Patch preparation has exactly one operation")
+        return load_operation_result(result_path, "patch_prepare")
     path = task_result_path(result_path, task_id + 1)
     task_result = TaskResult.read(path, result_path=result_path)
     if task_result.partition.task != task_id + 1:
@@ -179,14 +188,20 @@ def _read_task_result(job_file: Union[str, Path], task_id: int) -> Optional[Task
 
 def _attach_task_result(
     result: Dict[str, Any],
-    task_result: Optional[TaskResult],
+    task_result: Optional[Union[TaskResult, OperationResult]],
 ) -> None:
     """Attach compact producer-authored task and artifact metadata."""
 
     if task_result is None:
         return
     result["task_result"] = str(task_result.path)
-    result["partition"] = task_result.partition.to_fs()
+    if isinstance(task_result, OperationResult):
+        result["operation"] = {
+            "name": task_result.name,
+            "generation": task_result.generation,
+        }
+    else:
+        result["partition"] = task_result.partition.to_fs()
     result["artifacts"] = [artifact.to_fs() for artifact in task_result.artifacts]
 
 

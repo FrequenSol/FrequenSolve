@@ -1434,3 +1434,69 @@ def test_spectral_stage_does_not_change_neighboring_waveform_stage(problem):
     assert waveform.kernel_derivative is None
     assert problem.kernel_derivative is None
     assert spectral.identity() != waveform.identity()
+
+
+@pytest.mark.parametrize(
+    "method,length", [("bad", 0), ("l2", -1), ("l2", float("nan")), ("nodal", 1)]
+)
+def test_stage_rejects_invalid_mesh_transfer(method, length):
+    with pytest.raises(ValueError, match="mesh_"):
+        im.Stage(
+            [1.0],
+            iterations=1,
+            controls={},
+            mesh_transfer=method,
+            mesh_smoothing_length=length,
+        )
+
+
+def test_stage_rejects_unused_mesh_transfer():
+    with pytest.raises(ValueError, match="require stage controls"):
+        im.Stage([1.0], iterations=1, mesh_transfer="l2")
+
+
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("mode", ["legacy", "fixed", "wavelength"])
+def test_transfer_policy_reaches_native_adaptation(
+    tmp_path, fake, monkeypatch, staged, mode
+):
+    from frequensolve.imaging import _mesh_adaptation
+    from frequensolve.units import ureg as u
+
+    problem = _problem(tmp_path, fake, subdir="transfer_policy")
+    controls = {"vp": im.MeshParameters("vp", "layer_2", frequency=6.0, epw=2.0)}
+    options = (
+        {"mesh_transfer": "l2", "mesh_smoothing_length": 100.0}
+        if mode == "legacy"
+        else {"transfer": im.Transfer.l2(smooth=0.1 * u.km)}
+    )
+    expected = {"transfer": "l2", "smoothing_length": 100.0}
+    if mode == "wavelength":
+        options = {
+            "transfer": im.Transfer.l2(smooth_wavelengths=0.1, frequency=0.003 * u.kHz)
+        }
+        expected = {
+            "transfer": "l2",
+            "smoothing_length": 0.0,
+            "smoothing_wavelengths": 0.1,
+            "smoothing_frequency": 3.0,
+        }
+    received = {}
+
+    class ReachedNativeAdaptation(Exception):
+        pass
+
+    def adapt(problem, space, state, averaging, keys, **policy):
+        received.update(policy)
+        assert keys == {"vp"}
+        assert state.space.equivalent(problem.full_space)
+        raise ReachedNativeAdaptation
+
+    monkeypatch.setattr(_mesh_adaptation, "adapt_meshes", adapt)
+    with pytest.raises(ReachedNativeAdaptation):
+        if staged:
+            stage = im.Stage(FREQUENCIES, iterations=1, controls=controls, **options)
+            im.FWI(problem, stage)._problem_for(0)
+        else:
+            problem.with_controls(controls, **options)
+    assert received == expected

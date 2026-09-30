@@ -1943,3 +1943,15 @@ WORKSPACE_DEPRECATION = (
     "workspace_mb is deprecated and ignored: Sauce allocates the indivisible "
     "source-batch workspace at its required size"
 )
+
+
+def validate_mesh_transfer(method: str, length: float) -> None:
+    """Reject unsupported transfer methods and ambiguous smoothing requests."""
+    if method not in {"nodal", "l2"}:
+        raise ValueError("mesh_transfer must be 'nodal' or 'l2'")
+    if not np.isfinite(length) or length < 0:
+        raise ValueError(
+            "mesh_smoothing_length must be finite and nonnegative (meters)"
+        )
+    if method != "l2" and length != 0:
+        raise ValueError("mesh_smoothing_length requires mesh_transfer='l2'")
