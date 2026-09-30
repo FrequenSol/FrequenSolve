@@ -36,7 +36,7 @@ import numpy as np
 import xarray as xr
 
 from frequensolve.imaging.data import ObservedGroup
-from frequensolve.units import is_quantity, value_and_units_to_fs
+from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 from frequensolve.util.mixins import ExportContext
 
 __all__ = [
@@ -862,6 +862,52 @@ class Preprocess:
             if not name:
                 raise ValueError("preprocessing hook name must be non-empty")
             object.__setattr__(self, "name", name)
+
+    @classmethod
+    def material_weighting(
+        cls,
+        blocks: Mapping[Any, Any],
+        *,
+        units: Mapping[Any, Any],
+        name: Optional[str] = None,
+    ) -> "Preprocess":
+        """Apply material-defined W inside the residual norm, frozen for the objective lifetime.
+
+        Keys are one-based component IDs or tuples of coupled component IDs.
+        Values are material expressions. ``units`` specifies transformed trace
+        units for each block. Frequency-independent W also weights df traces.
+        """
+        from frequensolve.physics import ReceiverExpression
+
+        if not blocks or set(blocks) != set(units):
+            raise ValueError("Every material weighting block needs output units")
+        rows = []
+        used = set()
+        for key, expression in blocks.items():
+            components = (key,) if isinstance(key, int) else tuple(key)
+            if not components or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+                for value in components
+            ):
+                raise ValueError("Weighting components must be positive one-based IDs")
+            if len(set(components)) != len(components) or used.intersection(components):
+                raise ValueError("Material weighting blocks must not overlap")
+            if not isinstance(expression, ReceiverExpression) or expression.wavefield:
+                raise TypeError("Material weighting requires material expressions")
+            used.update(components)
+            rows.append(
+                {
+                    "components": list(components),
+                    "coefficient": expression.coefficient(basis="physical"),
+                    "units": unit_expression(units[key]),
+                }
+            )
+        return cls(
+            "material_weighting",
+            "trace_pair",
+            {"model_policy": "frozen", "blocks": rows},
+            name=name,
+        )
 
     # -- objective weights ---------------------------------------------------
 

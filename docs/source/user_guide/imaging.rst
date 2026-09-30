@@ -1810,3 +1810,28 @@ mode and its diagonal approximation otherwise; ``mass`` always applies ``M``. Co
 required; partial support masks and non-material controls are rejected.
 A solver supporting native ``mass`` and ``mass_inverse`` callbacks is required
 for consistent mode; diagonal mode requires ``mass_diagonal``.
+
+Material-defined residual weighting
+-----------------------------------
+
+``Preprocess.material_weighting`` evaluates material expressions at receivers
+and applies the factor W inside the residual norm, including W's Hermitian
+transpose during reverse propagation:
+
+.. code-block:: python
+
+   acoustic = fs.physics.acoustic()
+   weight = Preprocess.material_weighting(
+       {1: 1 / acoustic.materials.rho}, units={1: "m^2/s^2"}
+   )
+   misfit = Misfit(preprocess=[weight])
+
+Component IDs are one-based; a tuple selects a coupled tensor block. Explicit
+``units`` describe the transformed traces, including the original field units.
+Tensor blocks act on physical symmetric-tensor components in solver tensor
+order. Blocks cannot overlap. The factor is frozen within an initialized
+objective, while receiver material expressions retain their direct material
+derivatives. Frequency-independent factors apply to both traces and their
+spectral derivatives. Dispersive constitutive weights are rejected. Passing
+compliance as W produces the metric W^H W, rather than a compliance energy
+metric; those are different objectives.

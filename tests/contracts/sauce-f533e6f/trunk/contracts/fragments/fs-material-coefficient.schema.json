@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/fragments/fs-material-coefficient.schema.json",
+  "title": "Material coefficient",
+  "description": "A dimensioned scalar material expression or an elastic constitutive tensor in the selected packed basis. This specifies a factor W, not a metric W^H W.",
+  "$defs": {
+    "expression": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "units": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "ref"
+          ],
+          "properties": {
+            "ref": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "op",
+            "arg"
+          ],
+          "properties": {
+            "op": {
+              "enum": [
+                "neg",
+                "sqrt",
+                "abs"
+              ]
+            },
+            "arg": {
+              "$ref": "#/$defs/expression"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "op",
+            "args"
+          ],
+          "properties": {
+            "op": {
+              "enum": [
+                "add",
+                "sub",
+                "mul",
+                "div"
+              ]
+            },
+            "args": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "$ref": "#/$defs/expression"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "op",
+            "args"
+          ],
+          "properties": {
+            "op": {
+              "const": "pow"
+            },
+            "args": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "prefixItems": [
+                {
+                  "$ref": "#/$defs/expression"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "value"
+                  ],
+                  "properties": {
+                    "value": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ],
+              "items": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "expr"
+      ],
+      "properties": {
+        "expr": {
+          "$ref": "#/$defs/expression"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "tensor"
+      ],
+      "properties": {
+        "tensor": {
+          "enum": [
+            "compliance",
+            "stiffness"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "engineering_voigt",
+            "mandel",
+            "physical"
+          ],
+          "default": "engineering_voigt",
+          "description": "Packed tensor basis. Receiver expressions use Mandel; physical acts on physical symmetric-tensor entries."
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

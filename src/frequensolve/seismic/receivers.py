@@ -9,7 +9,7 @@ import json
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from numbers import Number
+from numbers import Integral, Number
 from pathlib import Path
 from typing import (
     Any,
@@ -170,6 +170,7 @@ class ReceiverComponent:
 
     name: str = "name"
     field: str
+    expression: Optional[Dict[str, Any]] = None
     direction: Optional[Union[List[float], Direction]] = None
     units: Optional[str] = None
     weight: Optional[Any] = None
@@ -195,6 +196,11 @@ class ReceiverComponent:
         return {
             "name": self.name,
             "field": canonical_field(self.field),
+            **(
+                {"expression": copy.deepcopy(self.expression)}
+                if self.expression is not None
+                else {}
+            ),
             **(
                 {"transfer": copy.deepcopy(self.transfer)}
                 if self.transfer is not None
@@ -240,7 +246,8 @@ class ReceiverComponent:
             data["direction"] = Direction.from_fs(data["direction"])
         return cls(
             name=data["name"],
-            field=canonical_field(data["field"]),
+            field=canonical_field(data.get("field", data["name"])),
+            expression=data.get("expression"),
             direction=data.get("direction"),
             units=data.get("units"),
             weight=data.get("weight"),
@@ -2222,10 +2229,11 @@ class ReceiverGroup(ExtraFieldsMixin):
 
     Args:
         name: String identifier for this receiver group.
-        device: Device defining receiver type and components.
+        device: Receiver device, physical expression, or mapping of named expressions.
         coordinates: Receiver coordinates as an array, grid, file path, or
             ``ReceiverCoords`` object.
-        domain: Optional domain where the receiver group is evaluated.
+        domain: Mesh block ID or exact material layer name to sample.
+        materials: Optional named material expressions written as diagnostics.
         sampling: Optional sparse survey sampling reference.
         survey: Convenience sparse survey name/reference. Merged with
             ``sampling`` when both are supplied.
@@ -2239,7 +2247,7 @@ class ReceiverGroup(ExtraFieldsMixin):
 
     name: str = "group"
     device: ReceiverDevice = field(default_factory=ReceiverDevice)
-    domain: Optional[int] = None
+    domain: Optional[Union[int, str]] = None
     coordinates: ReceiverCoords = field(default_factory=ReceiverCoords)
     sampling: Optional[ReceiverSampling] = None
     extra: Dict = field(default_factory=dict)
@@ -2269,7 +2277,8 @@ class ReceiverGroup(ExtraFieldsMixin):
         name: str,
         device: ReceiverDevice,
         coordinates: Union[np.ndarray, xr.DataArray, str, Path, Grid, ReceiverCoords],
-        domain: Optional[int] = None,
+        domain: Optional[Union[int, str]] = None,
+        materials: Optional[Mapping[str, Any]] = None,
         sampling: Optional[Union[str, Dict, ReceiverSampling]] = None,
         survey: Optional[Union[str, ReceiverSampling]] = None,
         extra: Optional[Dict] = None,
@@ -2290,11 +2299,55 @@ class ReceiverGroup(ExtraFieldsMixin):
         elif survey_obj is not None and sampling_obj.survey is None:
             sampling_obj.survey = survey_obj.survey
         self.name = name
+        self._expressions = None
+        self._expression_dimension = None
+        from frequensolve.physics import ReceiverExpression
+
+        if isinstance(device, ReceiverExpression) or isinstance(device, Mapping):
+            outputs = (
+                {name: device}
+                if isinstance(device, ReceiverExpression)
+                else dict(device)
+            )
+            if not outputs or any(
+                not isinstance(value, ReceiverExpression) for value in outputs.values()
+            ):
+                raise TypeError(
+                    "Receiver outputs must be a non-empty mapping of expressions"
+                )
+            self._expressions = outputs
+            dimension = next(
+                (
+                    value.dimension
+                    for value in outputs.values()
+                    if value.dimension is not None
+                ),
+                None,
+            )
+            if dimension is None and isinstance(coords, CoordsArray):
+                dimension = coords.coordinates.shape[-1]
+            self._expression_dimension = dimension
+            device = ReceiverNode(components=[])
+        if not isinstance(device, ReceiverDevice):
+            raise TypeError(
+                "Receiver device must be a ReceiverDevice or physical expression"
+            )
         self.device = device
+        self.materials = dict(materials or {})
         self.coordinates = coords
-        self.domain = domain
+        if isinstance(domain, bool) or (
+            domain is not None and not isinstance(domain, (str, Integral))
+        ):
+            raise TypeError(
+                "Receiver domain must be a mesh block ID or material layer name"
+            )
+        if isinstance(domain, str) and not domain.strip():
+            raise ValueError("Receiver material layer name must not be empty")
+        self.domain = int(domain) if isinstance(domain, Integral) else domain
         self.sampling = sampling_obj
         self._init_extra(extra, **kwargs)
+        if self._expression_dimension is not None:
+            self.resolve_expressions()
         deprecated_frame_keys = {"frame", "source_frame", "receiver_frame"} & set(
             self.extra
         )
@@ -2302,6 +2355,30 @@ class ReceiverGroup(ExtraFieldsMixin):
             raise TypeError(
                 "ReceiverGroup frame is no longer supported; receiver coordinates are physical"
             )
+
+    def resolve_expressions(self, ctx: Optional[ExportContext] = None) -> None:
+        """Bind symbolic outputs to the simulation dimension before export or pairing."""
+        if not self._expressions:
+            return
+        dimension = getattr(ctx, "dimension", None) or self._expression_dimension
+        if dimension is None:
+            raise ValueError(
+                "Receiver expressions need a simulation dimension or physics factory dimension"
+            )
+        physics = getattr(ctx, "physics", None)
+        components = []
+        multiple = len(self._expressions) > 1
+        for name, expression in self._expressions.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("Receiver expression output names must be non-empty")
+            output = expression.receiver_components(name, dimension, physics)
+            if multiple:
+                for component in output:
+                    component.name = (
+                        name if expression.rank == 0 else f"{name}.{component.name}"
+                    )
+            components.extend(output)
+        self.device.components = components
 
     @property
     def survey(self) -> Optional[str]:
@@ -2354,6 +2431,7 @@ class ReceiverGroup(ExtraFieldsMixin):
         export directory when an export context is available.
         """
 
+        self.resolve_expressions(ctx)
         coords = self.coordinates
         if isinstance(self.device, EncodedReceiver):
             self.device.validate_size(self.size, ctx)
@@ -2524,6 +2602,29 @@ class ReceiverGroup(ExtraFieldsMixin):
             ),
             "coordinates": coords_payload,
         }
+        if self.materials:
+            from frequensolve.physics import ReceiverExpression
+
+            if "material_samples" in self.extra:
+                raise ValueError("Specify materials or material_samples, not both")
+            payload["material_samples"] = []
+            for name, expression in self.materials.items():
+                if not isinstance(name, str) or not name:
+                    raise ValueError("Material diagnostic names must be non-empty")
+                if (
+                    not isinstance(expression, ReceiverExpression)
+                    or expression.wavefield
+                ):
+                    raise TypeError(
+                        "materials diagnostics require material expressions"
+                    )
+                payload["material_samples"].append(
+                    {
+                        "name": name,
+                        "coefficient": expression.coefficient(),
+                        "units": expression.units,
+                    }
+                )
         return merge_extra(payload, self.extra, "ReceiverGroup")
 
     @classmethod

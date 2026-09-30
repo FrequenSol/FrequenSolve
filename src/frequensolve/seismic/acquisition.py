@@ -286,6 +286,8 @@ class Acquisition(ExtraFieldsMixin):
             *self.boundary_loadings,
             *_coerce_boundary_loadings(boundary_loadings),
         ]
+        for group in self.receiver_groups:
+            group.resolve_expressions(ctx)
         self._validate_export_contract(all_boundary_loadings)
 
         ctx = ctx or ExportContext()
@@ -756,16 +758,16 @@ class Acquisition(ExtraFieldsMixin):
         name: str,
         device: ReceiverDevice,
         coords: np.ndarray,
-        domain: Optional[int] = None,
+        domain: Optional[Union[int, str]] = None,
         **kwargs,
     ):
         """Add a receiver group with common device and coordinates.
 
         Args:
             name: Receiver group name.
-            device: Device defining receiver type and components.
+            device: ReceiverDevice, physical expression, or mapping of named expressions.
             coords: Receiver coordinate array or coordinate object.
-            domain: Optional domain where the receiver group is evaluated.
+            domain: Optional mesh block ID or exact material layer name.
             **kwargs: Additional solver-facing receiver group fields.
 
         Returns:

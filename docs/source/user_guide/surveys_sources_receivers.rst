@@ -18,7 +18,7 @@ Related tutorials:
   for offset windows and explicit source-receiver layouts.
 
 Calibrated airgun sources
-------------------------
+-------------------------
 
 ``AirgunSignature`` accepts a ghost-free far-field pressure-distance signature,
 not chamber pressure or an imposed pressure at the source. It lowers to the
@@ -91,6 +91,58 @@ Supported fields depend on physics:
      - ``velocity``, ``stress``, ``strain``, ``pressure``
    * - Poroelastic
      - ``velocity``, ``fluid_flux``, ``stress``, ``pressure``, ``strain``, ``displacement``, ``fluid_displacement``
+
+Typed Fields and Material Expressions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Physics namespaces expose symbolic quantities as attributes:
+``fs.physics.acoustic()``, ``fs.physics.elastic()``,
+``fs.physics.poroelastic()``, and ``fs.physics.electromagnetic()``.
+Fields and materials carry units and tensor shape; values resolve against the
+simulation at receiver locations. Select components with ``velocity.z``,
+``strain.xx``, or ``strain["x", "z"]``. Use ``.to("MPa")`` for output units.
+
+.. code-block:: python
+
+   elastic = fs.physics.elastic()
+   momentum = elastic.materials.rho * elastic.fields.velocity
+   strain = elastic.materials.compliance @ elastic.fields.stress
+   acq.add_receiver_group("momentum", momentum, coords=coords, domain="solid")
+   acq.add_receiver_group("strain_xx", strain.xx, coords=coords, domain="solid")
+
+A full vector or symmetric tensor records all its independent components;
+a selected entry records one. For multiple quantities in one group, pass a
+mapping such as ``{"pressure": acoustic.fields.pressure,
+"momentum": acoustic.materials.rho * acoustic.fields.velocity}``.
+Labels are ``x,z`` and ``xx,zz,xz`` in Cartesian 2D, or ``x,y,z`` and
+``xx,yy,zz,yz,xz,xy`` in 3D. Coupled group labels include the quantity name,
+for example ``momentum.z``. Simulation export resolves dimensions; standalone
+authoring may supply ``dimension=2`` or ``dimension=3`` to the factory.
+
+``*`` permits scalar material scaling, ``+``/``-`` combine compatible
+expressions, and ``@`` applies elastic compliance or stiffness to a symmetric
+field tensor. Expressions remain linear in wavefields. Symmetric tensor
+intermediates use Mandel packing; public shear entries are physical values.
+Tensor expressions currently require Cartesian 2D or 3D. Constitutive component
+selection and general nonlinear wavefield products are not supported.
+
+Only registered channels are written. To record source-independent material
+diagnostics explicitly, use ``materials={"rho": elastic.materials.rho,
+"S": elastic.materials.compliance}`` on the receiver group. Compliance diagnostics
+use Mandel matrices in the ``<receiver_group>_properties`` HDF5 dataset.
+Internal compliance dependencies are never automatically
+written. Material-only outputs use this diagnostics path, which preserves
+source-independent physical values. Material diagnostics currently require
+dense sampling; ordinary expression channels also support sparse sampling. ``domain`` accepts a numeric
+mesh block ID or an exact, unique material layer name; interface material
+sampling needs an explicit side.
+
+The poroelastic namespace initially exposes velocity, fluid flux, stress, and
+pressure with scalar frame/fluid properties. Elastic constitutive tensors are
+available through the elastic namespace. Electromagnetic quantities retain the
+solver's existing field-unit conventions. Availability is also checked against
+the selected native formulation. This API requires an expression-aware Sauce
+backend; older backends cannot consume expression-bearing receiver components.
 
 Physical and Encoded Receiver Arrays
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
