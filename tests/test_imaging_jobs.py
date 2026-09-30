@@ -2286,7 +2286,10 @@ def test_smooth_job_rejects_sources_without_parts(tmp_path):
         SmoothJob(object(), smoothing={"type": "tv"})
 
 
-def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_path):
+@pytest.mark.parametrize("relative_tolerance", [None, 2e-5])
+def test_native_regularization_job_preserves_mesh_identity_and_round_trips(
+    tmp_path, relative_tolerance
+):
     from frequensolve.imaging.jobs import RegularizationJob
 
     sim = _saved_simulation(tmp_path)
@@ -2307,6 +2310,11 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_p
         smoothing=SmoothingConfig(kind="tv", normalize_amplitude=True),
         input_vector=vector,
         operation="prepare",
+        **(
+            {}
+            if relative_tolerance is None
+            else {"relative_tolerance": relative_tolerance}
+        ),
     )
     staged = ControlVectorFile.read(prepare.input_vector, native=True)
     assert staged.control_spaces == {"vp": "mesh-basis"}
@@ -2315,7 +2323,13 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_p
         payload["control_sensitivities"]["Regularization"]["normalize_amplitude"]
         is True
     )
+    expected_tolerance = 1e-4 if relative_tolerance is None else relative_tolerance
+    assert (
+        payload["control_sensitivities"]["Regularization"]["relative_tolerance"]
+        == expected_tolerance
+    )
     loaded = _round_trip(prepare)
+    assert loaded.relative_tolerance == expected_tolerance
     assert isinstance(loaded, RegularizationJob) and loaded.operation == "prepare"
     assert loaded.context == prepare.context
     assert loaded.postprocess_fetch_files() == prepare.postprocess_fetch_files()

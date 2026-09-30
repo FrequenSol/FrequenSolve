@@ -3977,7 +3977,7 @@ class RegularizationJob(SmoothJob):
         upper: Optional[Union[str, Path, ControlVectorFile]] = None,
         tau: float = 1.0,
         iterations: int = 1000,
-        relative_tolerance: float = 1e-6,
+        relative_tolerance: float = 1e-4,
         absolute_tolerance: float = 1e-8,
         gradient: Union[str, Path] = "regularized.h5",
         name: Optional[str] = None,
