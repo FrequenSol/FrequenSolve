@@ -697,6 +697,21 @@ class AWSSite(BaseSite):
             requests=(
                 ArtifactRequest(role="visualization"),
                 ArtifactRequest(role="visualization_data"),
+                # Native solver v2 catalogs use format-specific roles.
+                *(
+                    ArtifactRequest(role=role)
+                    for role in (
+                        "vtk",
+                        "vtu",
+                        "vtr",
+                        "vtp",
+                        "vts",
+                        "xmf",
+                        "xdmf",
+                        "acquisition_sources",
+                        "acquisition_receivers",
+                    )
+                ),
             ),
             include_defaults=False,
             project_path=path,
@@ -1317,6 +1332,13 @@ class AWSSite(BaseSite):
         result._result_path_override = authored / "runs" / simulation_id
         result._job_id = simulation_id
         result._cloud_result_run_id = simulation_id
+        if hasattr(result, "staged_artifact_fingerprints"):
+            result._frozen_artifact_fingerprints = result.staged_artifact_fingerprints(
+                "AWSSite"
+            )
+            result._frozen_task_fingerprints = getattr(
+                result, "staged_task_fingerprints", result.staged_artifact_fingerprints
+            )("AWSSite")
         if isinstance(result, ImagingJob):
             relative = Path(result.save_path).resolve().relative_to(authored)
             result.save_path = result._result_path / relative
@@ -1438,6 +1460,7 @@ class AWSSite(BaseSite):
                             ),
                             retention="durable",
                         ),
+                        ArtifactRequest(role="traces_metadata", retention="durable"),
                     ),
                     include_defaults=False,
                     project_path=path,

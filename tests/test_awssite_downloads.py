@@ -659,6 +659,15 @@ def test_fetch_vtk_downloads_only_configured_output_paths(tmp_path):
     assert {request.role for request in calls[0]["requests"]} == {
         "visualization",
         "visualization_data",
+        "vtk",
+        "vtu",
+        "vtr",
+        "vtp",
+        "vts",
+        "xmf",
+        "xdmf",
+        "acquisition_sources",
+        "acquisition_receivers",
     }
     assert not site.s3_client.paginate_calls
 
@@ -1437,6 +1446,78 @@ def test_cloud_snapshot_rejects_changed_staged_descriptor(tmp_path):
     staged.write_text('{"f_list": [99]}')
     with pytest.raises(RuntimeError, match="does not match its provenance"):
         AWSSite._prepare_run_snapshot(job)
+
+
+def test_native_cloud_result_reads_traces_and_fetches_declared_metadata_and_vtk(
+    tmp_path,
+):
+    job, _, _ = staged_cloud_job(tmp_path)
+    job.outputs.paraview = [SimpleNamespace(path="ParaView")]
+    run = AWSSite._snapshot_run_job(job, "simulation-1")
+    fingerprints = run.staged_artifact_fingerprints("AWSSite")
+    assert run._artifact_contract_fingerprints() == fingerprints
+    assert run._task_reuse_fingerprints() == fingerprints
+    prefix = "project-a/jobs/simulation-a/job-a/results/runs/simulation-1/"
+    files = {
+        "traces/shards/f_10.00000_hz.h5": (
+            "traces",
+            "simulated_traces",
+            "hdf5_shard",
+            "trace",
+        ),
+        "traces/trace_metadata.h5": ("metadata", "traces_metadata", "file", "metadata"),
+        "ParaView/pressure_00000.vtu": ("vtu:pressure", "vtu", "file", "vtk"),
+        "ParaView/Acquisition/receivers.vtp": (
+            "receivers",
+            "acquisition_receivers",
+            "file",
+            "receivers",
+        ),
+    }
+    catalog = {
+        "schema": "fs-task-result-2",
+        "partition": {"task": 1, "task_count": 1, "frequency": {"real": 10, "imag": 0}},
+        "fingerprints": fingerprints,
+        "status": {"state": "success", "code": 0},
+        "artifacts": [
+            {
+                "id": identity,
+                "role": role,
+                "representation": representation,
+                "schema": "synthetic-native-1",
+                "retention": "durable",
+                "path": path,
+                "bytes": len(content),
+            }
+            for path, (identity, role, representation, content) in files.items()
+        ],
+    }
+    client = FakeS3Client(
+        {
+            **{prefix + path: spec[3] for path, spec in files.items()},
+            prefix + "_fs_run/tasks/task_000001/result.json": json.dumps(catalog),
+            prefix + "unrelated.vtu": "never download by scanning",
+        }
+    )
+    site = make_site(client)
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status_details=lambda run_id: {
+            "id": run_id,
+            "outputIdentity": "s3://bucket/" + prefix,
+        }
+    )
+    dataset = site.fetch_traces(run)
+    assert dataset.manifest.files == [
+        run._result_path / "traces/shards/f_10.00000_hz.h5"
+    ]
+    assert (run._result_path / "traces/trace_metadata.h5").read_text() == "metadata"
+    site.fetch_vtk(run)
+    assert (run._result_path / "ParaView/pressure_00000.vtu").read_text() == "vtk"
+    assert (
+        run._result_path / "ParaView/Acquisition/receivers.vtp"
+    ).read_text() == "receivers"
+    assert not (run._result_path / "unrelated.vtu").exists()
+    assert client.paginate_calls == []
 
 
 def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
