@@ -415,9 +415,17 @@ misfit pairs observed and simulated groups by name.
 The misfit maps one to one onto Sauce's objective terms: a loss (``l2``,
 ``huber``, ``student_t``), a comparison (``waveform``, ``phase_derivative``,
 ``spectral_derivative``),
-a normalization (``observed_rms`` by default, ``explicit``, or
+a normalization (``explicit`` with scale ``1.0`` by default, ``observed_rms``, or
 ``Normalization.balance_artifact(file)`` written by a ``calibrate`` job),
 per-group weights, preprocessing hooks and a receiver projection.
+
+The default reduction is ``sum``: ``Misfit.l2()`` uses half the summed squared
+residual after weighting and preprocessing, with no automatic amplitude
+normalization. Explicit RMS scaling and weighted-mean reduction remain available.
+To reproduce the previous defaults, use
+``normalization=im.Normalization.observed_rms(reduction="weighted_mean")``.
+Changing these settings affects objective and gradient magnitudes and the
+relative strength of regularization and other objective terms.
 
 .. code-block:: python
 
@@ -433,7 +441,8 @@ per-group weights, preprocessing hooks and a receiver projection.
    misfit = im.Misfit.l2(projection=im.ReceiverProjection.up_down(impedance=1.5e6))
 
 For joint waveform and full-complex frequency-derivative FWI, use independent
-terms. Each term's default normalization uses its own observed RMS; the
+terms. Each term defaults to unit scale and sum reduction; choose explicit scales
+or observed-RMS normalization to balance terms with different units. The
 derivative is with respect to Hz at fixed Laplace damping, not a phase quotient.
 Supply matching ``df`` observations and the same source-derivative policy.
 

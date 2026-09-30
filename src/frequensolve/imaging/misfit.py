@@ -442,19 +442,19 @@ class Normalization:
         kind: ``"explicit"`` (one ``value`` or per-component ``components``),
             ``"observed_rms"`` (optional ``minimum`` floor), or
             ``"balance_artifact"`` (``file`` written by ``action=calibrate``).
-        value: Explicit scale, plain or with units.
+        value: Explicit scale, plain or with units (defaults to 1.0).
         components: Explicit per-component scales.
         minimum: Floor for the observed RMS scale.
         file: Balance artifact path.
-        reduction: ``"weighted_mean"`` (default) or ``"sum"``.
+        reduction: ``"sum"`` (default) or ``"weighted_mean"``.
     """
 
-    kind: str = "observed_rms"
+    kind: str = "explicit"
     value: Any = None
     components: Optional[Mapping[str, Any]] = None
     minimum: Any = None
     file: Optional[Path] = None
-    reduction: Literal["weighted_mean", "sum"] = "weighted_mean"
+    reduction: Literal["weighted_mean", "sum"] = "sum"
 
     def __post_init__(self) -> None:
         kind = str(self.kind).strip().lower()
@@ -468,10 +468,12 @@ class Normalization:
         minimum = None
         file = None
         if kind == "explicit":
-            if (self.value is None) == (self.components is None):
+            if self.value is not None and self.components is not None:
                 raise ValueError("explicit normalization needs value or components")
-            if self.value is not None:
-                value = _scale_value(self.value, "normalization value")
+            if self.components is None:
+                value = _scale_value(
+                    1.0 if self.value is None else self.value, "normalization value"
+                )
             else:
                 components = {
                     str(name): _scale_value(scale, f"normalization component {name!r}")
@@ -503,9 +505,9 @@ class Normalization:
         value: Any = None,
         *,
         components: Optional[Mapping[str, Any]] = None,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
-        """Return a fixed scale (one value or per-component values)."""
+        """Return a fixed scale (unit scale unless a value or components is given)."""
 
         return cls(
             kind="explicit", value=value, components=components, reduction=reduction
@@ -516,7 +518,7 @@ class Normalization:
         cls,
         minimum: Any = None,
         *,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
         """Return the observed-RMS scale with an optional floor."""
 
@@ -527,7 +529,7 @@ class Normalization:
         cls,
         file: Union[str, Path],
         *,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
         """Return the scale stored in a calibration balance artifact."""
 
@@ -538,7 +540,7 @@ class Normalization:
         """Normalize a kind name, number, mapping, or :class:`Normalization`."""
 
         if value is None:
-            return cls.observed_rms()
+            return cls()
         if isinstance(value, cls):
             return value
         if isinstance(value, str):
@@ -582,7 +584,7 @@ class Normalization:
             components=scale.get("components"),
             minimum=scale.get("minimum"),
             file=scale.get("file"),
-            reduction=data.get("reduction", "weighted_mean"),
+            reduction=data.get("reduction", "sum"),
         )
 
 
@@ -1828,7 +1830,7 @@ class Misfit:
         return cls(
             loss=data.get("objective"),
             comparison=data.get("comparison"),
-            normalization=Normalization.observed_rms(),
+            normalization=Normalization(),
             **common,
         )
 
