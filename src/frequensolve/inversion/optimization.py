@@ -248,6 +248,9 @@ class InexactNewtonOptions:
 class LBFGSOptions:
     """Controls for projected limited-memory BFGS and Armijo line search.
 
+    ``max_line_search_trials`` caps attempted steps per update across both
+    the L-BFGS direction and any projected-gradient recovery direction.
+
     Absolute/relative stopping tolerances, their defaults and the fixed
     ``initial_objective`` reference follow :class:`InexactNewtonOptions`.
     """
@@ -1367,6 +1370,7 @@ def minimize_lbfgs(
         bounded_raw_step = np.zeros_like(model)
         step = np.zeros_like(model)
         recovery_attempted = fallback
+        line_search_trials = 0
         try:
             while not accepted:
                 maximum_step = np.inf
@@ -1384,7 +1388,6 @@ def minimize_lbfgs(
                     break
 
                 step_length = min(1.0, maximum_step)
-                line_search_trials = 0
                 while step_length >= options.minimum_step_length and (
                     options.max_line_search_trials is None
                     or line_search_trials < options.max_line_search_trials
@@ -1431,13 +1434,17 @@ def minimize_lbfgs(
                         break
                     step_length *= options.backtrack_factor
 
-                if accepted or recovery_attempted:
+                budget_exhausted = (
+                    options.max_line_search_trials is not None
+                    and line_search_trials >= options.max_line_search_trials
+                )
+                if accepted or recovery_attempted or budget_exhausted:
                     break
 
                 # A stale L-BFGS metric can yield a descent direction whose
                 # local model is nevertheless poor enough that every bounded
                 # Armijo trial fails.  Discard that metric and give the
-                # projected gradient one independent line search in the
+                # projected gradient the remaining trial budget in the
                 # supplied inverse-Hessian metric before abandoning the
                 # nonlinear continuation stage.
                 steps.clear()

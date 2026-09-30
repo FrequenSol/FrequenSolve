@@ -538,7 +538,8 @@ def test_lbfgs_restarts_its_metric_after_a_failed_line_search():
         preconditioner=lambda _model, vector: inverse_diagonal * vector,
         options=LBFGSOptions(
             max_iterations=2,
-            max_line_search_trials=1,
+            minimum_step_length=1.0,
+            max_line_search_trials=2,
             gradient_tolerance=0.0,
             step_tolerance=0.0,
             objective_tolerance=0.0,
@@ -1312,3 +1313,34 @@ def test_lbfgs_restart_reproduces_uninterrupted_accepted_models():
         minimize_lbfgs(
             rosen, rosen_der, saved[0].model, options=options, restart=invalid
         )
+
+
+@pytest.mark.parametrize("limit", [3, 4, 5])
+@pytest.mark.parametrize("reject_by_transform", [False, True])
+def test_lbfgs_shares_trial_budget_and_preserves_accepted_model(
+    limit, reject_by_transform
+):
+    attempted = []
+
+    def transform(model, step):
+        attempted.append(step.copy())
+        return -step if reject_by_transform else step
+
+    result = minimize_lbfgs(
+        lambda model: 1.0,
+        lambda model: np.ones_like(model),
+        [2.0],
+        step_transform=transform,
+        options=LBFGSOptions(
+            max_line_search_trials=limit,
+            gradient_tolerance=0.0,
+            step_tolerance=0.0,
+            objective_tolerance=0.0,
+        ),
+    )
+    assert result.message == "Armijo line search failed"
+    assert result.iterations == 0
+    assert len(attempted) == limit
+    assert result.steepest_descent_fallbacks == 0
+    np.testing.assert_array_equal(result.model, [2.0])
+    np.testing.assert_allclose([x[0] for x in attempted], -(0.5 ** np.arange(limit)))
