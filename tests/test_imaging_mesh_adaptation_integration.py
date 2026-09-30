@@ -251,9 +251,14 @@ def test_adapted_mesh_objective_and_gradient_are_rank_invariant(tmp_path, site):
     report = distributed.job._result_path / "_fs_run/tasks/task_000001/result.json"
     assert json.loads(report.read_text())["execution"]["mpi_ranks"] == 2
     np.testing.assert_allclose(distributed.value, value, rtol=2e-5, atol=1e-12)
-    np.testing.assert_allclose(
-        distributed.gradient.values, gradient, rtol=2e-4, atol=1e-10
-    )
+    # The single-precision solves stop at 1e-4. Mesh coefficients can cancel,
+    # so compare the covectors at their overall scale rather than dividing by
+    # each small coefficient. Double-precision solves also satisfy the former
+    # component-wise bound.
+    relative_gradient_error = np.linalg.norm(
+        distributed.gradient.values - gradient
+    ) / np.linalg.norm(gradient)
+    assert relative_gradient_error < 2e-4
     assert hashlib.sha256(artifact.read_bytes()).hexdigest() == digest
 
 

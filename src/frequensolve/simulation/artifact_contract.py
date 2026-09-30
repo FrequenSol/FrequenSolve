@@ -23,6 +23,7 @@ __all__ = [
     "ArtifactContractError",
     "ArtifactRequest",
     "ArtifactRecord",
+    "MaterialArtifactRecord",
     "OperationResult",
     "TaskPartition",
     "TaskResult",
@@ -48,6 +49,7 @@ OPERATION_NAMES = frozenset(
     }
 )
 _HASH_PATTERN = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
+_MESH_KEY_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 _RETENTION = frozenset({"transient", "cache", "durable"})
 _STATUS = frozenset({"success", "failed", "skipped"})
 
@@ -295,6 +297,129 @@ class ArtifactRecord:
 
 
 @dataclass(frozen=True)
+class MaterialArtifactRecord:
+    """One mesh-space material artifact a Sauce run resolved (built or reused).
+
+    The artifact is project-owned and lives outside ResultPath, so Sauce records
+    its absolute path and, when it lies below the project, a project-relative
+    path that stays valid after the project is relocated or fetched.
+    """
+
+    space: str
+    path: Path
+    project_relative_path: Optional[str]
+    mesh_keyed: bool
+    mesh_key: Optional[str]
+    sizing_frequency: Optional[float]
+    basis_identity: str
+    built: bool
+    bytes: int
+
+    @classmethod
+    def from_fs(cls, value: Mapping[str, Any]) -> "MaterialArtifactRecord":
+        """Parse one ``execution.material_artifacts`` entry."""
+
+        value = _mapping(value, "material artifact")
+        _reject_unknown(
+            value,
+            {
+                "id",
+                "role",
+                "representation",
+                "schema",
+                "space",
+                "path",
+                "project_relative_path",
+                "mesh_keyed",
+                "mesh_key",
+                "sizing_frequency",
+                "basis_identity",
+                "built",
+                "retention",
+                "bytes",
+            },
+            "material artifact",
+        )
+        space = _nonempty_string(value.get("space"), "material artifact space")
+        if (
+            value.get("id") != f"material_space:{space}"
+            or value.get("role") != "material_space"
+            or value.get("schema") != "fs-property-space-1"
+        ):
+            raise ArtifactContractError(
+                f"material artifact for {space!r} has an unexpected id, role, or schema"
+            )
+        path = Path(_nonempty_string(value.get("path"), "material artifact path"))
+        if not path.is_absolute():
+            raise ArtifactContractError("material artifact path must be absolute")
+        relative = value.get("project_relative_path")
+        if relative is not None:
+            relative = _nonempty_string(relative, "material artifact project path")
+            parts = PurePosixPath(relative)
+            if parts.is_absolute() or ".." in parts.parts:
+                raise ArtifactContractError(
+                    "material artifact project path must stay below the project"
+                )
+        keyed = value.get("mesh_keyed")
+        built = value.get("built")
+        if not isinstance(keyed, bool) or not isinstance(built, bool):
+            raise ArtifactContractError(
+                "material artifact mesh_keyed and built must be booleans"
+            )
+        key = value.get("mesh_key")
+        frequency = value.get("sizing_frequency")
+        if (
+            keyed != (key is not None)
+            or keyed != (frequency is not None)
+            or (
+                key is not None
+                and (not isinstance(key, str) or not _MESH_KEY_PATTERN.fullmatch(key))
+            )
+        ):
+            raise ArtifactContractError(
+                "a mesh-keyed material artifact requires one 16-digit mesh_key "
+                "and its sizing_frequency"
+            )
+        if frequency is not None:
+            frequency = _finite_float(frequency, "material artifact sizing_frequency")
+            if frequency <= 0.0:
+                raise ArtifactContractError(
+                    "material artifact sizing_frequency must be positive"
+                )
+        return cls(
+            space=space,
+            path=path,
+            project_relative_path=relative,
+            mesh_keyed=keyed,
+            mesh_key=key,
+            sizing_frequency=frequency,
+            basis_identity=_nonempty_string(
+                value.get("basis_identity"), "material artifact basis_identity"
+            ),
+            built=built,
+            bytes=_integer(value.get("bytes"), "material artifact bytes", minimum=0),
+        )
+
+    def resolve(self, project_path: Path | str | None = None) -> Path:
+        """Return the local path, preferring the project-relative form."""
+
+        if project_path is not None and self.project_relative_path is not None:
+            return Path(project_path) / Path(
+                *PurePosixPath(self.project_relative_path).parts
+            )
+        return self.path
+
+
+def _material_artifacts(
+    metadata: Mapping[str, Any],
+) -> tuple[MaterialArtifactRecord, ...]:
+    raw = metadata.get("execution", {}).get("material_artifacts", [])
+    if not isinstance(raw, list):
+        raise ArtifactContractError("execution.material_artifacts must be an array")
+    return tuple(MaterialArtifactRecord.from_fs(item) for item in raw)
+
+
+@dataclass(frozen=True)
 class TaskPartition:
     """Exact partition identity for one solver task."""
 
@@ -495,6 +620,12 @@ class TaskResult:
 
         return self.state in {"success", "skipped"} and self.code == 0
 
+    @property
+    def material_artifacts(self) -> tuple[MaterialArtifactRecord, ...]:
+        """Return the mesh-space material artifacts this task resolved."""
+
+        return _material_artifacts(self.metadata)
+
     def to_fs(self) -> Dict[str, Any]:
         """Serialize this validated task result using portable artifact paths."""
 
@@ -686,6 +817,12 @@ class OperationResult:
         """Return whether the operation committed reusable output."""
 
         return self.state in {"success", "skipped"} and self.code == 0
+
+    @property
+    def material_artifacts(self) -> tuple[MaterialArtifactRecord, ...]:
+        """Return the mesh-space material artifacts this operation resolved."""
+
+        return _material_artifacts(self.metadata)
 
     def to_fs(self) -> Dict[str, Any]:
         """Serialize this validated operation result with portable paths."""

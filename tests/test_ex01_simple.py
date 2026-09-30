@@ -611,13 +611,6 @@ def time_domain_results(tmp_path_factory):
     # Cleanup will happen automatically when the module is done
 
 
-@pytest.fixture
-def visual_wavelet():
-    """Return the deterministic wavelet used by PR-safe visual tests."""
-
-    return RickerWavelet(**TIME_DOMAIN_PARAMS["wavelet"])
-
-
 # =============================================================================
 # Test Suite
 # =============================================================================
@@ -969,88 +962,33 @@ def test_time_domain_simulation_basic(time_domain_results):
 
 
 @pytest.mark.visual
-@pytest.mark.mpl_image_compare(tolerance=2.0)
 def test_model_plot(simulation):
-    """Test basic plotting functionality without requiring the solver.
-
-    This test verifies that the model visualization matches the expected reference
-    image. It generates a plot of the model geometry showing the vp property
-    with equal aspect ratio.
-
-    This corresponds to the model plotting in ex01_simple.ipynb where
-    model.plot("vp", aspect="equal") is called.
-
-    Parameters
-    ----------
-    simulation : SeismicSimulation
-        The simulation object to generate plots for.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The figure containing the plot to be compared.
-    """
-    # Set up the simulation
+    """Check plotted velocity, interfaces and axes without font rasterization."""
     test_simulation_setup(simulation)
-
-    # Create figure and plot model similar to the notebook
-    # NOTE: We have to obtain the figure object first and pass the ax to the plot method
-    #       to prevent the plot method from creating a new figure and closing it.
-    #       This method needs to return the correct figure to be compared using the mpl_image_compare decorator.
     fig, ax = plt.subplots()
-    simulation.model.plot(property="vp", aspect="equal", ax=ax)
-
-    return fig
-
-
-@pytest.mark.visual
-@pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
-def test_time_domain_wavelet_time_plot(visual_wavelet):
-    """Test the deterministic time-domain wavelet plot without a solver.
-
-    This test verifies that the time-domain wavelet plot matches its expected reference image.
-    """
-    # Create figure and axes
-    fig, ax = plt.subplots()
-    unused_fig, unused_ax = plt.subplots()
-
-    # Plot on the provided axes
-    created_time, created_freq = visual_wavelet.plot(
-        ax_time=ax, ax_freq=unused_ax, color="tab:blue"
-    )
-    plt.close(unused_fig)
-
-    assert created_time is None
-    assert created_freq is None
-    assert len(ax.lines) == 1
-    assert ax.lines[0].get_color() == "tab:blue"
-
-    return fig
-
-
-@pytest.mark.visual
-@pytest.mark.mpl_image_compare(tolerance=2.0, savefig_kwargs={"dpi": 100})
-def test_time_domain_wavelet_freq_plot(visual_wavelet):
-    """Test the deterministic frequency-domain wavelet plot without a solver.
-
-    This test verifies that the frequency-domain wavelet plot matches its expected reference image.
-    """
-    # Create figure and axes
-    fig, ax = plt.subplots()
-    unused_fig, unused_ax = plt.subplots()
-
-    # Plot on the provided axes
-    created_time, created_freq = visual_wavelet.plot(
-        ax_time=unused_ax, ax_freq=ax, color="tab:orange"
-    )
-    plt.close(unused_fig)
-
-    assert created_time is None
-    assert created_freq is None
-    assert len(ax.lines) == 1
-    assert ax.lines[0].get_color() == "tab:orange"
-
-    return fig
+    try:
+        image = simulation.model.plot(
+            property="vp", resolution=[21, 21], aspect="equal", ax=ax
+        )
+        assert image.axes is ax
+        values = np.asarray(image.get_array())
+        assert values.shape == (21, 21)
+        np.testing.assert_allclose(values[:10], 1.0)
+        np.testing.assert_allclose(values[11:], 2.0)
+        np.testing.assert_allclose(image.get_clim(), [1.0, 2.0])
+        assert len(ax.lines) == 3
+        for line, depth in zip(ax.lines, [0.0, 0.25, 0.5]):
+            np.testing.assert_allclose(line.get_ydata(), depth)
+            np.testing.assert_allclose(
+                [min(line.get_xdata()), max(line.get_xdata())], [0.0, 1.0]
+            )
+        assert ax.get_aspect() == 1.0
+        assert ax.yaxis_inverted()
+        assert ax.get_xlabel() == "X [km]"
+        assert ax.get_ylabel() == "Depth [km]"
+        assert len(fig.axes) == 2  # Model and its colorbar.
+    finally:
+        plt.close(fig)
 
 
 @pytest.mark.integration

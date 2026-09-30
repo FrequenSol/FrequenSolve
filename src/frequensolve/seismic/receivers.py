@@ -1306,7 +1306,7 @@ class CoordsFromFile(ReceiverCoords):
 
     def __init__(
         self,
-        file: Union[str, Path] = None,
+        file: Optional[Union[str, Path]] = None,
         format: Literal["HDF5"] = "HDF5",
         dset: Optional[str] = None,
         units: Optional[str] = None,
@@ -1321,6 +1321,8 @@ class CoordsFromFile(ReceiverCoords):
                 "CoordsFromFile does not support remote coordinate files yet; "
                 "provide a local file or inline/materialized coordinates."
             )
+        if file is None:
+            raise TypeError("A coordinate file path is required")
         self.file = Path(file).expanduser()
         if self.file.is_absolute():
             self.file = self.file.resolve()
@@ -1708,8 +1710,8 @@ class CoordsGrid(ReceiverCoords):
 
         # For slice, get all coords and then slice
         elif isinstance(indices, slice):
-            coords = self.grid.get_coords()
-            return coords[indices]
+            grid_coords = self.grid.get_coords()
+            return grid_coords[indices]
         else:
             raise ValueError("Invalid indices type")
 
@@ -2030,9 +2032,9 @@ class CoordsArray(ReceiverCoords):
         """
 
         if indices is None:
-            return np.asarray(self.coordinates.values, dtype=np.float64)
+            return np.asarray(self.coordinates, dtype=np.float64)
         else:
-            return np.asarray(self.coordinates[indices].values, dtype=np.float64)
+            return np.asarray(self.coordinates[indices], dtype=np.float64)
 
     def to_file(
         self, file_name: Union[str, Path], format: Optional[Literal["HDF5"]] = None
@@ -2066,7 +2068,7 @@ class CoordsArray(ReceiverCoords):
         if format == "HDF5":
             with h5py.File(file, "w") as f:
                 dset = f.create_dataset(
-                    "coords", data=(self.coordinates.values).astype(np.float64)
+                    "coords", data=np.asarray(self.coordinates, dtype=np.float64)
                 )
                 if self.units is not None:
                     dset.attrs["units"] = unit_expression(self.units)
@@ -2086,7 +2088,7 @@ class CoordsArray(ReceiverCoords):
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize inline receiver coordinates for solver input."""
 
-        values = np.asarray(self.coordinates.values, dtype=np.float64).tolist()
+        values = np.asarray(self.coordinates, dtype=np.float64).tolist()
         payload = {"_type": self.__class__.__name__, "value": values}
         if self.units is not None:
             payload["units"] = unit_expression(self.units)
@@ -2398,6 +2400,7 @@ class ReceiverGroup(ExtraFieldsMixin):
     def _clean_coordinates(coords):
         # Allow coordinates to be defined either as a ReceiverCoords object
         # various other reasonble ways:
+        out: ReceiverCoords
         if isinstance(coords, CoordinateValue):
             values, units, system = coordinate_array_metadata(coords)
             out = CoordsArray(coordinates=values, units=units, system=system)
@@ -2515,6 +2518,7 @@ class ReceiverGroup(ExtraFieldsMixin):
                     attrs["system"] = coords.system
                 assert isinstance(coords.coordinates, xr.DataArray)
                 coordinate_dim = coords.coordinates.dims[1]
+                assert ctx.store is not None
                 ref = ctx.store.put_dataarray(
                     dataset,
                     coords.coordinates,

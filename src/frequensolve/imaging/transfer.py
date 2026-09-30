@@ -30,7 +30,7 @@ class Transfer:
     frequency: Optional[float] = None
 
     def __post_init__(self) -> None:
-        length = self.smoothing_length
+        length: Any = self.smoothing_length
         if is_quantity(length):
             length = length.to("m").magnitude
         if not isinstance(length, Real):

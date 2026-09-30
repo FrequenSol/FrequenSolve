@@ -8,8 +8,12 @@ import numpy as np
 import pytest
 
 from frequensolve import CartesianGrid
-from frequensolve.imaging import ControlSpace, GridParameters, SourceEnergy
-from frequensolve.imaging import SmoothingConfig
+from frequensolve.imaging import (
+    ControlSpace,
+    GridParameters,
+    SmoothingConfig,
+    SourceEnergy,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -41,7 +45,12 @@ def test_smooth_kernel_maps_to_physical_update():
     # The covector of a constant kernel k is B.T @ (w * k); the update must be k / E.
     x, z = np.meshgrid(np.linspace(0, 1, 3), np.linspace(0, 1, 3))
     basis = np.column_stack(
-        [((1 - x) * (1 - z)).ravel(), (x * (1 - z)).ravel(), ((1 - x) * z).ravel(), (x * z).ravel()]
+        [
+            ((1 - x) * (1 - z)).ravel(),
+            (x * (1 - z)).ravel(),
+            ((1 - x) * z).ravel(),
+            (x * z).ravel(),
+        ]
     )
     weights = np.outer([0.5, 1, 0.5], [0.5, 1, 0.5])
     metric = bind(2.0)

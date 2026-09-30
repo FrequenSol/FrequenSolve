@@ -7,7 +7,7 @@
 import re
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Mapping
+from typing import Any, Mapping
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,7 @@ class RootPatchDescriptor:
     parent_fingerprint: str
     roots: tuple[int, ...]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isinstance(self.parent_fingerprint, str) or not re.fullmatch(
             r"[0-9a-fA-F]{16}", self.parent_fingerprint
         ):
@@ -31,7 +31,7 @@ class RootPatchDescriptor:
         object.__setattr__(self, "roots", tuple(sorted(int(root) for root in roots)))
         object.__setattr__(self, "parent_fingerprint", self.parent_fingerprint.upper())
 
-    def to_fs(self):
+    def to_fs(self) -> dict[str, Any]:
         return {
             "schema": "fs-root-patch-1",
             "parent_fingerprint": self.parent_fingerprint,
@@ -39,7 +39,7 @@ class RootPatchDescriptor:
         }
 
     @classmethod
-    def from_fs(cls, value: Mapping):
+    def from_fs(cls, value: Mapping[str, Any]) -> "RootPatchDescriptor":
         if set(value) != {"schema", "parent_fingerprint", "roots"}:
             raise ValueError(
                 "root patch descriptor requires schema, parent_fingerprint and roots"

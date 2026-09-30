@@ -1189,9 +1189,11 @@ class ExtensionLinearization:
                 report.state_fingerprint
                 or entry.state_fingerprint
                 or manifest.baseline,
-                self.registry_fingerprint,
+                read_manifest(self.job, task=task).fingerprint,
             )
-            for report, manifest in zip(self.reports, self.manifests)
+            for task, (report, manifest) in enumerate(
+                zip(self.reports, self.manifests), start=1
+            )
         ]
         self.extension_fingerprints: List[Tuple[str, str]] = [
             (manifest.fingerprint, manifest.baseline) for manifest in self.manifests
@@ -1254,7 +1256,7 @@ class ExtensionLinearization:
     def _solve(self, *, model_gradient: bool = False, **options: Any) -> FWIOperatorJob:
         """Run the shared-band fit, or explicitly requested independent fits."""
 
-        extension = {
+        extension: dict[str, Any] = {
             "fields": self.extension_space.fields_fs(),
             "solver": {
                 **self.extension.solver_fs(),
@@ -1309,7 +1311,7 @@ class ExtensionLinearization:
     @property
     def shared_frequency_fit(self) -> bool:
         """Whether this point fits one tap vector across its frequency band."""
-        return self.extension.frequency_coupling == "shared" and (
+        return self.extension.frequency_coupling == "shared" and bool(
             len(self.frequencies) > 1 or np.any(self.frequency_weights != 1.0)
         )
 
@@ -1341,7 +1343,14 @@ class ExtensionLinearization:
             reports = self.solve_reports
             if all(r.data_objective is not None for r in reports):
                 return float(
-                    np.dot(self.frequency_weights, [r.data_objective for r in reports])
+                    np.dot(
+                        self.frequency_weights,
+                        [
+                            float(r.data_objective)
+                            for r in reports
+                            if r.data_objective is not None
+                        ],
+                    )
                     + reports[0].regularization
                 )
             if reports[0].quadratic_objective is None:
@@ -1377,7 +1386,12 @@ class ExtensionLinearization:
                         value
                     )
         if self.shared_frequency_fit:
-            merged["regularization"] = float(self.solve_reports[0].regularization)
+            regularization = self.solve_reports[0].regularization
+            if regularization is None:
+                raise RuntimeError(
+                    "Shared frequency solve did not report its regularization"
+                )
+            merged["regularization"] = float(regularization)
             merged["reduced_objective"] = self.value
         return merged
 
@@ -1909,7 +1923,8 @@ class ExtendedProblem:
             objective="report.json",
             control_state=control_state,
             state_output="baseline.h5" if discover else None,
-            manifest="registry.json" if discover else None,
+            # Frequency-dependent catalog identities are required by model tangents.
+            manifest="registry.json",
             min_support=problem.min_support,
             misfit=problem._misfit_payload,
             extension={

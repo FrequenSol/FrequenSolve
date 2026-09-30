@@ -35,6 +35,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Literal,
     Mapping,
     Optional,
     Sequence,
@@ -1303,11 +1304,14 @@ class FWIOperatorJob(_ImagingJobBase):
             else:
                 if set(pml_stage) != {"manifest", "identity"}:
                     raise ValueError("pml_stage requires manifest and identity")
+                manifest_path = _input_path(pml_stage["manifest"], simulation)
+                if manifest_path is None:
+                    raise ValueError("pml_stage requires a manifest path")
                 self.pml_stage = PatchStageSnapshot.read(
-                    _input_path(pml_stage["manifest"], simulation),
+                    manifest_path,
                     identity=pml_stage["identity"],
                 )
-        self.stage_mesh = None
+        self.stage_mesh: Literal["capture"] | PatchStageMesh | None = None
         if stage_mesh is not None:
             from frequensolve.mesh._stage_mesh import PatchStageMesh
 
@@ -1327,6 +1331,7 @@ class FWIOperatorJob(_ImagingJobBase):
                     raise ValueError("Stage mesh capture requires action='linearize'")
                 from frequensolve.mesh._stage_snapshot import _digest
 
+                assert self.control_state is not None
                 if _digest(self.control_state) != _digest(self.pml_stage.control_state):
                     raise ValueError(
                         "Stage mesh capture requires the canonical stage baseline"
@@ -1342,8 +1347,11 @@ class FWIOperatorJob(_ImagingJobBase):
                     raise ValueError(
                         "Stage mesh replay requires mode, manifest and identity"
                     )
+                mesh_manifest_path = _input_path(stage_mesh["manifest"], simulation)
+                if mesh_manifest_path is None:
+                    raise ValueError("stage_mesh requires a manifest path")
                 self.stage_mesh = PatchStageMesh.read(
-                    _input_path(stage_mesh["manifest"], simulation),
+                    mesh_manifest_path,
                     identity=stage_mesh["identity"],
                     stage=self.pml_stage,
                 )
@@ -1704,10 +1712,10 @@ class FWIOperatorJob(_ImagingJobBase):
                 raise ValueError("solve takes a direction only with reduced_normal")
 
         if (
-            has_extension
+            self.extension is not None
             and action != "solve"
             and self.extension.get("solver") is not None
-        ):  # type: ignore[union-attr]
+        ):
             raise ValueError("extension.solver requires action = solve")
 
         if self.smoothing is not None:
@@ -2267,7 +2275,7 @@ class FWIOperatorJob(_ImagingJobBase):
         """Hash the direction, objective dual, baseline and extension inputs."""
 
         inputs: Dict[str, Any] = _kernel_window_fingerprint(
-            self.kernel_derivative, self.simulation.project_path
+            self.kernel_derivative, self.project_path
         )
         if self.receiver_state is not None and self.action != "receiver_linearize":
             inputs["receiver_state"] = self._resolved_input_fingerprint(
@@ -2305,8 +2313,9 @@ class FWIOperatorJob(_ImagingJobBase):
         if self.pml_stage is None:
             return files
         inputs = list(self.pml_stage.input_files())
+        assert self.control_state is not None
         inputs.append(Path(self.control_state))
-        if self.stage_mesh not in (None, "capture"):
+        if self.stage_mesh is not None and self.stage_mesh != "capture":
             self.stage_mesh.verify(stage=self.pml_stage)
             inputs.extend(self.stage_mesh.input_files())
         project = Path(self.project_path).resolve()
@@ -2908,7 +2917,7 @@ class ControlGradientJob(_ImagingJobBase):
         """Hash the observed data, direction and current-control inputs."""
 
         inputs: Dict[str, Any] = _kernel_window_fingerprint(
-            self.kernel_derivative, self.simulation.project_path
+            self.kernel_derivative, self.project_path
         )
         if self.observed:
             inputs["observed"] = {

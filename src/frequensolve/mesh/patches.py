@@ -4,21 +4,32 @@
 
 """Whole-root patch authoring and native geometry preparation."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass
 from numbers import Integral
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+
+if TYPE_CHECKING:
+    from frequensolve.imaging._artifacts import ControlStateFile
+    from frequensolve.mesh._stage_snapshot import PatchStageSnapshot
+    from frequensolve.simulation.jobs._patches import PatchPreparationJob
+    from frequensolve.simulation.simulation import SeismicSimulation
 
 import numpy as np
 
 from frequensolve.mesh.boundary_conditions import BoundaryCondition
 from frequensolve.units import is_quantity, ureg
+from frequensolve.util.named_list import NamedList
 
 __all__ = ["Patch", "PatchSet", "PreparedPatchSet"]
 
 
-def _ids(values, label):
+def _ids(values: Iterable[int], label: str) -> tuple[int, ...]:
     values = tuple(values)
     if not values or any(
         isinstance(value, bool) or not isinstance(value, Integral) or value < 1
@@ -30,7 +41,7 @@ def _ids(values, label):
     return tuple(sorted(int(value) for value in values))
 
 
-def _metres(value, label, shape=()):
+def _metres(value: Any, label: str, shape: tuple[int, ...] | None = ()) -> np.ndarray:
     if not is_quantity(value):
         raise ValueError(
             f"{label} requires explicit length units, such as 2 * fs.ureg.km"
@@ -52,18 +63,18 @@ class Patch:
     roots: tuple[int, ...]
     sources: tuple[int, ...]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError("A patch requires a nonempty name")
         object.__setattr__(self, "roots", _ids(self.roots, "roots"))
         object.__setattr__(self, "sources", _ids(self.sources, "sources"))
 
 
-def _bisect_sources(coordinates, size):
+def _bisect_sources(coordinates: np.ndarray, size: int) -> tuple[tuple[int, ...], ...]:
     """Split along the longest coordinate extent, breaking ties by source ID."""
-    groups = []
+    groups: list[tuple[int, ...]] = []
 
-    def split(ids):
+    def split(ids: np.ndarray) -> None:
         if len(ids) <= size:
             groups.append(tuple(int(i + 1) for i in sorted(ids)))
             return
@@ -77,7 +88,9 @@ def _bisect_sources(coordinates, size):
     return tuple(groups)
 
 
-def _global_coordinates(values, units, system, dimension, label):
+def _global_coordinates(
+    values: Any, units: Any, system: str | None, dimension: int, label: str
+) -> np.ndarray:
     if system not in (None, "global"):
         raise NotImplementedError(
             f"{label} uses coordinate system {system!r}; materialize global coordinates before preparing patches"
@@ -94,7 +107,9 @@ def _global_coordinates(values, units, system, dimension, label):
     return result
 
 
-def _acquisition_coordinates(simulation):
+def _acquisition_coordinates(
+    simulation: SeismicSimulation,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     from frequensolve.seismic.receivers import ReceiverNode, coordinate_array_metadata
 
     acquisition = simulation.acquisition
@@ -120,7 +135,7 @@ def _acquisition_coordinates(simulation):
                 values.reshape(1, -1),
                 units or default,
                 system,
-                simulation.dimension,
+                int(simulation.dimension),
                 f"Source {i}",
             )[0]
         )
@@ -141,12 +156,39 @@ def _acquisition_coordinates(simulation):
             coords.get(),
             getattr(coords, "units", None) or default,
             getattr(coords, "system", None),
-            simulation.dimension,
+            int(simulation.dimension),
             f"Receiver group {group.name!r}",
         )
     if not receivers:
         raise ValueError("Patch preparation requires receiver groups")
     return np.asarray(sources), receivers
+
+
+def _root_extent(roots: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Parent sampled bounds from the axis-major ``roots`` inventory arrays."""
+    return (
+        np.min(np.asarray(roots["sampled_lower"], dtype=float), axis=1),
+        np.max(np.asarray(roots["sampled_upper"], dtype=float), axis=1),
+    )
+
+
+def _root_edges(roots: Mapping[str, Any], dimension: int) -> list[np.ndarray] | None:
+    """Per-root native edge samples, or ``None`` when ``edge_samples`` was not requested.
+
+    ``edge_points`` is dimension by (9 times the total edge count), packed root
+    by root; root ``r`` owns the columns after ``9 * sum(edge_count[:r-1])``.
+    """
+    if "edge_count" not in roots or "edge_points" not in roots:
+        return None
+    counts = np.asarray(roots["edge_count"], dtype=int)
+    points = np.asarray(roots["edge_points"], dtype=float)
+    offsets = 9 * np.concatenate([[0], np.cumsum(counts)])
+    if points.shape != (dimension, offsets[-1]):
+        raise ValueError("Inventory edge_points do not match edge_count")
+    return [
+        points[:, offsets[i] : offsets[i + 1]].reshape(dimension, -1, 9)
+        for i in range(len(counts))
+    ]
 
 
 class PatchSet:
@@ -157,7 +199,15 @@ class PatchSet:
     PML construction. Named parent material artifacts must already exist.
     """
 
-    def __init__(self, patches, *, max_offset, padding, depth=None, pml=None):
+    def __init__(
+        self,
+        patches: Iterable[Patch],
+        *,
+        max_offset: Any,
+        padding: Any,
+        depth: Any = None,
+        pml: BoundaryCondition | None = None,
+    ) -> None:
         self.patches = tuple(patches)
         if not self.patches or not all(
             isinstance(patch, Patch) for patch in self.patches
@@ -165,13 +215,19 @@ class PatchSet:
             raise ValueError("Supply one or more Patch objects")
         if len({patch.name for patch in self.patches}) != len(self.patches):
             raise ValueError("Patch names must be unique")
-        self.shots_per_patch = None
+        self.shots_per_patch: int | None = None
         self._set_policy(max_offset, padding, depth, pml)
 
     @classmethod
     def around_sources(
-        cls, *, shots_per_patch, max_offset, padding, depth=None, pml=None
-    ):
+        cls,
+        *,
+        shots_per_patch: int,
+        max_offset: Any,
+        padding: Any,
+        depth: Any = None,
+        pml: BoundaryCondition | None = None,
+    ) -> PatchSet:
         if (
             isinstance(shots_per_patch, bool)
             or not isinstance(shots_per_patch, Integral)
@@ -184,7 +240,9 @@ class PatchSet:
         result._set_policy(max_offset, padding, depth, pml)
         return result
 
-    def _set_policy(self, max_offset, padding, depth, pml):
+    def _set_policy(
+        self, max_offset: Any, padding: Any, depth: Any, pml: BoundaryCondition | None
+    ) -> None:
         offset = _metres(max_offset, "max_offset", shape=None)
         if offset.shape not in ((), (2,), (3,)):
             raise ValueError("max_offset must be a scalar or a 2D/3D offset vector")
@@ -211,7 +269,9 @@ class PatchSet:
             raise ValueError("The patch PML override must specify the pml condition")
         self.pml.boundaries = ["patch_cut"]
 
-    def _requests(self, simulation, inventory):
+    def _requests(
+        self, simulation: SeismicSimulation, inventory: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         sources, receivers = _acquisition_coordinates(simulation)
         offset = np.asarray(self.max_offset)
         if offset.ndim and offset.shape != (simulation.dimension,):
@@ -227,12 +287,7 @@ class PatchSet:
         else:
             groups = _bisect_sources(sources, self.shots_per_patch)
             names = tuple(f"patch_{i:04d}" for i in range(1, len(groups) + 1))
-        parent_lower = np.min(
-            [root["sampled_lower"] for root in inventory["roots"]], axis=0
-        )
-        parent_upper = np.max(
-            [root["sampled_upper"] for root in inventory["roots"]], axis=0
-        )
+        parent_lower, parent_upper = _root_extent(inventory["roots"])
         requests, selections = [], []
         for index, (name, shots) in enumerate(zip(names, groups)):
             source_points = sources[np.array(shots) - 1]
@@ -321,7 +376,7 @@ class PatchSet:
             )
         return {"units": "m", "patches": requests}, selections
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         """Serialize the reusable selection policy with explicit metre distances."""
         return {
             "patches": [
@@ -336,7 +391,7 @@ class PatchSet:
         }
 
     @classmethod
-    def from_dict(cls, value):
+    def from_dict(cls, value: Mapping[str, Any]) -> PatchSet:
         """Restore a saved patch selection policy through its ordinary validators."""
         if value["shots_per_patch"] is not None and value["patches"]:
             raise ValueError(
@@ -358,10 +413,24 @@ class PatchSet:
             )
         return cls([Patch(**item) for item in value["patches"]], **options)
 
-    def prepare(self, simulation, frequencies, *, site):
-        """Prepare native curved root geometry and per-shot aperture selections without wave solves."""
+    def prepare(
+        self,
+        simulation: SeismicSimulation,
+        frequencies: Sequence[complex] | np.ndarray,
+        *,
+        site: Any,
+        edge_samples: bool = False,
+    ) -> PreparedPatchSet:
+        """Prepare native curved root geometry and per-shot aperture selections without wave solves.
+
+        ``edge_samples=True`` adds nine native samples per root edge to the
+        inventory for ``PreparedPatchSet.plot``; it is off by default because
+        the samples scale with the parent.
+        """
         from frequensolve.simulation.jobs._patches import PatchPreparationJob
 
+        if not isinstance(edge_samples, bool):
+            raise TypeError("edge_samples must be a boolean")
         # Fail on unsupported acquisition before scheduling geometry work.
         _acquisition_coordinates(simulation)
         inventory_job = PatchPreparationJob(
@@ -369,6 +438,8 @@ class PatchSet:
         )
         site.run(inventory_job, check=True)
         request, selections = self._requests(simulation, inventory_job.geometry_report)
+        if edge_samples:
+            request["edge_samples"] = True
         key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[
             :16
         ]
@@ -396,18 +467,24 @@ class PatchSet:
 class PreparedPatchSet:
     """Native physical-domain preview and original acquisition identities."""
 
-    def __init__(self, geometry, selections, jobs, pml):
+    def __init__(
+        self,
+        geometry: dict[str, Any],
+        selections: list[dict[str, Any]],
+        jobs: Iterable[PatchPreparationJob],
+        pml: BoundaryCondition,
+    ) -> None:
         self._geometry = deepcopy(geometry)
         self._selections = deepcopy(selections)
         self.jobs = tuple(jobs)
         self.pml = deepcopy(pml)
 
     @property
-    def geometry(self):
+    def geometry(self) -> dict[str, Any]:
         return deepcopy(self._geometry)
 
     @property
-    def storage_estimates(self):
+    def storage_estimates(self) -> dict[str, Any]:
         """Known input/preview storage; solver allocations require a realized mesh."""
         from pathlib import Path
 
@@ -416,7 +493,7 @@ class PreparedPatchSet:
             parent = Path(self.jobs[-1]._result_path) / self._geometry["parent_file"]
             if parent.is_file():
                 parent_bytes = parent.stat().st_size
-        roots = {root["root"]: root for root in self._geometry["roots"]}
+        edges = _root_edges(self._geometry["roots"], self._geometry["dimension"])
         return {
             "parent_mesh_file_bytes": parent_bytes,
             "geometry_json_utf8_bytes": len(
@@ -427,9 +504,14 @@ class PreparedPatchSet:
                 {
                     "name": patch["name"],
                     "root_id_payload_bytes": 8 * len(patch["descriptor"]["roots"]),
-                    "preview_float64_payload_bytes": sum(
-                        np.asarray(roots[root]["edge_points"], dtype=np.float64).nbytes
-                        for root in patch["descriptor"]["roots"]
+                    # None until the preparation requested edge_samples.
+                    "preview_float64_payload_bytes": (
+                        None
+                        if edges is None
+                        else sum(
+                            edges[root - 1].astype(np.float64).nbytes
+                            for root in patch["descriptor"]["roots"]
+                        )
                     ),
                 }
                 for patch in self._geometry["patches"]
@@ -438,7 +520,13 @@ class PreparedPatchSet:
             "solver_workspace_bytes": None,
         }
 
-    def freeze_stage(self, control_state, *, name, directory):
+    def freeze_stage(
+        self,
+        control_state: ControlStateFile | str | Path,
+        *,
+        name: str,
+        directory: Path,
+    ) -> PatchStageSnapshot:
         """Pin stage inputs atomically for controlled patch execution and restart."""
         from frequensolve.mesh._stage_snapshot import PatchStageSnapshot
 
@@ -456,10 +544,10 @@ class PreparedPatchSet:
         )
 
     @property
-    def acquisition(self):
+    def acquisition(self) -> list[dict[str, Any]]:
         return deepcopy(self._selections)
 
-    def simulations(self, *, name="patch"):
+    def simulations(self, *, name: str = "patch") -> tuple[SeismicSimulation, ...]:
         """Build child simulations with parent catalogs and per-shot sparse apertures."""
         from pathlib import Path
 
@@ -483,11 +571,13 @@ class PreparedPatchSet:
             if patch["cut_boundary"]:
                 child += deepcopy(self.pml)
             child.acquisition.extra["active_sources"] = list(selection["sources"])
-            child.acquisition.receiver_groups = [
-                group
-                for group in child.acquisition.receiver_groups
-                if any(selection["receivers"][group.name].values())
-            ]
+            child.acquisition.receiver_groups = NamedList(
+                [
+                    group
+                    for group in child.acquisition.receiver_groups
+                    if any(selection["receivers"][group.name].values())
+                ]
+            )
             for group in child.acquisition.receiver_groups:
                 survey = SparseSurvey(
                     f"patch_{index:04d}_{group.name}",
@@ -513,12 +603,12 @@ class PreparedPatchSet:
         return tuple(children)
 
     @property
-    def job(self):
+    def job(self) -> PatchPreparationJob:
         if len(self.jobs) != 1:
             raise ValueError("Patch preparation used multiple jobs; inspect .jobs")
         return self.jobs[0]
 
-    def plot(self, *, ax=None, patch=None):
+    def plot(self, *, ax: Any = None, patch: str | None = None) -> Any:
         """Draw native sampled curved root edges in metres; PML is not part of this physical preview."""
         import matplotlib.pyplot as plt
         from matplotlib.collections import LineCollection
@@ -534,19 +624,24 @@ class PreparedPatchSet:
             selected = [item for item in selected if item["name"] == patch]
             if not selected:
                 raise KeyError(f"Unknown patch {patch!r}")
-        roots = {item["root"]: item for item in self._geometry["roots"]}
+        roots = self._geometry["roots"]
+        samples = _root_edges(roots, dimension)
+        if samples is None:
+            raise ValueError(
+                "Plotting requires native edge samples; prepare with edge_samples=True"
+            )
         collection_type = LineCollection if dimension == 2 else Line3DCollection
 
-        def edges(ids):
+        def edges(ids: Iterable[int]) -> list[np.ndarray]:
             return [
-                edge.T
-                for root in ids
-                for edge in np.asarray(roots[root]["edge_points"])
-                .reshape(dimension, -1, 9)
-                .transpose(1, 0, 2)
+                edge.T for root in ids for edge in samples[root - 1].transpose(1, 0, 2)
             ]
 
-        ax.add_collection(collection_type(edges(roots), colors="0.8", linewidths=0.5))
+        ax.add_collection(
+            collection_type(
+                edges(range(1, len(samples) + 1)), colors="0.8", linewidths=0.5
+            )
+        )
         for i, item in enumerate(selected):
             ax.add_collection(
                 collection_type(
@@ -601,8 +696,7 @@ class PreparedPatchSet:
                         s=12,
                         zorder=4,
                     )
-        lower = np.min([root["sampled_lower"] for root in roots.values()], axis=0)
-        upper = np.max([root["sampled_upper"] for root in roots.values()], axis=0)
+        lower, upper = _root_extent(roots)
         ax.set_xlim(lower[0], upper[0])
         ax.set_xlabel("x (m)")
         if dimension == 2:

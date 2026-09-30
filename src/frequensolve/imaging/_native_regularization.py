@@ -33,7 +33,9 @@ class NativeRegularization(Regularization):
     Sauce evaluates the energy and solves constrained proximal problems using
     native control bases, including mesh controls. TV/TGV use split-Bregman
     shrinkage; epsilon controls splitting, not smoothing of the norm. Weights
-    and amplitude normalization are resolved once at the stage's first model.
+    and amplitude normalization are resolved once at the stage's first model;
+    wavelength weights use the local length ``L(x) = lambda*v(x)/f`` (sizing
+    wavespeed of that model, largest frequency, no ``2*pi``).
     ``reference`` is an optional complete ControlState; fixed DOFs contribute
     their actual values to the energy. Without it, the model itself is regularized.
     """
@@ -41,7 +43,7 @@ class NativeRegularization(Regularization):
     smoothing: Any = None
     reference: Optional[ControlState] = None
     iterations: int = 1000
-    relative_tolerance: float = 1e-6
+    relative_tolerance: float = 1e-4
     absolute_tolerance: float = 1e-8
 
     def __post_init__(self) -> None:
@@ -100,8 +102,9 @@ class BoundNativeRegularization(BoundRegularization):
         if source is None:
             source = linearization.job
         self.source = copy.copy(source)
-        # The native basis and material wavelengths belong to this stage, not
-        # the mutable simulation last installed by a rejected PDE trial.
+        # The native basis and the stage wavespeed v(x) behind the local
+        # smoothing length L(x) = lambda*v(x)/f belong to this stage, not the
+        # mutable simulation last installed by a rejected PDE trial.
         self.source.simulation = copy.deepcopy(self.source.simulation)
         self.source.simulation.name = problem.backend.job_name("regularization_model")
         self.source.simulation.save()

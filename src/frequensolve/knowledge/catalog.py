@@ -19,7 +19,6 @@ from typing import Any, Mapping, Optional, Union
 
 from frequensolve._physics_components import allowed_components_for_physics
 from frequensolve._property_names import canonical_property_name
-from frequensolve._version import get_versions
 from frequensolve.solver import (
     SolverCompatibilityManifest,
     load_solver_compatibility,
@@ -583,7 +582,9 @@ class SimulationKnowledgeCatalog:
 
         loaded_compatibility = compatibility or load_solver_compatibility()
         preferred = loaded_compatibility.preferred_solver
-        installed_version = package_version or get_versions()["version"]
+        from frequensolve import __version__
+
+        installed_version = package_version or __version__
         if not isinstance(installed_version, str) or not installed_version.strip():
             raise CatalogValidationError("package_version must be a non-empty string")
 

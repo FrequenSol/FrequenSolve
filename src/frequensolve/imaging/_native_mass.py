@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from ._artifacts import SmoothingConfig
-from ._native_regularization import NativeRegularization
+from ._native_regularization import BoundNativeRegularization, NativeRegularization
 from .controls import ControlSpace, ControlVector
 from .regularization import BoundPreconditioner, Preconditioner, _values_on
 
@@ -29,7 +29,7 @@ class NativeMass(Preconditioner):
 
     curvature_scale: bool = True
     iterations: int = 300
-    relative_tolerance: float = 1e-9
+    relative_tolerance: float = 1e-4
     absolute_tolerance: float = 1e-30
     approximation: str = "consistent"
     _diagonal_cache: dict = field(
@@ -52,11 +52,13 @@ class NativeMass(Preconditioner):
 class BoundNativeMass(BoundPreconditioner):
     """A frozen native mass map with optional scalar curvature calibration."""
 
+    preconditioner: NativeMass
+
     def __init__(self, specification: NativeMass, space: ControlSpace) -> None:
         super().__init__(specification, space)
         self.scale = 1.0
-        self.callbacks = None
-        self._diagonal = None
+        self.callbacks: BoundNativeRegularization | None = None
+        self._diagonal: np.ndarray | None = None
         for block in space.resolved_blocks:
             if not block.name.startswith("model."):
                 raise ValueError("NativeMass currently supports only material controls")

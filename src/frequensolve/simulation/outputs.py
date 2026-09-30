@@ -291,14 +291,17 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 class TraceOutput(Output):
     """Receiver trace output request.
 
-    Sauce publishes the packed traces at ``<path>/traces.h5`` and replaces
-    that file on every rerun of the job.
+    Released Sauce producers publish ``<path>/traces.h5``. Development
+    producers may publish immutable generation segments instead. Resolve
+    both layouts through the job's trace manifest.
 
     Args:
         path: Trace output directory relative to the job result directory.
         keep_history: Keep each superseded pack under
             ``<path>/history/<generation>/`` instead of discarding it, e.g. to
             retain the traces of every FWI iteration run in one job directory.
+            Immutable generation producers retain superseded manifests and
+            segments in their original generation directories when enabled.
         **kwargs: Additional solver-facing trace output fields.
 
     Raises:

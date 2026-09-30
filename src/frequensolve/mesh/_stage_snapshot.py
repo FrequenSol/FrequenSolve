@@ -4,6 +4,8 @@
 
 """Immutable, relocatable inputs for one patch optimization stage."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -13,6 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, Any, Sequence
 
 import h5py
 import numpy as np
@@ -22,11 +25,16 @@ from frequensolve.model.property import rsf_binary_path
 from frequensolve.simulation.jobs.remote import _PROJECT_FILE_REFERENCE_KEYS
 from frequensolve.simulation.simulation import CustomJSONEncoder
 
+if TYPE_CHECKING:
+    from frequensolve.mesh._stage_mesh import PatchStageMesh
+    from frequensolve.mesh.patches import PreparedPatchSet
+    from frequensolve.simulation.simulation import SeismicSimulation
+
 _SCHEMA = "fs-patch-stage-1"
 _PATH_KEYS = _PROJECT_FILE_REFERENCE_KEYS | {"artifact"}
 
 
-def _digest(path):
+def _digest(path: str | Path) -> str:
     sha = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -34,7 +42,7 @@ def _digest(path):
     return "sha256:" + sha.hexdigest()
 
 
-def _write_json(path, payload):
+def _write_json(path: Path, payload: Any) -> None:
     path.write_text(
         json.dumps(
             payload, cls=CustomJSONEncoder, sort_keys=True, indent=2, allow_nan=False
@@ -44,7 +52,7 @@ def _write_json(path, payload):
     )
 
 
-def _contained(root, name):
+def _contained(root: Path, name: str) -> Path:
     """Resolve only bundle-relative paths, including after directory relocation."""
     path = PurePosixPath(name)
     if (
@@ -61,14 +69,14 @@ def _contained(root, name):
     return result
 
 
-def _check_hdf_dependencies(path):
+def _check_hdf_dependencies(path: Path) -> None:
     """Refuse HDF indirection that would escape the copied file's byte identity."""
     if not h5py.is_hdf5(path):
         return
     with h5py.File(path, "r") as h5:
-        visited = set()
+        visited: set[int] = set()
 
-        def walk(group):
+        def walk(group: h5py.Group) -> None:
             address = h5py.h5o.get_info(group.id).addr
             if address in visited:
                 return
@@ -91,14 +99,14 @@ def _check_hdf_dependencies(path):
 
 
 class _InputCopier:
-    def __init__(self, root, export_root, project):
+    def __init__(self, root: Path, export_root: Path, project: Path) -> None:
         self.root = root
         self.export_root = export_root
         self.project = project
-        self.copied = {}
+        self.copied: dict[Path, str] = {}
         (root / "inputs").mkdir()
 
-    def pin(self, locator):
+    def pin(self, locator: str | Path) -> str:
         text = str(locator)
         file_name, separator, dataset = text.partition(":")
         source = Path(file_name).expanduser()
@@ -135,7 +143,7 @@ class _InputCopier:
                 self._copy_file(source, target)
         return self.copied[source] + (separator + dataset if separator else "")
 
-    def _copy_file(self, source, target):
+    def _copy_file(self, source: Path, target: Path) -> None:
         _check_hdf_dependencies(source)
         before = _digest(source)
         shutil.copyfile(source, target)
@@ -157,7 +165,7 @@ class _InputCopier:
                 raise ValueError("RSF sidecar reference could not be pinned")
             target.write_text(header)
 
-    def rewrite(self, value):
+    def rewrite(self, value: Any) -> Any:
         if isinstance(value, dict):
             return {
                 key: (
@@ -180,20 +188,29 @@ class PatchStageSnapshot:
     identity: str
 
     @classmethod
-    def publish(cls, directory, simulation, state, prepared, *, name, frequencies):
+    def publish(
+        cls,
+        directory: Path,
+        simulation: SeismicSimulation,
+        state: ControlStateFile | str | Path,
+        prepared: PreparedPatchSet,
+        *,
+        name: str,
+        frequencies: Sequence[complex] | np.ndarray,
+    ) -> PatchStageSnapshot:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("A patch stage requires a nonempty name")
-        frequencies = np.asarray(frequencies, dtype=complex)
+        band = np.asarray(frequencies, dtype=complex)
         if (
-            frequencies.ndim != 1
-            or not frequencies.size
-            or not np.all(np.isfinite(frequencies))
-            or np.any(frequencies.real <= 0)
+            band.ndim != 1
+            or not band.size
+            or not np.all(np.isfinite(band))
+            or np.any(band.real <= 0)
         ):
             raise ValueError(
                 "Patch stages require finite frequencies with positive real parts"
             )
-        state = (
+        control_state = (
             deepcopy(state)
             if isinstance(state, ControlStateFile)
             else ControlStateFile.read(state)
@@ -205,7 +222,7 @@ class PatchStageSnapshot:
             )
         directory.parent.mkdir(parents=True, exist_ok=True)
         geometry = prepared.geometry
-        basis = {}
+        basis: dict[str, str] = {}
         for patch in geometry["patches"]:
             for coverage in patch.get("material_coverage", ()):
                 space, identity = coverage["space"], coverage["basis_identity"]
@@ -217,8 +234,8 @@ class PatchStageSnapshot:
         with TemporaryDirectory(
             prefix=".patch-stage-", dir=directory.parent
         ) as temporary:
-            temporary = Path(temporary)
-            root, export = temporary / "bundle", temporary / "export"
+            temporary_root = Path(temporary)
+            root, export = temporary_root / "bundle", temporary_root / "export"
             root.mkdir()
             local = deepcopy(simulation)
             context = local.export_context(project_path=export, rel_path="arrays")
@@ -236,7 +253,7 @@ class PatchStageSnapshot:
             _write_json(root / "simulation.json", payload)
             _write_json(root / "geometry.json", geometry)
             _write_json(root / "acquisition.json", prepared.acquisition)
-            state.write(root / "control_state.h5")
+            control_state.write(root / "control_state.h5")
             files = [
                 {
                     "file": path.relative_to(root).as_posix(),
@@ -249,7 +266,7 @@ class PatchStageSnapshot:
             descriptor = {
                 "schema": _SCHEMA,
                 "name": name,
-                "frequencies": [[value.real, value.imag] for value in frequencies],
+                "frequencies": [[value.real, value.imag] for value in band],
                 "parent_geometry": geometry["parent_fingerprint"],
                 "parent_mesh": "parent.gmp",
                 "material_basis": basis,
@@ -270,14 +287,14 @@ class PatchStageSnapshot:
         return cls.read(directory / "manifest.json", identity=identity)
 
     @classmethod
-    def read(cls, manifest, *, identity):
-        manifest = Path(manifest).resolve(strict=True)
+    def read(cls, manifest: str | Path, *, identity: str) -> PatchStageSnapshot:
+        manifest_path = Path(manifest).resolve(strict=True)
         if (
             not re.fullmatch(r"sha256:[0-9a-f]{64}", identity)
-            or _digest(manifest) != identity
+            or _digest(manifest_path) != identity
         ):
             raise ValueError("Patch stage manifest identity mismatch")
-        payload = json.loads(manifest.read_text())
+        payload = json.loads(manifest_path.read_text())
         if payload.get("schema") != _SCHEMA:
             raise ValueError("Unsupported patch stage schema")
         band = np.asarray(payload.get("frequencies", []), dtype=float)
@@ -289,7 +306,7 @@ class PatchStageSnapshot:
             or np.any(band[:, 0] <= 0)
         ):
             raise ValueError("Invalid patch stage frequency band")
-        root = manifest.parent
+        root = manifest_path.parent
         files = payload["files"]
         by_name = {}
         for record in files:
@@ -319,17 +336,17 @@ class PatchStageSnapshot:
         ):
             raise ValueError("Patch stage geometry/acquisition identity mismatch")
         ControlStateFile.read(_contained(root, payload["control_state"]))
-        return cls(manifest, identity)
+        return cls(manifest_path, identity)
 
-    def verify(self):
+    def verify(self) -> PatchStageSnapshot:
         """Revalidate before each use; a saved Python object does not certify mutable disk bytes."""
         return self.read(self.manifest, identity=self.identity)
 
-    def to_fs(self):
+    def to_fs(self) -> dict[str, str]:
         self.verify()
         return {"manifest": str(self.manifest), "identity": self.identity}
 
-    def input_files(self):
+    def input_files(self) -> tuple[Path, ...]:
         """Enumerate verified committed bytes without including generated stage jobs."""
         self.verify()
         payload = json.loads(self.manifest.read_text())
@@ -338,14 +355,16 @@ class PatchStageSnapshot:
             for record in payload["files"]
         )
 
-    def publish_mesh(self, capture_manifest, directory):
+    def publish_mesh(
+        self, capture_manifest: str | Path, directory: str | Path
+    ) -> PatchStageMesh:
         """Publish one completed native frequency-mesh capture beside the stage inputs."""
         from frequensolve.mesh._stage_mesh import PatchStageMesh
 
         return PatchStageMesh.publish(capture_manifest, directory, stage=self)
 
     @property
-    def control_state(self):
+    def control_state(self) -> Path:
         self.verify()
         return (
             self.manifest.parent
@@ -353,7 +372,7 @@ class PatchStageSnapshot:
         )
 
     @property
-    def simulation_file(self):
+    def simulation_file(self) -> Path:
         self.verify()
         return (
             self.manifest.parent / json.loads(self.manifest.read_text())["simulation"]

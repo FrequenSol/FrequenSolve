@@ -184,6 +184,40 @@ def test_native_tv_fwi_objective_through_local_orchestration(tmp_path, site):
     )
 
 
+def test_reference_wavelength_weights_match_the_sdk_resolution(tmp_path, site):
+    """Sauce resolves ``lambda*reference_wavelength`` (no 2*pi) like the SDK."""
+    from frequensolve.imaging._native_regularization import bind_workflow_regularization
+
+    problem = _problem(tmp_path, site)
+    linearization = problem.linearize()
+    point = np.linspace(-0.1, 0.2, problem.space.size)
+    for kind in ("tikhonov", "tv", "tgv"):
+        wavelength = im.Smoothing(
+            kind=kind,
+            wavelength_fraction=0.25,
+            reference_wavelength=0.4,
+            tgv_ratio=2.0,
+            normalize_amplitude=False,
+        )
+        if kind == "tgv":
+            alpha1, alpha2 = wavelength.resolved_tgv_weights()
+            explicit = im.Smoothing(
+                kind=kind, alpha1=alpha1, alpha2=alpha2, normalize_amplitude=False
+            )
+        else:
+            explicit = im.Smoothing(
+                kind=kind, alpha=wavelength.resolved_alpha(), normalize_amplitude=False
+            )
+        values = []
+        for config in (wavelength, explicit):
+            _, native = bind_workflow_regularization(
+                config, linearization.space, problem, linearization
+            )
+            values.append(native.value(point))
+        assert values[0] > 0
+        assert values[0] == pytest.approx(values[1], rel=1e-6)
+
+
 def test_multifrequency_zero_data_kernel_stacks_native_task_images(tmp_path, site):
     """Observed-RMS problems can request a zero-data kernel and native frequency mean."""
     from frequensolve.geometry.grids import CartesianGrid

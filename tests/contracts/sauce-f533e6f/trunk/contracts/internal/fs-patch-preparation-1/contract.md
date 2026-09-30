@@ -6,7 +6,9 @@ The `patch_prepare` job operation accepts this block as `PatchPreparation`.
 Coordinates and explicit nonnegative `padding` are in metres. Each uniquely
 named patch supplies either physical parent `roots` or `lower`/`upper` bounds
 matching the model dimension. Omitting `patches` requests only the parent
-inventory. Preparation uses native curved bounds, closes material supports, applies padding, connects
+inventory. `edge_samples` (default false) adds nine native samples per root
+edge to the inventory for previews; it is optional because it scales with the
+parent. Preparation uses native curved bounds, closes material supports, applies padding, connects
 selected components and fills selection-created holes. It reports additions
 and topology-driven growth. Exact geometry is retained during extraction.
 
@@ -24,7 +26,9 @@ containment. Omitting `points` performs no acquisition check.
 
 When patches are requested, every named `Model/property_spaces` artifact must
 already exist for the full parent. Relative artifact paths resolve against the
-project directory. Preparation checks the parent fingerprint,
+project directory, and a missing literal path falls back to the generated-mesh
+keyed name (`<name>.<key>.h5`) exactly as space definitions do. Preparation
+checks the parent fingerprint,
 physical-cell mapping and resolved material-layer slots, then includes the
 complete supports of core coefficients before buffering. Geometry inventory
 alone does not read or generate material artifacts. Scheduler `--init-no-size` or `--init`

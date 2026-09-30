@@ -1258,7 +1258,7 @@ def minimize_lbfgs(
             raise ValueError("L-BFGS restart has invalid stopping momentum")
         stopping.improvement = improvement
 
-    def restart_state(iteration):
+    def restart_state(iteration: int) -> dict[str, Any]:
         return {
             "schema": "fs-lbfgs-restart-1",
             "model": model.tolist(),

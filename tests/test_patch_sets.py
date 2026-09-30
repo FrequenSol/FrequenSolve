@@ -3,7 +3,6 @@
 # or distribution is prohibited except under a written license.
 
 import json
-from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
@@ -34,16 +33,15 @@ def _simulation(tmp_path):
 
 
 def _inventory():
+    # Axis-major inventory arrays: one list per dimension with a value per root.
     return {
         "root_count": 4,
-        "roots": [
-            {
-                "root": i + 1,
-                "sampled_lower": [i * 1000, 0],
-                "sampled_upper": [(i + 1) * 1000, 2000],
-            }
-            for i in range(4)
-        ],
+        "roots": {
+            "cell": [10 * (i + 1) for i in range(4)],
+            "domain": [1] * 4,
+            "sampled_lower": [[i * 1000 for i in range(4)], [0] * 4],
+            "sampled_upper": [[(i + 1) * 1000 for i in range(4)], [2000] * 4],
+        },
     }
 
 
@@ -232,6 +230,27 @@ def test_preparation_requires_complete_native_containment(tmp_path, monkeypatch,
             patches.prepare(_simulation(tmp_path), [3], site=site)
 
 
+def test_prepared_preview_requires_requested_edge_samples():
+    geometry = {
+        "dimension": 2,
+        **_inventory(),
+        "patches": [{"name": "one", "descriptor": {"roots": [1, 2]}}],
+    }
+    prepared = fs.PreparedPatchSet(
+        geometry, [], (), fs.BoundaryCondition(conditions=["pml"])
+    )
+    estimate = prepared.storage_estimates["patches"][0]
+    assert estimate["root_id_payload_bytes"] == 16
+    assert estimate["preview_float64_payload_bytes"] is None
+    with pytest.raises(ValueError, match="edge_samples=True"):
+        prepared.plot()
+    geometry["roots"].update(edge_count=[4] * 4, edge_points=[[0.0] * 9 * 15] * 2)
+    with pytest.raises(ValueError, match="edge_points"):
+        fs.PreparedPatchSet(
+            geometry, [], (), fs.BoundaryCondition(conditions=["pml"])
+        ).plot()
+
+
 @pytest.mark.visual
 @pytest.mark.parametrize("dimension", [2, 3])
 @pytest.mark.parametrize("support_added", [False, True])
@@ -247,14 +266,15 @@ def test_prepared_plot_preserves_native_curved_samples_and_acquisition(
     points = np.array([t, t * (1 - t)] if dimension == 2 else [t, 0.5 * t, t * (1 - t)])
     geometry = {
         "dimension": dimension,
-        "roots": [
-            {
-                "root": 1,
-                "sampled_lower": [0] * dimension,
-                "sampled_upper": [1] * dimension,
-                "edge_points": points.tolist(),
-            }
-        ],
+        "root_count": 1,
+        "roots": {
+            "cell": [10],
+            "domain": [1],
+            "sampled_lower": [[0]] * dimension,
+            "sampled_upper": [[1]] * dimension,
+            "edge_count": [1],
+            "edge_points": points.tolist(),
+        },
         "patches": [
             {
                 "name": "curved",
@@ -265,10 +285,15 @@ def test_prepared_plot_preserves_native_curved_samples_and_acquisition(
         ],
     }
     if support_added:
-        support = deepcopy(geometry["roots"][0])
-        support["root"] = 2
-        support["edge_points"] = (points + 0.1).tolist()
-        geometry["roots"].append(support)
+        # A second root's edge samples pack after the first root's columns.
+        roots = geometry["roots"]
+        geometry["root_count"] = 2
+        roots["cell"].append(20)
+        roots["domain"].append(1)
+        roots["sampled_lower"] = [[0, 0.1]] * dimension
+        roots["sampled_upper"] = [[1, 1.1]] * dimension
+        roots["edge_count"].append(1)
+        roots["edge_points"] = np.concatenate([points, points + 0.1], axis=1).tolist()
         geometry["patches"][0]["descriptor"]["roots"] = [1, 2]
         geometry["patches"][0]["support_roots"] = [1, 2]
     acquisition = [
@@ -281,8 +306,11 @@ def test_prepared_plot_preserves_native_curved_samples_and_acquisition(
     prepared = fs.PreparedPatchSet(
         geometry, acquisition, (), fs.BoundaryCondition(conditions=["pml"])
     )
-    geometry["roots"][0]["edge_points"][0][0] = 1000
-    assert prepared.geometry["roots"][0]["edge_points"][0][0] == 0
+    geometry["roots"]["edge_points"][0][0] = 1000
+    assert prepared.geometry["roots"]["edge_points"][0][0] == 0
+    assert prepared.storage_estimates["patches"][0][
+        "preview_float64_payload_bytes"
+    ] == 8 * dimension * 9 * (1 + support_added)
     ax = prepared.plot()
     try:
         ax.figure.canvas.draw()

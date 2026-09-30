@@ -4,6 +4,7 @@ import os
 from math import comb
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 import h5py
 import numpy as np
@@ -11,7 +12,12 @@ import numpy as np
 __all__ = ["write_receiver_window"]
 
 
-def write_receiver_window(path, delays, *, coefficients=(0, 0, 0, 0, 1)):
+def write_receiver_window(
+    path: str | Path,
+    delays: Any,
+    *,
+    coefficients: Any = (0, 0, 0, 0, 1),
+) -> str:
     """Write coefficients of ``p(t - delays)`` and return a solver dataset path.
 
     ``delays`` is a finite, nonnegative seconds array of shape
@@ -45,14 +51,16 @@ def write_receiver_window(path, delays, *, coefficients=(0, 0, 0, 0, 1)):
         delays = np.asarray(delays)
     if len(delays.shape) != 2 or min(delays.shape) <= 0:
         raise ValueError("delays must have shape (global_receiver, source_field)")
-    path = Path(path).resolve()
+    destination = Path(path).resolve()
     receivers, sources = delays.shape
     degree = coefficients.size - 1
     # Bounded preparation workspace, independent of total acquisition size.
     chunks = (1, min(receivers, 256), min(sources, 64))
-    if path.exists():
-        raise FileExistsError(path)
-    with TemporaryDirectory(dir=path.parent, prefix=".receiver-window-") as scratch:
+    if destination.exists():
+        raise FileExistsError(destination)
+    with TemporaryDirectory(
+        dir=destination.parent, prefix=".receiver-window-"
+    ) as scratch:
         temporary = Path(scratch) / "window.h5"
         with h5py.File(temporary, "x") as handle:
             result = handle.create_dataset(
@@ -85,5 +93,5 @@ def write_receiver_window(path, delays, *, coefficients=(0, 0, 0, 0, 1)):
                                 )
                     result[(slice(None), *selection)] = shifted
         # Publish only a complete file, atomically refusing a concurrent overwrite.
-        os.link(temporary, path)
-    return f"{path}:/coefficients"
+        os.link(temporary, destination)
+    return f"{destination}:/coefficients"

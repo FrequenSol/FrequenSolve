@@ -73,7 +73,7 @@ def test_parent_normalized_patch_values_and_covectors(
             max_offset=2000 * ureg.m,
             padding=0 * ureg.m,
         ).prepare(baseline.simulation, [3], site=site)
-        roots = tuple(row["root"] for row in inventory.geometry["roots"])
+        roots = tuple(range(1, inventory.geometry["root_count"] + 1))
         prepared = PatchSet(
             [
                 Patch(name="odd", roots=roots, sources=(1, 3)),

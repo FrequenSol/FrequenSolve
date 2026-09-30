@@ -272,9 +272,7 @@ class ReceiverExpression:
                 "Material-only outputs must be requested with materials= diagnostics"
             )
         if self.kind == "field":
-            prefix = {"em": "maxwell", "poroelastic": "poroelastic"}.get(
-                self.physics, self.physics
-            )
+            prefix = "maxwell" if self.physics == "em" else self.physics
             name = (
                 "solid_velocity"
                 if self.physics == "poroelastic" and self.name == "velocity"

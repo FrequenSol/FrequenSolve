@@ -10,6 +10,17 @@ from tests.test_imaging_workflows import FREQUENCIES, _problem
 pytestmark = pytest.mark.unit
 
 
+def test_mass_solver_tolerance_is_forwarded_without_tightening(tmp_path):
+    lin = _problem(tmp_path, FakeImagingSite(seed=7)).linearize()
+    for specification, expected in (
+        (im.NativeMass(curvature_scale=False), 1e-4),
+        (im.NativeMass(curvature_scale=False, relative_tolerance=2e-5), 2e-5),
+    ):
+        bound = specification.bind(lin.space)
+        bound.update(lin)
+        assert bound.callbacks.regularization.relative_tolerance == expected
+
+
 def test_mass_inverse_pairing_and_curvature_calibration(tmp_path):
     problem = _problem(tmp_path, FakeImagingSite(seed=7))
     lin = problem.linearize()

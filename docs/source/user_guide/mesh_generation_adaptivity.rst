@@ -42,17 +42,24 @@ wave solves. It uses native curved geometry and the existing site scheduler:
        max_offset=4 * fs.ureg.km,
        padding=2 * fs.ureg.km,
    )
-   prepared = patches.prepare(sim, [3, 7.5], site=site)
+   prepared = patches.prepare(sim, [3, 7.5], site=site, edge_samples=True)
    prepared.plot()
 
 Distances require units. Omitting ``depth`` retains the full parent depth;
 ``depth=[0, 8] * fs.ureg.km`` requests a smaller interval. Receiver aperture is
 evaluated separately for each shot. Explicit ``Patch(name=..., roots=...,
 sources=...)`` entries use one-based IDs and must assign every physical shot
-exactly once. The native inventory in ``prepared.geometry`` supplies root IDs,
-requested and added roots, and realized bounds. ``prepared.acquisition`` records
-original shot/receiver IDs and retained/excluded pair counts; ``prepared.jobs``
-exposes the preparation jobs.
+exactly once. The native inventory in ``prepared.geometry["roots"]`` is a compact
+object of arrays indexed by one-based parent root ID: ``cell`` and ``domain``
+(the authored GMP domain ID) hold one integer per root, and the axis-major
+``lower``/``upper`` and ``sampled_lower``/``sampled_upper`` bounds hold one
+metre array per dimension with ``root_count`` values each. Patches supply
+requested and added roots and realized bounds. ``edge_samples=True`` adds nine
+native samples per root edge (``edge_count`` and ``edge_points``, packed root by
+root) for ``prepared.plot()``; it is off by default because the samples scale
+with the parent, and plotting without them raises. ``prepared.acquisition``
+records original shot/receiver IDs and retained/excluded pair counts;
+``prepared.jobs`` exposes the preparation jobs.
 
 A scalar ``max_offset`` selects a radial aperture. A vector such as
 ``max_offset=[4000, 2000, 500] * fs.ureg.m`` selects a box with one maximum

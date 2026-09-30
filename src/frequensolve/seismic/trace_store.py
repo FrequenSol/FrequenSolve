@@ -2127,7 +2127,9 @@ class TraceStore:
         except (KeyError, IndexError, ValueError):
             return {}
         names = _attr_strings(
-            dset.attrs.get("component", dset.attrs.get("value_convention_components", []))
+            dset.attrs.get(
+                "component", dset.attrs.get("value_convention_components", [])
+            )
         )
         units = _attr_strings(
             dset.attrs.get("units", dset.attrs.get("value_convention_primal_units", []))

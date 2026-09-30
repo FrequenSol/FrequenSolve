@@ -376,8 +376,8 @@ class Acquisition(ExtraFieldsMixin):
                 or any(
                     isinstance(value, bool)
                     or not isinstance(value, Integral)
-                    or value < 1
-                    or (count is not None and value > count)
+                    or int(value) < 1
+                    or (count is not None and int(value) > count)
                     for value in selected
                 )
             ):

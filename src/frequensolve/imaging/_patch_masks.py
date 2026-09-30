@@ -4,7 +4,15 @@
 
 """Material update cores expressed in the authoritative parent control layout."""
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from frequensolve.imaging.controls import ControlState
+    from frequensolve.imaging.problem import ImagingProblem
+    from frequensolve.mesh.patches import PreparedPatchSet
 
 import h5py
 import numpy as np
@@ -20,13 +28,19 @@ from .controls import (
 )
 
 
-def core_masks(problem, prepared, index):
+def core_masks(
+    problem: ImagingProblem, prepared: PreparedPatchSet, index: int
+) -> dict[str, np.ndarray]:
     """Keep complete basis supports intersecting this patch's requested roots."""
     patch = prepared.geometry["patches"][index]
     coverage = {item["space"]: item for item in patch.get("material_coverage", ())}
-    roots = {item["root"]: item for item in prepared.geometry["roots"]}
-    selected = [roots[root] for root in patch["core_roots"]]
-    simulation = problem._patch_runtime.parent.simulation
+    # Inventory bounds are axis-major; transpose to one row per parent root.
+    roots = prepared.geometry["roots"]
+    sampled_lower = np.asarray(roots["sampled_lower"], dtype=float).T
+    sampled_upper = np.asarray(roots["sampled_upper"], dtype=float).T
+    runtime = problem._patch_runtime
+    assert runtime is not None
+    simulation = runtime.parent.simulation
     ctx = _BindContext(simulation)
     native_per_m = ctx.length(1 * ureg.m)[0]
     boxes = [
@@ -34,11 +48,11 @@ def core_masks(problem, prepared, index):
             axis: (float(lo) * native_per_m, float(hi) * native_per_m)
             for axis, lo, hi in zip(
                 _axis_names(simulation.dimension),
-                root["sampled_lower"],
-                root["sampled_upper"],
+                sampled_lower[root - 1],
+                sampled_upper[root - 1],
             )
         }
-        for root in selected
+        for root in patch["core_roots"]
     ]
     model = simulation.model.to_fs(simulation.export_context())
     masks = {}
@@ -67,7 +81,9 @@ def core_masks(problem, prepared, index):
                 ranges = np.asarray(
                     h5["property_space/material_ranges"], dtype=np.int64
                 )
-            material = problem._shared.manifest.block(block.name).binding[1]
+            manifest = problem._shared.manifest
+            assert manifest is not None
+            material = manifest.block(block.name).binding[1]
             if (
                 ranges.ndim != 2
                 or ranges.shape[1] != 2
@@ -113,7 +129,9 @@ def core_masks(problem, prepared, index):
     return masks
 
 
-def local_patch_view(problem, index, state):
+def local_patch_view(
+    problem: ImagingProblem, index: int, state: ControlState
+) -> ImagingProblem:
     """Select assigned data and update core while fixing every exterior coefficient."""
     from copy import copy
 
@@ -122,6 +140,8 @@ def local_patch_view(problem, index, state):
     view._shared = copy(problem._shared)
     view._shared.state = state
     view._shared.state_provisional = False
-    view._masks = core_masks(problem, problem._patch_runtime.prepared, index)
+    runtime = problem._patch_runtime
+    assert runtime is not None
+    view._masks = core_masks(problem, runtime.prepared, index)
     view._masks_adopted = True
     return view

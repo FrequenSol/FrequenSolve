@@ -4,11 +4,14 @@
 
 """Frozen patch execution and assembly on parent control/observation identities."""
 
+from __future__ import annotations
+
 import json
 import shutil
 import weakref
 from copy import copy, deepcopy
 from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence, cast
 from uuid import uuid4
 
 import numpy as np
@@ -20,16 +23,16 @@ from frequensolve.simulation.simulation import BaseSimulation
 
 from ._artifacts import ControlRegistryManifest, ControlStateFile
 from ._backend import LinearizationEntry, fingerprint, read_report, reduce_covectors
-from ._objective import _ObjectiveSpace
+from ._objective import ObjectiveState, _ObjectiveSpace
 from ._patch_objective import patch_objective_keys, restrict_patch_misfit
-from .controls import ControlState
-from .data import DataVector, _DataSegment
+from .controls import ControlSpace, ControlState, ControlVector
+from .data import DataSpace, DataVector, _DataSegment
 from .jobs import FWIOperatorJob
 from .operators import Jacobian, Normal
 from .problem import ImagingProblem, Linearization
 
 
-def _remove_candidate_artifacts(root, paths):
+def _remove_candidate_artifacts(root: Path, paths: Iterable[Path]) -> None:
     """Remove only candidate-owned directories after their last operator is released."""
     for path in paths:
         resolved = Path(path).resolve()
@@ -42,25 +45,36 @@ def _remove_candidate_artifacts(root, paths):
 
 
 class _CandidateArtifacts:
-    def __init__(self, root, directory):
+    def __init__(self, root: Path, directory: Path) -> None:
         self.paths = [directory]
         self.root = root.resolve()
 
-    def activate(self):
+    def activate(self) -> None:
         # Failed native evaluations retain their inputs and logs for diagnosis.
         weakref.finalize(self, _remove_candidate_artifacts, self.root, self.paths)
 
-    def track(self, job):
+    def track(self, job: FWIOperatorJob) -> None:
         self.paths.append(Path(job._result_path).parent)
 
 
 class _ChildProblem(ImagingProblem):
+    _patch_misfit: dict[str, Any]
+    _patch_stage: PatchStageSnapshot
+    _patch_mesh: PatchStageMesh
+    _patch_artifacts: _CandidateArtifacts
     """Action context whose stage definitions stay fixed across candidate states."""
 
-    def _sync_simulation(self, state):
+    def _sync_simulation(self, state: ControlState | None) -> None:
         pass  # Candidates are passed exclusively through controls.state.
 
-    def _operator_job(self, space, action, *, frequencies, **options):
+    def _operator_job(
+        self,
+        space: ControlSpace,
+        action: str,
+        *,
+        frequencies: Sequence[Any],
+        **options: Any,
+    ) -> FWIOperatorJob:
         job = FWIOperatorJob(
             self.backend.job_name(action),
             self.simulation,
@@ -80,9 +94,10 @@ class _ChildProblem(ImagingProblem):
 
 
 class _PatchRuntime:
-    def __init__(self, problem):
-        self.cache = {}
+    def __init__(self, problem: ImagingProblem) -> None:
+        self.cache: dict[str, CompositeLinearization] = {}
         self.problem = problem
+        assert problem.patches is not None
         self.policy = deepcopy(problem.patches.to_dict())
         parent = problem.restrict(patches=None, support="refresh")
         # The full parent establishes the authoritative registry and objective
@@ -92,6 +107,8 @@ class _PatchRuntime:
         self.parent._shared = copy(parent._shared)
         self.parent._shared.simulation = deepcopy(parent.simulation)
         self.state = baseline.state
+        assert problem.patches is not None
+        assert problem._shared.manifest is not None
         prepared = problem.prepare_patches()
         self.prepared = prepared
         directory = (
@@ -106,7 +123,7 @@ class _PatchRuntime:
         )
         pinned = BaseSimulation.load(self.stage.simulation_file, project_path=directory)
         self.parent._shared.simulation = deepcopy(pinned)
-        self.children = []
+        self.children: list[tuple[int, Any, _ChildProblem, FWIOperatorJob | None]] = []
         jobs = []
         for index, simulation in enumerate(
             prepared.simulations(name=problem.name + "_patch")
@@ -116,7 +133,10 @@ class _PatchRuntime:
             simulation._file = None
             simulation.mesh.file = str(directory / "parent.gmp")
             for task, frequency in enumerate(problem.frequencies, 1):
-                context = problem.restrict(frequencies=[frequency], patches=None)
+                context = cast(
+                    _ChildProblem,
+                    problem.restrict(frequencies=[frequency], patches=None),
+                )
                 context.__class__ = _ChildProblem
                 context._shared = copy(problem._shared)
                 context._shared.simulation = deepcopy(simulation)
@@ -154,10 +174,15 @@ class _PatchRuntime:
                 self.children.append((index, frequency, context, capture))
                 jobs.append(capture)
         problem.backend.run_many(jobs)
-        for ordinal, (index, frequency, context, capture) in enumerate(self.children):
-            problem._check_tasks(capture)
+        for ordinal, (index, frequency, context, captured_job) in enumerate(
+            self.children
+        ):
+            assert captured_job is not None
+            problem._check_tasks(captured_job)
             manifests = list(
-                capture._result_path.glob("_fs_run/tasks/*/stage_mesh/manifest.json")
+                captured_job._result_path.glob(
+                    "_fs_run/tasks/*/stage_mesh/manifest.json"
+                )
             )
             if len(manifests) != 1:
                 raise ValueError(
@@ -168,7 +193,7 @@ class _PatchRuntime:
                 directory / "meshes" / f"{ordinal:04d}",
             )
 
-    def checkpoint(self):
+    def checkpoint(self) -> dict[str, Any]:
         """Describe verified immutable stage inputs, meshes and child definitions."""
         self.stage.verify()
         root = self.stage.manifest.parent
@@ -191,12 +216,16 @@ class _PatchRuntime:
             "schema": "fs-patch-runtime-1",
             "stage": self.stage.to_fs(),
             "policy": self.policy,
-            "registry": self.problem._shared.manifest.raw,
+            "registry": cast(
+                ControlRegistryManifest, self.problem._shared.manifest
+            ).raw,
             "children": records,
         }
 
     @classmethod
-    def restore(cls, problem, record):
+    def restore(
+        cls, problem: ImagingProblem, record: Mapping[str, Any]
+    ) -> _PatchRuntime:
         """Reopen the exact interrupted stage; never recapture at the accepted model."""
         if record.get("schema") != "fs-patch-runtime-1":
             raise ValueError("Unsupported patch runtime checkpoint")
@@ -238,7 +267,9 @@ class _PatchRuntime:
             simulation = _contained(root, item["simulation"])
             if _digest(simulation) != item["simulation_sha256"]:
                 raise ValueError("Checkpoint patch simulation changed")
-            context = problem.restrict(frequencies=[frequency], patches=None)
+            context = cast(
+                _ChildProblem, problem.restrict(frequencies=[frequency], patches=None)
+            )
             context.__class__ = _ChildProblem
             context._shared = copy(problem._shared)
             context._shared.simulation = BaseSimulation.load(
@@ -264,8 +295,11 @@ class _PatchRuntime:
             raise ValueError("Checkpoint omits a patch/frequency mesh")
         return runtime
 
-    def linearize(self, problem, state, *, gradient):
+    def linearize(
+        self, problem: ImagingProblem, state: ControlState | None, *, gradient: bool
+    ) -> CompositeLinearization:
         self.stage.verify()
+        assert problem._shared.manifest is not None
         if state is None:
             state = problem._require_state()
         key = fingerprint(
@@ -314,6 +348,7 @@ class _PatchRuntime:
                 objective="report.json",
                 covector="gradient.h5" if gradient else None,
                 state_output="support.h5",
+                manifest="registry.json" if not gradient else None,
                 control_state=control_state,
                 misfit=context._patch_misfit,
                 pml_stage=self.stage,
@@ -328,7 +363,7 @@ class _PatchRuntime:
         if not pending:
             raise ValueError("Patch stage has no meshes for the requested frequencies")
         problem.backend.run_many([job for _, _, job in pending])
-        children = []
+        children: list[Linearization] = []
         for index, context, job in pending:
             problem._check_tasks(job)
             reports = read_report(job)
@@ -370,7 +405,13 @@ class _PatchRuntime:
         return composite
 
 
-def linearize_patches(problem, state, *, gradient, receiver_diagonal):
+def linearize_patches(
+    problem: ImagingProblem,
+    state: ControlState | None,
+    *,
+    gradient: bool,
+    receiver_diagonal: Mapping[str, Any] | None,
+) -> CompositeLinearization:
     if receiver_diagonal is not None:
         raise ValueError("Patch receiver diagonal probes are not implemented")
     if problem.kernel_derivative is not None:
@@ -384,6 +425,7 @@ def linearize_patches(problem, state, *, gradient, receiver_diagonal):
         for block in problem.space.resolved_blocks
     ):
         raise ValueError("Patch stages require fixed geometry and source positions")
+    assert problem.patches is not None
     if (
         problem._patch_runtime is not None
         and problem._patch_runtime.policy != problem.patches.to_dict()
@@ -395,25 +437,36 @@ def linearize_patches(problem, state, *, gradient, receiver_diagonal):
         problem._data_space = None
     if problem._patch_runtime is None:
         problem._patch_runtime = _PatchRuntime(problem)
-    return problem._patch_runtime.linearize(problem, state, gradient=gradient)
+    runtime = problem._patch_runtime
+    assert runtime is not None
+    return runtime.linearize(problem, state, gradient=gradient)
 
 
 class CompositeLinearization(Linearization):
+    _patch_artifacts: _CandidateArtifacts
     """Sum patch derivatives; expose each original observation exactly once."""
 
-    def __init__(self, problem, state, key, children):
+    def __init__(
+        self,
+        problem: ImagingProblem,
+        state: ControlState,
+        key: str,
+        children: Sequence[Linearization],
+    ) -> None:
         self.problem = problem
         self.state = state
         self.fingerprint = key
         self.children = tuple(children)
         self.frequencies = problem.frequencies
-        self.manifest = problem._shared.manifest
+        manifest = problem._shared.manifest
+        assert manifest is not None
+        self.manifest = manifest
         self.registry_fingerprint = self.manifest.fingerprint
         self.state_fingerprint = fingerprint(state=state.values)
         self.reports = [r for child in children for r in child.reports]
         self.report = {}
         self.value = sum(child.value for child in children)
-        masks = {}
+        masks: dict[str, np.ndarray] = {}
         for child in children:
             for name, sl in child.space.full_slices.items():
                 mask = child.support_masks.get(name, np.ones(sl.stop - sl.start, bool))
@@ -425,13 +478,15 @@ class CompositeLinearization(Linearization):
         self.gradient = (
             None
             if any(c.gradient is None for c in children)
-            else self._sum([c.gradient for c in children])
+            else self._sum([cast(ControlVector, c.gradient) for c in children])
         )
         for child in children:
             for name, value in child.report.items():
                 self.report[name] = self.report.get(name, 0.0) + value
-        self._maps = []
-        keys_by_frequency = {f: {} for f in self.frequencies}
+        self._maps: list[tuple[np.ndarray, np.ndarray]] = []
+        keys_by_frequency: dict[Any, dict[str, set[tuple[int, ...]]]] = {
+            f: {} for f in self.frequencies
+        }
         child_keys = []
         for child in children:
             keys = patch_objective_keys(
@@ -476,68 +531,76 @@ class CompositeLinearization(Linearization):
         self._data_space._dense = set()
         self._data_space._keys = canonical
         for child, keys in zip(children, child_keys):
-            local, global_ = [], []
+            local: list[int] = []
+            global_: list[int] = []
             for layout in child.data_space.term_layouts():
                 target = self.data_space.term_layout(
                     layout.id, frequency=child.frequencies[0]
                 )
+                assert target.indices is not None
                 lookup = {
                     tuple(row): index
                     for row, index in zip(target.coordinate_keys, target.indices)
                 }
+                assert layout.indices is not None
+                assert target.indices is not None
                 local.extend(layout.indices)
                 global_.extend(
                     lookup[tuple(row)] for row in keys[layout.id][layout.row_ids - 1]
                 )
             self._maps.append((np.asarray(local, int), np.asarray(global_, int)))
-        self._jacobian = self._normal = None
+        self._jacobian: Jacobian | None = None
+        self._normal: Normal | None = None
         self.frequency_weights = (
             np.ones(len(self.frequencies))
             if problem.weights is None
-            else np.asarray(problem.weights)
+            else np.asarray(problem.weights, dtype=float)
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"CompositeLinearization(patches={len(self.children)}, value={self.value:g})"
 
     @property
-    def regularization_job(self):
-        parent = self.problem._patch_runtime.parent
+    def regularization_job(self) -> FWIOperatorJob:
+        runtime = self.problem._patch_runtime
+        assert runtime is not None
+        parent = runtime.parent
         return parent._linearize_job(self.space, None, gradient=True)
 
     @property
-    def jobs(self):
+    def jobs(self) -> tuple[FWIOperatorJob, ...]:
         return tuple(child.job for child in self.children)
 
     @property
-    def job(self):
+    def job(self) -> FWIOperatorJob:
         if len(self.jobs) != 1:
             raise ValueError("Composite linearization has multiple jobs; use .jobs")
         return self.jobs[0]
 
     @property
-    def data_space(self):
+    def data_space(self) -> DataSpace:
+        assert self._data_space is not None
         return self._data_space
 
     @property
-    def objective_states(self):
+    def objective_states(self) -> list[ObjectiveState]:
         """Native states in child-job order; canonical vectors use the row maps."""
         return [state for child in self.children for state in child.objective_states]
 
-    def _sum(self, vectors):
+    def _sum(self, vectors: Iterable[ControlVector]) -> ControlVector:
         values = sum(
             (v.space.to_sauce_vector(v) for v in vectors),
             np.zeros(self.space.full_size),
         )
         return self.space.from_sauce_vector(values)
 
-    def _assemble(self, vectors):
+    def _assemble(self, vectors: Iterable[DataVector]) -> DataVector:
         values = np.zeros(self.data_space.size, complex)
         for vector, (local, global_) in zip(vectors, self._maps):
             values[global_] = vector.values[local]
         return DataVector(values, self.data_space)
 
-    def _split(self, vector):
+    def _split(self, vector: Any) -> list[DataVector]:
         dual = self._data_vector(vector)
         result = []
         for child, (local, global_) in zip(self.children, self._maps):
@@ -546,20 +609,20 @@ class CompositeLinearization(Linearization):
             result.append(DataVector(values, child.data_space))
         return result
 
-    def _directions(self, direction):
+    def _directions(self, direction: Any) -> list[ControlVector]:
         vector = self._control_vector(direction)
         full = self.space.to_sauce_vector(vector)
         return [child.space.from_sauce_vector(full) for child in self.children]
 
-    def jvp(self, direction):
+    def jvp(self, direction: Any) -> DataVector:
         return self._assemble(
             [c.jvp(v) for c, v in zip(self.children, self._directions(direction))]
         )
 
-    def vjp(self, dual):
+    def vjp(self, dual: Any) -> ControlVector:
         return self._sum([c.vjp(v) for c, v in zip(self.children, self._split(dual))])
 
-    def vjp_tasks(self, dual):
+    def vjp_tasks(self, dual: Any) -> list[ControlVector]:
         parts = [c.vjp(v) for c, v in zip(self.children, self._split(dual))]
         return [
             self._sum(
@@ -572,7 +635,7 @@ class CompositeLinearization(Linearization):
             for frequency in self.frequencies
         ]
 
-    def apply_normal(self, direction):
+    def apply_normal(self, direction: Any) -> ControlVector:
         return self._sum(
             [
                 c.apply_normal(v)
@@ -580,46 +643,46 @@ class CompositeLinearization(Linearization):
             ]
         )
 
-    def weight_data(self, dual):
+    def weight_data(self, dual: Any) -> DataVector:
         return self._assemble(
             [c.weight_data(v) for c, v in zip(self.children, self._split(dual))]
         )
 
-    def objective_residual(self):
+    def objective_residual(self) -> DataVector:
         return self._assemble([c.objective_residual() for c in self.children])
 
-    def simulated(self):
+    def simulated(self) -> DataVector:
         return self._assemble([c.simulated() for c in self.children])
 
-    def observed(self):
+    def observed(self) -> DataVector:
         return self._assemble([c.observed() for c in self.children])
 
     @property
-    def residual_sign(self):
+    def residual_sign(self) -> float:
         signs = {c.residual_sign for c in self.children}
         if len(signs) != 1:
             raise ValueError("Patch residual conventions disagree")
         return signs.pop()
 
-    def _with_covector(self):
+    def _with_covector(self) -> Linearization:
         return self if self.gradient is not None else self.problem.linearize(self.state)
 
     @property
-    def jacobian(self):
+    def jacobian(self) -> Jacobian:
         if self._jacobian is None:
             self._jacobian = Jacobian(self._with_covector())
         return self._jacobian
 
     @property
-    def normal(self):
+    def normal(self) -> Normal:
         if self._normal is None:
             self._normal = Normal(self._with_covector())
         return self._normal
 
 
-def patch_observed_vector(problem):
+def patch_observed_vector(problem: ImagingProblem) -> DataVector:
     """Select raw observations on the same canonical rows as patch predictions."""
-    lin = problem.linearize(gradient=False)
+    lin = cast(CompositeLinearization, problem.linearize(gradient=False))
     parent = problem.restrict(patches=None)
     observed = parent.observed_vector()
     groups = {
@@ -631,6 +694,8 @@ def patch_observed_vector(problem):
     for frequency in lin.frequencies:
         for target in lin.data_space.term_layouts(frequency=frequency):
             source = observed.space.term_layout(groups[target.id], frequency=frequency)
+            assert target.indices is not None
+            assert source.indices is not None
             lookup = {
                 tuple(row): index
                 for row, index in zip(source.coordinate_keys, source.indices)

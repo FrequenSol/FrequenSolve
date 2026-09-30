@@ -4,12 +4,15 @@
 
 """Local patch optimization, ordered publication and common-epoch proposals."""
 
+from __future__ import annotations
+
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from dataclasses import asdict, dataclass
 from threading import RLock
 from time import perf_counter
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -17,7 +20,8 @@ from frequensolve.inversion import LossTerms
 from frequensolve.mesh._stage_snapshot import _contained, _digest
 
 from ._patch_masks import core_masks, local_patch_view
-from .controls import ControlState, ControlVector
+from .controls import ControlSpace, ControlState, ControlVector
+from .problem import ImagingProblem, Linearization
 from .results import StageResult
 
 
@@ -34,7 +38,7 @@ class PatchUpdates:
     local_steps: int = 1
     check_every: int | None = 1
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.mode not in {"local_serial", "local_parallel"}:
             raise ValueError("PatchUpdates mode must be local_serial or local_parallel")
         for name in ("local_steps", "check_every"):
@@ -45,28 +49,35 @@ class PatchUpdates:
                 raise ValueError(f"{name} must be a positive integer")
             object.__setattr__(self, name, int(value))
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 class _RestrictedRegularization:
     """Pull back a global term while retaining all fixed-exterior connections."""
 
-    def __init__(self, bound, baseline, global_space, local_space, lock):
+    def __init__(
+        self,
+        bound: Any,
+        baseline: ControlState,
+        global_space: ControlSpace,
+        local_space: ControlSpace,
+        lock: Any,
+    ) -> None:
         self.bound = bound
         self.baseline = baseline
         self.global_space = global_space
         self.space = local_space
         self.lock = lock
 
-    def _point(self, vector):
+    def _point(self, vector: ControlVector) -> ControlVector:
         return self.baseline.with_update(vector).vector(self.global_space)
 
-    def value(self, vector):
+    def value(self, vector: ControlVector) -> float:
         with self.lock:
             return self.bound.value(self._point(vector))
 
-    def gradient(self, vector):
+    def gradient(self, vector: ControlVector) -> ControlVector:
         with self.lock:
             gradient = self.bound.gradient(self._point(vector))
             return self.space.from_sauce_vector(
@@ -74,7 +85,14 @@ class _RestrictedRegularization:
             )
 
 
-def combine_proposals(baseline, proposals, masks, space, *, step_limit=None):
+def combine_proposals(
+    baseline: ControlState,
+    proposals: Sequence[ControlState],
+    masks: Sequence[Mapping[str, np.ndarray]],
+    space: ControlSpace,
+    *,
+    step_limit: float | None = None,
+) -> ControlState:
     """Average increments in native coordinates, retaining untouched coefficients."""
     if len(proposals) != len(masks):
         raise ValueError("Each parallel proposal requires its own core mask")
@@ -115,17 +133,17 @@ def combine_proposals(baseline, proposals, masks, space, *, step_limit=None):
 
 
 def solve_local_stage(
-    workflow,
-    index,
-    stage,
-    start,
-    view,
-    first,
-    regularization,
-    native,
+    workflow: Any,
+    index: int,
+    stage: Any,
+    start: int,
+    view: ImagingProblem,
+    first: Linearization,
+    regularization: Any,
+    native: Any,
     *,
-    stage_started=None,
-):
+    stage_started: float | None = None,
+) -> StageResult:
     """Optimize cores and publish only completed, epoch-consistent updates."""
     from .workflows import FWIIteration, _StageObjective
 
@@ -140,6 +158,7 @@ def solve_local_stage(
     space = view.space
     state = first.state
     runtime = view._patch_runtime
+    assert runtime is not None
     prepared = runtime.prepared
     names = [p["name"] for p in prepared.geometry["patches"]]
     lock = RLock()
@@ -181,23 +200,23 @@ def solve_local_stage(
     )
     policy = settings.to_dict()
 
-    def epoch(model):
+    def epoch(model: ControlState) -> str:
         return hashlib.sha256(model.values.tobytes()).hexdigest()
 
-    def save_proposal(model):
+    def save_proposal(model: ControlState) -> dict[str, str]:
         root = runtime.stage.manifest.parent
         path = root / "proposals" / (epoch(model) + ".h5")
         path.parent.mkdir(parents=True, exist_ok=True)
         model.save(path)
         return {"file": path.relative_to(root).as_posix(), "sha256": _digest(path)}
 
-    def load_proposal(record):
+    def load_proposal(record: Mapping[str, Any]) -> ControlState:
         path = _contained(runtime.stage.manifest.parent, record["file"])
         if _digest(path) != record["sha256"]:
             raise ValueError("Checkpoint local proposal changed")
         return ControlState.load(path, state.space.without_support())
 
-    def publish(sweep, *, completed=False):
+    def publish(sweep: int, *, completed: bool = False) -> None:
         workflow._local_checkpoint = progress
         view._shared.set_state(state)
         workflow._problem_for(index).state = state
@@ -217,7 +236,11 @@ def solve_local_stage(
             history=history,
         )
 
-    def proposal(patch, base, recorded):
+    def proposal(
+        patch: int, base: ControlState, recorded: Mapping[str, Any] | None
+    ) -> tuple[
+        ControlState, list[tuple[int, ControlState, LossTerms, Any, Any]], int, float
+    ]:
         began = perf_counter()
         point = base if recorded is None else load_proposal(recorded["state"])
         local = local_patch_view(view, patch, point)
@@ -239,7 +262,7 @@ def solve_local_stage(
             local_native._gradient_cache = {}
         local_objective = _StageObjective(local, local.space, local_reg, None, {})
         local_objective.native_regularization = local_native
-        events = []
+        events: list[tuple[int, ControlState, LossTerms, Any, Any]] = []
         done = 0 if recorded is None else recorded["iteration"]
         remaining = settings.local_steps - done
         if remaining <= 0 or (recorded is not None and recorded["completed"]):
@@ -260,7 +283,7 @@ def solve_local_stage(
                 scaling, local.space, max_ratio=optimizer.scaling_max_ratio
             )
 
-        def accepted(event):
+        def accepted(event: Any) -> None:
             if event.iteration > 0:
                 model = point.with_update(ControlVector(event.model, local.space))
                 events.append(
@@ -294,7 +317,7 @@ def solve_local_stage(
             perf_counter() - began,
         )
 
-    site = view.site
+    site: Any = view.site
     keep_cluster = bool(getattr(site, "shutdown_on_completion", False))
     if keep_cluster:
         site.shutdown_on_completion = False
@@ -319,7 +342,8 @@ def solve_local_stage(
                     raise ValueError("Checkpoint sweep baseline epoch changed")
             start_patch = int(progress["next_patch"])
             if settings.mode == "local_parallel":
-                executor = ThreadPoolExecutor(max_workers=len(names))
+                # Bound scheduler threads independently of the number of survey patches.
+                executor = ThreadPoolExecutor()
                 futures = {
                     patch: executor.submit(
                         proposal, patch, base, progress["proposals"].get(str(patch))

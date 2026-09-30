@@ -882,7 +882,7 @@ class Preprocess:
         if not blocks or set(blocks) != set(units):
             raise ValueError("Every material weighting block needs output units")
         rows = []
-        used = set()
+        used: set[int] = set()
         for key, expression in blocks.items():
             components = (key,) if isinstance(key, int) else tuple(key)
             if not components or any(

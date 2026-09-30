@@ -13,6 +13,11 @@
     "units": {
       "const": "m"
     },
+    "edge_samples": {
+      "type": "boolean",
+      "default": false,
+      "description": "Sample nine points per native root edge into the inventory report; off by default because it scales with the parent."
+    },
     "patches": {
       "type": "array",
       "items": {

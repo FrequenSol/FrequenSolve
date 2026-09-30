@@ -1532,7 +1532,9 @@ def _task_channel_to_output(
         storage = storage[0] if storage else None
     if storage != "solver":
         return values, False
-    roles = _decode_attr(attrs.get("value_frame_roles"))
+    roles = _decode_attr(
+        attrs.get("value_convention_roles", attrs.get("value_frame_roles"))
+    )
     if isinstance(roles, str):
         roles = [roles]
     scales = np.asarray(attrs.get("value_scale", []), dtype=np.float64).reshape(-1)
@@ -1697,7 +1699,11 @@ class ImageSet:
                         values = values.reshape(len(labels), -1)[channel]
                     else:
                         raise ValueError(f"{file}:{h5data.name} is not a scalar image")
-                    values, output = _task_channel_to_output(attrs, channel, values)
+                output = False
+                if part is not None:
+                    values, output = _task_channel_to_output(
+                        attrs, 0 if channel is None else channel, values
+                    )
                 array = xr.DataArray(data=values.reshape(n), dims=dims, coords=coords)
                 for dim, units in zip(dims, axis_units):
                     if units:
@@ -1713,7 +1719,7 @@ class ImageSet:
                         value = value[channel]
                     if value is not None:
                         array.attrs[attr_name] = value
-                if channel is not None and output:
+                if output:
                     array.attrs["value_storage"] = "output"
                 images[prop] = array
         return images
@@ -1752,6 +1758,16 @@ class SmoothingConfig:
     uses them for vector processing; NativeRegularization uses them with
     model-energy/proximal callbacks in FWI/LSRTM. ``to_image_fs`` emits the
     separate ``Imaging.Smoothing`` contract for Cartesian shards.
+
+    Without explicit weights, ``wavelength_fraction`` (Sauce ``lambda``) counts
+    local wavelengths: Sauce sets the smoothing length ``L(x) = lambda*v(x)/f``
+    at every quadrature point from the local sizing wavespeed ``v(x)`` and the
+    job's largest frequency ``f`` (no ``2*pi``), so the strength varies with
+    velocity. Tikhonov/TV use ``alpha(x) = L(x)**(2*derivative_order)`` and TGV
+    ``alpha1(x) = L(x)``, ``alpha2(x) = tgv_ratio*L(x)**2``. A
+    ``reference_wavelength`` replaces ``L(x)`` by the uniform
+    ``lambda*reference_wavelength``. Values tuned against the former
+    ``lambda*v_min/(2*pi*f)`` length must be scaled by ``1/(2*pi)``.
     """
 
     kind: str = "tikhonov"
@@ -1862,30 +1878,45 @@ class SmoothingConfig:
             return self.alpha1 is None
         return self.alpha is None
 
+    def reference_length(self) -> float:
+        """Return the uniform smoothing length ``lambda*reference_wavelength``.
+
+        This is Sauce's ``L = lambda*v/f`` with the fixed wavelength ``v/f``
+        replaced by ``reference_wavelength`` (no ``2*pi``). Without a reference
+        wavelength the length is local, ``L(x) = lambda*v(x)/f``, and only Sauce
+        can evaluate it from the material model.
+        """
+
+        if self.reference_wavelength is None:
+            raise ValueError(
+                "a scalar smoothing length requires reference_wavelength; pass "
+                "lambda to Sauce, which sets L(x) = lambda*v(x)/f from the local "
+                "wavespeed of the material model"
+            )
+        return self.wavelength_fraction * self.reference_wavelength
+
     def resolved_alpha(self) -> float:
-        """Return the direct variational coefficient for local application."""
+        """Return the scalar Tikhonov/TV coefficient Sauce would use.
+
+        Explicit ``alpha`` wins; otherwise ``reference_length()**(2*p)`` for
+        derivative order ``p``. Spatially varying wavelength weights are not
+        resolvable here; send ``lambda`` to Sauce instead.
+        """
 
         if self.alpha is not None:
             return self.alpha
-        if self.reference_wavelength is None:
-            raise ValueError(
-                "local control smoothing requires alpha or reference_wavelength; "
-                "Sauce --smooth can derive wavelength from the material model"
-            )
-        length = self.wavelength_fraction * self.reference_wavelength / (2.0 * np.pi)
-        return length ** (2 * self.derivative_order)
+        return self.reference_length() ** (2 * self.derivative_order)
 
     def resolved_tgv_weights(self) -> Tuple[float, float]:
-        """Return the first- and second-order TGV weights."""
+        """Return the scalar TGV weights ``(L, tgv_ratio*L**2)`` Sauce would use.
+
+        Explicit ``alpha1``/``alpha2`` win; otherwise ``L`` is
+        :meth:`reference_length`.
+        """
 
         if self.alpha1 is not None and self.alpha2 is not None:
             return self.alpha1, self.alpha2
-        if self.reference_wavelength is None:
-            raise ValueError(
-                "local TGV smoothing requires alpha1/alpha2 or reference_wavelength; "
-                "Sauce --smooth can derive wavelength from the material model"
-            )
-        length = self.wavelength_fraction * self.reference_wavelength / (2.0 * np.pi)
+        length = self.reference_length()
         return length, self.tgv_ratio * length * length
 
     def _common_fs(self) -> Dict[str, Any]:
@@ -1921,9 +1952,12 @@ class SmoothingConfig:
         """Serialize the ``Imaging.Smoothing`` Cartesian stacking contract.
 
         Cartesian image smoothing uses mixed first-order FEM fields, so a
-        second derivative order is rejected. A reference wavelength is resolved
-        into explicit coefficients because the image smoother has no
-        ``reference_wavelength`` field.
+        second derivative order is rejected. Without explicit weights, ``lambda``
+        is passed through and Sauce applies the local ``L(x) = lambda*v(x)/f``.
+        A reference wavelength is resolved into the equivalent uniform
+        coefficients (``alpha = L**2``; TGV ``alpha1 = L``,
+        ``alpha2 = tgv_ratio*L**2`` with ``L = lambda*reference_wavelength``)
+        because the image smoother has no ``reference_wavelength`` field.
         """
 
         if self.derivative_order != 1:

@@ -31,6 +31,7 @@ from frequensolve.seismic.trace_store import TraceStore
 from frequensolve.simulation.jobs import FrequencyDomainJob
 from frequensolve.simulation.jobs.artifacts import RunMetadata
 from frequensolve.simulation.simulation import CustomJSONEncoder
+from frequensolve.simulation.task_index import TASK_INDEX_VERSION
 
 SCHEMA = "frequensolve-sdk-performance/v1"
 BASELINE_SCHEMA = "frequensolve-sdk-performance-baseline/v1"
@@ -392,40 +393,48 @@ def _validation_scenario(root: Path, size: str, coordinate_count: int) -> Scenar
 def _write_run_metadata(result_path: Path, artifact_count: int) -> None:
     run_dir = result_path / "_fs_run"
     run_dir.mkdir(parents=True)
-    (run_dir / "run_manifest.json").write_text(
-        json.dumps(
-            {
-                "schema": "fs-run-manifest-1",
-                "exit_status": {"status": "success"},
-                "job_file_sha256": "a" * 64,
-                "simulation_file_sha256": "b" * 64,
-            }
-        )
-    )
-    (run_dir / "outputs.json").write_text(
-        json.dumps(
-            {
-                "files": [
-                    {
-                        "path": f"ParaView/pv_{index:05d}.vtu",
-                        "kind": "vtk",
-                        "schema": "fs-output-artifact-1",
-                    }
-                    for index in range(artifact_count)
-                ]
-            }
-        )
-    )
-    (run_dir / "timings.json").write_text(
-        json.dumps(
-            {
-                "frequency_tasks": [
-                    {"task": index + 1, "total_seconds": float(index + 1) / 10.0}
-                    for index in range(artifact_count)
-                ]
-            }
-        )
-    )
+    strings = h5py.string_dtype("utf-8")
+    rows = np.arange(artifact_count, dtype=np.int64)
+    with h5py.File(run_dir / "tasks.h5", "w") as h5:
+        h5.attrs["schema"] = TASK_INDEX_VERSION
+        tasks = h5.create_group("tasks")
+        artifacts = h5.create_group("artifacts")
+        dependencies = h5.create_group("dependencies")
+        tasks["task_id"] = rows + 1
+        tasks.create_dataset("status", data=["success"] * artifact_count, dtype=strings)
+        tasks["frequency_real"] = rows.astype(np.float64) + 1
+        tasks["frequency_imag"] = np.zeros(artifact_count, dtype=np.float64)
+        for name, digit in [("job", "a"), ("simulation", "b"), ("outputs", "c")]:
+            tasks.create_dataset(
+                "fingerprint_" + name, data=[digit * 64] * artifact_count, dtype=strings
+            )
+        tasks["artifact_offset"] = rows
+        tasks["artifact_count"] = np.ones(artifact_count, dtype=np.int64)
+        tasks["iterations"] = np.zeros(artifact_count, dtype=np.int64)
+        tasks["residual"] = np.zeros(artifact_count, dtype=np.float64)
+        for name in [
+            "mesh",
+            "setup",
+            "assembly",
+            "solve_forward",
+            "solve_adjoint",
+            "imaging",
+        ]:
+            tasks["timing_" + name] = (rows.astype(np.float64) + 1) / 10
+        columns = {
+            "id": [f"vtk-{index}" for index in rows],
+            "role": ["vtk"] * artifact_count,
+            "schema": ["fs-output-artifact-1"] * artifact_count,
+            "representation": ["vtu"] * artifact_count,
+            "path": [f"ParaView/pv_{index:05d}.vtu" for index in rows],
+            "retention": ["durable"] * artifact_count,
+            "generation": ["generation-1"] * artifact_count,
+        }
+        for name, values in columns.items():
+            artifacts.create_dataset(name, data=values, dtype=strings)
+        for name in ["bytes", "dependency_offset", "dependency_count"]:
+            artifacts[name] = np.zeros(artifact_count, dtype=np.int64)
+        dependencies.create_dataset("id", shape=(0,), dtype=strings)
     (result_path / "_fs_python_run.json").write_text(
         json.dumps({"status": "completed"})
     )
@@ -446,7 +455,7 @@ def _result_metadata_scenario(
             raise RuntimeError("result metadata did not roundtrip expected artifacts")
         return {
             "artifacts": len(artifacts),
-            "timingRows": len(metadata.timings.get("frequency_tasks", [])),
+            "timingRows": len(metadata.tasks),
         }
 
     return Scenario(

@@ -69,7 +69,7 @@ receiver apertures through a composite linearization:
        sim, controls=controls, observed=observed,
        frequencies=[3, 7.5], patches=patches, site=site,
    )
-   prepared = problem.prepare_patches()
+   prepared = problem.prepare_patches(edge_samples=True)
    prepared.plot()
    lin = problem.linearize()
    children = lin.jobs
@@ -79,7 +79,8 @@ Preparation inspects geometry and acquisition without wave solves. Named meshed
 material artifacts must already exist when explicitly preparing; ordinary
 linearization first discovers the full-parent registry and material basis.
 ``prepared.storage_estimates`` reports available geometry input and preview
-payload sizes. Wavefield and solver workspace estimates are unavailable before
+payload sizes; the preview size is ``None`` unless ``edge_samples=True`` was
+requested. Wavefield and solver workspace estimates are unavailable before
 frequency meshes are realized; those fields are ``None``.
 The first stage evaluation also resolves objective scales and reduction mass
 on the full parent. Children inherit those values. Original observation keys
@@ -785,7 +786,7 @@ profiles and tensor hat lattices. Use ``regularization=`` on ``FWI``, ``Stage`` 
 .. code-block:: python
 
    regularization = im.NativeRegularization(
-       im.Smoothing(kind="tv", wavelength_fraction=0.3),
+       im.Smoothing(kind="tv", wavelength_fraction=0.05),
        iterations=1000,
    )
    result = im.FWI(problem, stages, regularization=regularization).run()
@@ -795,6 +796,34 @@ are also dispatched to Sauce by these workflows. A problem's ``smoothing=``
 configuration supplies the native regularizer when no explicit workflow or stage
 regularization is given. An explicit regularization overrides that inherited
 configuration, avoiding duplicate terms.
+
+Without explicit weights, ``wavelength_fraction`` (Sauce ``lambda``) counts
+local wavelengths. Sauce uses one smoothing-length convention for control
+smoothing, native regularization, Cartesian image smoothing and mesh-adaptation
+smoothing:
+
+.. math::
+
+   L(x) = \lambda\,\frac{v(x)}{f},
+
+where :math:`v(x)` is the local sizing wavespeed (P in acoustic, S in elastic
+layers) at each quadrature point of the stage's material model and :math:`f`
+is the job's largest frequency; there is no :math:`2\pi`. Tikhonov and TV use
+:math:`\alpha(x) = L(x)^{2p}` for derivative order :math:`p`, and TGV uses
+:math:`\alpha_1(x) = L(x)` and :math:`\alpha_2(x) = \mathrm{tgv\_ratio}\,L(x)^2`,
+so smoothing is stronger in fast regions and weaker in slow ones. Sauce
+evaluates these weights itself; FrequenSolve passes ``lambda`` through. A
+``reference_wavelength`` instead gives the uniform length
+:math:`L = \lambda\,\mathrm{reference\_wavelength}`, and explicit ``alpha``
+(or ``alpha1``/``alpha2``) override the wavelength weights.
+
+.. note::
+
+   Earlier versions used the uniform length :math:`\lambda\,v_{\min}/(2\pi f)`
+   from each layer's minimum wavespeed. To keep roughly the same smoothing in the
+   slowest regions, divide previously tuned ``wavelength_fraction`` values by
+   :math:`2\pi` (for example 0.3 becomes about 0.05). Faster regions are now
+   smoothed more strongly than before because the length follows :math:`v(x)`.
 
 TV and TGV use split-Bregman shrinkage. ``epsilon`` controls the splitting
 parameter; it does not round off the absolute-value norm. The native energies are

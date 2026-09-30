@@ -1493,6 +1493,7 @@ class FWI:
         metadata["state_path"] = str(state_path)
         if getattr(view, "patches", None) is not None:
             metadata["stage_identity"] = self._identity(view)
+            assert view._patch_runtime is not None
             metadata["patch_runtime"] = json.dumps(
                 view._patch_runtime.checkpoint(), sort_keys=True
             )
@@ -1781,10 +1782,15 @@ class FWI:
             if bound_regularization is None:
                 bound_regularization = native_regularization
             else:
-                from .regularization import _BoundSum
+                from .regularization import Sum, _BoundSum
 
                 bound_regularization = _BoundSum(
-                    regularization, space, [bound_regularization, native_regularization]
+                    Sum(
+                        bound_regularization.regularization,
+                        native_regularization.regularization,
+                    ),
+                    space,
+                    [bound_regularization, native_regularization],
                 )
             native_regularization = None
         if self.patch_updates is not None:
@@ -1802,7 +1808,14 @@ class FWI:
                 stage_started=stage_started,
             )
             if timing_snapshot is not None:
-                local_result.metrics.update(timing_backend.cost_since(timing_snapshot))
+                assert timing_backend is not None
+                local_result = dataclasses.replace(
+                    local_result,
+                    metrics={
+                        **local_result.metrics,
+                        **timing_backend.cost_since(timing_snapshot),
+                    },
+                )
             return local_result
         metrics = self._stage_metrics(index, stage, space, optimizer, regularization)
         if native_regularization is not None:
@@ -2018,7 +2031,14 @@ class FWI:
             },
         )
         if timing_snapshot is not None:
-            stage_result.metrics.update(timing_backend.cost_since(timing_snapshot))
+            assert timing_backend is not None
+            stage_result = dataclasses.replace(
+                stage_result,
+                metrics={
+                    **stage_result.metrics,
+                    **timing_backend.cost_since(timing_snapshot),
+                },
+            )
         self.results.append(stage_result)
         return stage_result
 

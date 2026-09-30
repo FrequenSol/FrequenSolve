@@ -16,10 +16,20 @@ from frequensolve.mesh import BoundaryCondition
 from frequensolve.mesh._root_patch import RootPatchDescriptor
 from frequensolve.mesh.patches import PatchSet
 from frequensolve.model.layered import LayeredModel
+from frequensolve.model.parameterization import (
+    MeshControl,
+    MeshPropertySpace,
+    ParameterizedProperty,
+)
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project import Project
 from frequensolve.seismic import Acquisition, ReceiverNode
 from frequensolve.simulation import Discretization, FrequencyDomainJob, SolverConfig
+from frequensolve.simulation.artifact_contract import (
+    TaskResult,
+    load_operation_result,
+    task_result_path,
+)
 from frequensolve.simulation.jobs._patches import PatchPreparationJob
 from frequensolve.units import ureg
 from tests.test_imaging_jobs import CONTRACT_ROOT, VALIDATOR
@@ -34,7 +44,9 @@ def _solver(dimension):
     return Path(value)
 
 
-def _parent(tmp_path, dimension, physics, *, curved=False, root_columns=4):
+def _parent(
+    tmp_path, dimension, physics, *, curved=False, root_columns=4, mesh_space=None
+):
     project = Project(name="patches", path=tmp_path / "project", load_if_exists=False)
     simulation = project.new_simulation(
         name="parent", dimension=dimension, physics=physics
@@ -54,10 +66,21 @@ def _parent(tmp_path, dimension, physics, *, curved=False, root_columns=4):
             values = values[:, None] + 0.01 * np.cos(2 * np.pi * y[None, :] / 0.4)
             coordinates["y"] = y
         offset = xr.DataArray(values, dims=list(coordinates), coords=coordinates)
+
+    def vp(value, layer):
+        # Optionally put every layer's Vp on one named Sauce mesh property space.
+        if mesh_space is None:
+            return value
+        return ParameterizedProperty(
+            value, id=f"vp_{layer}", control=MeshControl(mesh_space)
+        )
+
     model.add_surface(name="top", depth=offset)
-    model.add_layer(name="fluid", physics="acoustic", properties={"Vp": 1.5, "Rho": 1})
+    model.add_layer(
+        name="fluid", physics="acoustic", properties={"Vp": vp(1.5, "fluid"), "Rho": 1}
+    )
     model.add_surface(name="interface", depth=offset + 0.25)
-    properties = {"Vp": 2.5, "Rho": 2}
+    properties = {"Vp": vp(2.5, "lower"), "Rho": 2}
     if physics == "coupled":
         properties["Vs"] = 1.2
     model.add_layer(
@@ -67,10 +90,14 @@ def _parent(tmp_path, dimension, physics, *, curved=False, root_columns=4):
     )
     model.add_surface(name="bottom", depth=offset + 0.6)
     simulation += model
-    simulation += model.hex_mesh_generator(
-        n=[root_columns, 2] if dimension == 2 else [root_columns, 2, 2]
-    )
-    simulation.mesh.set_adapt(elems_per_wave=0.5, order=2, f_low=3, f_high=3)
+    if root_columns is None:
+        # No generator: Sauce sizes the mesh from f_list and keys its artifacts.
+        simulation.mesh.set_adapt(elems_per_wave=0.5, order=2, f_low=3)
+    else:
+        simulation += model.hex_mesh_generator(
+            n=[root_columns, 2] if dimension == 2 else [root_columns, 2, 2]
+        )
+        simulation.mesh.set_adapt(elems_per_wave=0.5, order=2, f_low=3, f_high=3)
     simulation += BoundaryCondition(conditions=["free"], boundaries=["z_min"])
     boundaries = ["x_min", "x_max", "z_max"] + (
         ["y_min", "y_max"] if dimension == 3 else []
@@ -193,11 +220,31 @@ def test_root_patch_preparation_and_forward_parity(tmp_path, dimension, physics)
                 assert mpi_error < 2e-4
         error = np.linalg.norm(results[1] - results[0]) / np.linalg.norm(results[0])
         assert error < 1e-4
+        assert set(report["roots"]) == {
+            "cell",
+            "domain",
+            "lower",
+            "upper",
+            "sampled_lower",
+            "sampled_upper",
+        }
+        assert np.shape(report["roots"]["lower"]) == (dimension, report["root_count"])
         prepared = PatchSet.around_sources(
             shots_per_patch=1, max_offset=120 * ureg.m, padding=0 * ureg.m
-        ).prepare(parent, [3, 4], site=site)
+        ).prepare(parent, [3, 4], site=site, edge_samples=True)
         assert prepared.acquisition[0]["receivers"]["surface"] == {1: (1, 2, 3)}
         assert prepared.geometry["parent_fingerprint"] == report["parent_fingerprint"]
+        VALIDATOR.evolve(schema=schema).validate(prepared.geometry)
+        roots = prepared.geometry["roots"]
+        assert roots["edge_count"] == [4 if dimension == 2 else 12] * len(roots["cell"])
+        assert np.shape(roots["edge_points"]) == (
+            dimension,
+            9 * sum(roots["edge_count"]),
+        )
+        assert all(
+            item["preview_float64_payload_bytes"] > 0
+            for item in prepared.storage_estimates["patches"]
+        )
         assert (
             prepared.geometry["patches"][0]["descriptor"]["roots"]
             == cut["descriptor"]["roots"]
@@ -214,15 +261,14 @@ def test_preparation_closes_material_supports_before_buffering(
 ):
     import h5py
 
-    from frequensolve.model.parameterization import MeshPropertySpace
-
-    parent = _parent(tmp_path, dimension, physics)
+    parent = _parent(tmp_path, dimension, physics, mesh_space="vp")
     artifact = Path(parent.project_path) / "parent-support.h5"
     parent.model.property_spaces["vp"] = MeshPropertySpace(
         artifact=artifact.name if dimension == 2 else str(artifact),
         frequency=3,
         epw=1,
     )
+    parent.save()
     with LocalSite(
         solver=_solver(dimension),
         n_workers=1,
@@ -235,51 +281,75 @@ def test_preparation_closes_material_supports_before_buffering(
         report = inventory.geometry_report
         assert not artifact.exists()  # Inventory must not generate a material basis.
         assert not (Path(parent._file).parent / "root_point_mapping.h5").exists()
-        roots = report["roots"]
-        # Use sparse canonical material IDs in reverse physical-root order.
-        canonical = [10 * (len(roots) - i) for i in range(len(roots))]
-        core = roots[0]
-        adjacent = next(
-            root for root in roots[1:] if root["material"] == core["material"]
-        )
-        support_ids = sorted([core["root"], adjacent["root"]])
-        parent_fingerprint = int(report["parent_fingerprint"], 16)
-        if parent_fingerprint >= 2**63:
-            parent_fingerprint -= 2**64
-        with h5py.File(artifact, "w") as h5:
-            space = h5.create_group("property_space")
-            space["schema"] = np.bytes_("fs-property-space-1")
-            space["identity"] = np.bytes_("support-fixture")
-            space["parent_fingerprint"] = np.int64(parent_fingerprint)
-            space["root_directory"] = np.asarray(
-                sorted(
-                    [canonical[i], root["cell"], root["material"], 7]
-                    for i, root in enumerate(roots)
-                ),
-                dtype=np.int32,
+        # The solver's own first use of the mesh space builds the parent basis.
+        basis = FrequencyDomainJob("basis", parent, [3])
+        assert site.run(basis, check=True).successful
+        assert artifact.exists()
+        # A sized mesh uses the declared (literal) path, and the run records it.
+        (record,) = TaskResult.read(
+            task_result_path(basis._result_path, 1), result_path=basis._result_path
+        ).material_artifacts
+        assert record.resolve(parent.project_path) == artifact.resolve()
+        assert (record.space, record.mesh_keyed, record.mesh_key) == ("vp", False, None)
+        with h5py.File(artifact, "r") as h5:
+            space = h5["property_space"]
+            identity = space["identity"][()].decode().strip()
+            directory = space["root_directory"][()]
+            root_offset = space["root_control_offset"][()]
+            root_controls = space["root_control_ids"][()]
+            control_offset = space["control_root_offset"][()]
+            control_roots = space["control_roots"][()]
+        # Rows are (canonical root, GMP cell, material-layer slot, kind); the slot
+        # is domain_to_layer(domain), the position of the GMP domain's subdomain.
+        subdomains = json.loads(Path(parent._file).read_text())["Model"]["subdomains"]
+        layer = {item["mesh_block_id"]: i + 1 for i, item in enumerate(subdomains)}
+        slot_of_cell = {int(row[1]): slot for slot, row in enumerate(directory)}
+        physical_slots = [slot_of_cell[cell] for cell in report["roots"]["cell"]]
+        assert [directory[slot, 2] for slot in physical_slots] == [
+            layer[domain] for domain in report["roots"]["domain"]
+        ]
+        canonical = [int(directory[slot, 0]) for slot in physical_slots]
+        physical = {root: i + 1 for i, root in enumerate(canonical)}
+        slot_of_root = {int(row[0]): slot for slot, row in enumerate(directory)}
+
+        # 0-based CSR tables in directory-slot order; control IDs are 1-based rows.
+        def controls_of(roots):
+            return sorted(
+                {
+                    int(control)
+                    for root in roots
+                    for control in root_controls[
+                        root_offset[slot_of_root[root]] : root_offset[
+                            slot_of_root[root] + 1
+                        ]
+                    ]
+                }
             )
-            for i, root in enumerate(roots):
-                group = space.create_group(f"roots/{canonical[i]}")
-                # IDs deliberately exceed 32-bit range; support growth must not
-                # activate the adjacent root's other coefficient.
-                group["global_ids"] = np.asarray(
-                    (
-                        [2**33, 2**33 + 1]
-                        if root == core
-                        else (
-                            [2**33 + 1, 2**33 + 2]
-                            if root == adjacent
-                            else [2**33 + 10 + i]
-                        )
-                    ),
-                    dtype=np.int64,
-                )
+
+        def roots_of(controls):
+            return sorted(
+                {
+                    int(root)
+                    for control in controls
+                    for root in control_roots[
+                        control_offset[control - 1] : control_offset[control]
+                    ]
+                }
+            )
+
+        core = 1
+        core_controls = controls_of([canonical[core - 1]])
+        closure = roots_of(core_controls)
+        support_ids = sorted(physical[root] for root in closure)
+        # The fixture must distinguish one closure step from recursive growth.
+        assert core in support_ids and len(support_ids) > 1
+        assert len(roots_of(controls_of(closure))) > len(closure)
         artifact_bytes = artifact.read_bytes()
         request = {
             "units": "m",
             "patches": [
-                {"name": "core", "roots": [core["root"]], "padding": 0},
-                {"name": "buffered", "roots": [core["root"]], "padding": 1},
+                {"name": "core", "roots": [core], "padding": 0},
+                {"name": "buffered", "roots": [core], "padding": 1},
             ],
         }
         preparation = PatchPreparationJob("supports", parent, [3], request)
@@ -291,13 +361,15 @@ def test_preparation_closes_material_supports_before_buffering(
         )
         VALIDATOR.evolve(schema=schema).validate(output)
         selected, buffered = output["patches"]
-        assert selected["core_roots"] == [core["root"]]
+        assert selected["core_roots"] == [core]
+        # Support growth closes the core coefficients' supports once; it must not
+        # activate the other coefficients of the added support roots.
         assert selected["support_roots"] == selected["buffer_roots"] == support_ids
         coverage = selected["material_coverage"][0]
-        assert coverage["basis_identity"] == "support-fixture"
-        assert coverage["control_ids"] == [2**33, 2**33 + 1]
+        assert coverage["basis_identity"] == identity
+        assert coverage["control_ids"] == core_controls
         assert dict(zip(coverage["physical_roots"], coverage["material_roots"])) == {
-            root: canonical[root - 1] for root in support_ids
+            physical[root]: root for root in closure
         }
         assert buffered["material_coverage"] == selected["material_coverage"]
         assert set(support_ids) <= set(buffered["buffer_roots"])
@@ -307,7 +379,79 @@ def test_preparation_closes_material_supports_before_buffering(
         assert distributed.geometry_report["patches"] == output["patches"]
         assert preparation.results_exist()
         with h5py.File(artifact, "r+") as h5:
-            h5["property_space/identity"][()] = np.bytes_("changed-fixture")
+            h5["property_space/identity"][()] = np.bytes_("changed-basis")
+        assert not preparation.results_exist()
+
+
+@pytest.mark.parametrize("dimension", [2, 3])
+def test_preparation_reads_mesh_keyed_material_artifact(tmp_path, dimension):
+    import h5py
+
+    parent = _parent(
+        tmp_path, dimension, "acoustic", root_columns=None, mesh_space="vp"
+    )
+    literal = Path(parent.project_path) / "parent-support.h5"
+    parent.model.property_spaces["vp"] = MeshPropertySpace(
+        artifact=literal.name, frequency=3, epw=1
+    )
+    parent.save()
+    with LocalSite(
+        solver=_solver(dimension),
+        n_workers=1,
+        threads_per_worker=2,
+        shutdown_on_completion=False,
+        solver_policy="warn",
+    ) as site:
+        # Two bands key two generated meshes, so two artifacts coexist.
+        records = {}
+        for name, band in (("basis", [3]), ("basis_high", [3, 4])):
+            basis = FrequencyDomainJob(name, parent, band)
+            assert site.run(basis, check=True).successful
+            task = TaskResult.read(
+                task_result_path(basis._result_path, 1),
+                result_path=basis._result_path,
+            )
+            (records[max(band)],) = task.material_artifacts
+        assert not literal.exists()
+        written = sorted(literal.parent.glob("parent-support.*.h5"))
+        resolved = {
+            band: record.resolve(parent.project_path)
+            for band, record in records.items()
+        }
+        assert written == sorted(resolved.values())
+        assert records[3].mesh_key != records[4].mesh_key
+        for band, record in records.items():
+            assert record.space == "vp" and record.mesh_keyed
+            assert record.sizing_frequency == band
+            assert resolved[band] == record.path.resolve()
+            assert resolved[band].name == f"parent-support.{record.mesh_key}.h5"
+            assert record.bytes == resolved[band].stat().st_size
+            with h5py.File(resolved[band], "r") as h5:
+                identity = h5["property_space/identity"][()].decode().strip()
+            assert record.basis_identity == identity
+        request = {
+            "units": "m",
+            "patches": [{"name": "core", "roots": [1], "padding": 0}],
+        }
+        for name, band in (("keyed_high", [3, 4]), ("keyed", [3])):
+            preparation = PatchPreparationJob(name, parent, band, request)
+            record = records[max(band)]
+            assert preparation._input_fingerprint_payload()["vp"] == {
+                **preparation._path_content_fingerprint(resolved[max(band)]),
+                "basis_identity": record.basis_identity,
+            }
+            assert site.run(preparation, check=True).successful
+            # geometry_report also verifies patch_prepare read the selected file.
+            report = preparation.geometry_report
+            coverage = report["patches"][0]["material_coverage"]
+            assert coverage[0]["basis_identity"] == record.basis_identity
+            operation = load_operation_result(preparation._result_path, "patch_prepare")
+            (used,) = operation.material_artifacts
+            assert used.resolve(parent.project_path) == resolved[max(band)]
+            assert (used.mesh_key, used.built) == (record.mesh_key, False)
+        assert preparation.results_exist()
+        with h5py.File(resolved[3], "r+") as h5:
+            h5["property_space/identity"][()] = np.bytes_("changed-basis")
         assert not preparation.results_exist()
 
 
@@ -334,13 +478,16 @@ def test_curved_patch_checks_actual_point_containment(tmp_path, dimension, physi
         boundary = [0, 20] if dimension == 2 else [0, 200, 10]
         exterior = [10, 18] if dimension == 2 else [10, 200, 8]
         # This point is outside the curved free surface but inside a root's AABB.
-        assert any(
-            np.all(np.array(root["sampled_lower"]) <= exterior)
-            and np.all(np.array(root["sampled_upper"]) >= exterior)
-            for root in report["roots"]
+        sampled_lower = np.array(report["roots"]["sampled_lower"]).T
+        sampled_upper = np.array(report["roots"]["sampled_upper"]).T
+        assert np.any(
+            np.all(sampled_lower <= exterior, axis=1)
+            & np.all(sampled_upper >= exterior, axis=1)
         )
+        assert "edge_points" not in report["roots"]
         request = {
             "units": "m",
+            "edge_samples": True,
             "patches": [
                 {
                     "name": "all",
@@ -360,6 +507,19 @@ def test_curved_patch_checks_actual_point_containment(tmp_path, dimension, physi
         }
         valid = PatchPreparationJob("contained", parent, [3], request)
         assert site.run(valid, check=True).successful
+        VALIDATOR.evolve(
+            schema=json.loads(
+                (CONTRACT_ROOT / "outputs/fs-patch-geometry-1/schema.json").read_text()
+            )
+        ).validate(valid.geometry_report)
+        edge_count = valid.geometry_report["roots"]["edge_count"]
+        edges = np.asarray(valid.geometry_report["roots"]["edge_points"]).reshape(
+            dimension, sum(edge_count), 9
+        )
+        # Curved roots: interior samples leave the chord between edge ends.
+        assert (
+            np.max(np.abs(edges[:, :, 4] - 0.5 * (edges[:, :, 0] + edges[:, :, 8]))) > 1
+        )
         patch = valid.geometry_report["patches"][0]
         assert patch["acquisition_checked"]
         assert len(patch["point_roots"]) == 2
@@ -432,23 +592,14 @@ def test_patch_children_preserve_global_acquisition_ids(
         inventory = PatchPreparationJob("catalog", parent, [3], {"units": "m"})
         assert site.run(inventory, check=True).successful
         roots = tuple(range(1, inventory.geometry_report["root_count"] + 1))
+        # Axis-major bounds: index [0] is the x extent of every root.
+        x_lower = inventory.geometry_report["roots"]["sampled_lower"][0]
+        x_upper = inventory.geometry_report["roots"]["sampled_upper"][0]
         west = (
-            tuple(
-                row["root"]
-                for row in inventory.geometry_report["roots"]
-                if row["sampled_upper"][0] <= 501
-            )
-            if cut
-            else roots
+            tuple(root for root, x in zip(roots, x_upper) if x <= 501) if cut else roots
         )
         east = (
-            tuple(
-                row["root"]
-                for row in inventory.geometry_report["roots"]
-                if row["sampled_lower"][0] >= 499
-            )
-            if cut
-            else roots
+            tuple(root for root, x in zip(roots, x_lower) if x >= 499) if cut else roots
         )
         patches = PatchSet(
             [

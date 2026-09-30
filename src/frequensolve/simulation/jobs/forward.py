@@ -5,9 +5,15 @@ Time-domain jobs derive a uniform frequency sweep from ``f_min``/``f_max`` and
 either ``df`` or ``T_max`` so the solver can reconstruct time traces.
 """
 
+from __future__ import annotations
+
 from numbers import Integral
 from pathlib import Path
-from typing import Iterable, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Iterable, List, Literal, Optional, Union
+
+if TYPE_CHECKING:
+    from frequensolve.mesh.patches import PatchSet
+    from frequensolve.simulation.jobs._patches import PatchRunResult
 
 import numpy as np
 
@@ -73,7 +79,7 @@ class FrequencyDomainJob(BaseJob):
         phase_derivatives: int = 0,
         *,
         preserve_task_outputs: bool = False,
-        patches=None,
+        patches: PatchSet | None = None,
     ):
         phase_derivatives = _phase_derivative_order(phase_derivatives)
         if patches is not None:
@@ -81,7 +87,7 @@ class FrequencyDomainJob(BaseJob):
 
             if not isinstance(patches, PatchSet):
                 raise TypeError("patches must be a PatchSet")
-            if simulation.mesh.root_patch is not None:
+            if simulation.mesh is not None and simulation.mesh.root_patch is not None:
                 raise ValueError("Patch forward jobs require the parent simulation")
         self.patches = patches
 
@@ -115,12 +121,19 @@ class FrequencyDomainJob(BaseJob):
         return payload
 
     def _run_composite(
-        self, site, *, timeout=None, poll_interval=None, check=False, **kwargs
-    ):
+        self,
+        site: Any,
+        *,
+        timeout: float | None = None,
+        poll_interval: float | None = None,
+        check: bool = False,
+        **kwargs: Any,
+    ) -> PatchRunResult:
         """Prepare valid root selections and run ordinary child jobs through the site."""
         from frequensolve.simulation.jobs._patches import PatchRunResult
 
         self.save()
+        assert self.patches is not None
         prepared = self.patches.prepare(self.simulation, self.f_list, site=site)
         children = prepared.simulations(name=f"{self.simulation.name}_{self.name}")
         jobs = tuple(
@@ -151,7 +164,7 @@ class FrequencyDomainJob(BaseJob):
         d: dict,
         base_path: Optional[Union[str, Path]] = None,
         project_path: Optional[Union[str, Path]] = None,
-    ):
+    ) -> FrequencyDomainJob:
         """Deserialize a saved frequency-domain forward job.
 
         Args:
@@ -196,13 +209,15 @@ class FrequencyDomainJob(BaseJob):
         return job
 
     @staticmethod
-    def _restore_patches(payload):
+    def _restore_patches(payload: dict[str, Any]) -> PatchSet:
         from frequensolve.mesh.patches import PatchSet
 
         return PatchSet.from_dict(payload)
 
     @staticmethod
-    def _fingerprint_job_payload(job_data, *, include_frequencies=False):
+    def _fingerprint_job_payload(
+        job_data: dict[str, Any], *, include_frequencies: bool = False
+    ) -> dict[str, Any]:
         payload = BaseJob._fingerprint_job_payload(
             job_data, include_frequencies=include_frequencies
         )
@@ -398,7 +413,7 @@ class TimeDomainJob(BaseJob):
         d: dict,
         base_path: Optional[Union[str, Path]] = None,
         project_path: Optional[Union[str, Path]] = None,
-    ):
+    ) -> TimeDomainJob:
         """Deserialize a saved time-domain job from its frequency list.
 
         Args:

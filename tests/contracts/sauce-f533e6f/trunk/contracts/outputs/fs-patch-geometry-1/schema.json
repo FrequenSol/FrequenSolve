@@ -41,82 +41,111 @@
       "minLength": 1
     },
     "roots": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "required": [
-          "root",
-          "cell",
-          "material",
-          "lower",
-          "upper",
-          "edge_count",
-          "edge_points",
-          "sampled_lower",
-          "sampled_upper"
-        ],
-        "properties": {
-          "root": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "cell": {
+      "type": "object",
+      "description": "Parent root inventory as compact axis-major arrays indexed by one-based parent root ID.",
+      "required": [
+        "cell",
+        "domain",
+        "lower",
+        "upper",
+        "sampled_lower",
+        "sampled_upper"
+      ],
+      "properties": {
+        "cell": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
             "type": "integer"
           },
-          "material": {
-            "type": "integer"
-          },
-          "lower": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 3,
-            "items": {
-              "type": "number"
-            }
-          },
-          "upper": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 3,
-            "items": {
-              "type": "number"
-            }
-          },
-          "edge_count": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "edge_points": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 3,
-            "items": {
-              "type": "array",
-              "items": {
-                "type": "number"
-              }
-            }
-          },
-          "sampled_lower": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 3,
-            "items": {
-              "type": "number"
-            }
-          },
-          "sampled_upper": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 3,
-            "items": {
-              "type": "number"
-            }
-          }
+          "description": "Encoded GMP cell identity per root."
         },
-        "additionalProperties": false
-      }
+        "domain": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer"
+          },
+          "description": "GMP domain ID per root, as authored in the parent mesh; not a material-layer index or a material-basis root ID."
+        },
+        "lower": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "description": "Axis-major: one array per dimension, each with root_count values in parent root order."
+        },
+        "upper": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "description": "Axis-major: one array per dimension, each with root_count values in parent root order."
+        },
+        "sampled_lower": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "description": "Axis-major: one array per dimension, each with root_count values in parent root order."
+        },
+        "sampled_upper": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "description": "Axis-major: one array per dimension, each with root_count values in parent root order."
+        },
+        "edge_count": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "Present only when edge_samples was requested: native edges per root."
+        },
+        "edge_points": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "description": "Present only when edge_samples was requested: dimension by (9 times the total edge count), packed root by root with nine samples per edge."
+        }
+      },
+      "dependentRequired": {
+        "edge_count": [
+          "edge_points"
+        ],
+        "edge_points": [
+          "edge_count"
+        ]
+      },
+      "additionalProperties": false
     },
     "patches": {
       "type": "array",
@@ -301,7 +330,8 @@
                   "items": {
                     "type": "integer",
                     "minimum": 1
-                  }
+                  },
+                  "description": "Canonical material-basis root IDs (the artifact root directory numbering) supporting the core controls."
                 },
                 "physical_roots": {
                   "type": "array",
@@ -309,7 +339,8 @@
                   "items": {
                     "type": "integer",
                     "minimum": 1
-                  }
+                  },
+                  "description": "The same supports as one-based parent inventory root IDs."
                 },
                 "control_ids": {
                   "type": "array",

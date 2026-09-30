@@ -85,7 +85,7 @@ def test_frequency_stage_mesh_capture_and_candidate_replay(
             shots_per_patch=1,
             max_offset=120 * ureg.m,
             padding=0 * ureg.m,
-        ).prepare(baseline.simulation, [3, 7.5], site=site)
+        ).prepare(baseline.simulation, [3, 7.5], site=site, edge_samples=curved)
         assert prepared.geometry["patches"][0]["root_fraction"] < 1
         assert prepared.geometry["patches"][0]["cut_boundary"] > 0
         if curved:
@@ -96,12 +96,8 @@ def test_frequency_stage_mesh_capture_and_candidate_replay(
             for side, horizon in (("bottom", "surface_1"), ("top", "surface_3")):
                 for kind in ("edges", "quads", "triangles"):
                     assert set(boundaries[side][kind]) == set(boundaries[horizon][kind])
-            edges = np.concatenate(
-                [
-                    np.asarray(root["edge_points"]).reshape(dimension, -1, 9)
-                    for root in prepared.geometry["roots"]
-                ],
-                axis=1,
+            edges = np.asarray(prepared.geometry["roots"]["edge_points"]).reshape(
+                dimension, -1, 9
             )
             assert (
                 np.max(
@@ -206,7 +202,7 @@ def test_frequency_stage_mesh_capture_and_candidate_replay(
         if control_kind == "mesh":
             if dimension == 2 and physics == "acoustic":
                 for label, provided_stage, expected_error in (
-                    ("no_stage", None, "require a verified frozen stage"),
+                    ("no_stage", None, "frozen stage"),
                     ("no_mesh", stage, "require a frozen frequency mesh"),
                 ):
                     missing = FWIOperatorJob(

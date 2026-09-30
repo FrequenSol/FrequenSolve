@@ -10,6 +10,7 @@ from scripts.run_sdk_performance import (
     BASELINE_SCHEMA,
     SCHEMA,
     Scenario,
+    _result_metadata_scenario,
     _write_trace_product,
     compare_to_baseline,
     comparison_dependency_versions,
@@ -203,3 +204,8 @@ def test_baseline_comparison_rejects_scenario_reordering():
 
     with pytest.raises(ValueError, match="scenario order differs"):
         compare_to_baseline(evidence, baseline)
+
+
+def test_result_metadata_scenario_reads_current_task_contract(tmp_path):
+    scenario = _result_metadata_scenario(tmp_path, "small", 3)
+    assert scenario.operation() == {"artifacts": 3, "timingRows": 3}

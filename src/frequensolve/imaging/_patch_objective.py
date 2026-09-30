@@ -6,11 +6,15 @@
 
 import math
 from copy import deepcopy
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+import numpy as np
 
 from frequensolve.imaging._objective import ObjectiveState
 
 
-def _positive(value, label):
+def _positive(value: Any, label: str) -> float:
     if isinstance(value, bool):
         raise ValueError(f"Parent objective {label} must be positive and finite")
     value = float(value)
@@ -19,7 +23,9 @@ def _positive(value, label):
     return value
 
 
-def _resolved(term, configs):
+def _resolved(
+    term: Mapping[str, Any], configs: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
     """Require one replicated normalization of this configured parent term."""
     fields = (
         "receiver_group",
@@ -53,7 +59,7 @@ def _resolved(term, configs):
     return config
 
 
-def validate_patch_misfit(payload):
+def validate_patch_misfit(payload: Mapping[str, Any]) -> None:
     """Reject transformations whose restricted actions are not implemented."""
     hooks = payload.get("preprocess", {})
     if hooks.get("include_defaults") or hooks.get("hooks"):
@@ -68,7 +74,12 @@ def validate_patch_misfit(payload):
             raise ValueError("Patch objectives require untransformed waveform terms")
 
 
-def restrict_patch_misfit(payload, parent_state, *, receiver_groups):
+def restrict_patch_misfit(
+    payload: Mapping[str, Any],
+    parent_state: ObjectiveState | str | Path,
+    *,
+    receiver_groups: Iterable[str],
+) -> dict[str, Any]:
     """Freeze parent scales and reduction before selecting child receiver rows.
 
     The caller retains the original observed trace references and acquisition
@@ -80,7 +91,7 @@ def restrict_patch_misfit(payload, parent_state, *, receiver_groups):
     state = ObjectiveState(
         parent_state.path if isinstance(parent_state, ObjectiveState) else parent_state
     )
-    result = deepcopy(payload)
+    result = deepcopy(dict(payload))
     validate_patch_misfit(result)
     selected = tuple(receiver_groups)
     if not selected or len(set(selected)) != len(selected):
@@ -132,15 +143,15 @@ def restrict_patch_misfit(payload, parent_state, *, receiver_groups):
     return result
 
 
-def patch_objective_keys(saved_state, acquisition):
+def patch_objective_keys(
+    saved_state: ObjectiveState | str | Path, acquisition: Mapping[str, Any]
+) -> dict[str, np.ndarray]:
     """Map saved sparse trace keys to original point-receiver observation keys.
 
     Native sparse keys name trace IDs, while a dense parent's keys name receiver
     IDs. Inline patch surveys carry the exact bridge. Return canonical keys in
     each term's existing row order; never change native persisted coordinates.
     """
-    import numpy as np
-
     state = ObjectiveState(
         saved_state.path if isinstance(saved_state, ObjectiveState) else saved_state
     )

@@ -78,6 +78,17 @@ def _sha256(path):
 
 def _assert_stable_trace_layout(job):
     trace_dir = job._result_path / "traces"
+    manifest = job.trace_manifest
+    assert manifest.packed_files
+    assert all(path.is_file() for path in manifest.packed_files)
+    assert len(manifest.packed_frequencies) == job.n_tasks
+    if manifest.pack is not None and "generations" in manifest.pack.artifact.path.parts:
+        # Development producers publish immutable segments under a catalogued manifest.
+        assert manifest.pack.artifact.path.is_file()
+        assert all(
+            segment.path in manifest.packed_files for segment in manifest.pack.segments
+        )
+        return
     assert (trace_dir / "traces.h5").is_file()
     assert (trace_dir / "manifest.json").is_file()
     assert not (trace_dir / "generations").exists()
@@ -93,6 +104,21 @@ def exercise_trace_history(site, root):
     )
     assert site.run(job, check=True, fetch=True).successful
     _assert_stable_trace_layout(job)
+    pack = job.trace_manifest.pack
+    if pack is not None and "generations" in pack.artifact.path.parts:
+        first_manifest = pack.artifact.path
+        first_bytes = first_manifest.read_bytes()
+        first_digests = {
+            path: _sha256(path) for path in job.trace_manifest.packed_files
+        }
+        assert site.run(job, check=True, fetch=True, force=True).successful
+        _assert_stable_trace_layout(job)
+        # Immutable producers retain the earlier generation in place.
+        assert first_manifest.read_bytes() == first_bytes
+        assert all(_sha256(path) == digest for path, digest in first_digests.items())
+        assert job.trace_manifest.pack.generation != pack.generation
+        assert job.traces() is not None
+        return
     first = json.loads((job._result_path / "traces" / "manifest.json").read_text())
     first_digest = _sha256(job._result_path / "traces" / "traces.h5")
     assert site.run(job, check=True, fetch=True, force=True).successful

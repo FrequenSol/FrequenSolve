@@ -622,6 +622,28 @@ def test_linearize_caches_and_carries_the_residual_covector(setup, fake):
     assert moved is not lin and moved.fingerprint != lin.fingerprint
 
 
+def test_model_directions_use_each_frequency_registry(setup, monkeypatch):
+    from dataclasses import replace
+
+    from frequensolve.imaging import extension as extension_module
+    from frequensolve.imaging._artifacts import ControlVectorFile
+
+    _, _, extended = setup
+    read = extension_module.read_manifest
+
+    def frequency_registry(job, task=1):
+        registry = read(job, task=task)
+        return replace(registry, fingerprint=f"frequency-registry-{task}")
+
+    monkeypatch.setattr(extension_module, "read_manifest", frequency_registry)
+    linearization = extended.linearize()
+    directory = linearization._ops_dir()
+    stem = linearization._direction_stem(extended.space.ones(), directory)
+    for task in (1, 2):
+        vector = ControlVectorFile.read(linearization.job.task_input(stem, task))
+        assert vector.control_registry_fingerprint == f"frequency-registry-{task}"
+
+
 def test_solve_matches_the_closed_form_taps(setup, fake):
     sim, problem, xp = setup
     with pytest.raises(ValueError, match="single-frequency"):

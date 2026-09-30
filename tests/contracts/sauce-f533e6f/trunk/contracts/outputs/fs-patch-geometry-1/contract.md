@@ -8,18 +8,27 @@ authored GMP parent in generation-specific result directories. Read the
 result. `parent_file` is relative to the result root.
 
 Root IDs and the parent fingerprint are shared by every descriptor in the
-report. Root bounds and native edge samples are in metres. `lower`/`upper` include
-the native locator safety pad for curved roots. `sampled_lower`/`sampled_upper`
-and realized patch bounds exclude that pad and describe the evaluated stencil;
-they are estimates of curved extents, not certified extrema. `edge_points` is
-dimension by (9 times `edge_count`), with consecutive groups of nine samples
-per edge. These preview samples do not replace the original curved geometry.
+report. `roots` is a compact object of arrays indexed by one-based parent root
+ID (position `r` describes root `r`): `cell` and `domain` hold one integer per
+root, and the bounds are axis-major, one array per dimension with `root_count`
+metres each. `domain` is the GMP domain ID authored in the parent mesh; it is
+neither the material-layer slot resolved from the material model nor a
+material-basis root ID. `lower`/`upper` include the native locator safety pad
+for curved roots. `sampled_lower`/`sampled_upper` and realized patch bounds
+exclude that pad and describe the evaluated stencil; they are estimates of
+curved extents, not certified extrema. `edge_count` and `edge_points` appear
+only when the request sets `edge_samples`; `edge_points` is dimension by
+(9 times the total edge count), packed root by root with nine samples per
+edge, so root `r` owns the columns after `9 * sum(edge_count[:r-1])`. These
+preview samples do not replace the original curved geometry and scale with
+the parent, so they are off by default.
 
 Each patch distinguishes requested `core_roots`, complete `support_roots`,
 `buffer_roots` after physical padding, and `added_roots` for topology.
 `material_coverage` records each named parent's basis identity, canonical
-`control_ids` whose supports intersect the core, and paired canonical
-`material_roots` / inventory `physical_roots` supporting those IDs. Supports
+`control_ids` whose supports intersect the core, and paired `material_roots`
+(canonical material-basis root IDs from the artifact root directory) and
+`physical_roots` (the same supports as inventory root IDs). Supports
 are unioned across spaces before buffering; added support, buffer and topology
 roots do not activate additional update coefficients. This is conservative
 whole-core-root coverage for each named space, not a per-control active mask.

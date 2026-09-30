@@ -52,6 +52,7 @@ import itertools
 import math
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -65,6 +66,10 @@ from typing import (
 )
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from frequensolve.imaging._patch_problem import _PatchRuntime
+    from frequensolve.mesh.patches import PatchSet, PreparedPatchSet
 
 from frequensolve.imaging._artifacts import (
     ControlRegistryManifest,
@@ -664,8 +669,8 @@ class ImagingProblem:
         if patches is not None and not isinstance(patches, PatchSet):
             raise TypeError("patches must be a PatchSet")
         self._patches = patches
-        self._patch_runtime = None
-        self._prepared_patches = None
+        self._patch_runtime: _PatchRuntime | None = None
+        self._prepared_patches: PreparedPatchSet | None = None
         self._shared = _Shared(
             simulation,
             controls=controls,
@@ -690,7 +695,7 @@ class ImagingProblem:
             self._patches = None
             self._patch_runtime = None
             self._prepared_patches = None
-        self._patch_selection = None
+        self._patch_selection: tuple[int, ...] | None = None
         self._active: Optional[Tuple[str, ...]] = None
         self._frequencies: Tuple[Any, ...] = tuple(self._shared.frequencies)
         self._masks: Dict[str, np.ndarray] = {}
@@ -708,12 +713,15 @@ class ImagingProblem:
             )
 
     @property
-    def patches(self):
+    def patches(self) -> PatchSet | None:
         """Reusable patch selection policy, or ``None`` for full-domain execution."""
         return self._patches
 
-    def prepare_patches(self):
-        """Prepare and inspect patch geometry/acquisition without wave solves."""
+    def prepare_patches(self, *, edge_samples: bool = False) -> PreparedPatchSet:
+        """Prepare and inspect patch geometry/acquisition without wave solves.
+
+        ``edge_samples=True`` retains native edge samples for ``prepared.plot()``.
+        """
         if self.patches is None:
             raise ValueError("this imaging problem has no patches")
         from types import SimpleNamespace
@@ -722,6 +730,7 @@ class ImagingProblem:
             self.simulation,
             self.frequencies,
             site=SimpleNamespace(run=self.backend.run_preparation),
+            edge_samples=edge_samples,
         )
         return self._prepared_patches
 
@@ -839,7 +848,7 @@ class ImagingProblem:
         parts: Dict[str, Any] = {}
         if "misfit" in self._overrides:
             try:
-                misfit = self._misfit_payload.to_fs()
+                misfit: dict[str, Any] | str = self._misfit_payload.to_fs()
             except ValueError:  # large trace weights need an export context
                 misfit = repr(self.misfit)
             # Explicitly restating the shared misfit does not change the
@@ -1387,7 +1396,7 @@ class ImagingProblem:
             objective="report.json",
             control_state=control_state,
             state_output="baseline.h5" if discover or wants_scaling else None,
-            manifest="registry.json" if discover else None,
+            manifest="registry.json" if discover or not gradient else None,
             min_support=self.min_support,
             misfit=self._misfit_payload,
             reflectivity=self._reflectivity(space),
@@ -2738,7 +2747,7 @@ class Linearization:
         self.state = state
         self.point = state.vector(space)
         self.entry = entry
-        self.job: FWIOperatorJob = entry.job
+        self._job: FWIOperatorJob = entry.job
         self.frequencies: List[Any] = list(self.job.f_list)
         self.fingerprint = entry.fingerprint
         assert entry.state_fingerprint is not None
@@ -2792,12 +2801,17 @@ class Linearization:
     # -- descriptors ----------------------------------------------------------
 
     @property
-    def regularization_job(self):
+    def job(self) -> FWIOperatorJob:
+        """Native job backing this single-context linearization."""
+        return self._job
+
+    @property
+    def regularization_job(self) -> FWIOperatorJob:
         """Full physical model context for one global regularization term."""
         return self.job
 
     @property
-    def jobs(self):
+    def jobs(self) -> tuple[FWIOperatorJob, ...]:
         """Native child jobs in execution order."""
         return (self.job,)
 
@@ -2924,6 +2938,8 @@ class Linearization:
                 part = ControlVectorFile.read(job.covector_file(task), native=False)
                 state_fp = part.state_fingerprint
                 registry_fp = part.control_registry_fingerprint
+            if registry_fp is None and job.manifest is not None:
+                registry_fp = read_manifest(job, task=task).fingerprint
             if state_fp is None:
                 state_fp = report.state_fingerprint
             pairs.append(
