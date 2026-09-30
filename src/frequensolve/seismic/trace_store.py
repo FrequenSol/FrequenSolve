@@ -2179,10 +2179,13 @@ class TraceStore:
                 "Trace filtering requires a dimensionless spectral response"
             )
         frequencies = fd.frequency.values
-        laplace = np.broadcast_to(
-            np.asarray(fd.coords["laplace"].values if "laplace" in fd.coords else 0.0),
-            frequencies.shape,
+        # Legacy Wavelet filtering uses its ordinary Fourier spectrum.
+        coordinate = (
+            fd.coords["laplace"].values
+            if not isinstance(wavelet, Wavelet) and "laplace" in fd.coords
+            else 0.0
         )
+        laplace = np.broadcast_to(np.asarray(coordinate), frequencies.shape)
         if not np.isfinite(laplace).all():
             raise ValueError("Trace Laplace coordinates must be finite")
         values = np.empty(frequencies.shape, dtype=np.complex128)
@@ -2243,9 +2246,13 @@ class TraceStore:
         wavelet: Wavelet | TransferFunction,
         times: np.ndarray,
         frequencies: np.ndarray,
+        *,
+        laplace: float = 0.0,
     ) -> np.ndarray:
-        """Sample a wavelet spectrum at the requested frequencies."""
+        """Sample legacy Fourier wavelets or transfer functions at their damping."""
 
+        if isinstance(wavelet, Wavelet):
+            laplace = 0.0
         response = (
             wavelet.sample(times[:-1]) if isinstance(wavelet, Wavelet) else wavelet
         )
@@ -2258,9 +2265,11 @@ class TraceStore:
             in_band = frequencies <= 0.5 / response.dt
             values = np.zeros(frequencies.shape, dtype=np.complex128)
             if np.any(in_band):
-                values[in_band] = response.at_frequencies(frequencies[in_band])
+                values[in_band] = response.at_frequencies(
+                    frequencies[in_band], laplace=laplace
+                )
             return values
-        return response.at_frequencies(frequencies)
+        return response.at_frequencies(frequencies, laplace=laplace)
 
     def _read_raw_selected_fd(
         self,
@@ -2415,15 +2424,18 @@ class TraceStore:
             df=target_df,
             upscale=wavelet_upscale,
         )
+        response_laplace = self._uniform_laplace(base)
         base_wavelet_value = self._sample_wavelet_spectrum(
             wavelet,
             base_wavelet_sampling.T_list,
             sampling.F_list,
+            laplace=response_laplace,
         )
         oversampled_wavelet_value = self._sample_wavelet_spectrum(
             wavelet,
             wavelet_sampling.T_list,
             sampling.F_list,
+            laplace=response_laplace,
         )
         # Match the DFT normalization used by the standard path, which samples
         # the wavelet on the base (non-upscaled) time grid.

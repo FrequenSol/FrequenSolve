@@ -5611,9 +5611,13 @@ def test_trace_dataset_td_hermite_can_roll_high_frequency_spectrum_to_zero(tmp_p
     )
 
 
+@pytest.mark.parametrize("response_kind", ["legacy", "transfer"])
 def test_trace_dataset_td_standard_can_use_endpoint_derivative_taper_with_laplace(
     tmp_path,
+    response_kind,
 ):
+    from frequensolve.seismic.spectra import GainDelay
+
     packed_path = tmp_path / "standard_taper.h5"
     _write_base_and_df_trace_product(
         packed_path,
@@ -5622,7 +5626,11 @@ def test_trace_dataset_td_standard_can_use_endpoint_derivative_taper_with_laplac
         laplace=-0.25,
     )
     traces = TraceDataset.open(packed_path)
-    wavelet = RickerWavelet(f=10.0, center=0.15)
+    wavelet = (
+        RickerWavelet(f=10.0, center=0.15)
+        if response_kind == "legacy"
+        else GainDelay(delay=0.01)
+    )
 
     untapered = traces.td(
         "surface",
@@ -5636,7 +5644,7 @@ def test_trace_dataset_td_standard_can_use_endpoint_derivative_taper_with_laplac
         "surface",
         "p",
         source=7,
-        wavelet=RickerWavelet(f=10.0, center=0.15),
+        wavelet=wavelet,
         upscale=2,
         laplace_compensation="off",
         high_frequency_taper=True,
