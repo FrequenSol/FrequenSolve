@@ -519,6 +519,19 @@ class Backend:
         with self._timing_lock:
             return self._worker_seconds, self._unmeasured_runs
 
+    def curvature(self) -> Any:
+        """Return Sauce postprocessing on this site's pinned solver and workdir."""
+        from .curvature import NativeCurvature
+
+        if not getattr(self.site, "supports_curvature", False):
+            raise NotImplementedError(
+                "This site does not support Sauce curvature operations; use "
+                "LocalSite or a site implementing run_curvature(request)."
+            )
+        return NativeCurvature(
+            workdir=self.workdir / "curvature", runner=self.site.run_curvature
+        )
+
     def cost_since(self, snapshot: Tuple[float, int]) -> Dict[str, Any]:
         seconds, missing = self.timing_snapshot()
         missing -= snapshot[1]

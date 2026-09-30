@@ -1567,7 +1567,24 @@ class Misfit:
         terms: Optional[Sequence[ObjectiveTerm]] = None,
         group_preprocess: Optional[Mapping[str, Any]] = None,
         include_default_preprocess: bool = False,
+        noise_std: Any = None,
     ) -> None:
+        self.noise_std = noise_std
+        if noise_std is not None:
+            if terms is not None or normalization is not None or weights is not None:
+                raise ValueError(
+                    "noise_std requires a simple misfit without terms, weights or normalization"
+                )
+            if (
+                Loss.from_value(loss).kind != "l2"
+                or Comparison.from_value(comparison).kind != "waveform"
+            ):
+                raise ValueError("noise_std requires L2 waveform comparison")
+            normalization = (
+                Normalization.explicit(components=noise_std)
+                if isinstance(noise_std, Mapping)
+                else Normalization.explicit(noise_std)
+            )
         if terms is not None:
             if any(v is not None for v in (loss, comparison, normalization, weights)):
                 raise ValueError(

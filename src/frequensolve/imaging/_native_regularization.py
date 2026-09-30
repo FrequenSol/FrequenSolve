@@ -22,6 +22,8 @@ from .regularization import (
     Scaled,
     Sum,
     Tikhonov,
+    _BoundScaled,
+    _BoundSum,
     _SymmetricModelOperator,
 )
 
@@ -319,8 +321,15 @@ def bind_workflow_regularization(
     specification: Any, space: ControlSpace, problem: Any, linearization: Any
 ) -> tuple[Optional[BoundRegularization], Optional[BoundNativeRegularization]]:
     """Separate smooth user terms from one native proximal model term."""
+    from .statistics import GaussianPrior
+
+    if isinstance(specification, GaussianPrior):
+        return (
+            specification.bind(space, problem=problem, linearization=linearization),
+            None,
+        )
     native: Optional[BoundNativeRegularization] = None
-    smooth: list[Regularization] = []
+    smooth: list[BoundRegularization] = []
 
     def add(spec: Any, factor: float = 1.0) -> None:
         nonlocal native
@@ -371,12 +380,21 @@ def bind_workflow_regularization(
             native = spec.bind(space, problem=problem, linearization=linearization)
             native.factor = factor
         else:
-            smooth.append(spec if factor == 1 else factor * spec)
+            bound = (
+                spec.bind(space, problem=problem, linearization=linearization)
+                if isinstance(spec, GaussianPrior)
+                else spec.bind(space)
+            )
+            smooth.append(
+                bound
+                if factor == 1
+                else _BoundScaled(Scaled(spec, factor), space, bound, factor)
+            )
 
     add(specification)
     smooth_bound = (
         None
         if not smooth
-        else (smooth[0] if len(smooth) == 1 else Sum(*smooth)).bind(space)
+        else smooth[0] if len(smooth) == 1 else _BoundSum(specification, space, smooth)
     )
     return smooth_bound, native

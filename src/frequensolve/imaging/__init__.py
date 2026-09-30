@@ -22,6 +22,8 @@ from frequensolve.imaging._native_regularization import (
 )
 from frequensolve.imaging.controls import *  # noqa: F403
 from frequensolve.imaging.controls import __all__ as _controls_all
+from frequensolve.imaging.curvature import *  # noqa: F403
+from frequensolve.imaging.curvature import __all__ as _curvature_all
 from frequensolve.imaging.data import *  # noqa: F403
 from frequensolve.imaging.data import __all__ as _data_all
 from frequensolve.imaging.energy import SourceEnergy as SourceEnergy
@@ -57,6 +59,7 @@ __all__ = unique_exports(
         "write_receiver_window",
     ],
     _controls_all,
+    _curvature_all,
     _data_all,
     _misfit_all,
     _artifacts_all,
@@ -69,3 +72,14 @@ __all__ = unique_exports(
     _extension_all,
     _focusing_all,
 )
+
+from .illumination import IlluminationCalibration, ReferenceIllumination
+from .statistics import BFGSUncertainty, GaussianPrior, UncertaintyResult
+
+__all__ += [
+    "BFGSUncertainty",
+    "GaussianPrior",
+    "UncertaintyResult",
+    "ReferenceIllumination",
+    "IlluminationCalibration",
+]

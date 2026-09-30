@@ -2729,6 +2729,14 @@ class Linearization:
             value-only linearization.
     """
 
+    def illumination(self, config: Any) -> Any:
+        """Calibrate reference illumination with this frozen normal operator."""
+        from .illumination import ReferenceIllumination
+
+        if not isinstance(config, ReferenceIllumination):
+            raise TypeError("illumination needs a ReferenceIllumination configuration")
+        return config.bind(self)
+
     def __init__(
         self,
         problem: ImagingProblem,

@@ -1045,6 +1045,12 @@ class BaseSite:
             to logging them.
     """
 
+    supports_curvature = False
+
+    def run_curvature(self, request: Path) -> None:
+        """Execute a Sauce request and make its declared output available locally."""
+        raise NotImplementedError("This site does not implement curvature operations")
+
     _is_notebook: bool = field(default_factory=_check_if_notebook)
     verbose: bool = False
 

@@ -1150,6 +1150,29 @@ class _ContinuationResult:
         self.stage_result = stage_result
 
 
+def _gaussian_declaration(prior: Any) -> str:
+    """Fingerprint authored prior fields independently of stage mesh refinement."""
+
+    def scale(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(k): scale(v) for k, v in value.items()}
+        if hasattr(value, "magnitude"):
+            return dict(
+                value=np.asarray(value.magnitude).tolist(), units=str(value.units)
+            )
+        return np.asarray(value).tolist()
+
+    return fingerprint(
+        reference=prior.reference.values,
+        basis=[
+            (k, prior.reference.space.block(k).basis_identity)
+            for k in prior.reference.space.blocks
+        ],
+        std=scale(prior.std),
+        mesh_measure=prior.mesh_measure,
+    )
+
+
 class FWI:
     """Staged full-waveform inversion over one :class:`ImagingProblem`.
 
@@ -1202,9 +1225,18 @@ class FWI:
         history: Any = None,
         callback: Optional[Callable[[FWIIteration], None]] = None,
         patch_updates: Optional[PatchUpdates] = None,
+        uncertainty: Any = None,
     ) -> None:
         if patch_updates is not None and not isinstance(patch_updates, PatchUpdates):
             raise TypeError("patch_updates must be a PatchUpdates configuration")
+        from .curvature import BFGSHistory
+        from .statistics import BFGSUncertainty, GaussianPrior
+
+        if uncertainty is not None and not isinstance(uncertainty, BFGSUncertainty):
+            raise TypeError("uncertainty must be a BFGSUncertainty configuration")
+        self.uncertainty = uncertainty
+        self._uncertainty_archive: Optional[BFGSHistory] = None
+        self._uncertainty_outputs: dict[str, str] = {}
         self.patch_updates = patch_updates
         self.problem = problem
         self.stages: List[Stage] = _stage_list(stages)
@@ -1216,6 +1248,43 @@ class FWI:
         self.optimizer = LBFGS() if optimizer is None else optimizer
         if not callable(getattr(self.optimizer, "solve", None)):
             raise TypeError("optimizer must provide solve()")
+        if uncertainty is not None:
+            if (
+                patch_updates is not None
+                or getattr(problem, "patches", None) is not None
+            ):
+                raise ValueError("BFGS uncertainty currently requires full-domain FWI")
+            if scaling is not None:
+                raise ValueError(
+                    "BFGS uncertainty automatically uses Gaussian prior scaling"
+                )
+            problem.backend.curvature()  # fail before any propagation on unsupported sites
+            for i, stage in enumerate(self.stages):
+                if uncertainty.stages == "final" and i != len(self.stages) - 1:
+                    continue
+                selected = (
+                    self.optimizer if stage.optimizer is None else stage.optimizer
+                )
+                prior = (
+                    regularization
+                    if stage.regularization is None
+                    else stage.regularization
+                )
+                if not isinstance(selected, LBFGS) or not isinstance(
+                    prior, GaussianPrior
+                ):
+                    raise ValueError(
+                        "BFGS uncertainty requires LBFGS and GaussianPrior"
+                    )
+                misfit = problem.misfit if stage.misfit is None else stage.misfit
+                if getattr(misfit, "noise_std", None) is None:
+                    raise ValueError(
+                        "BFGS uncertainty requires Misfit.l2(noise_std=...)"
+                    )
+                if stage.loss is not None:
+                    raise ValueError(
+                        "BFGS uncertainty cannot override the Gaussian data loss"
+                    )
         self.regularization = regularization
         self.preconditioner = preconditioner
         if smoothing is not None and smoothing is not False:
@@ -1491,6 +1560,40 @@ class FWI:
             history=history,
         )
         metadata["state_path"] = str(state_path)
+        from .statistics import GaussianPrior
+
+        prior_spec = (
+            self.regularization
+            if stage.regularization is None
+            else stage.regularization
+        )
+        metadata["gaussian_prior"] = (
+            None
+            if not isinstance(prior_spec, GaussianPrior)
+            else _gaussian_declaration(prior_spec)
+        )
+        metadata["uncertainty_config"] = json.dumps(
+            None if self.uncertainty is None else dataclasses.asdict(self.uncertainty)
+        )
+        metadata["uncertainty_outputs"] = json.dumps(self._uncertainty_outputs)
+        archive = self._uncertainty_archive
+        if archive is not None:
+            digest = hashlib.sha256(
+                archive.steps.tobytes() + archive.gradient_differences.tobytes()
+            ).hexdigest()[:20]
+            archive_path = self.checkpoint_path.with_name(
+                f"{self.checkpoint_path.stem}.bfgs_{index}_{digest}.h5"
+            )
+            archive.save(archive_path)
+            metadata["uncertainty_history"] = str(archive_path)
+            metadata["uncertainty_prior"] = self._uncertainty_prior
+            metadata["optimizer_restart"] = json.dumps(
+                getattr(self, "_optimizer_checkpoint", None)
+            )
+            metadata["optimizer_config"] = getattr(self, "_optimizer_config", None)
+            metadata["optimizer_scaling"] = json.dumps(
+                getattr(self, "_optimizer_scaling", None)
+            )
         if getattr(view, "patches", None) is not None:
             metadata["stage_identity"] = self._identity(view)
             assert view._patch_runtime is not None
@@ -1535,6 +1638,40 @@ class FWI:
                 f"not {self.problem.name!r}"
             )
         index = int(meta["stage_index"])
+        if not 0 <= index < len(self.stages):
+            raise ValueError("Checkpoint stage index is outside the configured stages")
+        from .statistics import GaussianPrior
+
+        prior_spec = (
+            self.regularization
+            if self.stages[index].regularization is None
+            else self.stages[index].regularization
+        )
+        declaration = (
+            None
+            if not isinstance(prior_spec, GaussianPrior)
+            else _gaussian_declaration(prior_spec)
+        )
+        if meta.get("gaussian_prior") != declaration:
+            raise ValueError("Checkpoint Gaussian prior declaration changed")
+        configured = (
+            None if self.uncertainty is None else dataclasses.asdict(self.uncertainty)
+        )
+        if json.loads(meta.get("uncertainty_config", "null")) != configured:
+            raise ValueError("Checkpoint uncertainty configuration changed")
+        self._uncertainty_outputs = json.loads(meta.get("uncertainty_outputs", "{}"))
+        if meta.get("uncertainty_history"):
+            self._resume_uncertainty = (
+                index,
+                meta["uncertainty_history"],
+                meta["uncertainty_prior"],
+            )
+            self._resume_optimizer = (
+                index,
+                json.loads(meta.get("optimizer_restart", "null")),
+                meta.get("optimizer_config"),
+                json.loads(meta.get("optimizer_scaling", "null")),
+            )
         self._resume_initial_objective = (index, meta.get("initial_objective"))
         self._resume_regularization = (
             index,
@@ -1648,6 +1785,15 @@ class FWI:
             initial = final = LossTerms(data=0.0)
             stage_iteration = stage.iterations
         view = stage.view(self._problem_for(index))
+        uncertainty_result = None
+        if str(index) in self._uncertainty_outputs:
+            from .statistics import UncertaintyResult
+
+            uncertainty_result = UncertaintyResult.load(
+                self._uncertainty_outputs[str(index)],
+                view.full_space,
+                native=view.backend.curvature(),
+            )
         return StageResult(
             index=index,
             name=stage.label(index),
@@ -1662,6 +1808,7 @@ class FWI:
             final_loss=final,
             resumed=True,
             skipped=True,
+            uncertainty=uncertainty_result,
         )
 
     # -- stage solves ---------------------------------------------------------
@@ -1731,6 +1878,31 @@ class FWI:
             raise ValueError(
                 f"stage {label!r} has no iterations left ({start_iteration} of "
                 f"{stage.iterations} done)"
+            )
+
+        capture_uncertainty = self.uncertainty is not None and (
+            self.uncertainty.stages == "all" or index == len(self.stages) - 1
+        )
+        self._uncertainty_archive = None
+        if capture_uncertainty:
+            assert self.uncertainty is not None
+            from .statistics import GaussianPrior
+
+            if not isinstance(optimizer, LBFGS) or not isinstance(
+                regularization, GaussianPrior
+            ):
+                raise ValueError("BFGS uncertainty requires LBFGS and GaussianPrior")
+            if getattr(view.misfit, "noise_std", None) is None:
+                raise ValueError(
+                    "BFGS uncertainty requires a Gaussian noise declaration"
+                )
+            optimizer = dataclasses.replace(
+                optimizer,
+                memory=max(optimizer.memory, stage.iterations),
+                curvature_tolerance=max(
+                    optimizer.curvature_tolerance, self.uncertainty.curvature_tolerance
+                ),
+                preconditioner_refresh=None,
             )
 
         # First linearization of the stage: adopts the support masks that
@@ -1856,8 +2028,58 @@ class FWI:
             preconditioner = bound_preconditioner
         refresh = getattr(optimizer, "preconditioner_refresh", None)
         scaling = self._scaling_for(objective.linearization(x0), space)
+        if capture_uncertainty:
+            from .curvature import BFGSHistory
+            from .regularization import Identity
+            from .statistics import BoundGaussianPrior
+
+            assert isinstance(bound_regularization, BoundGaussianPrior)
+            scaling = bound_regularization.std.copy()
+            # Pin a diagonal metric so the optimizer never introduces dynamic gamma.
+            if self.preconditioner is None:
+                physical_base = scaling**2
+            elif isinstance(self.preconditioner, Identity):
+                physical_base = np.ones(space.size)
+            elif (
+                bound_preconditioner is not None
+                and getattr(bound_preconditioner, "inverse", None) is not None
+            ):
+                physical_base = bound_preconditioner.inverse.inverse_diagonal
+            else:
+                raise ValueError(
+                    "BFGS uncertainty requires a known fixed diagonal preconditioner"
+                )
+            coordinates = fingerprint(
+                prior=bound_regularization.identity,
+                blocks=space.blocks,
+                support={
+                    k: v.astype(int).tolist() for k, v in space.support_masks().items()
+                },
+                basis=[space.block(k).basis_identity for k in space.blocks],
+            )
+            objective_id = fingerprint(
+                stage=view.identity(), prior=bound_regularization.identity
+            )
+            archive = BFGSHistory(
+                physical_base / scaling**2, state=objective_id, coordinates=coordinates
+            )
+            resumed_uq = getattr(self, "_resume_uncertainty", None)
+            if resumed_uq is not None and resumed_uq[0] == index:
+                if resumed_uq[2] != bound_regularization.identity:
+                    raise ValueError("Checkpoint Gaussian prior changed")
+                archive = BFGSHistory.load(resumed_uq[1])
+                if archive.coordinates != coordinates or archive.state != objective_id:
+                    raise ValueError(
+                        "Checkpoint uncertainty objective or coordinates changed"
+                    )
+                physical_base = archive.base_inverse_diagonal * scaling**2
+            preconditioner = lambda model, gradient: physical_base * gradient
+            bound_preconditioner = None
+            self._uncertainty_archive = archive
+            self._uncertainty_prior = bound_regularization.identity
+
         optimizer_restart = None
-        if getattr(view, "patches", None) is not None:
+        if getattr(view, "patches", None) is not None or capture_uncertainty:
             if isinstance(scaling, Mapping):
                 scaling = curvature_scaling(
                     scaling, space, max_ratio=optimizer.scaling_max_ratio
@@ -1898,7 +2120,9 @@ class FWI:
         )
 
         def on_iteration(it: InexactNewtonIteration) -> None:
-            if getattr(view, "patches", None) is not None:
+            if capture_uncertainty:
+                archive(it)
+            if getattr(view, "patches", None) is not None or capture_uncertainty:
                 self._optimizer_checkpoint = it.optimizer_state
             loss = objective.loss(it.model)
             stage_iteration = start_iteration + it.iteration
@@ -1976,7 +2200,7 @@ class FWI:
             space=space,
             **(
                 {"restart": optimizer_restart}
-                if getattr(view, "patches", None) is not None
+                if (getattr(view, "patches", None) is not None or capture_uncertainty)
                 and getattr(optimizer, "kind", None) == "lbfgs"
                 else {}
             ),
@@ -1985,6 +2209,38 @@ class FWI:
         problem.state = view.state_from(final)
         final_loss = objective.loss(result.model)
         stage_iteration = start_iteration + int(result.iterations)
+        uncertainty_result = None
+        if capture_uncertainty:
+            assert self.uncertainty is not None
+            assert isinstance(bound_regularization, BoundGaussianPrior)
+            from .statistics import UncertaintyResult
+
+            if np.any(
+                np.isclose(result.model, lower, rtol=0, atol=optimizer.bound_tolerance)
+            ) or np.any(
+                np.isclose(result.model, upper, rtol=0, atol=optimizer.bound_tolerance)
+            ):
+                raise ValueError(
+                    "BFGS posterior approximation does not support active parameter bounds"
+                )
+            native = view.backend.curvature()
+            factors = native.bfgs_uncertainty(
+                archive,
+                prior_std=bound_regularization.std,
+                rank=self.uncertainty.rank,
+                curvature_tolerance=max(
+                    optimizer.curvature_tolerance, self.uncertainty.curvature_tolerance
+                ),
+            )
+            uncertainty_result = UncertaintyResult(
+                factors, final, native=native, units=bound_regularization.units
+            )
+            saved = uncertainty_result.save(
+                Path(problem.workdir)
+                / "uncertainty"
+                / f"stage_{index}_{factors.path.parent.name}"
+            )
+            self._uncertainty_outputs[str(index)] = str(saved)
         self._write_checkpoint(
             index,
             stage,
@@ -2016,6 +2272,7 @@ class FWI:
             resumed=start_iteration > 0,
             vector=final,
             space=space,
+            uncertainty=uncertainty_result,
             metrics={
                 "optimizer": metrics["optimizer"],
                 "elapsed_seconds": perf_counter() - stage_started,
@@ -2506,7 +2763,9 @@ class LSRTM:
 # ---------------------------------------------------------------------------
 
 
-def rtm(problem: ImagingProblem, v: Any = None) -> ControlVector:
+def rtm(
+    problem: ImagingProblem, v: Any = None, *, illumination: Any = None
+) -> ControlVector:
     """Return the misfit gradient (RTM image on the control space) at ``v``.
 
     Equals ``problem.gradient(v)``: the objective's real control covector
@@ -2516,7 +2775,11 @@ def rtm(problem: ImagingProblem, v: Any = None) -> ControlVector:
 
     lin = problem.linearize(v, gradient=True)
     assert lin.gradient is not None
-    return lin.gradient
+    return (
+        lin.gradient
+        if illumination is None
+        else lin.illumination(illumination).apply(lin.gradient)
+    )
 
 
 def _simulation_for(problem: ImagingProblem, v: Any) -> Any:

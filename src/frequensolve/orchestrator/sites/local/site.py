@@ -859,6 +859,39 @@ class LocalSite(BaseSite):
     """
 
     supports_frequency_groups = True
+    supports_curvature = True
+
+    def run_curvature(self, request: Path) -> None:
+        """Run single-rank CPU postprocessing with the site's solver environment."""
+        import subprocess
+
+        thread_count = str(self._current_threads_per_worker())
+        environment = self.env.copy()
+        for name in (
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "BLIS_NUM_THREADS",
+        ):
+            if name not in self._explicit_environment_keys:
+                environment[name] = thread_count
+        with (request.parent / "solver.log").open("w") as log:
+            subprocess.run(
+                [
+                    self._solver_executable(),
+                    "-nthreads",
+                    thread_count,
+                    "--curvature",
+                    str(request),
+                ],
+                cwd=request.parent,
+                env=environment,
+                check=True,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+
     config: LocalSiteConfig = field(init=False)
     executable: Optional[str] = field(init=False)
     env: Dict[str, str] = field(default_factory=dict)
@@ -888,6 +921,9 @@ class LocalSite(BaseSite):
     # ----------------- lifecycle -----------------
 
     def __post_init__(self) -> None:
+        self._explicit_environment_keys = frozenset(self.env) | frozenset(
+            self.environment
+        )
         self.config = LocalSiteConfig()
         self.executable = self._get_solver_path()
         explicit_environment = solver_environment(

@@ -1883,3 +1883,158 @@ derivatives. Frequency-independent factors apply to both traces and their
 spectral derivatives. Dispersive constitutive weights are rejected. Passing
 compliance as W produces the metric W^H W, rather than a compliance energy
 metric; those are different objectives.
+
+Gaussian priors and posterior uncertainty
+-----------------------------------------
+
+Declare the noise and prior in the fitted objective, then request uncertainty
+on the workflow:
+
+.. code-block:: python
+
+   problem = im.ImagingProblem(
+       simulation, controls=controls, observed=observed,
+       frequencies=frequencies, site=site,
+       misfit=im.Misfit.l2(noise_std=data_noise),
+   )
+   prior = im.GaussianPrior(
+       reference=problem.state,
+       std={"vp": 150 * u.m / u.s, "vs": 80 * u.m / u.s},
+   )
+   result = im.FWI(
+       problem, stages,
+       optimizer=im.LBFGS(),
+       regularization=prior,
+       uncertainty=im.BFGSUncertainty(stages="all"),
+   ).run()
+
+   result.uncertainty.std("vp", grid=grid).plot()
+   stage_uncertainty = result.stages[0].uncertainty
+   covariance_direction = result.uncertainty.covariance @ direction
+   result.save("inversion")
+   restored = im.FWIResult.load("inversion", problem=result.problem)
+
+``noise_std`` supplies explicit waveform L2 noise scales, with summed residual
+energy. It cannot be combined with separate normalization or weighting options.
+The prior contributes its value, gradient and curvature to inversion. Quantities
+in ``std`` are converted to each material property's units; a scalar, array or
+mapping by block name is accepted.
+
+``BFGSUncertainty()`` saves the final stage by default; ``stages="all"`` also
+saves earlier stages in their own control bases. FrequenSolve automatically
+whitens by the prior, freezes the starting inverse diagonal and retains the
+complete accepted BFGS history for each selected stage. Sauce evaluates the
+Gaussian penalty and constructs the inverse-curvature approximation using an
+exact compact factorization of the signed correction to that diagonal. Its
+rank is at most twice the number of accepted curvature pairs. ``rank=20``, for
+example, retains at most twenty modes with the largest absolute eigenvalues.
+This is an approximation to posterior covariance inferred from the fitted
+objective and its optimization history.
+
+``std`` and ``variance`` return labelled xarray fields with physical units and
+support masks. Passing ``grid`` computes the variance of the interpolated field
+as ``diag(T C T.T)`` in Sauce, preserving correlations between coefficients.
+Interpolating coefficient standard deviations would give a different result.
+Cells outside the material and cells depending on frozen coefficients are
+masked. Without ``grid``, meshed fields are indexed by coefficient. The
+``covariance`` operator acts on the active coefficient space; saved results
+retain its factors, support, units and mesh basis. Loading with a matching
+``problem`` enables native covariance actions and grid sampling; loading with
+``space=...`` alone supports saved coefficient marginals.
+
+Priors across mesh refinement
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Meshed controls commonly refine at frequency-stage transitions. The default
+``GaussianPrior(mesh_measure="volume")`` uses positive lumped material-volume
+weights, normalized by the complete material volume. For coefficient values
+``m_i``, transferred reference values ``mu_i``, physical scales ``sigma_i`` and
+normalized weights ``w_i``, its penalty is:
+
+.. math::
+
+   R(m) = \frac{1}{2}\sum_i w_i
+          \left(\frac{m_i-\mu_i}{\sigma_i}\right)^2,
+   \qquad \sum_i w_i = 1.
+
+Here ``std`` specifies the scale of a physical field perturbation. The
+corresponding independent nodal prior standard deviation is
+``sigma_i / sqrt(w_i)``. A constant perturbation with constant physical scale
+has the same penalty after refinement; simply assigning the same independent
+nodal variance to every refined coefficient would increase the prior strength.
+``mesh_measure="coefficients"`` explicitly selects that resolution-dependent
+independent nodal convention instead.
+
+At every stage Sauce lifts both the reference mean and the physical scale field
+from the original reference mesh through the native constrained material basis,
+then recomputes the target mesh's volume weights. Keep ``reference=problem.state``
+from the original problem when refining with ``Stage(controls=...)``. Each stage
+has a newly discretized prior and a fresh BFGS history. Earlier posterior factors
+remain tied to their original mesh; they are not propagated as the next stage's
+prior. This defines refinement of a regularization model, rather than a
+mesh-independent stochastic field process.
+
+These statistical operations currently require real material controls with the
+identity transform and linear root geometry. Curved roots and mesh extensions
+are rejected until their bound physical geometry can be integrated. Uncertainty
+requires waveform L2 with declared noise, L-BFGS and a Gaussian prior; custom
+workflow scaling, patch workflows and active bounds at the returned point are
+rejected. Native postprocessing currently runs on one local CPU rank through
+``LocalSite``. It honors the site's worker thread budget and explicit thread
+environment overrides. Remote sites reject unsupported execution before wave
+solves. The compact factors reduce memory and work, but the current HDF5 boundary
+still stages complete coefficient arrays on that rank.
+
+Reference illumination
+----------------------
+
+For Rickett reference illumination, declare a reference image on the same
+regular lattice as the linearization and use physical smoothing distances:
+
+.. code-block:: python
+
+   illumination = im.ReferenceIllumination(
+       reference=reference_image,
+       smoothing={"x": 200 * u.m, "z": 100 * u.m},
+       relative_damping=0.01,
+   )
+   image = im.rtm(problem, illumination=illumination)
+
+   calibration = problem.linearize().illumination(illumination)
+   weights = calibration.weights
+   corrected = calibration.apply(raw_image)
+
+Calibration applies the frozen data normal to the joint reference vector once,
+including coupling between material blocks. Sauce computes depth envelopes,
+smooths the remigrated envelope and forms the reference-to-remigration envelope
+ratio. ``calibration.apply`` reuses the reference modeling and remigration for
+subsequent raw images. It returns the same typed control-vector representation
+as ordinary RTM.
+
+``relative_damping=0.01`` adds one percent of each block's maximum smoothed
+remigrated envelope to its denominator. The default ``padding="reflect"``
+reflects one full depth extent at each end before the analytic-signal FFT,
+reducing periodic boundary contamination; an integer selects the number of
+reflected depth samples and zero selects the unpadded periodic transform.
+Smoothing uses box half-widths and normalized truncated windows at grid edges.
+The high-level illumination API currently requires complete regular lattice
+material blocks with a depth axis named ``z``, ``depth`` or ``s``. Meshed-control
+illumination needs an explicit regular sampling grid and is not yet supported.
+
+Low-level backend operations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``BFGSHistory`` and ``NativeCurvature`` remain available for explicit history
+archives and backend actions. ``BFGSHistory`` rejects truncated histories,
+optimizer resets and mixed stages. ``NativeCurvature`` invokes Sauce's
+``--curvature`` operation for inverse actions, covariance factors and
+projections, Gaussian penalties, mesh transfer and Rickett weighting. A custom
+``runner`` can handle execution and staging through an explicitly configured
+site; the numerical operations remain in Sauce.
+
+The archive's fixed baseline and prior scaling must describe the actual fitted
+objective and coefficient chart. Ordinary L-BFGS may update its baseline by a
+scalar gamma; an independently constructed fixed-baseline history does not
+reproduce that changing optimizer operator. The high-level uncertainty workflow
+freezes its baseline to keep this contract consistent. Existing solver builds
+without these operations must be updated before using the API.
