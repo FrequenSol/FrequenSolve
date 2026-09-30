@@ -140,7 +140,9 @@ sampling needs an explicit side.
 The poroelastic namespace initially exposes velocity, fluid flux, stress, and
 pressure with scalar frame/fluid properties. Elastic constitutive tensors are
 available through the elastic namespace. Electromagnetic quantities retain the
-solver's existing field-unit conventions. Availability is also checked against
+solver's existing field-unit conventions. In single precision, the existing
+automatic electromagnetic scaling can overflow material/field products; explicit
+unit scales or ``disable_scaling=True`` may be needed. Availability is checked against
 the selected native formulation. This API requires an expression-aware Sauce
 backend; older backends cannot consume expression-bearing receiver components.
 
