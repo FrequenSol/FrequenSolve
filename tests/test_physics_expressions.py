@@ -12,6 +12,7 @@ from frequensolve.imaging.misfit import Preprocess
 from frequensolve.physics import Field, MaterialProperty
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import (
+    ReceiverArray,
     ReceiverComponent,
     ReceiverGroup,
     ReceiverNode,
@@ -254,3 +255,118 @@ def test_primary_fields_lower_to_registered_native_names(
     components = field.receiver_components(quantity, 2)
     expected = ["x", "y", "z"] if namespace.name == "em" else ["x", "z"]
     assert [component.name for component in components] == expected
+
+
+@pytest.mark.parametrize("dimension, axes", [(2, ["x", "z"]), (3, ["x", "y", "z"])])
+def test_device_accepts_measured_and_derived_quantities(dimension, axes, validator):
+    elastic = fs.physics.elastic()
+    device = ReceiverNode(name="pv")
+    pressure = device.add_component("pressure", elastic.fields.pressure, units="MPa")
+    device.add_component("velocity", elastic.fields.velocity)
+    device.add_component("momentum", elastic.materials.rho * elastic.fields.velocity)
+    strain = elastic.materials.compliance @ elastic.fields.stress
+    device.add_component("strain_xz", strain.xz)
+    group = ReceiverGroup("pv", device, [[0] * dimension], domain="solid")
+    payload = group.to_fs(ExportContext(dimension=dimension, physics="elastic"))
+    components = payload["device"]["components"]
+    assert [entry["name"] for entry in components] == [
+        "pressure",
+        *[f"velocity.{axis}" for axis in axes],
+        *[f"momentum.{axis}" for axis in axes],
+        "strain_xz",
+    ]
+    assert components[0]["units"] == "MPa"
+    assert "material_samples" not in payload
+    assert pressure.field is elastic.fields.pressure
+    assert [entry.name for entry in device.components] == [
+        "pressure",
+        "velocity",
+        "momentum",
+        "strain_xz",
+    ]
+    assert (
+        components[-1]["expression"]["child"]["coefficient"]["tensor"] == "compliance"
+    )
+    validator.validate(payload)
+    assert ReceiverGroup.from_fs(payload).to_fs() == payload
+
+
+def test_reusable_device_resolves_dimensions_per_group_and_preserves_later_additions():
+    acoustic = fs.physics.acoustic()
+    device = ReceiverNode()
+    device.add_component("velocity", acoustic.fields.velocity)
+    group2 = ReceiverGroup("two", device, [[0, 0]])
+    group3 = ReceiverGroup("three", device, [[0, 0, 0]])
+    for group, expected in [
+        (group2, ["velocity.x", "velocity.z"]),
+        (group3, ["velocity.x", "velocity.y", "velocity.z"]),
+        (group2, ["velocity.x", "velocity.z"]),
+    ]:
+        assert [c["name"] for c in group.to_fs()["device"]["components"]] == expected
+    device.add_component("pressure", acoustic.fields.pressure)
+    assert group2.to_fs()["device"]["components"][-1]["name"] == "pressure"
+    assert len(device.components) == 2
+
+
+def test_typed_device_supports_directional_velocity_and_legacy_components(validator):
+    acoustic = fs.physics.acoustic()
+    device = ReceiverNode()
+    device.add_component("p", "pressure")
+    device.add_component("v", acoustic.fields.velocity, direction=[0.6, 0.8], weight=2)
+    payload = ReceiverGroup("pv", device, [[0, 0]]).to_fs()
+    component = payload["device"]["components"][1]
+    assert component["name"] == "v" and component["weight"] == 2
+    assert component["expression"]["kind"] == "add"
+    assert [term["factor"] for term in component["expression"]["args"]] == [0.6, 0.8]
+    assert "direction" not in component
+    validator.validate(payload)
+
+
+def test_array_accepts_typed_components_without_changing_geometry():
+    acoustic = fs.physics.acoustic()
+    device = ReceiverArray(offsets=[[-1, 0], [1, 0]], offset_units="m")
+    device.add_component("pressure", acoustic.fields.pressure)
+    device.add_component("velocity_z", acoustic.fields.velocity.z)
+    payload = ReceiverGroup("array", device, [[0, 0]]).to_fs()["device"]
+    assert payload["offsets"] == [[-1.0, 0.0], [1.0, 0.0]]
+    assert [entry["name"] for entry in payload["components"]] == [
+        "pressure",
+        "velocity_z",
+    ]
+
+
+def test_standalone_device_uses_factory_dimension_and_rejects_ambiguous_names():
+    acoustic = fs.physics.acoustic(dimension=3)
+    device = ReceiverNode(
+        components=[ReceiverComponent(name="velocity", field=acoustic.fields.velocity)]
+    )
+    assert [c["name"] for c in device.to_fs()["components"]] == [
+        "velocity.x",
+        "velocity.y",
+        "velocity.z",
+    ]
+    device.add_component("velocity.x", acoustic.fields.velocity.x)
+    with pytest.raises(ValueError, match="unique"):
+        device.to_fs()
+
+
+def test_typed_device_binds_file_coordinates_when_constructing_data_space(tmp_path):
+    from types import SimpleNamespace
+
+    import h5py
+
+    from frequensolve.imaging.data import DataSpace
+
+    device = ReceiverNode()
+    device.add_component("velocity", fs.physics.acoustic().fields.velocity)
+    acquisition = Acquisition()
+    coords = tmp_path / "coords.h5"
+    with h5py.File(coords, "w") as h5:
+        h5.create_dataset("coords", data=[[0.0, 0.0, 0.0]])
+    acquisition.add_receiver_group("pv", device, coords)
+    acquisition.known_source_field_count = lambda: 1
+    simulation = SimpleNamespace(
+        acquisition=acquisition, physics="acoustic", dimension=3
+    )
+    space = DataSpace.from_simulation(simulation, [1.0])
+    assert space.segment("pv").components == ("velocity.x", "velocity.y", "velocity.z")

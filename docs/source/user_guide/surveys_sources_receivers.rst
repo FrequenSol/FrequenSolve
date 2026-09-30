@@ -104,11 +104,32 @@ simulation at receiver locations. Select components with ``velocity.z``,
 
 .. code-block:: python
 
+   acoustic = fs.physics.acoustic()
    elastic = fs.physics.elastic()
    momentum = elastic.materials.rho * elastic.fields.velocity
    strain = elastic.materials.compliance @ elastic.fields.stress
    acq.add_receiver_group("momentum", momentum, coords=coords, domain="solid")
    acq.add_receiver_group("strain_xx", strain.xx, coords=coords, domain="solid")
+
+Typed quantities can also be added to a reusable receiver device:
+
+.. code-block:: python
+
+   device = fs.ReceiverNode(name="pv")
+   device.add_component("pressure", acoustic.fields.pressure)
+   device.add_component("velocity", acoustic.fields.velocity)
+   acq.add_receiver_group("pv", device, coords=coords, domain="water")
+
+   derived = fs.ReceiverNode(name="derived")
+   derived.add_component("momentum", momentum)
+   derived.add_component("strain_xz", strain.xz)
+   acq.add_receiver_group("derived", derived, coords=coords, domain="solid")
+
+Device vector and tensor components expand to names such as ``velocity.x``,
+``velocity.z``, and ``strain.xz``. Scalars keep their authored name. Typed vectors
+also accept constant numeric ``direction`` vectors for a single projected
+measurement. String field names remain supported. A group resolves a copy of
+its device, so the authored expressions remain available when reusing the device.
 
 A full vector or symmetric tensor records all its independent components;
 a selected entry records one. For multiple quantities in one group, pass a

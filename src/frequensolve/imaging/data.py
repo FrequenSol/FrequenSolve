@@ -39,6 +39,8 @@ from typing import (
 import numpy as np
 import xarray as xr
 
+from frequensolve.util.mixins import ExportContext
+
 __all__ = [
     "DataSpace",
     "DataVector",
@@ -857,6 +859,14 @@ class DataSpace:
 
         segments = []
         for group in simulation.acquisition.receiver_groups:
+            resolve = getattr(group, "resolve_expressions", None)
+            if resolve is not None:
+                resolve(
+                    ExportContext(
+                        physics=getattr(simulation, "physics", None),
+                        dimension=getattr(simulation, "dimension", None),
+                    )
+                )
             components = tuple(
                 component.name for component in group.device.output_components()
             )
