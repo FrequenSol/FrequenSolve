@@ -98,6 +98,21 @@ information about the response. These are complex amplitudes at 10 Hz, not a
 time-domain seismogram. A successful/converged solve does not establish that a
 model represents your experiment.
 
+For the domain field, select the named output and its complex magnitude:
+
+.. code-block:: python
+
+   files = result.output_files(base="pressure", suffix=".vtu", existing=True)
+   if files:
+       fs.plot_vtu(files[0], field="pressure", source=1, part="abs")
+
+``base`` filters the output request name, not a directory. The plot uses unit
+metadata from the VTK header when available. The starter geometry uses km;
+do not assign pressure units that the result does not report. Receiver plots
+use receiver identifiers unless you explicitly map them to saved acquisition
+coordinates. Inspect pressure magnitude and phase with the source normalization
+and model units in mind.
+
 Retain the project, simulation, job, run ID and installed package version.
 Use :doc:`user_guide/site_configuration` for attaching to a specific existing
 run and retrieving its results; fetching an authored job's latest run is not

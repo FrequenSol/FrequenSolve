@@ -225,7 +225,8 @@ feature set.
    pv_result.output_files(base="pv", suffix=".vtu", existing=True)
 
 Expected output: ``output_files(...)`` returns the generated ``.vtu`` files for
-the ``pv`` :term:`output request`. Open those files in ParaView for interactive
+the ``pv`` :term:`output request`. Here ``base="pv"`` filters the output name,
+such as ``pv_00000.vtu``; it is not a directory. Open those files in ParaView for interactive
 inspection, or use the ``visual`` extra for lightweight PyVista checks in
 Python.
 

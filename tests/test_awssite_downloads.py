@@ -1120,7 +1120,10 @@ def test_run_and_result_logs_remain_bound_when_the_job_is_resubmitted(tmp_path):
         assert selected.read_text() == "original"
 
 
-def test_rerun_handles_and_results_keep_their_own_downloads(tmp_path, monkeypatch):
+@pytest.mark.parametrize("attach", [False, True])
+def test_rerun_handles_and_results_keep_their_own_downloads(
+    tmp_path, monkeypatch, attach
+):
     prefix = "project-a/jobs/simulation-a/job-a/results/runs/"
     client = FakeS3Client(
         {
@@ -1137,9 +1140,10 @@ def test_rerun_handles_and_results_keep_their_own_downloads(tmp_path, monkeypatc
     job.outputs.paraview = [SimpleNamespace(path="paraview")]
     job.outputs.traces.path = "nested/traces"
     result_api(site, job)
-    first = site._make_run_handle(job, "simulation-1")
+    handle = site.handle if attach else site._make_run_handle
+    first = handle(job, "simulation-1")
     job._job_id = "simulation-2"
-    second = site._make_run_handle(job, "simulation-2")
+    second = handle(job, "simulation-2")
     results = [
         run._make_result(JobStatus(state="completed", return_code=0))
         for run in (first, second)

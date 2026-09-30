@@ -1197,6 +1197,21 @@ class AWSSite(BaseSite):
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {e}")
 
+    def handle(
+        self, job: BaseJob, job_id: Optional[str] = None, mode: str = "attached"
+    ) -> RunHandle:
+        """Attach to an existing Cloud run with its own frozen result location."""
+        selected_id = job_id or getattr(job, "_job_id", None)
+        if selected_id is None:
+            raise ValueError("Cannot create a run handle without a job id")
+        run = self._make_run_handle(
+            job,
+            str(selected_id),
+            poll_interval=getattr(getattr(self, "config", None), "poll_interval", 5),
+        )
+        run.mode = mode
+        return run
+
     def _make_run_handle(
         self,
         job: BaseJob,
