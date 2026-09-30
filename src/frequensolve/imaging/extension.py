@@ -1558,6 +1558,7 @@ class ExtensionLinearization:
                         frequency=self.frequencies[task - 1]
                     ),
                     n_ranks=self.objective_states[task - 1].n_ranks,
+                    schema=self.objective_states[task - 1].vector_schema,
                 )
             job = self._action_job(
                 "vjp",

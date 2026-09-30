@@ -138,7 +138,7 @@ from frequensolve.simulation.artifact_contract import (
     task_result_path,
 )
 
-FAKE_STATE_SCHEMA = "fake-imaging-state-1"
+FAKE_STATE_SCHEMA = "fs-objective-linearization-3"
 FAKE_IMAGE_SCHEMA = "fs-image-hdf5-1"
 _ZERO_DIGEST = "sha256:" + "0" * 64
 _FAKE_JOBS = (FWIOperatorJob, ControlGradientJob, ImageKernelJob, SmoothJob)

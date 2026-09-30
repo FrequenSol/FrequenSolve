@@ -3,6 +3,9 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+import pytest
+
 from frequensolve.imaging.jobs import ControlGradientJob
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
@@ -245,3 +248,145 @@ def test_directory_input_fingerprint_is_compact_and_content_sensitive(tmp_path):
         "files": 2,
     }
     assert changed["sha256"] != first["sha256"]
+
+
+def test_downloaded_fingerprints_validate_rewritten_inputs_and_reload(tmp_path):
+    job, _ = _born_job(tmp_path)
+    job.save_for_remote("SlurmSite", "/work2/example/project")
+    job.save_simulation_for_remote("SlurmSite", "/work2/example/project")
+    expected = job.staged_task_fingerprints("SlurmSite")
+    assert job.downloaded_task_fingerprints() == [expected]
+    loaded = BaseJob.load(job.job_file)
+    assert loaded.downloaded_task_fingerprints() == [expected]
+    loaded.save()
+    assert loaded.downloaded_task_fingerprints() == [expected]
+    # Submission records the scheduler id after the inputs were staged.
+    loaded._job_id = "3532821"
+    loaded.save()
+    assert "job_id" in json.loads(loaded.job_file.read_text())
+    assert loaded.downloaded_task_fingerprints() == [expected]
+    payload = json.loads(loaded.simulation._file.read_text())
+    payload["scaling"] = "robust"
+    loaded.simulation._file.write_text(json.dumps(payload))
+    assert loaded.downloaded_task_fingerprints() == []
+
+
+def test_downloaded_fingerprints_reject_tampered_staging(tmp_path):
+    job, _ = _born_job(tmp_path)
+    staged, _ = job.save_for_remote("SlurmSite", "/work2/example/project")
+    job.save_simulation_for_remote("SlurmSite", "/work2/example/project")
+    staged.write_text(staged.read_text() + "\n")
+    assert job.downloaded_task_fingerprints() == []
+
+
+@pytest.mark.parametrize(
+    "operation,includes_context",
+    [("prepare", False), ("gradient", True), ("proximal", True)],
+)
+def test_regularization_remote_scan_distinguishes_context_input(
+    operation, includes_context
+):
+    from frequensolve.simulation.jobs.remote import JobRemoteMixin
+
+    payload = {
+        "control_sensitivities": {
+            "input": "input.h5",
+            "Regularization": {
+                "operation": operation,
+                "metric": "metric.h5",
+                "lower": "lower.h5",
+                "upper": "upper.h5",
+                "context": "context.h5",
+                "result": "output.h5",
+            },
+        }
+    }
+    refs = set(JobRemoteMixin._iter_file_references(payload))
+    assert refs == {"input.h5", "metric.h5", "lower.h5", "upper.h5"} | (
+        {"context.h5"} if includes_context else set()
+    )
+
+
+@pytest.mark.parametrize("schema", ["fs-objective-vector-3", "fs-objective-vector-4"])
+def test_direct_remote_submission_stages_nested_and_absolute_vector_payloads(
+    tmp_path, schema
+):
+    from frequensolve.imaging.data import DataSpace, DataVector, canonical_json_sha256
+    from frequensolve.imaging.jobs import FWIOperatorJob
+    from frequensolve.orchestrator.sites.hpc.site import SlurmSite
+    from frequensolve.project import Project
+    from frequensolve.seismic import Acquisition, ReceiverNode
+
+    root = (tmp_path / "project").resolve()
+    project = Project(name="direct", path=root)
+    sim = project.new_simulation(name="sim", physics="acoustic", dimension=2)
+    acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=[[0, 0]])
+    node = ReceiverNode(name="hydrophone")
+    node.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=node, coords=[[0, 0]])
+    sim.acquisition = acq
+    space = DataSpace.from_simulation(sim, [4.0])
+    inputs = root / "jobs" / "client_inputs"
+    for task in (1, 2):
+        manifest = space.ones().write_objective_vector(
+            inputs / f"dual_{task}.json",
+            state_fingerprint="sha256:" + "a" * 64,
+            term_layout=space.term_layouts(),
+            schema=schema,
+        )
+        payload = json.loads(manifest.read_text())
+        data_path = (
+            manifest.with_suffix(".h5")
+            if schema.endswith("-4")
+            else DataVector.shard_path(manifest)
+        )
+        nested = inputs / "data" / data_path.name
+        nested.parent.mkdir(exist_ok=True)
+        data_path.rename(nested)
+        reference = str(nested) if task == 1 else f"data/{nested.name}"
+        if schema.endswith("-4"):
+            payload["file"] = reference
+        else:
+            payload["shards"][0]["file"] = reference
+        payload.pop("manifest_fingerprint")
+        payload["manifest_fingerprint"] = canonical_json_sha256(payload)
+        manifest.write_text(json.dumps(payload))
+    job = FWIOperatorJob(
+        "vjp",
+        sim,
+        [4.0, 6.0],
+        action="vjp",
+        active=["model.vp"],
+        state="state.json",
+        objective_vector=inputs / "dual.json",
+        covector="vjp.h5",
+    )
+    job.save()
+    remote = (tmp_path / "remote").resolve()
+    # Exercise the actual site's input-transfer entry point without a connection.
+    uploads = []
+
+    class Site:
+        work_dir = remote
+        _transfer_remote_simulation_inputs = (
+            SlurmSite._transfer_remote_simulation_inputs
+        )
+
+        def put(self, local, target):
+            target = Path(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(Path(local).read_bytes())
+            uploads.append(target)
+
+    Site()._transfer_remote_simulation_inputs(job)
+    for task in (1, 2):
+        staged = remote / "jobs" / "client_inputs" / f"dual_{task}.json"
+        if schema.endswith("-3"):
+            reference = json.loads(staged.read_text())["shards"][0]["file"]
+            assert reference.startswith(str(remote)) and Path(reference).is_file()
+        np.testing.assert_array_equal(
+            DataVector.read_objective_vector(staged, space).values, space.ones().values
+        )
+    assert len({p for p in uploads if p.suffix == ".h5"}) == 2
+    assert not (remote / "jobs" / "client_inputs" / "dual.json").exists()

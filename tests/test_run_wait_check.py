@@ -429,3 +429,28 @@ def test_successful_result_still_validates_trace_manifest():
     run.job = BrokenOutputJob()
     with pytest.raises(ArtifactContractError, match="missing committed trace artifact"):
         run.wait()
+
+
+@pytest.mark.parametrize("mode", ["batch", "attached"])
+def test_remote_completion_does_not_open_undownloaded_trace_payloads(mode):
+    class RemoteJob(DummyJob):
+        @property
+        def trace_manifest(self):
+            pytest.fail("Metadata-only completion must defer reading trace payloads")
+
+    run = successful_run()
+    run.mode, run.job = mode, RemoteJob()
+    result = run.wait()
+    assert result.successful and result.trace_manifest is None
+
+
+def test_remote_wait_preserves_requested_download_failure():
+    run = successful_run()
+    run.mode = "batch"
+
+    def fetch(_):
+        raise FileNotFoundError("required packed payload is missing")
+
+    run._pending_fetch_fn = fetch
+    with pytest.raises(FileNotFoundError, match="required packed payload"):
+        run.wait()

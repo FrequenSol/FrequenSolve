@@ -49,3 +49,4 @@ local Sauce `875f1173` plus the uncommitted receiver checkpoint and multi-group
 changes (2026-09-27). The input direction/covector implications include
 `receiver_jvp` / `receiver_vjp`. These are targeted working-tree overlays,
 not a verbatim snapshot of that commit, and require the matching rebuilt solver.
+The version-4 objective contracts and partition-independent control registry are copied from `FrequenSol/Sauce@80d9e5e8cd5fc67eb0610c8eecf35241631e7ef6` (solver 0.4.1). `fs-objective-linearization-4` and `fs-objective-vector-4` use one canonical row file per task; `fs-control-registry-1` describes distributed blocks in global order without per-rank descriptor files. Other contracts retain the earlier pins above.

@@ -494,3 +494,140 @@ def test_logit_transform_accepts_explicitly_dimensionless_references():
 def test_control_from_fs_rejects_unknown_kinds():
     with pytest.raises(ValueError, match="unsupported property-control kind"):
         control_from_fs({"kind": "wavelet"})
+
+
+@pytest.mark.parametrize(
+    "transform,reference,update,expected",
+    [
+        ("identity", 1900.0, 20.0, 1920.0),
+        ("log", 1900.0, np.log(2.0), 3800.0),
+        ("inverse", 2.0, 0.5, 1.0),
+        ("logit", 0.25, np.log(3.0), 0.5),
+    ],
+)
+def test_parameterized_sampling_composes_reference_and_control(
+    transform, reference, update, expected
+):
+    import xarray as xr
+
+    grid = xr.DataArray(np.zeros(5), dims=["z"], coords={"z": [-1, 0, 0.5, 1, 2]})
+    prop = ParameterizedProperty(
+        reference,
+        id="vp",
+        transform=transform,
+        control=HatControl("z", 1.0, [update, update]),
+    )
+    values = prop.get(grid)
+    np.testing.assert_allclose(
+        values, [reference, expected, expected, expected, reference]
+    )
+
+
+def test_layered_sampling_parameterized_reference_and_length_units():
+    from frequensolve.model import LayeredModel
+
+    model = LayeredModel(dimension=2, x_limits=[0.0, 0.01])
+    model.add_surface(0.0, name="top")
+    prop = ParameterizedProperty(
+        {"value": 1900.0, "units": "m/s"},
+        id="vp",
+        transform="log",
+        control=HatControl("z", 10.0, [0.0, np.log(2.0)], units="m"),
+    )
+    model.add_layer(name="sediment", properties={"vp": prop, "rho": 2000.0})
+    model.add_surface(0.01, name="bottom")
+    # Geometry axes are explicitly supplied in km; the control is in metres.
+    sampled = model.sample_uniform(
+        [3, 3], axes_units={"x": "km", "z": "km"}, properties=["vp"]
+    )
+    np.testing.assert_allclose(sampled["vp"].isel(x=1), [1900, 1900 * np.sqrt(2), 3800])
+
+
+def test_tensor_parameterized_sampling_preserves_first_axis_fastest_storage():
+    import xarray as xr
+
+    from frequensolve.model.parameterization import TensorHatControl
+
+    grid = xr.DataArray(
+        np.zeros((3, 3)), dims=["z", "x"], coords={"z": [0, 0.5, 1], "x": [0, 0.5, 1]}
+    )
+    prop = ParameterizedProperty(
+        10.0,
+        id="vp",
+        control=TensorHatControl(
+            axes=["x", "z"],
+            shape=[2, 2],
+            origin=[0, 0],
+            spacing=[1, 1],
+            coefficients=[1, 2, 3, 4],
+        ),
+    )
+    np.testing.assert_allclose(
+        prop.get(grid), [[11, 11.5, 12], [12, 12.5, 13], [13, 13.5, 14]]
+    )
+
+
+def test_bspline_sampling_and_mesh_materialization_fail_explicitly():
+    import xarray as xr
+
+    from frequensolve.model.parameterization import MeshControl
+
+    grid = xr.DataArray(np.zeros(3), dims=["z"], coords={"z": [0, 0.5, 1]})
+    prop = ParameterizedProperty(
+        1900.0,
+        id="vp",
+        transform="log",
+        control=BSplineControl(
+            axis="z", knots=[0, 0, 1, 1], degree=1, coefficients=[0, np.log(2)]
+        ),
+    )
+    np.testing.assert_allclose(prop.get(grid), [1900, 1900 * np.sqrt(2), 3800])
+    with pytest.raises(ValueError, match="explicit grid"):
+        prop.get()
+    mesh = ParameterizedProperty(1900.0, id="vp", control=MeshControl("vp_space"))
+    with pytest.raises(NotImplementedError, match="solver-backed"):
+        mesh.get(grid)
+
+
+def test_layered_sampling_applies_control_in_named_surface_frame(tmp_path):
+    from frequensolve.geometry.frame import Axis, SurfaceCoordinateSystem
+    from frequensolve.simulation.simulation import SeismicSimulation
+    from frequensolve.units import ureg as u
+
+    simulation = SeismicSimulation(
+        name="sample", physics="acoustic", dimension=2, project_path=tmp_path
+    )
+    simulation += SurfaceCoordinateSystem(
+        name="below_top",
+        surface="top",
+        axes=[Axis("below", direction="z", positive="down")],
+    )
+    model = LayeredModel(dimension=2, x_limits=[0, 1] * u.km)
+    model.add_surface(name="top", depth=0.5 * u.km)
+    model.add_layer(
+        name="rock",
+        properties={
+            "Vp": ParameterizedProperty(
+                2.0,
+                id="vp",
+                units="km/s",
+                transform="log",
+                control=HatControl(
+                    coordinate_system="below_top",
+                    axis="below",
+                    units="m",
+                    spacing=500,
+                    coefficients=[0, np.log(2), 0],
+                ),
+            )
+        },
+    )
+    model.add_surface(name="bottom", depth=1.5 * u.km)
+    simulation += model
+    sampled = model.sample_uniform(
+        [2, 5], axes_units={"x": "km", "z": "km"}, properties="Vp"
+    )
+    np.testing.assert_allclose(
+        sampled["vp"].isel(x=0), [2, 2 * np.sqrt(2), 4, 2 * np.sqrt(2), 2]
+    )
+    assert sampled["vp"].attrs["units"] == "km/s"

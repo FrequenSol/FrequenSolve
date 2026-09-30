@@ -1424,8 +1424,10 @@ their reference model in both solvers.
 (``Imaging.grid``) and returns an :class:`~frequensolve.imaging.ImageSet` with
 xarray ``raw``, ``smoothed`` and ``incremental`` datasets on ``(z, x)``. With
 ``observed=None`` (the default) Sauce uses zero data and the images are the
-pure model sensitivity kernels; ``observed=True`` images the misfit residual
-instead. ``condition="fwi"`` resolves to the property-gradient condition of
+pure model sensitivity kernels. Observed-RMS normalization uses an explicit
+unit scale for these kernels and retains the configured reduction; explicit and
+balance-artifact scales are preserved. ``observed=True`` images the misfit residual
+with the problem's original normalization. ``condition="fwi"`` resolves to the property-gradient condition of
 the physics; other condition names are passed verbatim. Kernels run on a
 simulation copy with the current state installed
 (``problem.simulation_at(v)``, also :attr:`FWIResult.simulation
@@ -1656,6 +1658,14 @@ by role (``image``, ``gradient``, ``objective``, ``state``,
 ``objective_vector``, ``extension``); the readers in
 :mod:`frequensolve.imaging` (``ControlVectorFile``, ``ControlStateFile``,
 ``ObjectiveReport``, ``ImageSet`` ...) open them.
+
+Saved objective states and vectors are read in both formats: solver 0.4.1's
+canonical version 4 and the development solver's distributed version 3.
+Operator calls select the vector format from each task's saved state. Keep
+states with the solver build that created them and regenerate the linearization
+when changing builds. Low-level ``DataVector.write_objective_vector`` callers
+can specify ``schema="fs-objective-vector-4"`` for a canonical saved state;
+the default preserves the distributed version-3 convention.
 
 Sauce contract mapping
 ----------------------

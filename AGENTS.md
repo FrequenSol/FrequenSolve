@@ -124,6 +124,22 @@ Use one primary type label: `type:bug`, `type:feature`, `type:enhancement`,
 For agent-created issues, add `source:agent` when available and include enough
 context for a future agent to reproduce the problem without relying on chat.
 
+## Numerical tolerances
+
+Use relative tolerance `1e-4` by default for iterative solvers, smoothers,
+regularization/proximal solves, and similar numerical routines, not only TV.
+This tolerance rarely needs to change; most seismic imaging problems do not
+need tighter solver accuracy. Preserve explicit user-selected tolerances.
+
+For very hard problems or tasks that require unusually high accuracy, a smaller
+tolerance may be justified. Explain the need and verify the downstream benefit
+before tightening it; difficulty alone is not a reason to demand a smaller
+residual. For single-precision solves, keep the relative tolerance strictly
+above `1e-7`. Do not copy stringent diagnostic/test tolerances into production
+settings or tighten tolerances merely as a precaution. Choose absolute
+tolerances according to residual scaling and units; they are not interchangeable
+with relative tolerances.
+
 ## Development Setup
 
 Install the editable package with the extras needed for the task:

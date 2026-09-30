@@ -291,8 +291,14 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 class TraceOutput(Output):
     """Receiver trace output request.
 
+    Sauce publishes the packed traces at ``<path>/traces.h5`` and replaces
+    that file on every rerun of the job.
+
     Args:
         path: Trace output directory relative to the job result directory.
+        keep_history: Keep each superseded pack under
+            ``<path>/history/<generation>/`` instead of discarding it, e.g. to
+            retain the traces of every FWI iteration run in one job directory.
         **kwargs: Additional solver-facing trace output fields.
 
     Raises:
@@ -300,11 +306,20 @@ class TraceOutput(Output):
     """
 
     path: Optional[Union[str, Path]] = None
+    keep_history: bool = False
 
-    def __init__(self, path: Union[str, Path] = "traces", **kwargs):
+    def __init__(
+        self,
+        path: Union[str, Path] = "traces",
+        keep_history: bool = False,
+        **kwargs,
+    ):
         """Create a trace output request with a job-relative path."""
 
         self.path = _relative_output_path(path)
+        if not isinstance(keep_history, bool):
+            raise TypeError("keep_history must be a boolean")
+        self.keep_history = keep_history
         self._init_extra(None, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -317,11 +332,11 @@ class TraceOutput(Output):
             JSON-compatible trace output payload.
         """
 
-        return merge_extra(
-            {"_type": self.__class__.__name__, "path": self.path},
-            self.extra,
-            self.__class__.__name__,
-        )
+        payload: Dict[str, Any] = {"_type": self.__class__.__name__, "path": self.path}
+        # Omitted when false so existing job fingerprints are unchanged.
+        if self.keep_history:
+            payload["keep_history"] = True
+        return merge_extra(payload, self.extra, self.__class__.__name__)
 
     @classmethod
     def from_fs(cls, data: Dict) -> "TraceOutput":
@@ -336,7 +351,11 @@ class TraceOutput(Output):
 
         data = copy.deepcopy(data)
         data.pop("_type", None)
-        return cls(path=data.pop("path", "traces"), **data)
+        return cls(
+            path=data.pop("path", "traces"),
+            keep_history=data.pop("keep_history", False),
+            **data,
+        )
 
 
 @dataclass(kw_only=True)

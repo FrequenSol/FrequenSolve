@@ -239,6 +239,7 @@ class SolverAuthoringRules:
     default_tolerance: float
     default_precision: str
     additional_fields_status: str
+    tolerance_guidance: str = ""
 
 
 @dataclass(frozen=True)
@@ -1039,6 +1040,7 @@ def _solver_rules(value: object, path: str) -> SolverAuthoringRules:
             "defaults",
             "additional_fields_status",
         },
+        optional={"tolerance_guidance"},
         path=path,
     )
     defaults = _mapping(data["defaults"], f"{path}.defaults")
@@ -1048,6 +1050,11 @@ def _solver_rules(value: object, path: str) -> SolverAuthoringRules:
         path=f"{path}.defaults",
     )
     return SolverAuthoringRules(
+        tolerance_guidance=(
+            _string(data["tolerance_guidance"], f"{path}.tolerance_guidance")
+            if "tolerance_guidance" in data
+            else ""
+        ),
         solve_on_values=_string_tuple(
             data["solve_on_values"], f"{path}.solve_on_values"
         ),

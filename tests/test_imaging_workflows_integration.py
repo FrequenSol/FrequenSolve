@@ -182,3 +182,31 @@ def test_native_tv_fwi_objective_through_local_orchestration(tmp_path, site):
     assert result.loss.total == pytest.approx(
         result.loss.data + result.loss.regularization
     )
+
+
+def test_multifrequency_zero_data_kernel_stacks_native_task_images(tmp_path, site):
+    """Observed-RMS problems can request a zero-data kernel and native frequency mean."""
+    from frequensolve.geometry.grids import CartesianGrid
+
+    project = Project(name="kernel", path=tmp_path / "project", load_if_exists=False)
+    truth = _simulation(project, "truth", TRUTH_VP)
+    initial = _simulation(project, "initial", START_VP)
+    frequencies = [FREQUENCY - 1, FREQUENCY]
+    observed = FrequencyDomainJob("observed", truth, frequencies)
+    assert site.run(observed, check=True).successful
+    problem = im.ImagingProblem(
+        initial,
+        controls=im.DepthProfile("vp", "layer_2", count=4),
+        observed=im.ObservedData(observed),
+        frequencies=frequencies,
+        misfit=im.Misfit.huber(),
+        site=site,
+        name="kernel",
+    )
+    grid = CartesianGrid(n=[9, 7], x0=[0, 0], x1=[1.0, 0.6])
+    images = im.sensitivity_kernel(problem, grid, observed=None)
+    assert images.parts == 2
+    raw = images.raw["vp"].values
+    parts = [images.read_images("raw", part=task)["vp"].values for task in (1, 2)]
+    assert np.all(np.isfinite(raw)) and np.linalg.norm(raw) > 0
+    np.testing.assert_allclose(raw, (parts[0] + parts[1]) / 2, rtol=1e-4, atol=1e-12)

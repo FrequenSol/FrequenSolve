@@ -20,7 +20,14 @@ _CONVENTIONS = (OBSERVED_MINUS_SIMULATED, SIMULATED_MINUS_OBSERVED)
 import h5py
 import numpy as np
 
-from .data import DataSpace, DataVector, TermLayout, _DataSegment, file_sha256
+from .data import (
+    DataSpace,
+    DataVector,
+    TermLayout,
+    _DataSegment,
+    canonical_json_sha256,
+    file_sha256,
+)
 
 
 def _resolve(parent: Path, name: str) -> Path:
@@ -38,19 +45,46 @@ class ObjectiveState:
     def __init__(self, path: Union[str, Path]) -> None:
         self.path = Path(path)
         manifest = json.loads(self.path.read_text())
-        self.n_ranks = int(manifest["partition"]["n_ranks"])
-        if self.n_ranks < 1 or len(manifest["shards"]) != self.n_ranks:
+        schema = manifest.get("schema", "fs-objective-linearization-3")
+        if schema not in {
+            "fs-objective-linearization-3",
+            "fs-objective-linearization-4",
+        }:
+            raise ValueError(f"unsupported objective state schema {schema!r}")
+        self.vector_schema = schema.replace("linearization", "vector")
+        canonical = schema == "fs-objective-linearization-4"
+        self.n_ranks = 1 if canonical else int(manifest["partition"]["n_ranks"])
+        if not canonical and (
+            self.n_ranks < 1 or len(manifest["shards"]) != self.n_ranks
+        ):
             raise ValueError("objective state has an inconsistent rank partition")
+        if "manifest_fingerprint" in manifest:
+            basis = {
+                k: v
+                for k, v in manifest.items()
+                if k not in {"manifest_fingerprint", "state_fingerprint"}
+            }
+            if canonical_json_sha256(basis) != manifest["manifest_fingerprint"]:
+                raise ValueError("objective state manifest fingerprint mismatch")
+            if (
+                manifest.get("state_fingerprint", manifest["manifest_fingerprint"])
+                != manifest["manifest_fingerprint"]
+            ):
+                raise ValueError("objective state fingerprint mismatch")
         self.terms: Dict[str, Dict[str, Any]] = {}
         # Keep the resolved objective configuration as well as its rows.
         # Patch restriction must preserve parent normalization across ranks.
         self.term_configs: Dict[str, List[Dict[str, Any]]] = {}
         hashes: Dict[Path, str] = {}
-        for entry in manifest["shards"]:
-            shard = _resolve(self.path.parent, entry["file"])
-            if file_sha256(shard) != entry["sha256"]:
-                raise ValueError("objective state shard hash mismatch")
-            payload = json.loads(shard.read_text())
+        entries = [None] if canonical else manifest["shards"]
+        for entry in entries:
+            if entry is None:
+                shard, payload = self.path, manifest
+            else:
+                shard = _resolve(self.path.parent, entry["file"])
+                if file_sha256(shard) != entry["sha256"]:
+                    raise ValueError("objective state shard hash mismatch")
+                payload = json.loads(shard.read_text())
             for term in payload["terms"]:
                 self.term_configs.setdefault(term["id"], []).append(term)
                 cache = _resolve(shard.parent, term["cache"]["file"])
@@ -61,11 +95,15 @@ class ObjectiveState:
                     raise ValueError("objective state cache hash mismatch")
                 with h5py.File(cache, "r") as h5:
                     group = h5[term["cache"].get("group", "/")]
-                    ids = np.asarray(group["row_ids"], dtype=int).reshape(-1)
                     keys = np.asarray(group["coordinate_keys"], dtype=int).reshape(
                         -1, 3
                     )
                     count = int(np.asarray(group["n_global_rows"]).item())
+                    ids = (
+                        np.arange(1, count + 1)
+                        if canonical
+                        else np.asarray(group["row_ids"], dtype=int).reshape(-1)
+                    )
                     residual = None
                     convention = OBSERVED_MINUS_SIMULATED
                     if "objective_residual" in group:
