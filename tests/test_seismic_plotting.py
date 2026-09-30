@@ -803,6 +803,31 @@ def test_vtu_base_field_alias_accepts_unique_source_indexed_pressure(tmp_path):
     plotter.close()
 
 
+@pytest.mark.parametrize("unit_suffix", ["[Pa]", "(Pa)"])
+def test_native_vtu_display_name_and_units_produce_one_scalar_bar_unit(
+    tmp_path, unit_suffix
+):
+    path = _write_source_indexed_pressure_vtu(tmp_path)
+    path.write_text(
+        path.read_text().replace(
+            'Name="pressure_1_abs"',
+            f'Name="pressure_1_abs" fs_display_name="Pressure (Magnitude) {unit_suffix}" fs_units="Pa"',
+        )
+    )
+    plotter, mesh = plot_vtu(
+        path, field="pressure", source=1, part="abs", show=False, return_mesh=True
+    )
+    try:
+        assert "Pressure (Magnitude) [Pa]" in mesh.point_data
+        np.testing.assert_allclose(
+            mesh.point_data["Pressure (Magnitude) [Pa]"],
+            mesh.point_data["pressure_1_abs"],
+        )
+        assert list(plotter.scalar_bars.keys()) == ["Pressure (Magnitude) [Pa]"]
+    finally:
+        plotter.close()
+
+
 def test_vtu_plot_accepts_source_number_for_source_indexed_fields(tmp_path):
     path = _write_multi_source_strain_vtu(tmp_path)
 
