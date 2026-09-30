@@ -97,7 +97,8 @@ Typed Fields and Material Expressions
 
 Physics namespaces expose symbolic quantities as attributes:
 ``fs.physics.acoustic()``, ``fs.physics.elastic()``,
-``fs.physics.poroelastic()``, and ``fs.physics.electromagnetic()``.
+``fs.physics.coupled()``, ``fs.physics.poroelastic()``, and
+``fs.physics.electromagnetic()``.
 Fields and materials carry units and tensor shape; values resolve against the
 simulation at receiver locations. Select components with ``velocity.z``,
 ``strain.xx``, or ``strain["x", "z"]``. Use ``.to("MPa")`` for output units.
@@ -130,6 +131,55 @@ Device vector and tensor components expand to names such as ``velocity.x``,
 also accept constant numeric ``direction`` vectors for a single projected
 measurement. String field names remain supported. A group resolves a copy of
 its device, so the authored expressions remain available when reusing the device.
+
+Acoustic and elastic fields request physics-qualified plans, such as
+``acoustic:pressure`` and ``elastic:velocity_all``. A support-aware Sauce backend
+averages each channel over only the mapped elements where its physics is active,
+using the same weights for adjoint injection and receiver derivatives. Valid zero
+values still count; eligibility comes from the plan's physics mask.
+Normalization applies to the resulting channel's support, rather than separately
+to each child of an expression. Arithmetic combining acoustic-qualified and
+elastic-qualified fields is rejected by the SDK. Record those fields as separate
+components. Likewise, generic fields with different support should be recorded
+separately before combining their sampled values.
+
+.. code-block:: python
+
+   device = fs.ReceiverNode(name="obn_device")
+   device.add_component("pressure", acoustic.fields.pressure)
+   device.add_component("velocity", elastic.fields.velocity)
+   acq.add_receiver_group("OBN", device, coords=interface_coords)
+
+Omit the group domain here so both interface sides remain mapped. A group domain
+restricts all components: ``domain="solid"`` excludes fluid elements, so acoustic
+pressure is zero there. A channel with no compatible mapped element remains zero.
+Older backends average masked zeros into interface measurements and dilute them.
+
+For generic fields that route to the active physics, use ``fs.physics.coupled()``:
+
+.. code-block:: python
+
+   coupled = fs.physics.coupled()
+   device = fs.ReceiverNode(name="pv")
+   device.add_component("pressure", coupled.fields.pressure)
+   device.add_component("velocity", coupled.fields.velocity)
+   acq.add_receiver_group("pv", device, coords=coords)
+
+Generic pressure is fluid pressure or solid negative mean normal stress. Generic
+velocity and stress use the active acoustic/elastic plans; generic strain and
+displacement retain the backend's elastic-only definitions. Generic interface
+fields average their supported values from both sides. Common scalar properties,
+such as ``coupled.materials.rho`` and ``coupled.materials.Sp``, can scale fields;
+material-dependent sampling still requires an unambiguous material layer.
+Shared scalar properties are local references regardless of namespace:
+``elastic.materials.rho * acoustic.fields.velocity`` can sample density and
+velocity in an acoustic layer. The factory name does not select a material side.
+At a fluid--solid interface, material-dependent receiver expressions and objective
+weights require a group domain identifying one material layer; ambiguous layers
+raise an error rather than average the material properties. Constitutive tensors
+retain their physics restrictions.
+In 2.5D, generic full velocity and stress lack a common acoustic/elastic shape;
+select ``coupled.fields.velocity.x`` or ``.z``, or use physics-qualified fields.
 
 A full vector or symmetric tensor records all its independent components;
 a selected entry records one. For multiple quantities in one group, pass a

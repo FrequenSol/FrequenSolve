@@ -22,6 +22,7 @@ __all__ = [
     "PhysicsNamespace",
     "acoustic",
     "elastic",
+    "coupled",
     "poroelastic",
     "electromagnetic",
 ]
@@ -272,6 +273,15 @@ class ReceiverExpression:
                 "Material-only outputs must be requested with materials= diagnostics"
             )
         if self.kind == "field":
+            if (
+                self.physics == "coupled"
+                and dimension == 2.5
+                and self.name in {"velocity", "stress"}
+            ):
+                raise ValueError(
+                    "Full coupled velocity/stress outputs are unavailable in 2.5D; "
+                    "select velocity.x or velocity.z, or use physics-qualified fields"
+                )
             prefix = "maxwell" if self.physics == "em" else self.physics
             name = (
                 "solid_velocity"
@@ -281,7 +291,8 @@ class ReceiverExpression:
             # The existing induction plan is registered under its short name.
             qualifier = (
                 ""
-                if self.physics == "em" and self.name == "magnetic_induction"
+                if self.physics == "coupled"
+                or (self.physics == "em" and self.name == "magnetic_induction")
                 else f"{prefix}:"
             )
             name = qualifier + name + ("_all" if self.rank else "")
@@ -292,6 +303,22 @@ class ReceiverExpression:
             }
         if self.kind == "select":
             parent = self.args[0]
+            if (
+                self.physics == "coupled"
+                and dimension == 2.5
+                and parent.kind == "field"
+                and parent.name == "velocity"
+            ):
+                axis = self.selection[0]
+                if axis not in {"x", "z"}:
+                    raise ValueError(
+                        "Coupled 2.5D velocity supports x and z components"
+                    )
+                return {
+                    "kind": "field",
+                    "name": f"velocity_{axis}",
+                    "packing": "scalar",
+                }
             labels = _labels(parent.rank, 3 if self.physics == "em" else dimension)
             label = "".join(self.selection)
             if label not in labels:
@@ -391,7 +418,7 @@ class MaterialProperty(ReceiverExpression):
         *,
         units: Any,
         rank: int = 0,
-        physics: str,
+        physics: str | None,
         dimension: Any = None,
     ):
         super().__init__("material", _unit(units), rank, physics, dimension, name)
@@ -523,7 +550,12 @@ def _namespace(
         for key, (units, rank) in field_specs.items()
     }
     materials = {
-        key: MaterialProperty(key, units=units, physics=name, dimension=dimension)
+        key: MaterialProperty(
+            key,
+            units=units,
+            physics=None if key in _SEISMIC else name,
+            dimension=dimension,
+        )
         for key, units in material_specs.items()
     }
     if "rho" in materials:
@@ -561,6 +593,27 @@ def elastic(*, dimension: Any = None) -> PhysicsNamespace:
             "displacement": ("m", 1),
         },
         _ELASTIC,
+        dimension,
+    )
+
+
+def coupled(*, dimension: Any = None) -> PhysicsNamespace:
+    """Generic acoustic/elastic fields and local scalar material properties.
+
+    Pressure is fluid pressure or elastic negative mean normal stress. Velocity
+    and stress route to the active physics; strain and displacement retain the
+    backend's elastic-only definitions. Use acoustic()/elastic() for scoped fields.
+    """
+    return _namespace(
+        "coupled",
+        {
+            "pressure": ("Pa", 0),
+            "velocity": ("m/s", 1),
+            "stress": ("Pa", 2),
+            "strain": ("1", 2),
+            "displacement": ("m", 1),
+        },
+        _SEISMIC,
         dimension,
     )
 

@@ -41,6 +41,7 @@ def validator():
     [
         (fs.physics.acoustic, "pressure", "rho"),
         (fs.physics.elastic, "strain", "compliance"),
+        (fs.physics.coupled, "velocity", "rho"),
         (fs.physics.poroelastic, "fluid_flux", "porosity"),
         (fs.physics.electromagnetic, "electric", "conductivity"),
     ],
@@ -52,6 +53,92 @@ def test_namespaces_are_discoverable_typed_references(factory, field, material):
     assert field in dir(namespace.fields)
     with pytest.raises(AttributeError, match="Unknown quantity"):
         namespace.materials.missing
+
+
+@pytest.mark.parametrize("dimension", [2, 3])
+def test_scoped_and_coupled_fields_keep_distinct_native_plans(dimension, validator):
+    acoustic = fs.physics.acoustic()
+    elastic = fs.physics.elastic()
+    coupled = fs.physics.coupled()
+    device = ReceiverNode(name="mixed")
+    device.add_component("fluid_pressure", acoustic.fields.pressure)
+    device.add_component("solid_velocity", elastic.fields.velocity)
+    device.add_component("pressure", coupled.fields.pressure)
+    device.add_component("velocity", coupled.fields.velocity)
+    device.add_component("strain_xz", coupled.fields.strain.xz)
+    group = ReceiverGroup("mixed", device, [[0] * dimension])
+    payload = group.to_fs(ExportContext(dimension=dimension, physics="coupled"))
+    entries = {entry["name"]: entry for entry in payload["device"]["components"]}
+    assert entries["fluid_pressure"]["expression"]["name"] == "acoustic:pressure"
+    assert entries["pressure"]["expression"]["name"] == "pressure"
+    assert (
+        entries["solid_velocity.x"]["expression"]["child"]["name"]
+        == "elastic:velocity_all"
+    )
+    assert entries["velocity.x"]["expression"]["child"]["name"] == "velocity_all"
+    assert entries["strain_xz"]["expression"]["child"]["name"] == "strain_all"
+    assert "domain" not in payload
+    validator.validate(payload)
+    assert ReceiverGroup.from_fs(payload).to_fs() == payload
+    with pytest.raises(ValueError, match="physics"):
+        ReceiverGroup("generic", coupled.fields.pressure, [[0] * dimension]).to_fs(
+            ExportContext(dimension=dimension, physics="acoustic")
+        )
+
+
+def test_coupled_material_scaling_and_halfdimensional_limits():
+    coupled = fs.physics.coupled()
+    expression = coupled.materials.rho * coupled.fields.velocity
+    payload = ReceiverGroup("momentum", expression, [[0, 0]], domain="solid").to_fs(
+        ExportContext(dimension=2, physics="coupled")
+    )
+    assert payload["device"]["components"][0]["expression"]["child"]["coefficient"] == {
+        "expr": {"ref": "rho"}
+    }
+    for axis in ("x", "z"):
+        assert coupled.fields.velocity[axis]._native(2.5)["name"] == f"velocity_{axis}"
+    with pytest.raises(ValueError, match="x and z"):
+        coupled.fields.velocity.y._native(2.5)
+    for field in (coupled.fields.velocity, coupled.fields.stress):
+        with pytest.raises(ValueError, match="unavailable"):
+            field._native(2.5)
+
+
+@pytest.mark.parametrize(
+    "factory", [fs.physics.acoustic, fs.physics.elastic, fs.physics.coupled]
+)
+def test_shared_materials_follow_local_layer_without_scoping_field_support(factory):
+    acoustic = fs.physics.acoustic()
+    elastic = fs.physics.elastic()
+    materials = factory().materials
+    assert materials.rho.physics is None
+    assert materials.Sp.physics is None
+    for field, physics in (
+        (acoustic.fields.velocity, "acoustic"),
+        (elastic.fields.velocity, "elastic"),
+    ):
+        momentum = materials.rho * field
+        payload = ReceiverGroup("momentum", momentum, [[0, 0]]).to_fs(
+            ExportContext(dimension=2, physics=physics)
+        )
+        expression = payload["device"]["components"][0]["expression"]["child"]
+        assert expression["coefficient"] == {"expr": {"ref": "rho"}}
+        assert expression["child"]["name"] == physics + ":velocity_all"
+    pressure = acoustic.fields.pressure / materials.rho
+    assert pressure.physics == "acoustic"
+    with pytest.raises(ValueError, match="different physics"):
+        elastic.materials.compliance @ fs.physics.poroelastic().fields.stress
+
+
+def test_arithmetic_between_scoped_physics_requires_separate_outputs():
+    acoustic = fs.physics.acoustic()
+    elastic = fs.physics.elastic()
+    for operation in (
+        lambda: acoustic.fields.pressure + elastic.fields.pressure,
+        lambda: acoustic.fields.velocity - elastic.fields.velocity,
+    ):
+        with pytest.raises(ValueError, match="separate receiver outputs"):
+            operation()
 
 
 @pytest.mark.parametrize(
