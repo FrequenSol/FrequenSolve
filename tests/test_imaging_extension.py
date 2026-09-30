@@ -31,6 +31,7 @@ from frequensolve.imaging.operators import (
     ModelOperator,
     ReducedNormal,
 )
+from frequensolve.imaging.regularization import Quadratic
 from frequensolve.imaging.workflows import FWI, NewtonCG, Stage
 from frequensolve.inversion.validation import gradient_taylor_test
 from frequensolve.simulation import SolverConfig
@@ -51,11 +52,122 @@ def _space():
 
 
 def _extension(**kwargs):
-    options = dict(damping=0.3, lag_penalty=1.0, lag_scale=20 * u.ms, tolerance=1e-8)
+    options = dict(
+        damping=0.3,
+        lag_penalty=1.0,
+        lag_scale=20 * u.ms,
+        tolerance=1e-8,
+        frequency_coupling="independent",
+    )
     options.update(kwargs)
     return Extension(
         [Lags("vp", count=3, origin=-10 * u.ms, spacing=10 * u.ms)], **options
     )
+
+
+def test_shared_frequency_fit_dispatches_one_grouped_solve(tmp_path, fake, monkeypatch):
+    _, problem = _problem(tmp_path, fake)
+    xp = problem.extend(_extension(frequency_coupling="shared"))
+    lin = xp.linearize()
+    captured = []
+    monkeypatch.setattr(lin.view, "_run_job", captured.append)
+    job = lin._solve(model_gradient=True, covector="gradient.h5")
+    assert captured == [job]
+    assert job.frequency_groups == 2
+    assert job.extension["solver"]["frequency_weights"] == [1.0, 1.0]
+    _assert_valid(job.to_fs())
+
+
+def test_gradient_checkpoint_prefix_reaches_native_solver(tmp_path, fake, monkeypatch):
+    _, problem = _problem(tmp_path, fake)
+    extension = _extension(
+        gradient_checkpoints="iterations/gradient", gradient_checkpoint_interval=10
+    )
+    assert extension.solver_fs()["gradient_checkpoints"] == "iterations/gradient"
+    lin = problem.extend(extension).linearize()
+    monkeypatch.setattr(lin.view, "_run_job", lambda job: None)
+    job = lin._solve(model_gradient=True, covector="gradient.h5")
+    document = job.to_fs()
+    _assert_valid(document)
+    assert (
+        document["fwi_operator"]["extension"]["solver"]["gradient_checkpoint_interval"]
+        == 10
+    )
+    assert str(
+        document["fwi_operator"]["extension"]["solver"]["gradient_checkpoints"]
+    ).endswith("iterations/gradient")
+    with pytest.raises(ValueError, match="nonempty"):
+        _extension(gradient_checkpoints=" ")
+
+
+@pytest.mark.parametrize("interval", [0, -1, 1.5, True, "10"])
+def test_gradient_checkpoint_interval_requires_positive_integer(interval):
+    with pytest.raises(ValueError, match="positive integer"):
+        _extension(gradient_checkpoint_interval=interval)
+
+
+def test_extension_space_refreshes_after_registry_replaces_provisional_basis(setup):
+    sim, problem, xp = setup
+    provisional = xp.extension_space
+    assert provisional.size == 15
+    problem._shared.space = ControlSpace(
+        vp=DepthProfile("vp", "sediment", count=7),
+        rho=DepthProfile("rho", "sediment", count=3),
+    ).bind(sim)
+    assert xp.extension_space is not provisional
+    assert xp.extension_space.size == 21
+    assert xp.extension_space.space is problem.full_space
+
+
+def test_shared_single_frequency_weight_scales_data_not_regularizer(
+    tmp_path, fake, monkeypatch
+):
+    _, problem = _problem(tmp_path, fake)
+    xp = problem.restrict(frequencies=[4.0], weights=[0.7]).extend(
+        _extension(frequency_coupling="shared")
+    )
+    lin = xp.linearize()
+    monkeypatch.setattr(lin.view, "_run_job", lambda job: None)
+    job = lin._solve()
+    assert job.frequency_groups == 1
+    assert job.extension["solver"]["frequency_weights"] == [0.7]
+    _assert_valid(job.to_fs())
+
+
+def test_shared_frequency_objective_counts_regularization_once(tmp_path, fake):
+    _, problem = _problem(tmp_path, fake)
+    lin = problem.extend(_extension(frequency_coupling="shared")).linearize()
+    lin.frequency_weights = np.array([0.7, 1.3])
+    lin._solutions = [
+        (
+            lin.extension_space.zeros(),
+            ExtensionSolveReport(
+                baseline="baseline",
+                fingerprint="fingerprint",
+                damping=1.0,
+                method="cg",
+                iterations=2,
+                converged=True,
+                regularization=3.0,
+                data_objective=value,
+                reduced_objective=value + 3.0,
+                raw={"scope": "frequency_band"},
+            ),
+        )
+        for value in (2.0, 4.0)
+    ]
+    assert lin.value == pytest.approx(9.6)
+    assert lin.report["regularization"] == 3.0
+    assert lin.report["data_objective"] == pytest.approx(6.6)
+    with pytest.raises(NotImplementedError, match="Schur"):
+        _ = lin.normal
+
+
+def test_frequency_coupling_default_and_validation():
+    fields = [Lags("vp", count=3, origin=0, spacing=1)]
+    assert Extension(fields, damping=0.3).frequency_coupling == "shared"
+    with pytest.raises(ValueError, match="frequency_coupling"):
+        Extension(fields, damping=0.3, frequency_coupling="average")
 
 
 def _simulation(tmp_path, *, relaxed=False):
@@ -297,7 +409,7 @@ def test_extend_shares_state_and_rejects_unsupported_setups(tmp_path, fake, setu
         problem.restrict(misfit=Misfit(comparison="phase_derivative")).extend(
             _extension()
         )
-    # unrelaxed assembly is required
+    # relaxed assembly is an accepted approximation
     relaxed = ImagingProblem(
         _simulation(tmp_path / "relaxed", relaxed=True),
         controls=_space(),
@@ -306,18 +418,7 @@ def test_extend_shares_state_and_rejects_unsupported_setups(tmp_path, fake, setu
         site=fake,
         name="relaxed",
     )
-    with pytest.raises(ValueError, match="relaxed_assembly"):
-        relaxed.extend(_extension())
-    # Laplace frequencies
-    with pytest.raises(ValueError, match="real frequencies"):
-        ImagingProblem(
-            sim,
-            controls=_space(),
-            observed={"surface": "observed.h5"},
-            frequencies=[4.0 - 0.5j],
-            site=fake,
-            name="laplace",
-        ).extend(_extension())
+    assert relaxed.extend(_extension()).capabilities()["ok"]
     # field must borrow a block of the space
     with pytest.raises(ValueError, match="not a block"):
         problem.extend(
@@ -364,9 +465,12 @@ def _extension_jobs(fake):
     ]
 
 
-def test_extension_jobs_validate_against_the_pinned_schema(setup, fake):
-    sim, problem, xp = setup
-    view = xp.restrict(frequencies=[4.0])
+@pytest.mark.parametrize("frequency", [4.0, 4.0 - 0.5j])
+def test_extension_jobs_validate_against_the_pinned_schema(tmp_path, fake, frequency):
+    sim, problem = _problem(tmp_path, fake, frequencies=[frequency])
+    xp = problem.extend(_extension())
+    assert xp.capabilities()["ok"]
+    view = xp.restrict(frequencies=[frequency])
     lin = view.linearize()
     taps, report = view.solve()
     view.gradient()
@@ -428,7 +532,15 @@ def test_extension_jobs_validate_against_the_pinned_schema(setup, fake):
             assert {"direction", "covector"} <= set(op["extension"])
     # one single-frequency job per action on the saved task
     assert all(job.n_tasks == 1 for job in jobs)
-    assert all(job.f_list == [4.0] for job in jobs)
+    assert all(job.f_list == [frequency] for job in jobs)
+    for job in jobs:
+        pair = job.to_fs()["f_list"][0]
+        expected = (
+            [frequency.real, frequency.imag]
+            if isinstance(frequency, complex)
+            else frequency
+        )
+        np.testing.assert_allclose(pair, expected)
 
 
 def test_multi_frequency_actions_submit_one_job_each(setup, fake):
@@ -508,6 +620,28 @@ def test_linearize_caches_and_carries_the_residual_covector(setup, fake):
     # a moved point is a new linearization
     moved = xp.linearize(problem.vector() + 0.1)
     assert moved is not lin and moved.fingerprint != lin.fingerprint
+
+
+def test_model_directions_use_each_frequency_registry(setup, monkeypatch):
+    from dataclasses import replace
+
+    from frequensolve.imaging import extension as extension_module
+    from frequensolve.imaging._artifacts import ControlVectorFile
+
+    _, _, extended = setup
+    read = extension_module.read_manifest
+
+    def frequency_registry(job, task=1):
+        registry = read(job, task=task)
+        return replace(registry, fingerprint=f"frequency-registry-{task}")
+
+    monkeypatch.setattr(extension_module, "read_manifest", frequency_registry)
+    linearization = extended.linearize()
+    directory = linearization._ops_dir()
+    stem = linearization._direction_stem(extended.space.ones(), directory)
+    for task in (1, 2):
+        vector = ControlVectorFile.read(linearization.job.task_input(stem, task))
+        assert vector.control_registry_fingerprint == f"frequency-registry-{task}"
 
 
 def test_solve_matches_the_closed_form_taps(setup, fake):
@@ -691,21 +825,46 @@ def test_check_runs_every_identity(setup):
 # ---------------------------------------------------------------------------
 
 
-def test_fwi_decreases_the_reduced_objective(setup, fake):
+@pytest.mark.parametrize("regularization_weight", [0.0, 0.2])
+def test_fwi_decreases_the_reduced_objective(setup, fake, regularization_weight):
     sim, problem, xp = setup
     problem.state = problem.state_from(np.linspace(-0.5, 0.5, 8))
-    initial = xp.value()
+    regularization = Quadratic(np.eye(xp.space.size), weight=regularization_weight)
+    bound = regularization.bind(xp.space)
+    initial = xp.value() + bound.value(problem.vector())
     fwi = FWI(
         xp,
-        stages=[Stage(FREQUENCIES, iterations=4)],
-        optimizer=NewtonCG(max_cg_iterations=8),
+        stages=[Stage(FREQUENCIES, iterations=10)],
+        optimizer=NewtonCG(
+            max_cg_iterations=20,
+            initial_forcing=1e-8,
+            minimum_forcing=1e-8,
+            maximum_forcing=1e-8,
+            # Match the inner forcing accuracy; smaller residuals vary across BLAS.
+            gradient_tolerance=1e-8,
+            objective_tolerance=0.0,
+            step_tolerance=0.0,
+        ),
+        regularization=regularization,
     )
     result = fwi.run(resume=False)
     assert result.stages[0].success
     assert result.stages[0].final_loss.total < initial
-    assert result.stages[0].final_loss.total == pytest.approx(
-        xp.value(result.state.vector(xp.space))
-    )
+    final = result.state.vector(xp.space)
+    loss = result.stages[0].final_loss
+    lin = xp.linearize(final)
+    assert lin.report["regularization"] > 0.0  # backend tap regularization
+    assert loss.data == pytest.approx(lin.value)
+    assert loss.regularization == pytest.approx(bound.value(final))
+    assert loss.total == pytest.approx(lin.value + bound.value(final))
+    # Both terms must participate in the optimum, with the inner term counted once.
+    assert np.linalg.norm(lin.gradient.values + bound.gradient(final).values) < 1e-5
     assert problem.state is result.state
     assert any(job.reduced_normal is not None for job in _extension_jobs(fake))
     assert any(job.model_gradient for job in _extension_jobs(fake))
+
+
+def test_extension_workspace_budget_is_deprecated_and_not_emitted():
+    with pytest.warns(DeprecationWarning, match="workspace_mb"):
+        ext = _extension(workspace_mb=64.0)
+    assert "workspace_mb" not in ext.solver_fs()

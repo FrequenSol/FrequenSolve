@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
+from frequensolve.seismic.spectra import TransferFunction
 from frequensolve.seismic.trace_store import TraceStore, TraceSummary
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.jobs.artifacts import TraceManifest
@@ -550,7 +551,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int = 1,
-        wavelet: Optional[Wavelet] = None,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         **kwargs,
     ):
         """Read one frequency-domain gather.
@@ -570,7 +571,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         laplace_compensation: str = "auto",
@@ -620,7 +621,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,
@@ -642,7 +643,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int = 1,
-        wavelet: Optional[Wavelet] = None,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         **kwargs,
     ):
         """Alias for ``frequency_domain``."""
@@ -660,7 +661,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         laplace_compensation: str = "auto",
@@ -692,7 +693,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,

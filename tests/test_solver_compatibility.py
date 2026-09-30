@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import warnings
 
 import pytest
 
@@ -26,6 +27,13 @@ from frequensolve.solver import (
 )
 
 COMMIT = "a" * 40
+
+
+@pytest.fixture(autouse=True)
+def _reset_emitted_warnings():
+    solver._EMITTED_WARNINGS.clear()
+    yield
+    solver._EMITTED_WARNINGS.clear()
 
 
 def _manifest() -> SolverCompatibilityManifest:
@@ -502,6 +510,25 @@ def test_warn_policy_reports_preferred_solver_without_sauce(monkeypatch):
     assert "Preferred Solver: v0.1.0" in message
     assert "may result in unexpected behavior" in message
     assert "Sauce" not in message
+
+
+def test_repeated_checks_warn_once_per_solver_pairing(monkeypatch):
+    monkeypatch.setattr(
+        solver,
+        "query_local_solver_identity",
+        lambda *args, **kwargs: SolverIdentityQuery(
+            _identity(version="v0.2.0", commit="b" * 40)
+        ),
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            check_solver_compatibility("/solver", manifest=_manifest())
+        check_solver_compatibility("/other-solver", manifest=_manifest())
+
+    emitted = [w for w in caught if issubclass(w.category, SolverCompatibilityWarning)]
+    assert len(emitted) == 2
 
 
 def test_strict_policy_fails_unknown_identity(monkeypatch):

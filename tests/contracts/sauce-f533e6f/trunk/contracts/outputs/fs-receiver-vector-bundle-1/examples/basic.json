@@ -1,0 +1,19 @@
+{
+  "schema": "fs-receiver-vector-bundle-1",
+  "state_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "groups": [
+    {
+      "receiver_group": "surface",
+      "file": "surface.json",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "receiver_group": "deep",
+      "file": "deep.json",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "role": "dual",
+  "source_state": "state.json",
+  "source_state_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

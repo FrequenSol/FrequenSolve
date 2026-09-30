@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from numbers import Number
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     Iterable,
@@ -42,6 +43,9 @@ from frequensolve.util.mixins import (
     merge_extra,
 )
 
+if TYPE_CHECKING:
+    from frequensolve.seismic.receivers import ReceiverComponent
+
 __all__ = [
     "Source",
     "SourceGroup",
@@ -55,7 +59,7 @@ __all__ = [
 ]
 
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole"}
+_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
 
 
 def _path_to_fs(path: Union[str, Path], ctx: Optional[ExportContext]) -> str:
@@ -181,6 +185,12 @@ def _source_direction_from_fs(value: Any) -> Any:
     if set(payload).issubset(allowed) and has_axis != has_value:
         return payload
     return Direction.from_fs(payload)
+
+
+# Per-point basis fields the solver inherits from geometry defaults, as two groups.
+_SHAPE_KEYS = ("kind", "mechanism", "direction", "units")
+_SHAPE_TRIGGER_KEYS = ("kind", "mechanism", "direction")
+_STRENGTH_KEYS = ("amplitude", "moment_magnitude")
 
 
 def _source_basis_to_fs(value: Mapping[str, Any]) -> Dict[str, Any]:
@@ -492,6 +502,26 @@ def _source_coordinate_matrix(
     return np.asarray(rows, dtype=float), target_units, target_system
 
 
+def _acoustic_reciprocal_receiver(
+    kinds: Iterable[str | None], *, physics: str, name: str, units: str
+) -> ReceiverComponent:
+    """Define the ideal measurement paired with acoustic volume-rate monopoles."""
+    from frequensolve.seismic.receivers import ReceiverComponent
+    from frequensolve.units import ureg
+
+    if str(physics).strip().lower() != "acoustic":
+        raise ValueError(
+            "Reciprocal receiver definitions currently support acoustic volume_injection only"
+        )
+    if any(kind != "volume_injection" for kind in kinds):
+        raise ValueError(
+            "A pressure reciprocal receiver requires explicit volume_injection sources"
+        )
+    if not ureg.Unit(units).is_compatible_with(ureg.Pa):
+        raise ValueError("An acoustic reciprocal receiver requires pressure units")
+    return ReceiverComponent(name=name, field="pressure", units=units)
+
+
 @dataclass(init=False)
 class PointSource(ExtraFieldsMixin):
     """One physical source point in a source geometry catalog."""
@@ -576,6 +606,23 @@ class PointSource(ExtraFieldsMixin):
             amplitude=payload.pop("amplitude", None),
             mechanism=payload.pop("mechanism", None),
             extra=payload,
+        )
+
+    def reciprocal_receiver(
+        self, *, physics: str, name: str = "p", units: str = "Pa"
+    ) -> ReceiverComponent:
+        """Return the ideal pressure component paired with explicit volume injection.
+
+        This defines the per-unit-source measurement, without copying source
+        strength, signatures, or instrument transfer functions. It does not
+        construct or execute a reciprocal survey.
+        """
+        if self.mechanism is not None:
+            raise ValueError(
+                "A volume_injection reciprocal receiver cannot use a moment/force mechanism"
+            )
+        return _acoustic_reciprocal_receiver(
+            [self.kind], physics=physics, name=name, units=units
         )
 
     def to_fs(
@@ -934,6 +981,31 @@ class SourceGeometry(ExtraFieldsMixin):
         if isinstance(self._storage, _HDF5SourceGeometry):
             return "HDF5"
         return "SPSFiles"
+
+    def reciprocal_receiver(
+        self, *, physics: str, name: str = "p", units: str = "Pa"
+    ) -> ReceiverComponent:
+        """Return the ideal pressure component for a volume-injection catalog.
+
+        Every inline kind override must also be volume_injection. External
+        catalogs use their declared kind. Geometry and source strengths are not
+        copied into this receiver component.
+        """
+        if self.defaults.get("mechanism") is not None:
+            raise ValueError(
+                "A volume_injection reciprocal receiver cannot use a moment/force mechanism"
+            )
+        kinds = [self.kind, self.defaults.get("kind", self.kind)]
+        if isinstance(self._storage, _InlineSourceGeometry):
+            for point in self._storage.sources:
+                if point.mechanism is not None:
+                    raise ValueError(
+                        "A volume_injection reciprocal receiver cannot use a moment/force mechanism"
+                    )
+                kinds.append(point.kind or self.kind)
+        return _acoustic_reciprocal_receiver(
+            kinds, physics=physics, name=name, units=units
+        )
 
     @property
     def sources(self) -> List[PointSource]:
@@ -1300,6 +1372,44 @@ class SourceGeometry(ExtraFieldsMixin):
             return
         source = self._storage.sources[index]  # type: ignore[union-attr]
         source.coordinates = _replace_leading_coordinates(source.coordinates, values)
+
+    def fold_defaults_into_points(self) -> bool:
+        """Move geometry defaults onto each inline point and clear them.
+
+        Follows the solver's merge: a point keeps its own shape if it sets
+        ``kind``, ``mechanism`` or ``direction``, and its own strength if it
+        sets ``amplitude`` or ``moment_magnitude``; otherwise it inherits the
+        default. Returns ``False`` without changes when the defaults hold fields
+        outside the source basis.
+        """
+
+        if self.geometry_type != "Inline":
+            return False
+        if not self.defaults:
+            return True
+        if set(self.defaults) - set(_SHAPE_KEYS) - set(_STRENGTH_KEYS):
+            return False
+        defaults = _source_basis_to_fs(self.defaults)
+        points = []
+        for source in self.sources:
+            row = source.to_fs()
+            if not any(key in row for key in _SHAPE_TRIGGER_KEYS):
+                for key in _SHAPE_KEYS:
+                    row.pop(key, None)
+                    if key in defaults:
+                        row[key] = copy.deepcopy(defaults[key])
+            if not any(key in row for key in _STRENGTH_KEYS):
+                row.update(
+                    {
+                        key: copy.deepcopy(defaults[key])
+                        for key in _STRENGTH_KEYS
+                        if key in defaults
+                    }
+                )
+            points.append(PointSource.from_fs(row))
+        self._storage = _InlineSourceGeometry(points)
+        self.defaults = {}
+        return True
 
     def extend_inline(self, other: "SourceGeometry") -> None:
         """Append compatible inline geometry while preserving bulk arrays."""

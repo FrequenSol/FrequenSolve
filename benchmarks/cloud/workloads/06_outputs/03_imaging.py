@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/03_imaging.ipynb
-Source SHA-256: 3ed0f94bf19216647fd89a15ab40f436fff3a9b58b866ac67324200f72f97cca
+Source SHA-256: 5d0babc480edb8d6b2b860c3fcec5b8f0a808868c426d1b968fe5690930b69b1
 """
 
 # %% source cell 5
@@ -174,7 +174,7 @@ fwi = im.FWI(
     problem,
     stages=stages,
     optimizer=im.LBFGS(memory=5, step_limit=0.05),
-    penalty=im.Tikhonov(alpha=0.01, order=1),
+    regularization=im.Tikhonov(alpha=0.01, order=1),
     checkpoint="checkpoint.h5",
     history="history.json",
 )

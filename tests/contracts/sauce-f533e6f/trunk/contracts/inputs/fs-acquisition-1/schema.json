@@ -37,6 +37,7 @@
                 "vector",
                 "tensor",
                 "monopole",
+                "volume_injection",
                 "gradient",
                 "dipole"
               ]
@@ -52,7 +53,7 @@
             },
             "amplitude": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity",
-              "description": "Optional source-strength multiplier. A number is dimensionless and scales explicit unit-bearing direction components when present, otherwise it scales the default physical strength for the source kind. For thermal physics, scalar/monopole sources default to 1 W in 3D or 1 W/m in 2D. An object with `value` is interpreted as an exact physical source strength. For nonthermal physics, if object `units` are omitted, vector sources default to `N`, while scalar, tensor, monopole, gradient, and dipole sources default to `N*m`."
+              "description": "Optional source-strength multiplier. A number is dimensionless and scales explicit unit-bearing direction components when present, otherwise it scales the default physical strength for the source kind. For thermal physics, scalar/monopole sources default to 1 W in 3D or 1 W/m in 2D. An object with `value` is interpreted as an exact physical source strength. Explicit acoustic volume_injection sources default to 1 m^3/s in every dimension. Volume injection pairs reciprocally with pressure, without source-density weighting. Existing seismic scalar/monopole sources retain N*m units, default strength 1e9, and their density-scaled loading. Planar 2D spreads Q over a fixed 1 m out-of-plane thickness (internal line rate Q / 1 m); metadata remains in m^3/s. Other vector sources default to N and seismic moment sources to N*m."
             },
             "mechanism": {
               "oneOf": [
@@ -99,8 +100,7 @@
     "receiverComponent": {
       "type": "object",
       "required": [
-        "name",
-        "field"
+        "name"
       ],
       "properties": {
         "name": {
@@ -125,9 +125,34 @@
           "maximum": 2,
           "default": 0,
           "description": "Additional power of i omega applied by the receiver plan; negative values integrate in time. Changes output units accordingly."
+        },
+        "response": {
+          "description": "Unused; reserved for future reciprocal-survey definitions. Does not configure a transfer function."
+        },
+        "transfer": {
+          "$ref": "#/$defs/receiverTransferFunction"
+        },
+        "material_response": {
+          "$ref": "../../fragments/fs-material-coefficient.schema.json",
+          "description": "Multiply a receiver field by a material expression or constitutive tensor, including direct material derivatives."
+        },
+        "expression": {
+          "$ref": "../../fragments/fs-receiver-expression.schema.json"
         }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "anyOf": [
+        {
+          "required": [
+            "field"
+          ]
+        },
+        {
+          "required": [
+            "expression"
+          ]
+        }
+      ]
     },
     "receiverWeightTable": {
       "type": "object",
@@ -270,7 +295,11 @@
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
         },
         "sps_revision": {
-          "enum": ["auto", "1.0", "2.1"],
+          "enum": [
+            "auto",
+            "1.0",
+            "2.1"
+          ],
           "default": "auto"
         },
         "traces": {
@@ -381,8 +410,17 @@
           "type": "string"
         },
         "domain": {
-          "type": "integer",
-          "default": -1
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ],
+          "default": -1,
+          "description": "Mesh block ID, or an exact unique material subdomain name resolved to its mesh_block_id. Unknown and duplicate names are rejected."
         },
         "post_process": {
           "type": "boolean",
@@ -695,6 +733,41 @@
             ]
           },
           "additionalProperties": true
+        },
+        "properties": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Legacy scalar material diagnostics."
+        },
+        "material_samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "coefficient",
+              "units"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "coefficient": {
+                "$ref": "../../fragments/fs-material-coefficient.schema.json"
+              },
+              "units": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "description": "Source-independent material diagnostics for dense receiver groups. Scalars occupy one row; constitutive tensors occupy 2*DV*DV rows: column-major real entries then imaginary entries in engineering Voigt convention."
         }
       },
       "additionalProperties": true,
@@ -729,6 +802,82 @@
           }
         }
       ]
+    },
+    "receiverTransferFunction": {
+      "type": "object",
+      "description": "Dimensionless diagonal transfer function H(f), mapping ideal sampled physical receiver fields X(f) to measured fields Y(f)=H(f)X(f), before receiver encoding/reduction. Magnitude is gain; argument is phase. Total derivatives support first frequency derivatives only.",
+      "required": [
+        "file",
+        "dataset",
+        "frequencies_dataset",
+        "receiver_ids_dataset"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Complex response with h5py shape (frequency, receiver, complex=2), or (laplace, frequency, receiver, complex=2)."
+        },
+        "frequency_derivative_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional complex physical-Hz derivative q_f with the same shape as dataset. Required when spectral_derivative is total."
+        },
+        "frequencies_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One-dimensional physical Fourier-frequency coordinate in Hz. Task selection is exact within the solver comparison tolerance; extrapolation is forbidden."
+        },
+        "laplace_damping_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required for rank-4 q storage. One-dimensional nonpositive imaginary-frequency coordinate in physical Hz, matching the solve runtime."
+        },
+        "spectral_derivative": {
+          "enum": [
+            "frozen",
+            "total"
+          ],
+          "default": "frozen",
+          "description": "total uses q_f in physical Hz; frozen sets q_f to zero even when a derivative dataset is present."
+        },
+        "hash": {
+          "type": "string",
+          "description": "Optional content hash used for provenance and stale-linearization rejection."
+        },
+        "receiver_ids_dataset": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable physical receiver-node IDs 1..N in expanded geometry order, before array reduction or receiver encoding."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "spectral_derivative": {
+                "const": "total"
+              }
+            },
+            "required": [
+              "spectral_derivative"
+            ]
+          },
+          "then": {
+            "required": [
+              "frequency_derivative_dataset"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "receiverResponse": {
+      "$ref": "#/$defs/receiverTransferFunction",
+      "description": "Compatibility alias for receiverTransferFunction."
     }
   },
   "type": "object",

@@ -1,10 +1,10 @@
-"""Imaging workflows: staged FWI, LSRTM, RTM, sensitivity kernels, focusing.
+"""Imaging workflows: staged FWI, LSRTM, RTM, sensitivity kernels.
 
 The workflow layer owns the outer loop of an inversion while
 :class:`~frequensolve.imaging.problem.ImagingProblem` owns the physics:
 
 - :class:`Stage` names the frequencies, active blocks and iteration budget of
-  one continuation stage (plus optional loss, penalty, smoothing, optimizer
+  one continuation stage (plus optional loss, regularization, smoothing, optimizer
   and frequency-weight overrides) and produces the stage view of a problem.
 - :class:`LBFGS` and :class:`NewtonCG` are thin configurations of the
   generic optimizers in :mod:`frequensolve.inversion.optimization`; they add
@@ -18,8 +18,8 @@ The workflow layer owns the outer loop of an inversion while
   records every evaluation and iteration in an
   :class:`~frequensolve.inversion.history.OptimizationHistory`, checkpoints
   after every accepted iteration and resumes from a matching checkpoint.
-- :class:`LSRTM`, :func:`rtm`, :func:`sensitivity_kernel` and
-  :class:`TimeReversalFocus` are the single-linearization workflows.
+- :class:`LSRTM`, :func:`rtm` and :func:`sensitivity_kernel` are the
+  single-linearization workflows.
 
 Sign convention: Sauce's covector is the gradient of the misfit, i.e. the
 adjoint applied to ``simulated - observed``.  :func:`rtm` returns that
@@ -29,12 +29,14 @@ its negative.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import (
     Any,
     Callable,
@@ -56,10 +58,8 @@ from scipy.sparse.linalg import lsqr as scipy_lsqr
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging._artifacts import (
-    ControlVectorFile,
     ImageSet,
-    SmoothingConfig,
-    unqualified_block_name,
+    control_smoothing,
 )
 from frequensolve.imaging._backend import fingerprint
 from frequensolve.imaging.controls import (
@@ -69,10 +69,11 @@ from frequensolve.imaging.controls import (
     _BlockSpec,
 )
 from frequensolve.imaging.data import DataVector, TraceStoreRef
-from frequensolve.imaging.jobs import ControlGradientJob, ImageKernelJob, ImageSpec
-from frequensolve.imaging.misfit import Loss, Misfit
+from frequensolve.imaging.jobs import ImageKernelJob, ImageSpec, _kernel_derivative
+from frequensolve.imaging.misfit import Loss, Misfit, Normalization
 from frequensolve.imaging.problem import ImagingProblem, Linearization, _MisfitPayload
 from frequensolve.imaging.results import FWIResult, StageResult
+from frequensolve.imaging.transfer import Transfer, resolve_transfer
 from frequensolve.inversion.continuation import (
     ContinuationSchedule,
     ContinuationStage,
@@ -91,6 +92,7 @@ from frequensolve.inversion.optimization import (
     LBFGSOptions,
     minimize_inexact_newton,
     minimize_lbfgs,
+    minimize_proximal_gradient,
 )
 
 __all__ = [
@@ -99,8 +101,8 @@ __all__ = [
     "LBFGS",
     "LSRTM",
     "NewtonCG",
+    "PatchUpdates",
     "Stage",
-    "TimeReversalFocus",
     "block_curvatures",
     "curvature_scaling",
     "rms_step_limit",
@@ -108,6 +110,8 @@ __all__ = [
     "sensitivity_kernel",
     "sensitivity_kernel_job",
 ]
+
+from ._patch_updates import PatchUpdates
 
 CHECKPOINT_SCHEMA = "fs-imaging-fwi-checkpoint-1"
 
@@ -150,6 +154,17 @@ def _frequency_pairs(values: Sequence[Any]) -> List[List[float]]:
 def _digest(values: Any) -> str:
     array = np.ascontiguousarray(np.asarray(values, dtype=np.float64))
     return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _state_epoch(state: ControlState) -> str:
+    """Identify complete coefficients together with their basis and reference scales."""
+    saved = state.to_file()
+    return fingerprint(
+        blocks=saved.blocks,
+        control_spaces=saved.control_spaces,
+        scaling=saved.scaling,
+        scaling_units=saved.scaling_units,
+    ).removeprefix("sha256:")
 
 
 def _real_vector(value: Any, *, size: Optional[int] = None, name: str) -> np.ndarray:
@@ -273,15 +288,25 @@ class Stage:
             (``"huber"``, :class:`~frequensolve.imaging.misfit.Loss`, ...).
         misfit: Replace the whole misfit for the stage (exclusive with
             ``loss``).
-        penalty: Penalty overriding the workflow-level penalty.
-        smoothing: Gradient smoothing overriding the workflow/problem
+        regularization: Regularization overriding the workflow-level regularization.
+        smoothing: Gradient-output and search-step smoothing overriding the workflow/problem
             smoothing; ``False`` switches smoothing off for the stage.
         optimizer: :class:`LBFGS` / :class:`NewtonCG` overriding the
             workflow optimizer.
         weights: One nonnegative objective weight per stage frequency.
+        patches: PatchSet overriding the problem's patch policy for this stage.
         name: Stage label (default ``stage_<index>``).
         min_support: Relative support threshold for the stage.
         metadata: Free-form scalar metadata recorded with the stage.
+        mesh_averaging_wavelengths: Half-width of the material-aware slowness
+            averaging window for explicit mesh changes, in material-average
+            wavelengths at the largest requested control sizing frequency.
+        transfer: ``im.Transfer.nodal()`` (default) or
+            ``im.Transfer.l2(smooth=100 * u.m)`` for explicit mesh changes.
+            Smoothing lengths accept length quantities or numbers in meters.
+        mesh_transfer: Legacy spelling: ``"nodal"`` or ``"l2"``.
+        mesh_smoothing_length: L2 projection smoothing length in meters (zero
+            for unsmoothed projection). Applied once at the stage boundary.
         controls: Change the control layout from this stage on: a complete
             :class:`~frequensolve.imaging.controls.ControlSpace` or a mapping
             ``{block key: new block spec}`` replacing those blocks (e.g.
@@ -290,6 +315,8 @@ class Stage:
             :meth:`ImagingProblem.with_controls`, transferring the accepted
             state of the previous stage; later stages keep the new layout
             until another stage changes it.
+        kernel_derivative: Spectral-data selection for this stage, using
+            ``residual="derivative"`` or ``"window"``. Defaults to the problem's selection.
     """
 
     frequencies: Tuple[Any, ...]
@@ -297,7 +324,7 @@ class Stage:
     active: Optional[Tuple[str, ...]] = None
     loss: Optional[Loss] = None
     misfit: Optional[Misfit] = None
-    penalty: Any = None
+    regularization: Any = None
     smoothing: Any = None
     optimizer: Any = None
     weights: Optional[Tuple[float, ...]] = None
@@ -305,8 +332,39 @@ class Stage:
     min_support: Optional[float] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     controls: Any = None
+    mesh_averaging_wavelengths: float = 0.5
+    mesh_transfer: Optional[str] = None
+    mesh_smoothing_length: Optional[float] = None
+    kernel_derivative: Optional[Mapping[str, Any]] = None
+    transfer: Optional[Transfer] = None
+    patches: Any = None
 
     def __post_init__(self) -> None:
+        if self.patches is not None:
+            from frequensolve.mesh.patches import PatchSet
+
+            if not isinstance(self.patches, PatchSet):
+                raise TypeError("stage patches must be a PatchSet")
+        policy = resolve_transfer(
+            self.transfer, self.mesh_transfer, self.mesh_smoothing_length
+        )
+        if self.controls is None and (
+            policy.method != "nodal" or policy.smoothing_length
+        ):
+            raise ValueError("mesh transfer options require stage controls")
+        if self.kernel_derivative is not None:
+            object.__setattr__(
+                self,
+                "kernel_derivative",
+                _kernel_derivative(
+                    self.kernel_derivative, residuals=("derivative", "window")
+                ),
+            )
+        if (
+            not np.isfinite(self.mesh_averaging_wavelengths)
+            or self.mesh_averaging_wavelengths <= 0
+        ):
+            raise ValueError("mesh_averaging_wavelengths must be finite and positive")
         object.__setattr__(self, "frequencies", _stage_frequencies(self.frequencies))
         iterations = int(self.iterations)
         if iterations < 1:
@@ -325,9 +383,7 @@ class Stage:
         if self.misfit is not None and not isinstance(self.misfit, Misfit):
             raise TypeError("stage misfit must be a Misfit")
         if self.smoothing is not None and self.smoothing is not False:
-            object.__setattr__(
-                self, "smoothing", SmoothingConfig.from_value(self.smoothing)
-            )
+            object.__setattr__(self, "smoothing", control_smoothing(self.smoothing))
         if self.optimizer is not None and not callable(
             getattr(self.optimizer, "solve", None)
         ):
@@ -512,6 +568,10 @@ class Stage:
             kwargs["min_support"] = self.min_support
         if self.weights is not None:
             kwargs["weights"] = self.weights
+        if self.kernel_derivative is not None:
+            kwargs["kernel_derivative"] = self.kernel_derivative
+        if self.patches is not None:
+            kwargs["patches"] = self.patches
         return problem.restrict(
             frequencies=self.frequencies,
             active=None if self.active is None else list(self.active),
@@ -592,6 +652,13 @@ def _preconditioner_callable(
 class _OptimizerConfig:
     """Shared options of :class:`LBFGS` and :class:`NewtonCG`.
 
+    Gradient and objective-decrease thresholds are the corresponding
+    ``absolute_tolerance + relative_tolerance * abs(initial_objective)``.
+    Absolute defaults are zero; relative defaults are ``1e-6`` (gradient)
+    and ``1e-9`` (objective decrease). FWI retains the initial stage objective
+    through checkpoint restarts. See :class:`InexactNewtonOptions` for the
+    legacy tolerance spellings.
+
     ``step_limit`` caps the RMS update of every block per iteration
     (optimizer coordinates); ``scaling_max_ratio`` floors curvature-based
     scaling (see :func:`curvature_scaling`); ``preconditioner_refresh``
@@ -600,9 +667,13 @@ class _OptimizerConfig:
     """
 
     max_iterations: Optional[int] = None
-    gradient_tolerance: float = 1.0e-6
+    gradient_tolerance: Optional[float] = None
     step_tolerance: float = 1.0e-9
-    objective_tolerance: float = 1.0e-9
+    objective_tolerance: Optional[float] = None
+    grad_abs_tol: float = 0.0
+    grad_rel_tole: Optional[float] = None
+    obj_abs_tol: float = 0.0
+    obj_rel_tol: Optional[float] = None
     objective_target: Optional[float] = None
     objective_tolerance_momentum: float = 0.0
     objective_minimum_iterations: int = 1
@@ -642,6 +713,10 @@ class _OptimizerConfig:
             "gradient_tolerance": self.gradient_tolerance,
             "step_tolerance": self.step_tolerance,
             "objective_tolerance": self.objective_tolerance,
+            "grad_abs_tol": self.grad_abs_tol,
+            "grad_rel_tole": self.grad_rel_tole,
+            "obj_abs_tol": self.obj_abs_tol,
+            "obj_rel_tol": self.obj_rel_tol,
             "objective_target": self.objective_target,
             "objective_tolerance_momentum": self.objective_tolerance_momentum,
             "objective_minimum_iterations": self.objective_minimum_iterations,
@@ -665,13 +740,16 @@ class _OptimizerConfig:
         bounds: Optional[Tuple[Any, Any]] = None,
         preconditioner: Any = None,
         hessian_action: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
+        step_transform: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
         history: Optional[OptimizationHistory] = None,
         callback: Optional[Callable[[InexactNewtonIteration], None]] = None,
         max_iterations: Optional[int] = None,
+        initial_objective: Optional[float] = None,
         step_limit: Optional[float] = None,
         scaling: Optional[Any] = None,
         block_slices: Optional[Sequence[slice]] = None,
         space: Optional[ControlSpace] = None,
+        restart: Optional[Dict[str, Any]] = None,
     ) -> InexactNewtonResult:
         """Minimize ``objective`` from ``x0``.
 
@@ -686,11 +764,16 @@ class _OptimizerConfig:
                 with ``apply(g)`` (a bound imaging preconditioner).
             hessian_action: ``(model, dx) -> ndarray`` (Newton-CG only);
                 defaults to ``objective.hessian_action``.
+            step_transform: Optional ``(model, step) -> step`` in physical
+                optimizer coordinates. Applied outside CG; line searches
+                check the transformed step against the raw gradient.
             history: Optional history receiving one iteration record per
                 accepted iterate (``objective.loss`` required).
             callback: Called with every accepted
                 :class:`InexactNewtonIteration` (physical coordinates).
             max_iterations: Iteration budget overriding the configuration.
+            initial_objective: Original stage objective on restart; relative
+                stopping tolerances retain this fixed reference.
             step_limit: RMS step cap overriding the configuration.
             scaling: Per-DOF change-of-variables scale ``s`` (``x = s * y``)
                 or a ``block -> curvature`` mapping resolved with ``space``.
@@ -722,9 +805,9 @@ class _OptimizerConfig:
                 raise ValueError("scaling must be finite and positive")
         value_fn = objective.value
         gradient_fn = objective.gradient
-        hessian_fn = hessian_action
-        if hessian_fn is None:
-            hessian_fn = getattr(objective, "hessian_action", None)
+        curvature_fn = hessian_action
+        if curvature_fn is None:
+            curvature_fn = getattr(objective, "hessian_action", None)
         precondition = _preconditioner_callable(preconditioner, space)
 
         def to_physical(y: np.ndarray) -> np.ndarray:
@@ -741,11 +824,11 @@ class _OptimizerConfig:
             return grad if scale is None else scale * grad
 
         def h(y: np.ndarray, dy: np.ndarray) -> np.ndarray:
-            assert hessian_fn is not None
+            assert curvature_fn is not None
             out = _real_vector(
-                hessian_fn(to_physical(y), to_physical(dy)),
+                curvature_fn(to_physical(y), to_physical(dy)),
                 size=size,
-                name="Hessian product",
+                name="curvature product",
             )
             return out if scale is None else scale * out
 
@@ -761,6 +844,15 @@ class _OptimizerConfig:
         def step_limit_fn(y: np.ndarray, dy: np.ndarray) -> float:
             assert limit is not None
             return rms_step_limit(to_physical(dy), block_slices, limit)
+
+        def transform(y: np.ndarray, dy: np.ndarray) -> np.ndarray:
+            assert step_transform is not None
+            transformed = _real_vector(
+                step_transform(to_physical(y), to_physical(dy)),
+                size=size,
+                name="transformed step",
+            )
+            return to_scaled(transformed)
 
         def unscale_iteration(it: InexactNewtonIteration) -> InexactNewtonIteration:
             if scale is None:
@@ -799,18 +891,47 @@ class _OptimizerConfig:
             lower = np.broadcast_to(np.asarray(bounds[0], dtype=np.float64), (size,))
             upper = np.broadcast_to(np.asarray(bounds[1], dtype=np.float64), (size,))
             scaled_bounds = (to_scaled(lower), to_scaled(upper))
+        options = self.options(max_iterations)
+        if initial_objective is not None:
+            options = dataclasses.replace(options, initial_objective=initial_objective)
         kwargs: Dict[str, Any] = {
             "bounds": scaled_bounds,
-            "options": self.options(max_iterations),
+            "options": options,
             "preconditioner": None if precondition is None else p,
             "step_limit": None if limit is None else step_limit_fn,
+            "step_transform": None if step_transform is None else transform,
             "callback": on_iteration,
         }
         y0 = cast(Sequence[float], to_scaled(x0))
-        if self.kind == "lbfgs":
-            result = minimize_lbfgs(f, g, y0, **kwargs)
+        native = getattr(objective, "native_regularization", None)
+        if native is not None:
+            if step_transform is not None:
+                raise ValueError(
+                    "native proximal optimization does not accept an extra step transform"
+                )
+            metric = np.ones(size) if scale is None else 1.0 / scale**2
+
+            def prox(
+                y: np.ndarray, tau: float, box: Tuple[np.ndarray, np.ndarray]
+            ) -> np.ndarray:
+                physical_box = (to_physical(box[0]), to_physical(box[1]))
+                return to_scaled(native.prox(to_physical(y), tau, metric, physical_box))
+
+            result = minimize_proximal_gradient(
+                lambda y: objective.smooth_value(to_physical(y)),
+                g,
+                lambda y: native.value(to_physical(y)),
+                prox,
+                y0,
+                bounds=scaled_bounds,
+                options=options,
+                callback=on_iteration,
+                step_limit=None if limit is None else step_limit_fn,
+            )
+        elif self.kind == "lbfgs":
+            result = minimize_lbfgs(f, g, y0, restart=restart, **kwargs)
         else:
-            if hessian_fn is None:
+            if curvature_fn is None:
                 raise ValueError("NewtonCG requires a hessian_action")
             result = minimize_inexact_newton(f, g, h, y0, **kwargs)
         if scale is None:
@@ -882,10 +1003,10 @@ class NewtonCG(_OptimizerConfig):
 
 
 class _StageObjective:
-    """Cached misfit-plus-penalty objective of one stage.
+    """Cached misfit-plus-regularization objective of one stage.
 
     One ``linearize`` (value and covector) per distinct point; the value,
-    gradient, Hessian action (Gauss-Newton normal plus penalty Hessian) and
+    gradient, curvature action (Gauss-Newton normal plus regularization curvature) and
     loss terms of the last point are reused.  Every new evaluation is
     appended to the history with the stage metrics.
     """
@@ -894,13 +1015,14 @@ class _StageObjective:
         self,
         view: ImagingProblem,
         space: ControlSpace,
-        penalty: Any,
+        regularization: Any,
         history: Optional[OptimizationHistory],
         metrics: Mapping[str, Any],
     ) -> None:
         self.view = view
         self.space = space
-        self.penalty = penalty
+        self.regularization = regularization
+        self.native_regularization: Any = None
         self.history = history
         self.metrics = dict(metrics)
         self.evaluations = 0
@@ -924,11 +1046,15 @@ class _StageObjective:
             raise RuntimeError("linearize returned no gradient")
         gradient = np.array(lin.gradient.values, dtype=np.float64, copy=True)
         regularization = 0.0
-        if self.penalty is not None:
-            regularization = float(self.penalty.value(vector))
+        if self.regularization is not None:
+            regularization = float(self.regularization.value(vector))
             gradient += _real_vector(
-                self.penalty.gradient(vector), size=point.size, name="penalty gradient"
+                self.regularization.gradient(vector),
+                size=point.size,
+                name="regularization gradient",
             )
+        if self.native_regularization is not None:
+            regularization += self.native_regularization.value(vector)
         loss = LossTerms(data=lin.value, regularization=regularization)
         self._point = np.array(point, copy=True)
         self._linearization = lin
@@ -951,6 +1077,14 @@ class _StageObjective:
     def value(self, x: Any) -> float:
         return self.loss(x).total
 
+    def smooth_value(self, x: Any) -> float:
+        loss = self.loss(x)
+        return (
+            loss.total
+            if self.native_regularization is None
+            else loss.total - self.native_regularization.value(self.vector(x))
+        )
+
     def gradient(self, x: Any) -> np.ndarray:
         self._evaluate(x)
         assert self._gradient is not None
@@ -967,10 +1101,12 @@ class _StageObjective:
         out = np.array(
             np.asarray(lin.normal @ direction, dtype=np.float64).reshape(-1), copy=True
         )
-        if self.penalty is not None:
-            operator = self.penalty.hessian_operator(self.vector(x))
+        if self.regularization is not None:
+            operator = self.regularization.hessian_operator(self.vector(x))
             out += _real_vector(
-                operator @ direction, size=out.size, name="penalty Hessian product"
+                operator @ direction,
+                size=out.size,
+                name="regularization curvature product",
             )
         return out
 
@@ -992,6 +1128,9 @@ class FWIIteration:
     loss: LossTerms
     record: OptimizationRecord
     diagnostics: InexactNewtonIteration
+    mode: str = "global"
+    patch_name: Optional[str] = None
+    sweep: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -1027,13 +1166,13 @@ class FWI:
             :class:`ContinuationSchedule`.
         optimizer: :class:`LBFGS` (default) or :class:`NewtonCG`; a stage's
             ``optimizer`` overrides it.
-        penalty: Penalty (``bind(space)`` protocol) added to the misfit; a
-            stage's ``penalty`` overrides it.
+        regularization: Regularization (``bind(space)`` protocol) added to the misfit; a
+            stage's ``regularization`` overrides it.
         preconditioner: Preconditioner (``bind(space)`` protocol) or plain
             ``(model, g) -> ndarray`` callable; bound preconditioners are
             updated at every stage start and every
             ``optimizer.preconditioner_refresh`` iterations.
-        smoothing: Gradient smoothing applied by Sauce for every stage
+        smoothing: Search-step smoothing applied by Sauce for every stage
             (overrides the problem's; ``False`` switches it off).
         step_limit: RMS step cap per block (overrides the optimizer's).
         scaling: ``None``, ``"curvature"`` (estimate block curvatures with
@@ -1054,7 +1193,7 @@ class FWI:
         stages: Any,
         *,
         optimizer: Any = None,
-        penalty: Any = None,
+        regularization: Any = None,
         preconditioner: Any = None,
         smoothing: Any = None,
         step_limit: Optional[float] = None,
@@ -1062,16 +1201,25 @@ class FWI:
         checkpoint: Optional[Union[str, Path]] = None,
         history: Any = None,
         callback: Optional[Callable[[FWIIteration], None]] = None,
+        patch_updates: Optional[PatchUpdates] = None,
     ) -> None:
+        if patch_updates is not None and not isinstance(patch_updates, PatchUpdates):
+            raise TypeError("patch_updates must be a PatchUpdates configuration")
+        self.patch_updates = patch_updates
         self.problem = problem
         self.stages: List[Stage] = _stage_list(stages)
+        if patch_updates is not None and any(
+            stage.patches is None and getattr(problem, "patches", None) is None
+            for stage in self.stages
+        ):
+            raise ValueError("Local patch updates require patches in every stage")
         self.optimizer = LBFGS() if optimizer is None else optimizer
         if not callable(getattr(self.optimizer, "solve", None)):
             raise TypeError("optimizer must provide solve()")
-        self.penalty = penalty
+        self.regularization = regularization
         self.preconditioner = preconditioner
         if smoothing is not None and smoothing is not False:
-            smoothing = SmoothingConfig.from_value(smoothing)
+            smoothing = control_smoothing(smoothing)
         self.smoothing = smoothing
         if step_limit is not None:
             limit = float(step_limit)
@@ -1102,6 +1250,7 @@ class FWI:
         self.results: List[StageResult] = []
         self._views: Dict[str, ImagingProblem] = {}
         self._problems: Dict[int, ImagingProblem] = {}
+        self._stage_inputs: Dict[str, str] = {}
 
     # -- stage problems
 
@@ -1130,11 +1279,35 @@ class FWI:
                 f"needs an ImagingProblem; {type(previous).__name__} has no "
                 "with_controls"
             )
-        problem = (
-            previous
-            if stage.controls is None
-            else previous.with_controls(stage.controls)
-        )
+        if stage.controls is None:
+            problem = previous
+        elif isinstance(previous, ImagingProblem):
+            previous._ensure_registry()
+            entry = self._stage_inputs.get(str(index))
+            if entry is not None:
+                previous.state = ControlState.load(
+                    entry, previous.full_space.without_support()
+                )
+            elif self.checkpoint_path is not None:
+                accepted = previous._require_state()
+                digest = hashlib.sha256(accepted.values.tobytes()).hexdigest()[:20]
+                path = (
+                    self.checkpoint_path.parent
+                    / f"{self.checkpoint_path.stem}.stage_{index}.{digest}.h5"
+                )
+                path.parent.mkdir(parents=True, exist_ok=True)
+                accepted.save(path)
+                self._stage_inputs[str(index)] = str(path)
+            problem = previous.with_controls(
+                stage.controls,
+                mesh_averaging_wavelengths=stage.mesh_averaging_wavelengths,
+                transfer=resolve_transfer(
+                    stage.transfer, stage.mesh_transfer, stage.mesh_smoothing_length
+                ),
+                discovery_frequencies=stage.frequencies,
+            )
+        else:
+            problem = previous.with_controls(stage.controls)
         self._problems[index] = problem
         return problem
 
@@ -1214,7 +1387,7 @@ class FWI:
         stage: Stage,
         space: ControlSpace,
         optimizer: Any,
-        penalty: Any,
+        regularization: Any,
     ) -> Dict[str, Any]:
         view = self._views[stage.label(index)]
         smoothing = view.smoothing
@@ -1224,7 +1397,9 @@ class FWI:
             "frequencies": json.dumps(_frequency_pairs(stage.frequencies)),
             "active": ",".join(space.blocks),
             "optimizer": getattr(optimizer, "kind", type(optimizer).__name__),
-            "penalty": None if penalty is None else type(penalty).__name__,
+            "regularization": (
+                None if regularization is None else type(regularization).__name__
+            ),
             "smoothing": None if smoothing is None else smoothing.kind,
         }
 
@@ -1251,6 +1426,10 @@ class FWI:
         ).hexdigest()
         return {
             "schema": CHECKPOINT_SCHEMA,
+            "stage_inputs": json.dumps(self._stage_inputs, sort_keys=True),
+            "native_regularization": json.dumps(
+                getattr(self, "_native_checkpoint", None)
+            ),
             "problem": problem.name,
             "identity": self._identity(problem),
             # The control layout of this stage's problem (stages with
@@ -1259,6 +1438,7 @@ class FWI:
             "control_sizes": self._layout(problem)[1],
             "stage_index": int(index),
             "stage_name": stage.label(index),
+            "initial_objective": self._stage_initial_objective,
             "stage_iteration": int(stage_iteration),
             "stage_iterations": int(stage.iterations),
             "stage_completed": bool(completed),
@@ -1293,20 +1473,50 @@ class FWI:
         state = view.state_from(ControlVector(model, space))
         assert self.state_path is not None
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        state.save(self.state_path)
+        state_path = self.state_path
+        if getattr(view, "patches", None) is not None:
+            # Publish a new immutable state before changing the checkpoint
+            # pointer, so an interrupted write cannot change an older epoch.
+            epoch = _state_epoch(state)[:20]
+            state_path = state_path.with_name(
+                f"{state_path.stem}_{epoch}{state_path.suffix}"
+            )
+        state.save(state_path)
+        metadata = self._checkpoint_metadata(
+            index,
+            stage,
+            space,
+            stage_iteration=stage_iteration,
+            completed=completed,
+            history=history,
+        )
+        metadata["state_path"] = str(state_path)
+        if getattr(view, "patches", None) is not None:
+            metadata["stage_identity"] = self._identity(view)
+            assert view._patch_runtime is not None
+            metadata["patch_runtime"] = json.dumps(
+                view._patch_runtime.checkpoint(), sort_keys=True
+            )
+            metadata["model_epoch"] = epoch
+            metadata["optimizer_restart"] = json.dumps(
+                getattr(self, "_optimizer_checkpoint", None)
+            )
+            metadata["optimizer_config"] = getattr(self, "_optimizer_config", None)
+            metadata["optimizer_scaling"] = json.dumps(
+                getattr(self, "_optimizer_scaling", None)
+            )
+            metadata["patch_updates"] = json.dumps(
+                None if self.patch_updates is None else self.patch_updates.to_dict()
+            )
+            metadata["local_updates"] = json.dumps(
+                getattr(self, "_local_checkpoint", None)
+            )
         OptimizationCheckpoint(
             model=model,
             iteration=history.iteration_count,
             evaluations=history.evaluation_count,
             loss=loss,
-            metadata=self._checkpoint_metadata(
-                index,
-                stage,
-                space,
-                stage_iteration=stage_iteration,
-                completed=completed,
-                history=history,
-            ),
+            metadata=metadata,
         ).save(self.checkpoint_path)
 
     # -- resume ---------------------------------------------------------------
@@ -1325,13 +1535,45 @@ class FWI:
                 f"not {self.problem.name!r}"
             )
         index = int(meta["stage_index"])
+        self._resume_initial_objective = (index, meta.get("initial_objective"))
+        self._resume_regularization = (
+            index,
+            json.loads(meta.get("native_regularization", "null")),
+        )
         if index >= len(self.stages):
             raise ValueError(
                 f"checkpoint stage index {index} exceeds the {len(self.stages)} stages"
             )
         # Rebuild the control layout the checkpointed stage ran on (stage
         # ``controls`` of every stage up to it) before comparing layouts.
+        self._stage_inputs = json.loads(meta.get("stage_inputs", "{}"))
         problem = self._problem_for(index)
+        patch_record = meta.get("patch_runtime")
+        if patch_record is not None:
+            configured = (
+                None if self.patch_updates is None else self.patch_updates.to_dict()
+            )
+            if json.loads(meta.get("patch_updates", "null")) != configured:
+                raise ValueError("Checkpoint patch-update mode or settings changed")
+            self._resume_local = (index, json.loads(meta.get("local_updates", "null")))
+        if patch_record is not None:
+            from ._patch_problem import _PatchRuntime
+
+            self._resume_optimizer = (
+                index,
+                json.loads(meta.get("optimizer_restart", "null")),
+                meta.get("optimizer_config"),
+                json.loads(meta.get("optimizer_scaling", "null")),
+            )
+            view = self.stages[index].view(problem)
+            runtime = _PatchRuntime.restore(view, json.loads(patch_record))
+            if meta.get("stage_identity") != self._identity(view):
+                raise ValueError("Checkpoint patch stage objective or settings changed")
+            view._patch_runtime = runtime
+            runtime.problem = view
+            self._views[self.stages[index].label(index)] = view
+        elif getattr(problem, "patches", None) is not None:
+            raise ValueError("Patch checkpoint omits its frozen stage and meshes")
         control_ids, control_sizes = self._layout(problem)
         if meta.get("control_ids") != control_ids:
             raise ValueError(
@@ -1367,6 +1609,11 @@ class FWI:
                 f"checkpoint {path} references a missing control state {state_path}"
             )
         state = ControlState.load(state_path, problem.full_space.without_support())
+        if (
+            patch_record is not None
+            and meta.get("model_epoch") != _state_epoch(state)[:20]
+        ):
+            raise ValueError("Checkpoint complete model epoch changed")
         recorded = meta.get("mechanism_scaling")
         if recorded:
             scaling = {str(k): float(v) for k, v in json.loads(recorded).items()}
@@ -1459,6 +1706,7 @@ class FWI:
         *,
         expected_model: Optional[np.ndarray] = None,
     ) -> StageResult:
+        stage_started = perf_counter()
         problem = self._problem_for(index)
         history = self._history
         assert history is not None
@@ -1473,7 +1721,11 @@ class FWI:
             )
             self._views[label] = view
         optimizer = self.optimizer if stage.optimizer is None else stage.optimizer
-        penalty = self.penalty if stage.penalty is None else stage.penalty
+        regularization = (
+            self.regularization
+            if stage.regularization is None
+            else stage.regularization
+        )
         remaining = stage.iterations - int(start_iteration)
         if remaining < 1:
             raise ValueError(
@@ -1483,6 +1735,10 @@ class FWI:
 
         # First linearization of the stage: adopts the support masks that
         # define the stage space (held fixed until the next transition).
+        timing_backend = getattr(view, "backend", None)
+        timing_snapshot = (
+            timing_backend.timing_snapshot() if timing_backend is not None else None
+        )
         first = view.linearize(gradient=True)
         space = view.space
         x0 = np.array(first.point.values, dtype=np.float64, copy=True)
@@ -1497,24 +1753,134 @@ class FWI:
         lower, upper = space.bounds
         x0 = np.clip(x0, lower, upper)
 
-        bound_penalty = None if penalty is None else penalty.bind(space)
-        metrics = self._stage_metrics(index, stage, space, optimizer, penalty)
-        objective = _StageObjective(view, space, bound_penalty, history, metrics)
+        from frequensolve.imaging._native_regularization import (
+            bind_workflow_regularization,
+        )
+
+        # Explicit stage/workflow regularization overrides the inherited native
+        # smoothing configuration; it is never silently counted twice.
+        regularization = view.smoothing if regularization is None else regularization
+        bound_regularization, native_regularization = bind_workflow_regularization(
+            regularization, space, view, first
+        )
+        resumed = getattr(self, "_resume_regularization", None)
+        if resumed is not None and resumed[0] == index:
+            if (resumed[1] is None) != (native_regularization is None):
+                raise ValueError(
+                    "checkpoint native regularization configuration changed"
+                )
+            if native_regularization is not None:
+                native_regularization.restore(resumed[1])
+        self._native_checkpoint = (
+            None
+            if native_regularization is None
+            else native_regularization.checkpoint()
+        )
+        # Preserve native contexts in checkpoints, while smooth Tikhonov uses
+        # the requested optimizer and its exact coefficient gradient/Hessian.
+        if native_regularization is not None and native_regularization.is_smooth:
+            if bound_regularization is None:
+                bound_regularization = native_regularization
+            else:
+                from .regularization import Sum, _BoundSum
+
+                bound_regularization = _BoundSum(
+                    Sum(
+                        bound_regularization.regularization,
+                        native_regularization.regularization,
+                    ),
+                    space,
+                    [bound_regularization, native_regularization],
+                )
+            native_regularization = None
+        if self.patch_updates is not None:
+            from ._patch_updates import solve_local_stage
+
+            local_result = solve_local_stage(
+                self,
+                index,
+                stage,
+                start_iteration,
+                view,
+                first,
+                bound_regularization,
+                native_regularization,
+                stage_started=stage_started,
+            )
+            if timing_snapshot is not None:
+                assert timing_backend is not None
+                local_result = dataclasses.replace(
+                    local_result,
+                    metrics={
+                        **local_result.metrics,
+                        **timing_backend.cost_since(timing_snapshot),
+                    },
+                )
+            return local_result
+        metrics = self._stage_metrics(index, stage, space, optimizer, regularization)
+        if native_regularization is not None:
+            metrics["optimizer"] = "proximal_gradient"
+        objective = _StageObjective(view, space, bound_regularization, history, metrics)
+        objective.native_regularization = native_regularization
         initial_loss = objective.loss(x0)
+        self._stage_initial_objective = initial_loss.total
+        if start_iteration > 0:
+            reference_index, reference = getattr(
+                self, "_resume_initial_objective", (index, None)
+            )
+            if reference_index != index:
+                reference = None
+            if reference is None:
+                records = [
+                    r
+                    for r in history.iterations
+                    if r.metrics.get("stage_index") == index
+                ]
+                if not records:
+                    raise ValueError(
+                        "Cannot resume relative tolerances without the stage's initial objective"
+                    )
+                reference = records[0].loss.total
+            self._stage_initial_objective = float(reference)
         linearizations_before = objective.evaluations
 
-        preconditioner = self.preconditioner
+        preconditioner = self.preconditioner if native_regularization is None else None
         bound_preconditioner: Any = None
         if preconditioner is not None and callable(
             getattr(preconditioner, "bind", None)
         ):
             bound_preconditioner = preconditioner.bind(space)
             bound_preconditioner.update(
-                objective.linearization(x0), penalty=bound_penalty
+                objective.linearization(x0), regularization=bound_regularization
             )
             preconditioner = bound_preconditioner
         refresh = getattr(optimizer, "preconditioner_refresh", None)
         scaling = self._scaling_for(objective.linearization(x0), space)
+        optimizer_restart = None
+        if getattr(view, "patches", None) is not None:
+            if isinstance(scaling, Mapping):
+                scaling = curvature_scaling(
+                    scaling, space, max_ratio=optimizer.scaling_max_ratio
+                )
+            resumed_optimizer = getattr(self, "_resume_optimizer", None)
+            if (
+                resumed_optimizer is not None
+                and resumed_optimizer[0] == index
+                and start_iteration > 0
+            ):
+                if resumed_optimizer[2] != repr(optimizer):
+                    raise ValueError("Checkpoint optimizer configuration changed")
+                optimizer_restart = resumed_optimizer[1]
+                scaling = (
+                    None
+                    if resumed_optimizer[3] is None
+                    else np.asarray(resumed_optimizer[3])
+                )
+            self._optimizer_checkpoint = optimizer_restart
+            self._optimizer_config = repr(optimizer)
+            self._optimizer_scaling = (
+                None if scaling is None else np.asarray(scaling).tolist()
+            )
         step_limit = self.step_limit
         if step_limit is None:
             step_limit = getattr(optimizer, "step_limit", None)
@@ -1532,6 +1898,8 @@ class FWI:
         )
 
         def on_iteration(it: InexactNewtonIteration) -> None:
+            if getattr(view, "patches", None) is not None:
+                self._optimizer_checkpoint = it.optimizer_state
             loss = objective.loss(it.model)
             stage_iteration = start_iteration + it.iteration
             record = history.record_iteration(
@@ -1572,7 +1940,8 @@ class FWI:
                 and it.iteration % int(refresh) == 0
             ):
                 bound_preconditioner.update(
-                    objective.linearization(it.model), penalty=bound_penalty
+                    objective.linearization(it.model),
+                    regularization=bound_regularization,
                 )
             if self.callback is not None:
                 self.callback(
@@ -1588,7 +1957,7 @@ class FWI:
                     )
                 )
 
-        hessian = (
+        curvature = (
             objective.hessian_action
             if getattr(optimizer, "kind", None) == "newton_cg"
             else None
@@ -1598,12 +1967,19 @@ class FWI:
             x0,
             bounds=(lower, upper),
             preconditioner=preconditioner,
-            hessian_action=hessian,
+            hessian_action=curvature,
             callback=on_iteration,
             max_iterations=remaining,
+            initial_objective=self._stage_initial_objective,
             step_limit=step_limit,
             scaling=scaling,
             space=space,
+            **(
+                {"restart": optimizer_restart}
+                if getattr(view, "patches", None) is not None
+                and getattr(optimizer, "kind", None) == "lbfgs"
+                else {}
+            ),
         )
         final = ControlVector(result.model, space)
         problem.state = view.state_from(final)
@@ -1642,6 +2018,8 @@ class FWI:
             space=space,
             metrics={
                 "optimizer": metrics["optimizer"],
+                "elapsed_seconds": perf_counter() - stage_started,
+                "elapsed_scope": "stage preparation, evaluations, reductions and checkpoint writes",
                 "gradient_evaluations": int(result.gradient_evaluations),
                 "hessian_products": int(result.hessian_products),
                 "cg_iterations": int(result.cg_iterations),
@@ -1652,6 +2030,15 @@ class FWI:
                 "gradient_norm": float(np.linalg.norm(result.gradient)),
             },
         )
+        if timing_snapshot is not None:
+            assert timing_backend is not None
+            stage_result = dataclasses.replace(
+                stage_result,
+                metrics={
+                    **stage_result.metrics,
+                    **timing_backend.cost_since(timing_snapshot),
+                },
+            )
         self.results.append(stage_result)
         return stage_result
 
@@ -1676,6 +2063,7 @@ class FWI:
         self.results = []
         self._views = {}
         self._problems = {}
+        self._stage_inputs = {}
         plan = self._resume_plan() if resume else None
         if plan is not None:
             # ``_resume_plan`` built the checkpointed stage's problem.
@@ -1727,8 +2115,10 @@ class FWI:
         )
         first_stage = self.stages[start]
         first_problem = self._problem_for(start)
-        first_view = first_stage.view(first_problem)
-        self._views[first_stage.label(start)] = first_view
+        first_view = self._views.get(first_stage.label(start))
+        if first_view is None:
+            first_view = first_stage.view(first_problem)
+            self._views[first_stage.label(start)] = first_view
         assert first_problem.state is not None
         initial = first_view.vector(first_problem.state).values
 
@@ -1806,20 +2196,24 @@ class _RealJacobian(LinearOperator):
     ``matvec`` interleaves real and imaginary parts (optionally scaled by
     ``sqrt(w)`` per row) so ``||A x - b||`` equals the weighted complex
     residual norm; ``rmatvec`` restores the complex dual and applies
-    ``J.H``.  Optional penalty rows ``R`` are appended.
+    ``J.H``.  Optional regularization rows ``R`` are appended.
     """
 
     def __init__(
         self,
         jacobian: Any,
         row_weights: np.ndarray,
-        penalty_operator: Any = None,
+        regularization_operator: Any = None,
     ) -> None:
         self.jacobian = jacobian
         self.sqrt_weights = np.sqrt(np.asarray(row_weights, dtype=np.float64))
-        self.penalty_operator = penalty_operator
+        self.regularization_operator = regularization_operator
         rows, cols = jacobian.shape
-        extra = 0 if penalty_operator is None else int(penalty_operator.shape[0])
+        extra = (
+            0
+            if regularization_operator is None
+            else int(regularization_operator.shape[0])
+        )
         self.data_rows = 2 * int(rows)
         super().__init__(np.dtype(np.float64), (self.data_rows + extra, int(cols)))
 
@@ -1827,11 +2221,13 @@ class _RealJacobian(LinearOperator):
         x = np.asarray(x, dtype=np.float64).reshape(-1)
         data = np.asarray(self.jacobian @ x).reshape(-1) * self.sqrt_weights
         out = np.stack((data.real, data.imag), axis=-1).reshape(-1)
-        if self.penalty_operator is not None:
+        if self.regularization_operator is not None:
             out = np.concatenate(
                 [
                     out,
-                    np.asarray(self.penalty_operator @ x, dtype=np.float64).reshape(-1),
+                    np.asarray(
+                        self.regularization_operator @ x, dtype=np.float64
+                    ).reshape(-1),
                 ]
             )
         return out
@@ -1841,9 +2237,9 @@ class _RealJacobian(LinearOperator):
         pairs = y[: self.data_rows].reshape(-1, 2)
         dual = (pairs[:, 0] + 1j * pairs[:, 1]) * self.sqrt_weights
         out = np.asarray(self.jacobian.H @ dual, dtype=np.float64).reshape(-1)
-        if self.penalty_operator is not None:
+        if self.regularization_operator is not None:
             out = out + np.asarray(
-                self.penalty_operator.H @ y[self.data_rows :], dtype=np.float64
+                self.regularization_operator.H @ y[self.data_rows :], dtype=np.float64
             ).reshape(-1)
         return out
 
@@ -1860,19 +2256,24 @@ class LSRTM:
     Solves ``min_dm 0.5 ||J dm + r||_W^2 + 0.5 damping ||dm||^2 + P(dm)`` with
     ``r = F(v0) - d`` (``J``, ``W`` and ``r`` frozen at ``v0``):
 
+    Native regularization uses composite proximal-gradient iterations, with
+    Sauce evaluating the regularizer and solving each constrained proximal
+    problem. This also handles nonsmooth TV/TGV; ``info["method"]`` reports
+    ``"proximal_gradient"``. Without native regularization:
+
     - ``method="lsqr"``: SciPy's LSQR on the real-stacked Jacobian with the
       data-space residual from ``problem.residual(v0)`` (a site ``forward``
-      hook or a forward job); a penalty must expose ``operator()`` and is
+      hook or a forward job); a regularization must expose ``operator()`` and is
       appended as extra rows ``||R dm||^2``.
     - ``method="cg"``: conjugate gradients on the Gauss-Newton normal
       equations ``(H + damping I + P'') dm = -(g + P'(0))`` using
       ``lin.normal`` and ``lin.gradient`` only (no data-space residual
-      needed; the gradient is smoothed when the problem smooths gradients).
+      needed; the gradient and normal are both unprocessed).
 
     Args:
         problem: Problem (typically over ``GridParameters``/reflectivity).
         iterations: Solver iteration limit.
-        penalty: Optional penalty (``bind(space)`` protocol) on the image.
+        regularization: Optional regularization (``bind(space)`` protocol) on the image.
         method: ``"lsqr"`` or ``"cg"``.
         damping: Tikhonov damping ``||dm||^2`` weight.
         tolerance: Relative solver tolerance.
@@ -1884,7 +2285,7 @@ class LSRTM:
         problem: ImagingProblem,
         iterations: int = 15,
         *,
-        penalty: Any = None,
+        regularization: Any = None,
         method: str = "lsqr",
         damping: float = 0.0,
         tolerance: float = 1.0e-8,
@@ -1894,7 +2295,7 @@ class LSRTM:
         self.iterations = int(iterations)
         if self.iterations < 1:
             raise ValueError("iterations must be positive")
-        self.penalty = penalty
+        self.regularization = regularization
         method = str(method).strip().lower()
         if method not in {"lsqr", "cg"}:
             raise ValueError("method must be 'lsqr' or 'cg'")
@@ -1915,10 +2316,82 @@ class LSRTM:
         lin = self.problem.linearize(v0, gradient=True)
         self.linearization = lin
         space = lin.space
-        bound = None if self.penalty is None else self.penalty.bind(space)
+        from types import SimpleNamespace
+
+        from ._native_regularization import bind_workflow_regularization
+
+        # LSRTM regularizes the image/update; frozen image coefficients are zero.
+        image_state = ControlState(
+            lin.state.space,
+            np.zeros_like(lin.state.values),
+            scaling=lin.state.scaling,
+            scaling_units=lin.state.scaling_units,
+        )
+        specification = (
+            self.problem.smoothing
+            if self.regularization is None
+            else self.regularization
+        )
+        bound, native = bind_workflow_regularization(
+            specification,
+            space,
+            self.problem,
+            SimpleNamespace(job=lin.job, state=image_state),
+        )
+        if native is not None:
+            return self._run_proximal(lin, space, bound, native)
         if self.method == "cg":
             return self._run_cg(lin, space, bound)
         return self._run_lsqr(lin, space, bound)
+
+    def _run_proximal(
+        self, lin: Linearization, space: ControlSpace, bound: Any, native: Any
+    ) -> ControlVector:
+        """Solve the regularized image objective with its frozen data normal."""
+        assert lin.gradient is not None
+        g0 = lin.gradient.values.copy()
+        cached: Dict[bytes, Tuple[float, np.ndarray]] = {}
+
+        def smooth(x: np.ndarray) -> Tuple[float, np.ndarray]:
+            key = x.tobytes()
+            if key not in cached:
+                hx = np.asarray(lin.normal @ x) + self.damping * x
+                value = lin.value + float(g0 @ x + 0.5 * (x @ hx))
+                gradient = g0 + hx
+                if bound is not None:
+                    vector = ControlVector(x, space)
+                    value += bound.value(vector)
+                    gradient += bound.gradient(vector).values
+                cached.clear()
+                cached[key] = value, gradient
+            return cached[key]
+
+        def iteration(it: InexactNewtonIteration) -> None:
+            if self.callback is not None:
+                self.callback(ControlVector(it.model, space))
+
+        result = minimize_proximal_gradient(
+            lambda x: smooth(x)[0],
+            lambda x: smooth(x)[1],
+            native.value,
+            lambda x, tau, box: native.prox(x, tau, np.ones(space.size), box),
+            np.zeros(space.size),
+            options=InexactNewtonOptions(
+                max_iterations=self.iterations,
+                gradient_tolerance=self.tolerance,
+                objective_tolerance=0.0,
+                step_tolerance=0.0,
+            ),
+            callback=iteration,
+        )
+        self.info = {
+            "method": "proximal_gradient",
+            "iterations": result.iterations,
+            "status": result.status,
+            "converged": result.success,
+            "objective": result.objective,
+        }
+        return ControlVector(result.model, space)
 
     def _run_cg(
         self, lin: Linearization, space: ControlSpace, bound: Any
@@ -1926,20 +2399,20 @@ class LSRTM:
         zero = space.zeros()
         assert lin.gradient is not None
         rhs = -np.asarray(lin.gradient.values, dtype=np.float64)
-        hessian = None
+        curvature = None
         if bound is not None:
             rhs = rhs - _real_vector(
-                bound.gradient(zero), size=space.size, name="penalty"
+                bound.gradient(zero), size=space.size, name="regularization"
             )
-            hessian = bound.hessian_operator(zero)
+            curvature = bound.hessian_operator(zero)
         normal = lin.normal
         damping = self.damping
 
         def matvec(x: np.ndarray) -> np.ndarray:
             x = np.asarray(x, dtype=np.float64).reshape(-1)
             out = np.asarray(normal @ x, dtype=np.float64).reshape(-1) + damping * x
-            if hessian is not None:
-                out = out + np.asarray(hessian @ x, dtype=np.float64).reshape(-1)
+            if curvature is not None:
+                out = out + np.asarray(curvature @ x, dtype=np.float64).reshape(-1)
             return out
 
         operator = LinearOperator(
@@ -1982,19 +2455,19 @@ class LSRTM:
                 "regenerate the linearization with a current Sauce build or use "
                 "method='cg' which works from lin.normal and lin.gradient"
             ) from exc
-        penalty_operator = None
+        regularization_operator = None
         if bound is not None:
-            penalty_operator = bound.operator()
-            if penalty_operator is None:
+            regularization_operator = bound.operator()
+            if regularization_operator is None:
                 raise ValueError(
-                    "LSRTM with method='lsqr' needs a penalty exposing operator(); "
-                    "use method='cg' for this penalty"
+                    "LSRTM with method='lsqr' needs a regularization exposing operator(); "
+                    "use method='cg' for this regularization"
                 )
         weights = np.ones(lin.data_space.size, dtype=np.float64)
         weights = lin.weight_data(
             DataVector(weights.astype(np.complex128), lin.data_space)
         ).values.real
-        operator = _RealJacobian(lin.jacobian, weights, penalty_operator)
+        operator = _RealJacobian(lin.jacobian, weights, regularization_operator)
         b = np.concatenate(
             [
                 -operator.pack(residual.values),
@@ -2037,7 +2510,7 @@ def rtm(problem: ImagingProblem, v: Any = None) -> ControlVector:
     """Return the misfit gradient (RTM image on the control space) at ``v``.
 
     Equals ``problem.gradient(v)``: the objective's real control covector
-    (smoothed when the problem smooths gradients). The Jacobian and its frozen
+    (the raw objective derivative). The Jacobian and its frozen
     comparison residual carry Sauce's objective-space sign and normalization.
     """
 
@@ -2115,10 +2588,26 @@ def sensitivity_kernel_job(
         misfit: Any = problem._misfit_payload
     elif observed is None:
         observed_arg = None
-        # Zero-data kernels keep the misfit settings but drop the observed
-        # references (Sauce substitutes zero observed data).
+        # Observed RMS is undefined without observations. Retain the reduction
+        # and all other term settings, using a unit scale for zero-data kernels.
+        kernel_misfit = copy.copy(problem.misfit)
+        kernel_misfit._terms = tuple(
+            (
+                dataclasses.replace(
+                    term,
+                    normalization=Normalization(
+                        kind="explicit",
+                        value=1.0,
+                        reduction=term.normalization.reduction,
+                    ),
+                )
+                if term.normalization.kind == "observed_rms"
+                else term
+            )
+            for term in problem.misfit.objective_terms([g.name for g in groups])
+        )
         misfit = _MisfitPayload(
-            problem.misfit,
+            kernel_misfit,
             [dataclasses.replace(g, observed=None, derivatives={}) for g in groups],
         )
     else:
@@ -2157,7 +2646,8 @@ def sensitivity_kernel(
     """Run a Cartesian sensitivity-kernel (``Imaging.grid``) job and return its images.
 
     With ``observed=None`` Sauce uses zero observed data, so the images are
-    the pure model sensitivity kernels; ``observed=True`` images the misfit
+    the pure model sensitivity kernels; observed-RMS normalization uses a
+    unit scale while retaining its reduction. ``observed=True`` images the misfit
     residual instead.  See :func:`sensitivity_kernel_job` for the arguments.
     """
 
@@ -2175,174 +2665,3 @@ def sensitivity_kernel(
     )
     problem.backend.run(job)
     return job.load_images()
-
-
-class TimeReversalFocus:
-    """Time-reversal focusing objective over the problem's material blocks.
-
-    Non-material blocks of the problem view (sources, reflectivity) are held
-    at the current state; their gradient entries are zero.
-
-    Wraps ``ControlGradientJob(kind="focus")``: Sauce back-propagates the
-    observed data, measures the focusing of the time-reversed wavefield with
-    softening length ``softening`` (km) and returns the focusing objective and
-    its gradient with respect to the active ``model.*`` blocks.
-
-    Args:
-        problem: Problem providing simulation, observed data, site and the
-            active material blocks.
-        softening: Focusing softening length in km (or a length quantity).
-        kind: ``"trfwi"`` or ``"weft"``.
-        weights: Optional per-frequency weights.
-        smoothing: Gradient smoothing (default: the problem's).
-        spatial_window: Optional ``control_sensitivities.spatial_window``.
-    """
-
-    def __init__(
-        self,
-        problem: ImagingProblem,
-        softening: Any,
-        *,
-        kind: str = "trfwi",
-        weights: Optional[Sequence[float]] = None,
-        smoothing: Any = None,
-        spatial_window: Optional[Mapping[str, Any]] = None,
-    ) -> None:
-        self.problem = problem
-        magnitude = getattr(softening, "magnitude", None)
-        if magnitude is not None and hasattr(softening, "to"):
-            softening = softening.to("km").magnitude
-        self.softening = float(softening)
-        if not math.isfinite(self.softening) or self.softening <= 0.0:
-            raise ValueError("softening must be a positive length (km)")
-        self.kind = str(kind).strip().lower()
-        self.weights = None if weights is None else [float(w) for w in weights]
-        self.smoothing = (
-            problem.smoothing
-            if smoothing is None
-            else SmoothingConfig.from_value(smoothing)
-        )
-        self.spatial_window = None if spatial_window is None else dict(spatial_window)
-        self._results: Dict[str, Tuple[float, ControlVector]] = {}
-        self._jobs: Dict[str, ControlGradientJob] = {}
-
-    @property
-    def active(self) -> List[str]:
-        """Return the unqualified material block ids of the problem view.
-
-        Only ``model.*`` blocks enter Sauce's focus workflow; other blocks of
-        the view (sources, reflectivity) are held at the state and receive a
-        zero gradient.
-        """
-
-        blocks = list(self.problem.space.blocks)
-        model = [name for name in blocks if name.startswith("model.")]
-        if not model:
-            raise ValueError(
-                "time-reversal focusing needs at least one model.* block "
-                f"(active blocks: {blocks})"
-            )
-        return [unqualified_block_name(name) for name in model]
-
-    def _key(self, state: ControlState) -> str:
-        return _digest(state.values)[:16]
-
-    def job(self, v: Any = None) -> ControlGradientJob:
-        """Build the focus job at ``v`` (default: the current state)."""
-
-        problem = self.problem
-        state = problem.state_from(v) if v is not None else problem.state
-        if state is None:
-            raise ValueError("the control state is unknown; linearize once first")
-        key = self._key(state)
-        job = self._jobs.get(key)
-        if job is not None:
-            return job
-        active = self.active
-        full = problem.full_space
-        for block, sl in zip(full.resolved_blocks, full.full_slices.values()):
-            if block.name.startswith("model."):
-                continue
-            baseline = problem._authored_block(block.name, sl)
-            if baseline is None or not np.array_equal(state.values[sl], baseline):
-                raise NotImplementedError(
-                    f"time-reversal focusing runs on the authored simulation, but "
-                    f"block {block.name!r} differs from its authored baseline"
-                )
-        current: Optional[Path] = None
-        if v is not None or not problem.is_authored(state):
-            staging = problem.backend.staging_dir("focus", key)
-            blocks = {
-                name: values
-                for name, values in state.blocks().items()
-                if name.startswith("model.")
-            }
-            current = ControlVectorFile(blocks, native=True).write(
-                staging / "current.h5"
-            )
-        job = ControlGradientJob(
-            problem.backend.job_name("focus"),
-            problem.simulation,
-            list(problem.frequencies),
-            kind="focus",
-            observed=_observed_paths(problem),
-            gradient="focus_gradient.h5",
-            objective_file="focus_objective.h5",
-            focus={"softening": self.softening, "kind": self.kind},
-            active=active,
-            current=current,
-            misfit=problem._misfit_payload,
-            weights=self.weights,
-            smoothing=self.smoothing,
-            raw_gradient=(
-                "focus_gradient_raw.h5" if self.smoothing is not None else None
-            ),
-            spatial_window=self.spatial_window,
-        )
-        self._jobs[key] = job
-        return job
-
-    def dry_run(self, v: Any = None) -> Dict[str, Any]:
-        """Describe the focus job at ``v`` without submitting it."""
-
-        return self.problem.backend.dry_run(self.job(v))
-
-    def objective(self, v: Any = None) -> Tuple[float, ControlVector]:
-        """Return ``(value, gradient)`` of the focusing objective at ``v``."""
-
-        problem = self.problem
-        state = problem.state_from(v) if v is not None else problem.state
-        assert state is not None
-        key = self._key(state)
-        cached = self._results.get(key)
-        if cached is not None:
-            return cached
-        job = self.job(v)
-        problem.backend.run(job)
-        value = float(job.objective_value)
-        file = ControlVectorFile.read(job.gradient_file())
-        space = problem.space
-        # Non-material blocks do not enter the focus workflow: zero gradient.
-        blocks = {
-            b.name: (
-                file[b.name]
-                if b.name.startswith("model.")
-                else np.zeros(
-                    b.coefficient_count, dtype=complex if b.complex else float
-                )
-            )
-            for b in space.resolved_blocks
-        }
-        gradient = space.pack(blocks)
-        self._results[key] = (value, gradient)
-        return value, gradient
-
-    def value(self, v: Any = None) -> float:
-        """Return the focusing objective at ``v``."""
-
-        return self.objective(v)[0]
-
-    def gradient(self, v: Any = None) -> ControlVector:
-        """Return the focusing gradient on the problem space at ``v``."""
-
-        return self.objective(v)[1]

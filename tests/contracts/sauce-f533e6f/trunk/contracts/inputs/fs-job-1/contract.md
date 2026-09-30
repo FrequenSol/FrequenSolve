@@ -28,9 +28,9 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   precedence over `simulation/project_path`; explicit command-line and
   environment project-path overrides remain higher precedence.
 - `workflow` selects the run mode. Current public values are `forward`,
-  `forward_df`, `forward_ds`, `adjoint`, `smooth`, `rtm`, `focus`, `born`,
-  `lsrtm_gradient`, `fwi_operator`, `modal`, `size`, `raytrace`, `eikonal`, and
-  `transient`.
+  `forward_df`, `forward_ds`, `adjoint`, `smooth`, `rtm`, `born`,
+  `lsrtm_gradient`, `fwi_operator`, `modal`, `size`, `raytrace`,
+  `eikonal`, and `transient`.
 - `simulation` may be a legacy path string, an `fs-file-ref-1` object, or an
   inline `fs-simulation-1` object. Legacy relative path strings may be resolved
   under job-level `project_path` when that field is present.
@@ -43,6 +43,15 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
 - `f_list` is required by frequency workflows and prohibited for `raytrace`,
   `eikonal`, and `transient`. Current frequency readers
   accept complex values; real numeric values are the common forward path.
+- `fwi_operator` receiver actions use `receiver_linearize` to export an
+  immutable state, `receiver_jvp` for a material-control tangent, and
+  `receiver_vjp` for an independently keyed receiver dual. The linearization
+  accepts `field_retention: checkpoint` (default) or `replay`; VJP accepts
+  `field_reuse: checkpoint` or `replay` (defaulting to the state policy).
+  Checkpoint reuse loads complete saved base/df fields for each active source
+  batch and still assembles a fresh operator. These actions require
+  full-dimensional 2D or 3D acoustic, elastic, or coupled physical shots,
+  Cartesian or sparse receivers, and material controls.
 - `workflow: "forward_df"` computes the forward field and its analytic
   derivative with respect to real physical frequency, writing receiver datasets
   with the ordinary name and the `_df` suffix. `workflow: "forward_ds"` does
@@ -65,7 +74,7 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   beams and anisotropic incident eigenmodes are rejected. Maxwell phase-objective
   adjoint gradients remain unsupported. Maxwell recurrence loads use per-source
   normalization estimated from the previous solution magnitude and frequency;
-  receiver value frames restore the raw physical-frequency derivatives.
+  receiver value conventions restore the raw physical-frequency derivatives.
   Acoustic and elastic PML stretching is differentiated; poroelastic PML
   transforms remain frozen. Kjartansson constant-Q material dispersion is differentiated for
   acoustic, ISO/TI/TTI elastic, and direct or ISO/VTI/TTI-frame poroelastic
@@ -130,6 +139,18 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   The `wri` action instead solves one reduced wavefield-reconstruction
   subproblem per source-encoding RHS,
   `min_u 0.5 ||B(m)u-q||^2_G^-1 + 0.5 lambda ||Pu-d||^2_s^-2`.
+  `wri/objective_normalization` defaults to `observed_energy`: all reported
+  objective terms, model covectors and curvature products are divided by
+  `lambda * ||S^-1 d||^2`, using the same observation selection, projection,
+  observed preprocessing and residual weights, summed across source batches.
+  This common factor does not alter reconstruction. `none` disables it; a
+  positive number specifies a fixed divisor. Zero observed energy is rejected.
+  The artifact saves `/observed_energy` and `/objective_normalization` with a
+  `policy` attribute. Multi-frequency reduction uses the ratio of weighted sums,
+  not a sum of independently normalized values. `wri/normalization_only: true`
+  exports the observed calibration without assembly, solves, covectors or
+  `/value`; it excludes curvature. Its full-survey divisor can be frozen as a
+  numeric `objective_normalization` throughout inversion.
   The positive `wri/penalty` is `lambda`; `wri/data_scale` resolves to a scale in each
   selected receiver component's coordinate units (unit-aware `auto` by default). The observation term is
   inserted into the uncondensed DPG normal system before bubble condensation,
@@ -137,6 +158,14 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   path as an ordinary solve. When `control_sensitivities` is present, Sauce
   uses the envelope theorem to write the reduced model covector from local
   PDE-residual contractions; no wavefield adjoint solve is required.
+  `wri/formulation` is `centered` (default) or `original`. Centered subtracts
+  the current model's minimum PDE energy and its model covector, using one
+  ordinary forward reference solve per source batch. Original retains the
+  uncentered broken-test residual energy without the reference solve. Both
+  reconstruct the same wavefield. `/value` records its `formulation` attribute;
+  `/pde_objective` records its `definition`, and centered output additionally
+  saves the removed `/reference_pde_objective`. Existing curvature products
+  remain the original positive GN surrogates, not centered-objective Hessians.
   At a receiver point incident on multiple broken DPG elements, Sauce applies
   the penalty to every incidence with weights summing to one. This keeps the
   assembled operator and reported objective identical while also discouraging
@@ -156,8 +185,10 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   the penalty, alternating or variable-projection model/source updates, and
   continuation across tasks.
 
-  Source-independent dense WRI observations share the reconstruction matrix
-  and factorization across source batches, including a shorter final batch.
+  With `formulation: original`, source-independent dense WRI observations share
+  the reconstruction matrix and factorization across source batches, including
+  a shorter final batch. Centered WRI retains the hierarchy but refreshes its
+  operator and factors between each batch's reference and reconstruction solves.
   Sparse layouts and potentially source-dependent preprocessing error before solver
   setup if any configured batch has multiple RHSs. Batch sizes are never reduced
   automatically. Explicit single-RHS batches remain supported and rebuild per source.
@@ -177,22 +208,70 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   data/PDE weight ratios can still be ill-conditioned. Existing jobs that omitted
   the field change behavior; explicit `data_scale: 1` restores that scale choice.
   The objective artifact always writes `/data_scales`, with `components`,
-  `coordinate_units`, and `policy` attributes (`auto_solver_units` or `explicit`).
+  `units`, and `policy` attributes (`auto_solver_units` or `explicit`).
   The legacy scalar `/data_scale` is written only for explicit numeric input.
 
-  Optional `wri/curvature: fixed_wavefield | joint_schur` changes
-  `model_covector` to a model-normal action on `model_direction`. The former
+  Waveform and full-complex spectral `linearize` may request `receiver_diagonal: {}` to write
+  `receiver_diagonal_<task>.h5`; optional `probes`, `seed`, and `output` configure
+  the shared global receiver encoding. The default count is min(16, encoded
+  source RHS count), not a source-batch limit. See the supported layouts and
+  control-basis contraction in [curvature](../../../docs/imaging/curvature.md).
+
+  Spectral derivative RTM also accepts `control_sensitivities.receiver_diagonal`.
+  With `kernel_derivative.export_lower_orders`, matching `receiver_diagonal_dN`
+  artifacts accompany lower-order gradients; the highest order keeps the ordinary
+  output name. One probe hierarchy supplies orders 0–4 when receiver metrics differ
+  only by an order scalar. Observed normalization is included independently for
+  each order. Probe RHS width does not alter source batching. `--smooth` aggregates
+  these diagonals with the gradient frequency weights but does not smooth them.
+
+  Optional `wri/diagonal: "diagonal.h5"` writes the fixed-wavefield frozen-Gram
+  GN diagonal alongside the gradient, in the same control coordinates and
+  objective normalization. It excludes curvature actions and normalization-only
+  runs. Local control-basis contractions are squared after their full element
+  integration; no additional global solve is required.
+
+  A `model_direction` changes `model_covector` to a model-normal action.
+  Centered WRI defaults to `wri/curvature: metric_frozen`, a positive centered
+  approximation with two extra solves. `exact_gn` applies the full centered
+  residual GN normal with four extra solves. Both include the nonlocal reference
+  response and full normal-equation derivative. Original WRI defaults to
+  `joint_schur`. Explicit `fixed_wavefield | joint_schur` retain the uncentered
+  approximations; they are not centered GN. The former
   holds the reconstructed field fixed; the latter eliminates its increment
-  from the joint Gauss–Newton system. Both retain cross-parameter entries and
-  require `Solver/relaxed_assembly=false`, frozen Gram weights, and unwindowed material controls in uncoupled
-  acoustic, classic elastic or Maxwell DPG. They are positive-semidefinite approximations,
-  not exact reduced Hessians. The objective output still describes the base
+  from the joint Gauss–Newton system. All modes retain cross-parameter entries and
+  require frozen Gram weights and unwindowed material controls in acoustic,
+  classic elastic, coupled acoustic–elastic or Maxwell DPG. They are
+  positive-semidefinite approximations, not exact reduced Hessians. Relaxed
+  assembly is accepted as a further approximation; exact assembly
+  (`Solver/relaxed_assembly=false`) keeps the reconstruction and the curvature
+  contractions on the same Gram factor. The objective output still describes the base
   reconstruction; its `value` dataset records `curvature` and `gram_derivative`
   attributes. WRI reconstructs the base state within each invocation; these
   actions do not consume a waveform/phase saved-linearization artifact.
+  Coupled acoustic–elastic reconstruction and `pde_objective` include the same
+  registered normal-velocity and traction-continuity penalties. These interface
+  coefficients have no explicit material derivative. Objective gradients honor
+  `gram_derivative: total` in both acoustic and classic elastic domains; the
+  curvature actions remain frozen-Gram approximations. See the
+  [coupled WRI example](examples/fwi-operator-wri-coupled.json), which assumes
+  the referenced simulation defines the listed fluid and solid material controls.
   See [WRI curvature and costs](../../../docs/imaging/wri.md).
+- `control_sensitivities.quadrature` defaults to `auto`: unweighted tensor-node
+  volume sensitivities for RTM/FWI pullbacks, with native quadrature for other
+  controls, unsupported tensor layers, `fwi_operator.extension`, intersected
+  assembly, jobs with active geometry controls, and discrete JVP/normal actions.
+  Use explicit `wavefield` for exact
+  coefficient derivatives and transpose tests.
+  Explicit `material_intersections` subdivides volume material pullbacks at material-cell
+  boundaries; assembly, face rules and JVPs remain unchanged. These covectors
+  approximate continuous sensitivities rather than the exact discrete objective
+  derivative. RTM and FWI `linearize`, `vjp`, `receiver_vjp`, and `wri` accept
+  the option, including waveform and spectral receiver-probe diagonal contractions.
+  These diagonals are positive preconditioner approximations, not exact discrete
+  GN diagonals. Born/JVP, normals and WRI curvature/diagonals reject it.
 - `control_sensitivities` selects native material-control sensitivities instead
-  of a Cartesian image for a `born`, `rtm`, or `focus` workflow. `born` requires a
+  of a Cartesian image for a `born` or `rtm` workflow. `born` requires a
   `direction` HDF5 file for its JVP; `rtm` requires a `gradient` HDF5 output path
   for its VJP. An optional `objective` HDF5 path makes the same RTM invocation
   write the robust scalar data objective evaluated before its retained-state
@@ -201,7 +280,7 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   `--smooth` postprocess applies optional nonnegative `weights`, sums those
   coefficient covectors and scalar objectives, writes `raw_gradient` (or
   `gradient_raw.h5`), and writes the final `gradient`. Optional `Smoothing` applies a
-  representation-owned Tikhonov, TV, or second-order TGV variational Riesz map
+  representation-owned Tikhonov, TV, or second-order TGV variational regularization solve
   after aggregation. The parts may be native `/controls/<block>` files or
   `fwi_operator` covectors (`fs-control-vector-1`, qualified
   `/controls/model.<block>` datasets); the reader accepts both layouts, ignores
@@ -211,14 +290,14 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   are summed with the same weights, the `/support` masks are copied from the
   first source, and `/schema`, `/packing`, `/state_fingerprint` and
   `/control_registry_fingerprint` are carried through (every part must share
-  both fingerprints), so the smoothed covector can be used directly as
+  both fingerprints), so the processed vector can be used directly as
   `fwi_operator.direction`. Native sources produce native outputs.
   Optional `input` names one such vector explicitly: the postprocess then reads
   that file instead of the `_<task>` parts, copies it to `raw_gradient`, and
-  writes the smoothed `gradient`; `weights` and `objective`/`focus` aggregation
+  writes the smoothed `gradient`; `weights` and `objective` aggregation
   are ignored. `f_list` remains required because wavelength-relative smoothing
   scales use its largest frequency. Relative `gradient`, `raw_gradient` and
-  `objective` paths (and the focus `objective`) resolve under the job's result
+  `objective` paths resolve under the job's result
   directory, like the `fwi_operator` outputs, so the same relative string names
   both the `fwi_operator.covector` parts and the smoothing input; a relative
   `input` is looked up there first and otherwise like `fwi_operator.direction`.
@@ -284,14 +363,14 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   explicitly formed inverse derivatives. WRI reuses its existing optimal
   residual; RTM/FWI caches an additional element-local optimal residual and
   currently factors/solves its Gram matrix once per source batch. The frozen
-  path performs none of this additional work. Total currently requires
-  `Solver/relaxed_assembly=false`: the approximate fast-mode assembly can be
-  inconsistent with the separately evaluated residual objective. Use fp64 Schur
-  storage and a tight solve tolerance for verification. Both RTM and WRI keep
+  path performs none of this additional work. With relaxed assembly, total is an
+  approximation: the fast-mode assembly can be inconsistent with the separately
+  evaluated residual objective. For verification use
+  `Solver/relaxed_assembly=false`, fp64 Schur storage and a tight solve tolerance. Both RTM and WRI keep
   frozen Gram as their default; total is an opt-in verification mode.
   Total requires full-dimensional Cartesian acoustic, classic elastic or
   Maxwell DPG material controls; Galerkin, weak-symmetry elasticity, geometry,
-  focus, phase derivatives, source tapers and spatial windows are rejected.
+  phase derivatives, source tapers and spatial windows are rejected.
   WRI normals still require frozen Gram. Keep the mesh, polynomial orders,
   quadrature, PML stretch and material-extension geometry fixed during checks.
   Seismic and WRI model gradients exclude PML elements; ordinary Maxwell
@@ -299,37 +378,6 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   is not differentiated. Smoothing remains a postprocessing step, not part of
   the raw objective covector. Qualification remains combination-specific; see
   [capabilities](../../../docs/imaging/capabilities.md).
-
-- `focus` backpropagates the observed traces and minimizes unnormalized negative
-  wavefield energy around each encoded source center. `kind` selects:
-  - `trfwi` (default): acoustic `-1/2 integral w |p|^2 dx`, where `w` is a
-    Gaussian approximation to point evaluation. `softening` is its standard
-    deviation in km.
-  - `weft`: acoustic volumetric strain `theta = -p/K`, or elastic strain
-    `epsilon`, with objective `-1/2 integral w |theta|^2 dx` or
-    `-1/2 integral w epsilon:conjg(epsilon) dx`. `w` is the product of cosine
-    tapers, zero outside a source-centered box whose half-width is `softening`
-    km. Elastic DPG recovers strain from stress and constitutive compliance;
-    Galerkin uses the symmetric displacement gradient. The compliance's
-    material derivative is included in the gradient.
-  These are frequency-domain adaptations inspired by WEFT and TRFWI. WEFT's
-  acoustic volumetric measure and elastic rotation-invariant strain norm replace
-  the paper's componentwise moment-tensor imaging functional. Frequencies are
-  independent: there is no onset-time window, frequency coupling, or energy
-  normalization. For complex frequencies the prescribed damping is retained.
-  Scaling observations by `a` scales the objective and gradient by `|a|^2`;
-  their global phase has no effect. Zero observations produce zero outputs.
-  The aperture must be resolved by the mesh and quadrature. PML elements are
-  excluded from evaluation. Supports Cartesian acoustic and classic elastic
-  DPG/Galerkin with material controls, subject to their existing sensitivity
-  restrictions. DPG observations must use native fields (`post_process: false`);
-  material-dependent receiver operators are not supported. Willis coupling,
-  geometry controls, 2.5D, and sensitivity tapers/windows are excluded.
-  `distance_power` belongs to the removed signed-pressure objective and is
-  rejected. Each frequency writes `/value` in its objective HDF5 shard and a
-  control-gradient shard; existing frequency `weights` aggregate both products.
-  See [wavefield focusing](../../../docs/imaging/focusing.md) for equations,
-  examples, and the source papers.
 
 - Cartesian image `Smoothing` accepts `tikhonov`/`l2`, `tv`, and `tgv`/`tgv2`.
   The TGV2 image smoother uses the mixed first-order form
@@ -365,6 +413,33 @@ discrete toroidal harmonic and does not consume `k_list` or `k_weights`.
 ## Total spectral kernel derivatives
 
 An `rtm` or `fwi_operator` job may add `"kernel_derivative": {"order": 4, "axis": "fourier"}`.
+
+Retained spectral recurrence and forward trial fields default to
+`kernel_derivative.field_storage: "auto"`. After the base solve, Sauce predicts
+`n` recurrence snapshots plus `n+1` element-local forward trial planes from the
+actual DOF layout, precision and RHS batch size. This does not assemble forms.
+If that payload exceeds the remaining memory budget, all ranks use disk.
+`field_memory_fraction` defaults to `0.8`, leaving 20% headroom; zero selects disk
+for any nonempty hierarchy. Available host memory (and visible Linux cgroup
+limits under standard mounts) is conservatively divided among ranks on each host.
+Unknown availability selects disk. Explicit `"memory"` and `"disk"` override auto.
+The estimate, summed rank budgets and selected mode appear in result diagnostics
+as `spectral_estimated_field_bytes`, `spectral_field_budget_bytes` and
+`spectral_fields_on_disk`. These are snapshots, not reservations against other jobs.
+Disk mode writes
+immutable fields to rank-local scratch files under `--tmp-directory` and maps
+them read-only. Pages are loaded on access and are reclaimable by the operating
+system; this is not a fixed process-RSS limit. The active solve, solver factors,
+receiver data and optional probe caches still need memory. Forward trial packing
+can temporarily retain one full plane. No field compression or precision change
+is applied. Prefer a local SSD with enough capacity for the retained hierarchy.
+Scratch files are unlinked immediately and reclaimed when their mappings close,
+including after process termination; they are not restart checkpoints.
+`spectral_forward_cache_bytes` and `spectral_recurrence_cache_bytes` report heap
+payloads; the corresponding `spectral_forward_disk_bytes` and
+`spectral_recurrence_disk_bytes` report mapped file payloads, not physical RSS.
+This storage choice does not change the saved physical-state fingerprint.
+
 `order` defaults to one and accepts zero through four; `axis` defaults to
 `fourier` (real physical Hz), or may be `laplace` (imaginary physical Hz).
 The job requires `Image` with acoustic `fwi:acoustic`, property `vp`, an empty
@@ -392,6 +467,14 @@ The DPG optimal-test map and artificial impedance also remain frozen, as in
 - `"window"` with `"window": [a0, ..., an]` compares `sum_k a_k t^k` weighted
   traces (t in seconds) with one common residual; the polynomial degree sets
   the order.
+  Alternatively, with explicit `order`, map every objective receiver-group name
+  to an HDF5 dataset locator. The finite real coefficient arrays have Python/HDF5
+  shape `(order+1, global_receiver, source_field)` in solver source-field order,
+  shared across components. Here `order` is the maximum retained polynomial power;
+  individual traces or coefficient planes may be zero.
+  These FWI windows require dense point receivers without averaging or
+  frequency/material-dependent receiver operators; WRI and probe diagonals are
+  not supported. Coefficient inputs must remain fixed with the objective state.
 - `"jet"` sums one l2 misfit per order, weighted by `"order_weights"`
   (default ones, highest positive). It applies the triangular transpose of the
   derivative recurrence by adding each order's scaled receiver adjoint to the
@@ -405,6 +488,14 @@ the selected objective up to the frozen quantities above. Every mode costs
 the single adjoint solve of its plane. A time-domain
 SeismicStore supplies observed `t^k` moments directly; an HDF5 trace file or
 packed trace root must provide each needed derivative group.
+For separate per-order gradients, control-sensitivity RTM accepts
+`kernel_derivative/export_lower_orders: true` with `residual: derivative`.
+The primary outputs represent `order`; lower-order gradient and objective paths
+add `_dK` before `.h5`, before any task suffix. Postprocessing independently
+aggregates all orders. This reuses one forward hierarchy and factorization, but
+each objective has its own adjoint recurrence: `(n+1)*(n+4)/2` solves for orders
+0–n (20 at n=4). It does not produce multiple `fwi_operator` states and is not
+supported by image-kernel, window, jet, or WRI jobs.
 With `control_sensitivities` and a `derivative`, `window` or `jet` residual the
 job writes the native control gradient and objective of that time-weighted
 misfit instead of an image, using the exact discrete transpose of the
@@ -412,12 +503,23 @@ recurrence and analytic mixed frequency/material partials through order four
 (acoustic DPG, frozen Gram, unstretched cells). `workflow: fwi_operator`
 accepts the same key with a `derivative` or `window` residual and a waveform
 comparison for `linearize`, `jvp`, `vjp` and `normal`; `jet` is rejected there.
+For `action: wri`, `derivative` and `window` select centered windowed-reference
+WRI: the reference and observed traces receive the same spectral combination,
+while the PDE correction retains the base-frequency energy metric. It requires
+`formulation: centered` and fixed, frequency/material-independent receiver rows.
+Material gradients accept frozen or total Gram dependence; the spectral recurrence
+does not differentiate Gram in frequency. Original WRI, spectral normals and diagonal outputs are rejected.
+Cost is `order+2` solves for the objective/reconstruction and `2*(order+1)` with
+the gradient, per source batch. See [windowed WRI](../../../docs/imaging/wri.md#spectral-windows).
 `"source_derivative": "total"` includes the point-source frequency derivative
 in the forward hierarchy, matching `forward_df` and recorded time moments.
+First-order spectral Born and normal actions also support this source policy,
+including the mixed material/source-frequency load. Higher-order Born actions
+require a frozen source spectrum. Gram derivatives remain frozen.
 
 The initial scope is Cartesian 2D/3D acoustic DPG, nonzero complex frequency,
 point sources, native receivers, and lossless or Kjartansson material response.
-PML propagation is differentiated. Projection, WRI, control sensitivities with
+PML propagation is differentiated. Projection (and WRI except for the separate windowed-reference action above), control sensitivities with
 a `base` residual, phase-derivative comparisons, incident/equivalent sources, and gravity-surface
 forcing are rejected. Builds must support parallel HDF5, including serial runs.
 See the [native workflow guide](../../../docs/imaging/spectral-kernels.md)
@@ -435,6 +537,17 @@ receive the `_<task>` suffix before the extension when `f_list` has more than on
 entry. A `state_output` records each mechanism block's physical scaling, so a
 baseline written by one frequency task replays in another
 ([fs-control-state-1](../fs-control-state-1/contract.md)).
+
+The internal, experimental `controls/pml_stage` object supplies `manifest` and
+`identity` for an immutable [patch stage bundle](../../internal/fs-patch-stage-1/contract.md).
+It requires `controls/state` as the candidate. The runtime verifies the pinned
+material definition and context and restores the model baseline before initial
+mesh and PML sizing. After acquisition initialization, it validates and restores
+the complete stage baseline, captures the PML owner, then applies the candidate.
+Stage identity participates in native state reuse checks. Reference-window refresh
+verifies the pinned inputs and reloads both material owners. Acoustic/coupled
+sizing queries select frozen materials in PML. Controlled patch PML remains gated
+pending stage geometry/mesh and application derivative integration.
 
 Operator inputs `state` (jvp, vjp, normal), `direction`, `objective_vector`
 (vjp), `extension/direction` and `model_direction` are resolved per task when
@@ -485,6 +598,18 @@ and defines exactly one axis:
   samples. `packet_mb` bounds native donor exchange. The midpoint halo artifact
   is inferred from the named mesh property space; `artifact` can override it.
 
+Real and complex physical frequencies use the existing job `f_list`: for example,
+`[[3.0, -2.0]]` represents `3-2i` Hz. At lag `tau` seconds, the factor is
+`exp(-i*2*pi*f*tau)`, including `exp(2*pi*Im(f)*tau)`. Real tap coordinates are
+retained; transpose actions conjugate the complete factor, including its amplitude.
+This applies to extension JVP/VJP, normals, inner solves, reduced gradients and
+reduced Schur actions. Shared-band L2 fits are selected as described below.
+Large imaginary-frequency/lag products can impair conditioning; nonfinite
+frequencies and factors not representable in the solver working precision are
+rejected. Full-dimensional waveform comparisons remain required; relaxed
+assembly is accepted as an approximation. See the
+[complex-frequency lag example](examples/fwi-operator-extension-complex.json).
+
 Fields borrow spatial control maps, including meshed properties. Tap values use
 the property catalog units without nonlinear model transforms or bounds. The lag
 sum absorbs quadrature weights. Auxiliary inputs and outputs use
@@ -499,7 +624,8 @@ remain unchanged.
 
 `solve` requires `extension/solver` with positive `damping`, `solution`, and
 `report` paths. It solves one regularized quadratic shared across source batches
-of this frequency task. `field_scales` supplies one physical amplitude per field:
+of this frequency task, or across all frequencies with `frequency_weights`.
+`field_scales` supplies one physical amplitude per field:
 taps equal scale times the Krylov coordinate. The normal receives damping squared
 plus the applicable squared axis penalty: `lag_penalty*tau/lag_scale` or
 `offset_penalty*|half_offset|/offset_scale`. A nonzero axis penalty requires its
@@ -511,9 +637,23 @@ objective coordinates. `normal` itself remains unregularized.
 CG verifies its final true residual and reports iterations, normal actions,
 convergence, residual norms and quadratic change. `cache_mb` bounds resident
 incident checkpoints per rank; excess batches use temporary storage. A zero
-budget forces spilling. `workspace_mb` separately bounds retained reduced-gradient
-wavefields. `require_convergence` rejects an unconverged solve after emitting its
+budget forces spilling. The retained reduced-gradient source-batch workspace is
+indivisible and sized by the batch; the deprecated `workspace_mb` is accepted and
+ignored. `require_convergence` rejects an unconverged solve after emitting its
 diagnostic artifacts.
+
+For L2 fits, `gradient_checkpoints` optionally supplies an output prefix for a
+fixed-tap background gradient at accepted CG iterates divisible by
+`gradient_checkpoint_interval` (positive integer, default 1). Other iterations
+skip checkpoint gradient computation entirely. This requires active
+material controls and adds three propagation solves per source batch and
+frequency at each checkpoint. Gradients use
+`<prefix>_cg_<iteration>_<task>.h5`; matching JSON completion records contain the
+iteration, gradient path, per-frequency unweighted data objective, frequency
+weight, current inner residual norm (possibly recursive), normal-action count,
+and checkpoint propagation-solve count. A checkpoint is **not** a stationary
+reduced gradient. Sum its frequency covectors with the same band weights.
+Checkpoint output does not change the CG stopping policy or Krylov recurrence.
 
 For a reduced background gradient, select material blocks in `controls/active`
 when creating the state, then use `solve`, `model_gradient=true`, and a top-level
@@ -552,18 +692,37 @@ mutually exclusive with `model_gradient=true` and requires the observed-data
 target. The same material-only and fixed DPG-metric restrictions apply. See the
 [example](examples/fwi-operator-reduced-normal.json).
 
-Real Fourier frequencies, full-dimensional waveform comparisons and
-`Solver/relaxed_assembly=false` are required. Volume scattering excludes PML and
+Full-dimensional waveform comparisons are required; relaxed assembly is
+accepted as an approximation. Volume scattering excludes PML and
 boundary coefficients. Factors and incident states are reused inside a request.
-Each frequency task currently has its own inner solve; a common extension across
-a band requires composition of frequency normals and right-hand sides before
-one shared solve. See the [solver guide](../../../src/Core/Manage/Simulation/extension.md).
+For one common fit, supply `extension/solver/frequency_weights` (one finite,
+nonnegative weight per `f_list` entry, at least one positive) and launch with
+`--frequency-groups N`, where `N` equals the complete frequency count. MPI ranks
+must divide evenly into these contiguous groups. Each group retains one
+frequency's factors and incident checkpoints. The native iteration sums weighted
+data normals and right-hand sides, adds the regularizer once, and makes one
+common convergence decision. Control basis, field order, physical units, axis,
+scales and solver settings must agree; spatial partitions may differ. Routing
+uses canonical global control IDs and checks one owner per frequency and ID.
+Warm starts must represent the same physical tap vector on every group.
+
+Task-suffixed solution files contain the same physical taps with per-task state
+identities. Reports declare `scope: frequency_band` and `frequency_weights`;
+`quadratic_objective` is the global band value. With `model_gradient`,
+`data_objective` and the physical covector remain **per frequency**, unweighted.
+Aggregate these with the supplied weights and add `regularization` from exactly
+one report; never sum the per-task `reduced_objective` fields for the band.
+The current shared path supports L2 inner fits and reduced gradients, not robust
+losses or `reduced_normal`. The whole band must run together; partial reuse and
+per-frequency retry are invalid. Without the weights/group launch, the native
+contract retains independent frequency fits.
+See the [solver guide](../../../src/Core/Manage/Simulation/extension.md).
 
 The [iteration/composition design](../../internal/fs-extension-iteration-1/contract.md)
 requires both Sauce-owned and FrequenSolve Python-owned iteration over the same
 operator boundary, with frequency scheduling independent of driver choice.
-Native callbacks exist; a retained Python session/parallel-band interface is
-planned. This outline introduces no accepted job fields. File-based external
+Native callbacks and the MPI shared-band L2 launcher exist; a retained Python
+session interface remains planned. This outline introduces no additional job fields. File-based external
 quadratic iteration can use the current actions, but does not retain factors
 across executable invocations or supply robust candidate reweighting.
 
@@ -604,11 +763,12 @@ physical-field normal of the lower-level native session. Robust objective
 weights are frozen at the saved baseline, just as in ordinary FWI actions.
 
 This workflow currently requires full-dimensional first-order acoustic or classic
-elastic DPG, compiled Forms, unrelaxed assembly, native receiver channels, and the
-frozen trial-to-test policy. Coupled physics, Galerkin, 2.5D, axisymmetry, phase
+elastic DPG, compiled Forms, native receiver channels, and the frozen
+trial-to-test policy; relaxed assembly is accepted as an approximation. Coupled physics, Galerkin, 2.5D, axisymmetry, phase
 objectives, explicit Dirichlet data, and sensitivity tapers are
-rejected. Volume reflectivity excludes PML cells. `workspace_mb` bounds the
-retained joint session; solver and acquisition buffers have their own owners.
+rejected. Volume reflectivity excludes PML cells. The retained joint session holds
+one indivisible source-batch workspace (the deprecated `workspace_mb` is accepted
+and ignored); solver and acquisition buffers have their own owners.
 One source batch is active at a time, and all propagations reuse the background
 factors.
 
@@ -635,3 +795,172 @@ their task results, then retires the duplicate shards and shared trace metadata.
 Previously committed packed products survive unsuccessful replacement attempts
 in both modes. An immutable segment still referenced by a current task or pack
 is retained. This policy does not delete user-selected FWI checkpoint stems.
+
+## Native model regularization callbacks
+
+`control_sensitivities.Regularization` uses the `--smooth` entry point with an
+explicit `input` full-model vector and `gradient` output. `operation="prepare"`
+resolves weights/amplitude scales and writes `context`; `value` evaluates the
+same native energy with that context; `gradient` returns the exact Tikhonov
+coefficient covector and its energy (no mass inversion). The latter operation
+rejects TV/TGV; on a zero-padded tangent it applies the Tikhonov Hessian.
+`diagonal` returns the exact coefficient Hessian diagonal for Tikhonov, with
+zero reported energy; its input values are otherwise unused. Both derivative operations
+include constrained-basis assembly and use the frozen context weights.
+`mass` applies the consistent material mass matrix to primal coefficients;
+`mass_inverse` solves the mass system for an input coefficient covector.
+`mass_diagonal` returns the positive diagonal of the consistent mass matrix,
+including constrained-basis cross terms; its input values are otherwise unused.
+These operations use native geometry and the constrained basis, ignore the
+context's weights/amplitude, and report zero energy. The inverse uses `iterations`,
+`relative_tolerance` and `absolute_tolerance`, and fails on nonconvergence.
+Every operation other than `prepare`, including the mass operations, requires a
+prepared `context`: it identifies the native basis, and a block whose recorded
+identity differs from the bound control is rejected. Every operation reads a
+full, finite `input` vector; non-finite values are rejected even where the
+values are unused.
+`proximal` minimizes metric fidelity plus
+`tau` times that energy with full coefficient `lower`/`upper` bounds. Equal bounds
+fix coefficients. `metric` is a positive coefficient diagonal. All vectors must
+carry matching mesh `control_spaces` identities when applicable. They contain
+full values, not zero-padded tangents. `result` follows
+[fs-control-regularization-result-1](../../outputs/fs-control-regularization-result-1/contract.md).
+
+TV/TGV use split-Bregman shrinkage for mesh, axis and tensor controls. `epsilon`
+controls splitting, not epsilon smoothing of the norm. TGV uses first derivatives;
+second-order scalar regularization requires a sufficiently high-degree spline.
+The inversion driver adds this energy to its data objective once per model, after
+frequency aggregation. Legacy `Smoothing` vector processing remains a distinct
+operation with primal or dual input semantics.
+
+For a coefficient field `u`, the native energies are
+`alpha/2 * integral |D^p u|^2` (Tikhonov),
+`sqrt(alpha) * integral |D^p u|` (TV), and
+`min_w integral alpha1*|grad(u)-w| + alpha2*|sym(grad(w))|` (TGV).
+Spatial axes use km and angular axes radians. Integrals use the native basis
+and quadrature. Wavelength scaling sets `length=lambda*wavelength/(2*pi)`,
+`alpha=length^(2*p)`, or `alpha1=length`, `alpha2=tgv_ratio*length^2`.
+Explicit weights override these defaults.
+
+The prepared context records each included material block's basis identity,
+resolved weights and amplitude `a`. Normalization defaults on for wavelength
+weights and off for explicit weights; when enabled, `a` is the maximum absolute
+prepared input coefficient (one for a zero block). The energy is then
+`a^2 * R(u/a)`. The same context and regularizer configuration must be reused
+throughout a stage, including after checkpoint restoration. The SDK supplies
+`u=m-reference` for a reference-state regularizer; the callback does not subtract
+a reference itself.
+
+The proximal objective is `0.5*(u-input)^T metric*(u-input) + tau*R(u)` with
+coefficient bounds. The reported value excludes both fidelity and `tau`.
+`input_role` is ignored here: all inputs are primal full coefficients, including
+fixed values. `prepare` and `value` return the supplied input in `gradient`;
+`proximal` returns the constrained model. Relative output paths resolve under
+the result directory; input vectors and input contexts use the control-vector
+input lookup rules above. `Regularization` takes precedence if `Smoothing` is
+also present; frequency aggregation and scalar data-objective aggregation are
+not performed by this callback.
+
+FrequenSolve's `Tikhonov`, `TV` and `TGV` objects configure these callbacks;
+they do not implement separate Python discretizations or derivatives.
+FWI preserves its requested smooth optimizer for Tikhonov using `gradient`.
+TV/TGV and native LSRTM terms use composite proximal-gradient backtracking.
+Explicit custom smooth terms remain SDK-owned and may be added to that term.
+
+### Shared receiver groups
+
+Receiver actions cover all configured imaging receiver groups in one PDE
+hierarchy. A single group retains `fs-receiver-state-1` /
+`fs-receiver-vector-1`; multiple groups use the hash-bound
+`fs-receiver-state-bundle-1` / `fs-receiver-vector-bundle-1` collection manifests.
+Each member retains its own physical keys, units and observation identity.
+Members share the model, acquisition, frequency, partition and field checkpoints.
+`receiver_jvp` exports all group tangents after shared solves. `receiver_vjp`
+loads all group duals and sums their receiver loads before each common adjoint
+solve. The control direction/covector is bound to the collection fingerprint.
+
+## Control-mesh adaptation callback
+
+`control_sensitivities.MeshAdaptation` is an explicit single-rank `--smooth`
+setup request. `input` supplies the full accepted material coefficients with their
+old basis identities; `gradient` names the transferred native coefficient file.
+The request contains `source_identity`, positive `frequency` (Hz), positive
+`averaging_wavelengths` (window half-width), `model.property_spaces` declarations
+for the spaces to replace, and the JSON `result` path. Old and new spaces use the
+same initial geometry, material groups and property transforms. Unlisted spaces
+remain unchanged. Output basis identities refer to the new property artifacts.
+
+The sizing-only reference averages recovered slowness without crossing material
+interfaces; its physical window is fixed before refinement from the old material's
+volume-weighted harmonic-mean wavelength. Five-point Gauss quadrature per axis
+approximates a truncated Gaussian window. `transfer="nodal"` (default) interpolates
+coefficient updates. `transfer="l2"` integrates the source and target constrained
+bases on their cell intersections and solves the target projection. Optional
+`smoothing_length_m >= 0` adds that physical length squared times the target
+stiffness operator; nonzero smoothing requires `transfer="l2"`. Zero length is
+ordinary L2 projection. Both refinement and coarsening are supported, with native
+geometry and a checked matrix-free solve. Constants are preserved; general
+coarsening loses unresolved structure. Alternatively, `smoothing_wavelengths`
+(nonnegative, L2 only, with zero fixed length) sets the local smoothing length to
+`fraction * accepted_wavespeed(x) / smoothing_frequency_hz`. The frequency defaults
+to the requested sizing frequency and must be positive. The source model is
+restored before sampling the wavespeed; the resulting coefficient is frozen during
+the linear solve and integrated inside the stiffness operator. For acoustics the
+speed is Vp; elastic materials use the native minimum propagating wavespeed.
+Positive smoothing acts on model
+coefficients (log updates for log controls), retaining the reference. This is not
+a gradient transfer or an optimization regularization callback. Artifacts must use immutable paths keyed
+by the source state and sizing policy; retain them for all stage evaluations and
+restarts. The result follows `fs-control-mesh-adaptation-result-1`.
+
+The default `control_sensitivities.quadrature: "auto"` evaluates tensor-hat
+**volume sensitivities at tensor nodes without cell-volume weights** for RTM and
+FWI pullbacks (`linearize`, `vjp`, `receiver_vjp`, and gradient-only `wri`). This
+avoids missing fine control nodes. The gridded-image mapper supports curved
+wavefield elements; cached reference points and shared-element averaging prevent
+double counting. These are approximate nodal sensitivity values, not integrated
+coefficient covectors. Densities use physical km coordinates (per km^D),
+independent of solver nondimensionalization. Their Euclidean dot product is not an exact directional
+derivative of the discrete objective.
+
+Explicit `"tensor_points"` requests the same sampling. Explicit `"wavefield"`
+retains the discrete coefficient gradient for derivative/transpose tests. Auto
+keeps native quadrature for depth-only and other non-tensor layers, Born/JVP,
+normal actions, WRI curvature/diagonal actions, `fwi_operator.extension`,
+intersected assembly, and jobs with active geometry controls. Forward assembly
+and face terms remain unchanged. Sampling requires full-dimensional,
+axis-aligned Cartesian tensor controls sharing one layout per material layer.
+Auto integrates any other layer natively, including layers that mix tensor and
+other active controls and every layer sharing a tensor parameter with such a
+layer. Explicit `"tensor_points"` rejects those layers, active geometry
+controls, and `fwi_operator.extension`. Depth-strip integration is deferred.
+
+Diagnostics include `tensor_nodal_sensitivity`, `control_quadrature_points`,
+`control_quadrature_original_points`, `control_quadrature_cache_bytes`,
+`control_quadrature_setup_us`, and `control_quadrature_reuse`.
+`tensor_nodal_sensitivity` is `1` only when at least one layer was sampled.
+Point and cache-byte counts are summed over ranks; `control_quadrature_reuse` is
+the maximum per-rank reuse count. Cache bytes count reference-point and
+averaging-weight payload only. Smoothing of generated tensor sensitivities uses
+nodal (primal) input in sampled layers only; explicit input vectors retain their
+requested input role.
+
+## Internal root preparation
+
+The experimental top-level `patches` field is SDK-only metadata for saved
+frequency-domain forward wrappers. It records explicit roots or automatic shot
+grouping, scalar radial or per-axis box aperture, buffering, depth and PML policy.
+Run these wrappers through `site.run`; direct site submission is rejected.
+The SDK prepares ordinary native child jobs without this field, preserving the
+source catalog and selecting `Acquisition/active_sources` plus sparse receiver
+rows. Receiver groups with no retained rows are omitted from that child.
+
+`patch_prepare` runs one geometry-only operation with a `PatchPreparation`
+request (`fs-patch-preparation-1`) and a positive stage `f_list`. It publishes
+the parent snapshot and `fs-patch-geometry-1` report without wave solves.
+
+Experimental `fwi_operator/controls/stage_mesh` captures or replays a verified
+[frequency mesh companion](../../internal/fs-stage-mesh-1/contract.md). It requires
+`pml_stage` and an explicit candidate `state`. Capture uses the canonical stage
+baseline with `action: linearize` and stops before wave solves. Replay preserves
+the captured h/p mesh and solver hierarchy; changed execution context is an error.

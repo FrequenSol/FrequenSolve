@@ -41,3 +41,15 @@ regularization and nuisance-variable Schur elimination.
 Provider-specific source/model artifacts and the old `joint_direction`,
 `joint_covector`, and `model_normal` spellings are rejected by these operations.
 The separate WRI workflow retains its explicit material-only fields.
+
+Gradient producers additionally write the HDF5 group
+`/sampling/tensor_nodal`, containing a scalar integer `1` dataset for each
+parameter sampled as an unweighted nodal field. Dataset names match the
+`/controls` block IDs, including the `model.` prefix for joint vectors. An empty
+group explicitly means all blocks are coefficient covectors. Smoothing reads
+these producer roles by parameter ID; it must not infer them from its material
+layers or quadrature options. Frequency parts must agree on their roles before
+aggregation. Raw aggregates and unsmoothed outputs preserve the roles for their
+selected blocks. Smoothed vectors use the explicitly requested input role when
+reused as inputs. Legacy vectors without the group are coefficient covectors; legacy
+nodal data must be supplied as an explicit input with `input_role: primal`.

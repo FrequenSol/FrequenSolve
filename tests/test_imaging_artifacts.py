@@ -412,11 +412,6 @@ def test_control_registry_manifest_orders_active_blocks_and_offsets():
                     "distributed": False,
                 },
             ],
-            "descriptor_rank": 0,
-            "n_ranks": 1,
-            "rank_descriptors": [
-                {"file": "r.json", "fingerprint": "sha256:" + "1" * 64}
-            ],
         }
     )
     assert manifest.active_names == ("source.1.signature", "model.vp")
@@ -743,21 +738,23 @@ def test_smoothing_config_control_and_image_contracts():
     assert "illumination_normalization" not in control
 
     scaled = SmoothingConfig(
-        kind="tgv", wavelength_fraction=0.5, reference_wavelength=2 * np.pi
+        kind="tgv", wavelength_fraction=0.5, reference_wavelength=3.0, tgv_ratio=2.0
     )
-    assert scaled.to_control_fs()["reference_wavelength"] == pytest.approx(2 * np.pi)
+    control = scaled.to_control_fs()
+    assert control["reference_wavelength"] == pytest.approx(3.0)
+    assert "alpha1" not in control and "alpha2" not in control
     image = scaled.to_image_fs()
     assert "reference_wavelength" not in image
-    assert image["alpha1"] == pytest.approx(0.5)
-    assert image["alpha2"] == pytest.approx(0.25)
+    assert image["alpha1"] == pytest.approx(1.5)
+    assert image["alpha2"] == pytest.approx(2.0 * 1.5**2)
     tik = SmoothingConfig(
         kind="l2",
-        wavelength_fraction=1.0,
-        reference_wavelength=2 * np.pi,
+        wavelength_fraction=0.5,
+        reference_wavelength=3.0,
         derivative_order=2,
     )
     assert tik.kind == "tikhonov"
-    assert tik.resolved_alpha() == pytest.approx(1.0)
+    assert tik.resolved_alpha() == pytest.approx(1.5**4)
     with pytest.raises(ValueError, match="first-order"):
         tik.to_image_fs()
     assert (
@@ -770,6 +767,37 @@ def test_smoothing_config_control_and_image_contracts():
         SmoothingConfig(illumination_normalization="linear").illumination_normalization
         == "source"
     )
+
+
+def test_smoothing_reference_length_matches_sauce_without_two_pi():
+    # Sauce: L = lambda*reference_wavelength (no 2*pi), alpha = L**(2p),
+    # TGV (L, tgv_ratio*L**2).
+    tv = SmoothingConfig(kind="tv", wavelength_fraction=0.25, reference_wavelength=4.0)
+    assert tv.reference_length() == pytest.approx(1.0)
+    assert tv.resolved_alpha() == pytest.approx(1.0)
+    assert tv.to_image_fs()["alpha"] == pytest.approx(1.0)
+    assert tv.resolved_alpha() != pytest.approx((1.0 / (2.0 * np.pi)) ** 2)
+    tgv = SmoothingConfig(
+        kind="tgv", wavelength_fraction=0.25, reference_wavelength=4.0, tgv_ratio=3.0
+    )
+    assert tgv.resolved_tgv_weights() == pytest.approx((1.0, 3.0))
+
+
+def test_smoothing_local_wavelength_passes_lambda_through():
+    # Without a reference wavelength Sauce evaluates L(x) = lambda*v(x)/f itself.
+    for kind in ("tikhonov", "tv", "tgv"):
+        config = SmoothingConfig(kind=kind, wavelength_fraction=0.1)
+        for payload in (config.to_control_fs(), config.to_image_fs()):
+            assert payload["lambda"] == pytest.approx(0.1)
+            assert not {"alpha", "alpha1", "alpha2", "reference_wavelength"} & set(
+                payload
+            )
+        with pytest.raises(ValueError, match="reference_wavelength"):
+            config.reference_length()
+    with pytest.raises(ValueError, match="reference_wavelength"):
+        SmoothingConfig(kind="tv", wavelength_fraction=0.1).resolved_alpha()
+    with pytest.raises(ValueError, match="reference_wavelength"):
+        SmoothingConfig(kind="tgv", wavelength_fraction=0.1).resolved_tgv_weights()
 
 
 def test_smoothing_config_from_value_accepts_sauce_spellings():
@@ -807,3 +835,73 @@ def test_smoothing_config_from_value_accepts_sauce_spellings():
 def test_smoothing_config_rejects_invalid_values(kwargs, message):
     with pytest.raises(ValueError, match=message):
         SmoothingConfig(**kwargs)
+
+
+def test_image_set_reads_numerator_from_task_channels(tmp_path):
+    path = tmp_path / "images"
+    path.mkdir()
+    with h5py.File(path / "image_1.h5", "w") as h5:
+        _write_image_group(
+            h5,
+            "image",
+            np.arange(18.0).reshape(3, 6),
+            axis_units=["km", "km"],
+            units="gradient",
+        )
+        h5["image/vp"].attrs["component"] = np.array(
+            ["numerator", "forward_illumination", "adjoint_illumination"],
+            dtype=h5py.string_dtype(),
+        )
+        h5["image/vp"].attrs["value_scale"] = [2.0, 3.0, 4.0]
+    image = ImageSet(path=path, parts=1).read_images("raw", part=1)
+    np.testing.assert_array_equal(image.vp, np.arange(6.0).reshape(2, 3))
+    assert image.vp.attrs["value_scale"] == 2.0
+
+
+def test_image_set_converts_solver_task_numerator_to_output_units(tmp_path):
+    path = tmp_path / "images"
+    path.mkdir()
+    with h5py.File(path / "image_1.h5", "w") as h5:
+        _write_image_group(
+            h5,
+            "image",
+            np.arange(18.0).reshape(3, 6),
+            axis_units=["m", "m"],
+            units="m/s",
+        )
+        attrs = h5["image/vp"].attrs
+        attrs["component"] = np.array(
+            ["numerator", "forward_illumination", "adjoint_illumination"],
+            dtype=h5py.string_dtype(),
+        )
+        attrs["value_convention_roles"] = np.array(
+            ["dual", "diagonal", "diagonal"], dtype=h5py.string_dtype()
+        )
+        attrs["value_storage"] = np.array(["solver"], dtype=h5py.string_dtype())
+        attrs["value_scale"] = [1000.0, 1000.0, 1000.0]
+    image = ImageSet(path=path, parts=1).read_images("raw", part=1)
+    # Dual channels divide by the solver-to-output factor, matching the stacked aggregate.
+    np.testing.assert_allclose(image.vp, np.arange(6.0).reshape(2, 3) / 1000.0)
+    assert image.vp.attrs["value_storage"] == "output"
+
+
+@pytest.mark.parametrize("role,factor", [("dual", 0.001), ("primal", 1000.0)])
+@pytest.mark.parametrize(
+    "role_attribute", ["value_convention_roles", "value_frame_roles"]
+)
+def test_image_set_converts_scalar_task_to_output_units(
+    tmp_path, role, factor, role_attribute
+):
+    path = tmp_path / "images"
+    path.mkdir()
+    with h5py.File(path / "image_1.h5", "w") as h5:
+        _write_image_group(
+            h5, "image", np.arange(6.0), axis_units=["m", "m"], units="m/s"
+        )
+        attrs = h5["image/vp"].attrs
+        attrs[role_attribute] = np.array([role], dtype=h5py.string_dtype())
+        attrs["value_storage"] = np.array(["solver"], dtype=h5py.string_dtype())
+        attrs["value_scale"] = [1000.0]
+    image = ImageSet(path=path, parts=1).read_images("raw", part=1)
+    np.testing.assert_allclose(image.vp, np.arange(6.0).reshape(2, 3) * factor)
+    assert image.vp.attrs["value_storage"] == "output"

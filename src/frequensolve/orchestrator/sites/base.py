@@ -772,9 +772,13 @@ class RunHandle:
         )
         # A failed task may commit diagnostics without any receiver output.
         # Preserve its result even when the site's failure tolerance allows it.
+        remote = (
+            self.mode in {"batch", "attached"}
+            or getattr(self.site, "work_dir", None) is not None
+        )
         trace_manifest = (
             getattr(self.job, "trace_manifest", None)
-            if status.is_successful and not failed_tasks
+            if status.is_successful and not failed_tasks and not remote
             else None
         )
         return RunResult(
@@ -1095,6 +1099,10 @@ class BaseSite:
             The same job object, for fluent site implementations.
         """
 
+        if getattr(job, "patches", None) is not None:
+            raise ValueError(
+                "Patch jobs require site.run(job) to dispatch their child jobs"
+            )
         if validate and hasattr(job, "validate"):
             report = job.validate(
                 raise_errors=True,
@@ -1544,6 +1552,14 @@ class BaseSite:
         Returns:
             Final ``RunResult``.
         """
+        if getattr(job, "patches", None) is not None:
+            return job._run_composite(
+                self,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                check=check,
+                **submit_kwargs,
+            )
         return self.submit(job, **submit_kwargs).wait(
             timeout,
             poll_interval,

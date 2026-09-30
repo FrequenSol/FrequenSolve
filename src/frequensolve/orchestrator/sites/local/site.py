@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -52,7 +53,9 @@ from frequensolve.orchestrator.utils.environment import (
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.artifact_contract import (
     ArtifactContractError,
+    OperationResult,
     TaskResult,
+    load_operation_result,
     task_result_path,
 )
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
@@ -125,6 +128,101 @@ def _read_task_solver_convergence(
     return result_path, BaseJob.solver_convergence_summary(result)
 
 
+_OPERATION_STEP_NAMES = {
+    MESH_TASK_ID: "init",
+    SMOOTH_TASK_ID: "smooth",
+    PACK_TASK_ID: "pack",
+}
+_FAILURE_REASON_LIMIT = 300
+_LOG_TAIL_BYTES = 64 * 1024
+_LOG_ERROR_LINE = re.compile(r"^\s*(?:Error|Fortran runtime error)\s*:\s*(\S.*)$")
+
+
+def _compact_reason(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) > _FAILURE_REASON_LIMIT:
+        text = text[: _FAILURE_REASON_LIMIT - 3].rstrip() + "..."
+    return text
+
+
+def _step_run_dir(job_file: Union[str, Path], task_id: int) -> Optional[Path]:
+    """Return the solver run directory where one step writes ``error.json``."""
+
+    result_path = _job_result_path(job_file)
+    if result_path is None:
+        return None
+    if task_id >= 0:
+        return result_path / "_fs_run" / "tasks" / f"task_{task_id + 1:06d}"
+    name = _OPERATION_STEP_NAMES.get(task_id)
+    if name is None:
+        return None
+    return result_path / "_fs_run" / "operations" / name
+
+
+def _read_step_error_json(
+    job_file: Union[str, Path], task_id: int, *, not_before: float
+) -> Optional[str]:
+    run_dir = _step_run_dir(job_file, task_id)
+    if run_dir is None:
+        return None
+    error_path = run_dir / "error.json"
+    try:
+        # A diagnostic left by an earlier attempt must not explain this one;
+        # allow for filesystems that store whole-second mtimes.
+        if error_path.stat().st_mtime < not_before - 1.0:
+            return None
+        data = json.loads(error_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    message = str(data.get("message") or "").strip()
+    return message or None
+
+
+def _read_log_error_line(log_file: Optional[str]) -> Optional[str]:
+    """Return the last solver ``Error:`` line from the tail of a step log."""
+
+    if not log_file:
+        return None
+    try:
+        with open(log_file, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - _LOG_TAIL_BYTES))
+            tail = stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        match = _LOG_ERROR_LINE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _step_failure_reason(
+    job_file: Union[str, Path],
+    task_id: int,
+    log_file: Optional[str],
+    *,
+    not_before: float,
+) -> Optional[str]:
+    """Return the solver's compact reason for a failed step, if it left one."""
+
+    reason = _read_step_error_json(
+        job_file, task_id, not_before=not_before
+    ) or _read_log_error_line(log_file)
+    return _compact_reason(reason) if reason else None
+
+
+def _exit_description(return_code: int) -> str:
+    if return_code < 0:
+        try:
+            return f"solver terminated by {signal.Signals(-return_code).name}"
+        except ValueError:
+            pass
+    return f"solver exited with status {return_code}"
+
+
 def _job_task_frequency(job_file: Union[str, Path], task_id: int) -> Optional[complex]:
     """Return the exact frequency encoded for a zero-based local task."""
 
@@ -150,7 +248,9 @@ def _job_task_frequency(job_file: Union[str, Path], task_id: int) -> Optional[co
         ) from exc
 
 
-def _read_task_result(job_file: Union[str, Path], task_id: int) -> Optional[TaskResult]:
+def _read_task_result(
+    job_file: Union[str, Path], task_id: int
+) -> Optional[Union[TaskResult, OperationResult]]:
     """Read the fixed-path committed result for one local frequency task."""
 
     if task_id < 0:
@@ -158,6 +258,11 @@ def _read_task_result(job_file: Union[str, Path], task_id: int) -> Optional[Task
     result_path = _job_result_path(job_file)
     if result_path is None:
         return None
+    job_data = json.loads(Path(job_file).read_text(encoding="utf-8"))
+    if job_data.get("workflow") == "patch_prepare":
+        if task_id != 0:
+            raise ArtifactContractError("Patch preparation has exactly one operation")
+        return load_operation_result(result_path, "patch_prepare")
     path = task_result_path(result_path, task_id + 1)
     task_result = TaskResult.read(path, result_path=result_path)
     if task_result.partition.task != task_id + 1:
@@ -179,14 +284,20 @@ def _read_task_result(job_file: Union[str, Path], task_id: int) -> Optional[Task
 
 def _attach_task_result(
     result: Dict[str, Any],
-    task_result: Optional[TaskResult],
+    task_result: Optional[Union[TaskResult, OperationResult]],
 ) -> None:
     """Attach compact producer-authored task and artifact metadata."""
 
     if task_result is None:
         return
     result["task_result"] = str(task_result.path)
-    result["partition"] = task_result.partition.to_fs()
+    if isinstance(task_result, OperationResult):
+        result["operation"] = {
+            "name": task_result.name,
+            "generation": task_result.generation,
+        }
+    else:
+        result["partition"] = task_result.partition.to_fs()
     result["artifacts"] = [artifact.to_fs() for artifact in task_result.artifacts]
 
 
@@ -280,6 +391,44 @@ def _task_result_successful(result: Mapping[str, Any]) -> bool:
     return _local_task_state(result.get("status")) == "successful"
 
 
+def _step_failed_message(label: str, result: Optional[Mapping[str, Any]]) -> str:
+    """Return ``label`` with the step's reason and log when they are known."""
+
+    if not result:
+        return label
+    message = label
+    if result.get("error"):
+        message = f"{message}: {result['error']}"
+    if result.get("stdout"):
+        message = f"{message}; log: {result['stdout']}"
+    return message
+
+
+def _failed_tasks_message(
+    failed_results: Iterable[Mapping[str, Any]], *, limit: int = 5
+) -> str:
+    """Name failed frequency tasks (one-based) and their reported errors."""
+
+    failed = list(failed_results)
+    parts = []
+    for result in failed[:limit]:
+        task_id = result.get("task_id")
+        label = (
+            f"task {task_id + 1}"
+            if isinstance(task_id, int) and task_id >= 0
+            else "task ?"
+        )
+        error = result.get("error")
+        parts.append(f"{label} ({error})" if error else label)
+    if len(failed) > limit:
+        parts.append(f"{len(failed) - limit} more")
+    message = "failed tasks: " + ", ".join(parts)
+    logs = next((result["stdout"] for result in failed if result.get("stdout")), None)
+    if logs:
+        message = f"{message}; logs: {os.path.dirname(logs)}"
+    return message
+
+
 def _job_requires_postprocess(job: Any) -> bool:
     """Return a job's optional frequency-postprocess capability."""
 
@@ -303,29 +452,72 @@ def _image_jobs(job: Any) -> tuple[List[Any], bool]:
     return jobs, False
 
 
+FutureResultCache = Dict[int, tuple[bool, Dict[str, Any]]]
+
+
+def _resolve_future(
+    index: int, future: Future, cache: Optional[FutureResultCache] = None
+) -> tuple[bool, Dict[str, Any]]:
+    """Return ``(ok, payload)`` for a terminal future, gathering it at most once."""
+
+    if cache is not None and index in cache:
+        return cache[index]
+    resolved: tuple[bool, Dict[str, Any]]
+    try:
+        result = future.result()
+    except Exception as exc:
+        resolved = (
+            False,
+            {
+                "future_index": index,
+                "status": getattr(future, "status", None),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+    else:
+        if isinstance(result, Mapping):
+            resolved = (True, dict(result))
+        else:
+            resolved = (True, {"status": "success", "result": result})
+    if cache is not None:
+        cache[index] = resolved
+    return resolved
+
+
 def _collect_future_results(
-    futures: Iterable[Future],
+    futures: Iterable[Future], cache: Optional[FutureResultCache] = None
 ) -> tuple[List[Mapping[str, Any]], List[Dict[str, Any]]]:
     results: List[Mapping[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     for index, future in enumerate(futures):
-        try:
-            result = future.result()
-        except Exception as exc:
-            errors.append(
-                {
-                    "future_index": index,
-                    "status": getattr(future, "status", None),
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                }
-            )
+        ok, payload = _resolve_future(index, future, cache)
+        if ok and "group_tasks" in payload:
+            results.extend(dict(row) for row in payload["group_tasks"])
         else:
-            if isinstance(result, Mapping):
-                results.append(dict(result))
-            else:
-                results.append({"status": "success", "result": result})
+            (results if ok else errors).append(dict(payload))
     return results, errors
+
+
+def _future_task_states(
+    futures: Iterable[Future], cache: FutureResultCache
+) -> List[str]:
+    """Return task states, reading each finished future's task result.
+
+    Dask reports a future ``finished`` whenever ``run_task`` returned, including
+    when the returned record describes a failed solver task.
+    """
+
+    states = []
+    for index, future in enumerate(futures):
+        state = _local_task_state(getattr(future, "status", "unknown"))
+        if state in {"successful", "failed"}:
+            ok, payload = _resolve_future(index, future, cache)
+            state = (
+                "successful" if ok and _task_result_successful(payload) else "failed"
+            )
+        states.append(state)
+    return states
 
 
 def _local_task_status(statuses: Iterable[Any]) -> Dict[str, int]:
@@ -406,6 +598,7 @@ def run_task(
     n_threads: int = 1,
     stdout_dir: Optional[str] = None,
     fresh: bool = False,
+    frequency_groups: int = 1,
 ) -> Dict[str, Any]:
     """Run a single task and return its results.
 
@@ -415,9 +608,10 @@ def run_task(
         executable: Path to the solver executable
         env: Environment variables
         n_ranks: Number of MPI ranks
-        n_threads: Number of threads per rank
+        n_threads: Total thread budget across MPI ranks
         stdout_dir: Directory to store task logs
         fresh: Pass --fresh to the solver to disable solver-side output reuse
+        frequency_groups: Number of simultaneous frequency task groups
 
     Returns:
         Dict containing task results
@@ -425,6 +619,10 @@ def run_task(
     _wait_for_path(job_file)
     if n_ranks < 1:
         raise ValueError("n_ranks must be at least 1")
+    if frequency_groups < 1 or n_ranks % frequency_groups:
+        raise ValueError("n_ranks must be divisible by frequency_groups")
+    if frequency_groups > 1 and task_id != 0:
+        raise ValueError("A frequency band must start at task zero")
     threads_per_rank = max(1, n_threads // n_ranks)
     core_count = n_ranks * threads_per_rank
     if n_ranks > 1:
@@ -451,6 +649,8 @@ def run_task(
         args += ["--smooth"]
     elif task_id == MESH_TASK_ID:
         args += ["--init-no-size"]
+    elif frequency_groups > 1:
+        args += ["--frequency-groups", str(frequency_groups)]
     else:
         args += ["--task", f"{task_id + 1}"]
     command = shlex.join(args)
@@ -462,9 +662,10 @@ def run_task(
     else:
         stdout_file = None
     started = time.perf_counter()
+    started_at = time.time()
     manifest_path: Optional[Path] = None
     solver_convergence: Optional[Dict[str, object]] = None
-    task_result: Optional[TaskResult] = None
+    task_result: Optional[Union[TaskResult, OperationResult]] = None
     return_code: Optional[int] = None
     try:
         stdout_path = stdout_file if stdout_file else os.devnull
@@ -476,6 +677,45 @@ def run_task(
                 args, stdout=stdout, stderr=stdout, env=env, text=True
             )
             return_code = proc.wait()
+
+        if frequency_groups > 1:
+            rows = []
+            for index in range(frequency_groups):
+                contract = None
+                contract_error = None
+                try:
+                    contract = _read_task_result(job_file, index)
+                except (ArtifactContractError, OSError) as contract_exc:
+                    contract_error = str(contract_exc)
+                successful = (
+                    return_code == 0 and contract is not None and contract.successful
+                )
+                row = {
+                    "task_id": index,
+                    "status": "success" if successful else "error",
+                    "complete": contract is not None,
+                    "returncode": return_code,
+                    "duration_seconds": time.perf_counter() - started,
+                    "n_ranks": n_ranks // frequency_groups,
+                    "threads_per_rank": threads_per_rank,
+                    "core_count": core_count // frequency_groups,
+                    "stdout": stdout_file,
+                }
+                _attach_task_result(row, contract)
+                if not successful:
+                    row["error"] = (
+                        contract_error
+                        or "Shared frequency solve failed or did not publish a successful task contract"
+                    )
+                rows.append(row)
+            return {
+                "group_tasks": rows,
+                "status": (
+                    "success"
+                    if all(r["status"] == "success" for r in rows)
+                    else "error"
+                ),
+            }
 
         task_result = _read_task_result(job_file, task_id)
         if return_code != 0:
@@ -518,6 +758,11 @@ def run_task(
                     f"Sauce task reported {task_result.state} status "
                     f"with code {task_result.code}"
                 )
+                diagnostic = _step_failure_reason(
+                    job_file, task_id, stdout_file, not_before=started_at
+                )
+                if diagnostic:
+                    result["error"] += f": {diagnostic}"
             else:
                 assert solver_convergence is not None
                 residual = solver_convergence.get(
@@ -537,11 +782,25 @@ def run_task(
             manifest_path, solver_convergence = _read_task_solver_convergence(
                 job_file, task_id
             )
+        if isinstance(e, subprocess.CalledProcessError):
+            error = _exit_description(e.returncode)
+            if task_result is not None and not task_result.successful:
+                error += (
+                    f"; Sauce task reported {task_result.state} status "
+                    f"with code {task_result.code}"
+                )
+            diagnostic = _step_failure_reason(
+                job_file, task_id, stdout_file, not_before=started_at
+            )
+            if diagnostic:
+                error += f": {diagnostic}"
+        else:
+            error = str(e)
         result = {
             "task_id": task_id,
             "status": "error",
             "complete": task_result is not None,
-            "error": str(e),
+            "error": error,
             "duration_seconds": time.perf_counter() - started,
             "n_ranks": n_ranks,
             "threads_per_rank": threads_per_rank,
@@ -576,6 +835,7 @@ class LocalTaskSubmission:
 
     futures: List["Future"]
     task_plan: Dict[str, object]
+    mesh_result: Optional[Dict[str, Any]] = None
 
 
 @dataclass(kw_only=True)
@@ -598,6 +858,7 @@ class LocalSite(BaseSite):
         dashboard_port: Dashboard port, or ``0`` to let Dask choose.
     """
 
+    supports_frequency_groups = True
     config: LocalSiteConfig = field(init=False)
     executable: Optional[str] = field(init=False)
     env: Dict[str, str] = field(default_factory=dict)
@@ -798,6 +1059,8 @@ class LocalSite(BaseSite):
             _cancel_fn=self._cancel_local_run,
         )
         handle.backend["futures"] = futures
+        if isinstance(submission, LocalTaskSubmission):
+            handle.backend["mesh_result"] = submission.mesh_result
         handle.backend["task_plan"] = task_plan
         handle.backend["pack_after_tasks"] = pack
         handle.backend["fresh"] = fresh_run
@@ -890,7 +1153,9 @@ class LocalSite(BaseSite):
                     state="failed",
                     return_code=1,
                     job_id=run.id,
-                    message="Solver postprocess task failed",
+                    message=_step_failed_message(
+                        "Solver postprocess task failed", smooth_result
+                    ),
                     raw=raw,
                 )
             return JobStatus(
@@ -913,7 +1178,10 @@ class LocalSite(BaseSite):
                 state="failed",
                 return_code=1,
                 job_id=run.id,
-                message="Solver postprocess task failed",
+                message=_step_failed_message(
+                    "Solver postprocess task failed",
+                    raw.get("smooth") or run.backend.get("smooth_error"),
+                ),
                 raw=raw,
             )
         return JobStatus(
@@ -931,18 +1199,51 @@ class LocalSite(BaseSite):
                 return self._poll_local_smooth_task(run, smooth_future)
             return JobStatus(state="skipped", return_code=0, job_id=run.id)
         statuses = [getattr(future, "status", "unknown") for future in futures]
-        states = [_local_task_state(status) for status in statuses]
+        future_cache = run.backend.setdefault("future_results", {})
+        states = _future_task_states(futures, future_cache)
+        frequency_groups = getattr(run.job, "frequency_groups", 1)
         task_status = _merge_task_status_with_plan(
-            _local_task_status(statuses),
+            _local_task_status(states * frequency_groups),
             run.backend.get("task_plan"),
             job=run.job,
         )
         terminal = {"successful", "failed"}
+        if frequency_groups > 1 and all(state in terminal for state in states):
+            rows, errors = _collect_future_results(futures, future_cache)
+            if rows and not errors:
+                task_status = _merge_task_status_with_plan(
+                    _local_task_status(row.get("status") for row in rows),
+                    run.backend.get("task_plan"),
+                    job=run.job,
+                )
         if all(state in terminal for state in states) and _job_requires_postprocess(
             run.job
         ):
-            task_results, task_result_errors = _collect_future_results(futures)
+            task_results, task_result_errors = _collect_future_results(
+                futures, future_cache
+            )
             run.backend["task_results"] = task_results
+            failed_tasks = [
+                result for result in task_results if not _task_result_successful(result)
+            ]
+            if failed_tasks and not task_result_errors:
+                return JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message=(
+                        f"{_local_task_status_message(task_status)}; "
+                        f"{_failed_tasks_message(failed_tasks)}; "
+                        "solver postprocess not started"
+                    ),
+                    raw={
+                        "statuses": statuses,
+                        "task_states": states,
+                        "task_status": task_status,
+                        "tasks": task_results,
+                        "errors": failed_tasks,
+                    },
+                )
             if task_result_errors:
                 run.backend["task_result_errors"] = task_result_errors
                 raw = {
@@ -973,7 +1274,9 @@ class LocalSite(BaseSite):
         if all(state in terminal for state in states) and any(
             state == "failed" for state in states
         ):
-            task_results, task_result_errors = _collect_future_results(futures)
+            task_results, task_result_errors = _collect_future_results(
+                futures, future_cache
+            )
             run.backend["task_results"] = task_results
             if task_result_errors:
                 run.backend["task_result_errors"] = task_result_errors
@@ -995,7 +1298,9 @@ class LocalSite(BaseSite):
                 },
             )
         if all(state == "successful" for state in states):
-            task_results, task_result_errors = _collect_future_results(futures)
+            task_results, task_result_errors = _collect_future_results(
+                futures, future_cache
+            )
             run.backend["task_results"] = task_results
             if task_result_errors:
                 run.backend["task_result_errors"] = task_result_errors
@@ -1012,9 +1317,15 @@ class LocalSite(BaseSite):
                         "task_result_errors": task_result_errors,
                     },
                 )
+            task_failed = any(not _task_result_successful(row) for row in task_results)
+            task_status = _merge_task_status_with_plan(
+                _local_task_status(row.get("status") for row in task_results),
+                run.backend.get("task_plan"),
+                job=run.job,
+            )
             return JobStatus(
-                state="completed",
-                return_code=0,
+                state="failed" if task_failed else "completed",
+                return_code=1 if task_failed else 0,
                 job_id=run.id,
                 message=_local_task_status_message(task_status),
                 raw={
@@ -1078,7 +1389,9 @@ class LocalSite(BaseSite):
                     run.job.write_run_state(status="timeout")
                     return run._make_result(status)
 
-                task_results, task_result_errors = _collect_future_results(futures)
+                task_results, task_result_errors = _collect_future_results(
+                    futures, run.backend.setdefault("future_results", {})
+                )
                 run.backend["task_results"] = task_results
                 if task_result_errors:
                     run.backend["task_result_errors"] = task_result_errors
@@ -1130,6 +1443,30 @@ class LocalSite(BaseSite):
             ]
 
             smooth_result = None
+            if _job_requires_postprocess(run.job) and task_errors:
+                # The postprocess consumes every committed frequency product;
+                # running it after a failed task only masks the task failure.
+                run.job.write_run_state(
+                    status="failed", tasks=state_tasks, errors=task_errors
+                )
+                task_summary = _job_task_summary(run.job, state_tasks)
+                status = JobStatus(
+                    state="failed",
+                    return_code=1,
+                    job_id=run.id,
+                    message=(
+                        f"{_task_summary_message(task_summary)}; "
+                        f"{_failed_tasks_message(task_errors)}; "
+                        "solver postprocess not started"
+                    ),
+                    raw={
+                        "tasks": task_results,
+                        "task_summary": task_summary,
+                        "task_status": _summary_task_status(task_summary),
+                        "errors": task_errors,
+                    },
+                )
+                return run._make_result(status)
             if _job_requires_postprocess(run.job):
                 smooth_future = self._submit_local_smooth_task(run, all_futures)
                 cached_smooth_result = run.backend.get("smooth_result")
@@ -1147,7 +1484,9 @@ class LocalSite(BaseSite):
                         state="failed",
                         return_code=1,
                         job_id=run.id,
-                        message="Solver postprocess task failed",
+                        message=_step_failed_message(
+                            "Solver postprocess task failed", smooth_result
+                        ),
                         raw={"smooth": smooth_result, "tasks": task_results},
                     )
                     run.job.write_run_state(
@@ -1227,7 +1566,9 @@ class LocalSite(BaseSite):
                         state="failed",
                         return_code=1,
                         job_id=run.id,
-                        message="Packing task failed",
+                        message=_step_failed_message(
+                            "Packing task failed", pack_result
+                        ),
                         raw=raw,
                     )
                     run.job.write_run_state(
@@ -1353,7 +1694,9 @@ class LocalSite(BaseSite):
                     state="failed",
                     return_code=1,
                     job_id=run.id,
-                    message="Solver postprocess task failed",
+                    message=_step_failed_message(
+                        "Solver postprocess task failed", smooth_result
+                    ),
                     raw={"smooth": smooth_result},
                 )
                 run.job.write_run_state(
@@ -1464,6 +1807,11 @@ class LocalSite(BaseSite):
         pending_indices = list(task_plan["pending_indices"])
         if not pending_indices:
             return LocalTaskSubmission(futures=[], task_plan=task_plan)
+        frequency_groups = getattr(job, "frequency_groups", 1)
+        if frequency_groups > 1:
+            # One coupled iteration cannot reuse or retry a subset of the band.
+            task_plan = job.task_run_plan(reuse=False, force=True)
+            pending_indices = list(task_plan["pending_indices"])
 
         n_ranks = kwargs.get("procs_per_job", 1)
         max_ranks = getattr(job, "max_ranks_per_task", None)
@@ -1475,6 +1823,14 @@ class LocalSite(BaseSite):
 
         self._ensure_dask_for_tasks(1)
         client = self._dask_client_or_raise()
+
+        total_ranks = n_ranks * frequency_groups
+        total_threads = self._current_threads_per_worker()
+        if frequency_groups > 1 and total_threads < total_ranks:
+            raise ValueError(
+                f"Shared frequency fit needs at least {total_ranks} local worker threads "
+                f"({frequency_groups} frequencies × {n_ranks} ranks)"
+            )
 
         stdout_dir = str(job._stdout_path)
         os.makedirs(stdout_dir, exist_ok=True)
@@ -1523,6 +1879,27 @@ class LocalSite(BaseSite):
         finally:
             self._release_futures([future])
 
+        if frequency_groups > 1:
+            future = client.submit(
+                run_task,
+                job_file,
+                0,
+                executable,
+                self.env,
+                n_ranks=total_ranks,
+                n_threads=total_threads,
+                frequency_groups=frequency_groups,
+                stdout_dir=stdout_dir,
+                fresh=True,
+                retries=0,
+                pure=False,
+                resources={"CPU": total_threads},
+            )
+            self._futures.append(future)
+            return LocalTaskSubmission(
+                futures=[future], task_plan=task_plan, mesh_result=mesh_result
+            )
+
         self._ensure_dask_for_tasks(len(pending_indices))
         client = self._dask_client_or_raise()
 
@@ -1551,7 +1928,9 @@ class LocalSite(BaseSite):
                 raise
 
         self._futures.extend(futures)
-        return LocalTaskSubmission(futures=futures, task_plan=task_plan)
+        return LocalTaskSubmission(
+            futures=futures, task_plan=task_plan, mesh_result=mesh_result
+        )
 
     def fetch_traces(
         self,

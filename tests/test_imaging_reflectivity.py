@@ -176,29 +176,30 @@ def test_basis_accepts_a_material_control_already_in_the_simulation(tmp_path):
 
 def test_own_map_depth_profile_is_authored_like_a_material_profile(tmp_path):
     sim = layered_simulation(tmp_path / "project")
-    space = im.ControlSpace(
-        vp=im.DepthProfile("vp", "sediment", count=VP_COUNT),
-        refl=im.ReflectivityParameters(
-            "vp_ip",
-            fields=[
-                im.ReflectivityField(
-                    "ip",
-                    layer=2,
-                    axis=2,
-                    control=im.DepthProfile("ip", "sediment", count=8),
-                ),
-                im.ReflectivityField(
-                    "vp",
-                    layer=2,
-                    axis=1,
-                    control=im.DepthProfile.bspline(
-                        "vp", "sediment", count=6, degree=2
+    with pytest.warns(DeprecationWarning, match="workspace_mb"):
+        space = im.ControlSpace(
+            vp=im.DepthProfile("vp", "sediment", count=VP_COUNT),
+            refl=im.ReflectivityParameters(
+                "vp_ip",
+                fields=[
+                    im.ReflectivityField(
+                        "ip",
+                        layer=2,
+                        axis=2,
+                        control=im.DepthProfile("ip", "sediment", count=8),
                     ),
-                ),
-            ],
-            workspace_mb=256,
-        ),
-    )
+                    im.ReflectivityField(
+                        "vp",
+                        layer=2,
+                        axis=1,
+                        control=im.DepthProfile.bspline(
+                            "vp", "sediment", count=6, degree=2
+                        ),
+                    ),
+                ],
+                workspace_mb=256,
+            ),
+        )
     assert not space.resolved  # the own maps need the layer extent
 
     bound = space.bind(sim)
@@ -210,7 +211,7 @@ def test_own_map_depth_profile_is_authored_like_a_material_profile(tmp_path):
         "reflectivity.vp": 6,
     }
     payload = bound.reflectivity_payload()
-    assert payload["workspace_mb"] == 256.0
+    assert "workspace_mb" not in payload
     hat, bspline = [f["control"] for f in payload["fields"]]
     assert hat["kind"] == "hat" and hat["coordinate_system"] == "seabed_depth"
     assert hat["axis"] == "depth" and hat["origin"] == 0.0
@@ -304,7 +305,7 @@ def _rejected(tmp_path, fake, match, *, controls=None, prepare=None, **kwargs):
         )
 
 
-def test_capabilities_reject_galerkin_relaxed_assembly_and_fast_mode(tmp_path, fake):
+def test_capabilities_reject_galerkin_and_accept_relaxed_assembly(tmp_path, fake):
     def galerkin(sim):
         sim.discretization = Discretization(method="Galerkin")
 
@@ -320,25 +321,25 @@ def test_capabilities_reject_galerkin_relaxed_assembly_and_fast_mode(tmp_path, f
         r"Discretization\(method='DPG'\) \(got 'Galerkin'\)",
         prepare=galerkin,
     )
-    _rejected(tmp_path, fake, "unrelaxed assembly", prepare=relaxed)
-    _rejected(tmp_path, fake, "unrelaxed assembly", prepare=fast)
 
     def explicit(sim):
         sim.discretization = Discretization(method="DPG", form_execution="compiled")
         sim.solver = SolverConfig(mode="fast", relaxed_assembly=False)
 
-    sim = layered_simulation(tmp_path / "ok")
-    explicit(sim)
-    sim.save()
-    problem = im.ImagingProblem(
-        sim,
-        controls=_space(),
-        observed={"surface": tmp_path / "observed.h5"},
-        frequencies=FREQUENCIES,
-        site=fake,
-        name="fwi",
-    )
-    assert problem.capabilities()["ok"]
+    # Relaxed assembly (explicit or via fast mode) is an accepted approximation.
+    for label, prepare in (("relaxed", relaxed), ("fast", fast), ("exact", explicit)):
+        sim = layered_simulation(tmp_path / label)
+        prepare(sim)
+        sim.save()
+        problem = im.ImagingProblem(
+            sim,
+            controls=_space(),
+            observed={"surface": tmp_path / "observed.h5"},
+            frequencies=FREQUENCIES,
+            site=fake,
+            name="fwi",
+        )
+        assert problem.capabilities()["ok"], label
 
 
 def test_capabilities_reject_unsupported_physics_and_geometry(tmp_path, fake):

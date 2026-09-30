@@ -481,7 +481,9 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         """
 
         self._synchronize_gravity_surface_loadings()
-        ctx = ctx or self.export_context()
+        ctx = copy.copy(ctx or self.export_context())
+        ctx.physics = self.physics
+        ctx.dimension = self.dimension
         if getattr(ctx, "default_length_units", None) is None:
             ctx.default_length_units = self.units.defaults.get("length")
         payload = super().to_fs(ctx)

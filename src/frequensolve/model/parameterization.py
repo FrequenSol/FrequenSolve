@@ -668,6 +668,9 @@ class ParameterizedProperty(Property):
             raise ValueError("parameterized property requires a non-empty block id")
         if "/" in block_id or block_id in {".", ".."}:
             raise ValueError("parameterized property block id is not HDF5-safe")
+        self.darr = (
+            None  # A control field is materialized only at explicit coordinates.
+        )
         self.reference = reference
         self.id = block_id
         self.control = (
@@ -693,6 +696,130 @@ class ParameterizedProperty(Property):
 
         coefficients = self.control.coefficients
         return None if coefficients is None else np.asarray(coefficients)
+
+    def apply_control(self, reference_values: Any, context: Any) -> np.ndarray:
+        """Compose sampled reference values with controls in their own frame.
+
+        ``context`` is an EvaluationContext with coordinates in the control's
+        declared length units. Updates vanish outside the control support.
+        Mesh controls require solver materialization and fail explicitly here.
+        """
+        from scipy.interpolate import RegularGridInterpolator
+        from scipy.special import expit
+
+        from frequensolve.model.representation import ControlRepresentation
+
+        if isinstance(self.control, MeshControl):
+            raise NotImplementedError(
+                "mesh controls require solver-backed materialization"
+            )
+        if isinstance(self.control, TensorHatControl):
+            points = np.column_stack(
+                [
+                    context.coordinate(axis, self.control.coordinate_system)
+                    for axis in self.control.axes
+                ]
+            )
+            update = RegularGridInterpolator(
+                self.control.axis_coordinates,
+                self.control.grid,
+                bounds_error=False,
+                fill_value=0.0,
+            )(points).reshape(context.shape)
+        else:
+            update = ControlRepresentation(self.control).evaluate(
+                np.asarray(self.control.coefficients).tolist(), context
+            )
+        reference = np.broadcast_to(
+            np.asarray(reference_values, dtype=float), context.shape
+        )
+        if self.transform == "identity":
+            values = reference + update
+        elif self.transform == "log":
+            values = reference * np.exp(update)
+        elif self.transform == "inverse":
+            if np.any(reference <= 0):
+                raise ValueError("inverse transform requires a positive reference")
+            denominator = 1.0 / reference + update
+            if np.any(denominator <= 0):
+                raise ValueError("inverse control crosses zero reciprocal value")
+            values = 1.0 / denominator
+        else:
+            if np.any((reference <= 0) | (reference >= 1)):
+                raise ValueError(
+                    "logit reference must lie strictly between zero and one"
+                )
+            values = expit(np.log(reference) - np.log1p(-reference) + update)
+            values = np.where(update == 0, reference, values)
+            if np.any((values <= 0) | (values >= 1)):
+                raise ValueError("logit update exceeds the representable open interval")
+        if not np.all(np.isfinite(values)):
+            raise ValueError("parameterized property evaluates to non-finite values")
+        return values
+
+    def evaluation_context(self, grid: Any) -> Any:
+        """Build a control context from an xarray grid in the declared frame."""
+        from frequensolve.model.representation import EvaluationContext
+        from frequensolve.units import ureg
+
+        if isinstance(self.control, MeshControl):
+            raise NotImplementedError(
+                "mesh controls require solver-backed materialization"
+            )
+        axes = (
+            self.control.axes
+            if isinstance(self.control, TensorHatControl)
+            else (getattr(self.control, "axis", None),)
+        )
+        coordinates = {}
+        for axis in axes:
+            if axis not in grid.coords:
+                raise ValueError(f"control sampling grid has no axis {axis!r}")
+            coord = grid.coords[axis].broadcast_like(grid).transpose(*grid.dims)
+            values = np.asarray(coord.values, dtype=float)
+            source_units = coord.attrs.get("units", grid.attrs.get("units"))
+            if self.control.units is not None and source_units is not None:
+                values = (
+                    ureg.Quantity(values, source_units).to(self.control.units).magnitude
+                )
+            coordinates[axis] = values
+        return EvaluationContext(
+            coordinates,
+            coordinate_system=self.control.coordinate_system,
+            shape=grid.shape,
+            dims=grid.dims,
+        )
+
+    def get(self, grid: Any = None) -> Any:
+        """Materialize an inline control on a supplied xarray sampling grid.
+
+        Named control frames must already be resolved on the supplied grid;
+        LayeredModel sampling resolves them using the model coordinate systems.
+        """
+        import xarray as xr
+
+        if isinstance(self.control, MeshControl):
+            raise NotImplementedError(
+                "mesh controls require solver-backed materialization"
+            )
+        if grid is None:
+            raise ValueError(
+                "parameterized property sampling requires an explicit grid"
+            )
+        system = grid.attrs.get("coordinate_system", "global")
+        if system != self.control.coordinate_system:
+            raise ValueError(
+                f"sampling grid is in {system!r}, control is in {self.control.coordinate_system!r}"
+            )
+        values = self.apply_control(
+            self.reference.get(grid), self.evaluation_context(grid)
+        )
+        return xr.DataArray(
+            values,
+            dims=grid.dims,
+            coords=grid.coords,
+            attrs={"units": self.units} if self.units else {},
+        )
 
     def with_coefficients(self, coefficients: ArrayLike) -> "ParameterizedProperty":
         """Return a deep copy with replacement control coefficients."""

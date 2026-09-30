@@ -19,7 +19,6 @@ from typing import Any, Mapping, Optional, Union
 
 from frequensolve._physics_components import allowed_components_for_physics
 from frequensolve._property_names import canonical_property_name
-from frequensolve._version import get_versions
 from frequensolve.solver import (
     SolverCompatibilityManifest,
     load_solver_compatibility,
@@ -239,6 +238,7 @@ class SolverAuthoringRules:
     default_tolerance: float
     default_precision: str
     additional_fields_status: str
+    tolerance_guidance: str = ""
 
 
 @dataclass(frozen=True)
@@ -582,7 +582,9 @@ class SimulationKnowledgeCatalog:
 
         loaded_compatibility = compatibility or load_solver_compatibility()
         preferred = loaded_compatibility.preferred_solver
-        installed_version = package_version or get_versions()["version"]
+        from frequensolve import __version__
+
+        installed_version = package_version or __version__
         if not isinstance(installed_version, str) or not installed_version.strip():
             raise CatalogValidationError("package_version must be a non-empty string")
 
@@ -1039,6 +1041,7 @@ def _solver_rules(value: object, path: str) -> SolverAuthoringRules:
             "defaults",
             "additional_fields_status",
         },
+        optional={"tolerance_guidance"},
         path=path,
     )
     defaults = _mapping(data["defaults"], f"{path}.defaults")
@@ -1048,6 +1051,11 @@ def _solver_rules(value: object, path: str) -> SolverAuthoringRules:
         path=f"{path}.defaults",
     )
     return SolverAuthoringRules(
+        tolerance_guidance=(
+            _string(data["tolerance_guidance"], f"{path}.tolerance_guidance")
+            if "tolerance_guidance" in data
+            else ""
+        ),
         solve_on_values=_string_tuple(
             data["solve_on_values"], f"{path}.solve_on_values"
         ),

@@ -3,31 +3,43 @@
 from frequensolve._exports import unique_exports
 from frequensolve.seismic.acquisition import *  # noqa: F403
 from frequensolve.seismic.acquisition import __all__ as _acquisition_all
+from frequensolve.seismic.airgun import *  # noqa: F403
+from frequensolve.seismic.airgun import __all__ as _airgun_all
 from frequensolve.seismic.boundary_loadings import *  # noqa: F403
 from frequensolve.seismic.boundary_loadings import __all__ as _boundary_loadings_all
 from frequensolve.seismic.eikonal import *  # noqa: F403
 from frequensolve.seismic.eikonal import __all__ as _eikonal_all
 from frequensolve.seismic.receivers import *  # noqa: F403
 from frequensolve.seismic.receivers import __all__ as _receivers_all
+from frequensolve.seismic.source_signature import *  # noqa: F403
+from frequensolve.seismic.source_signature import __all__ as _signature_all
 from frequensolve.seismic.sources import *  # noqa: F403
 from frequensolve.seismic.sources import __all__ as _sources_all
 from frequensolve.seismic.sparse_survey import *  # noqa: F403
 from frequensolve.seismic.sparse_survey import __all__ as _sparse_survey_all
+from frequensolve.seismic.spectra import *  # noqa: F403
+from frequensolve.seismic.spectra import __all__ as _spectra_all
 from frequensolve.seismic.survey import *  # noqa: F403
 from frequensolve.seismic.survey import __all__ as _survey_all
+from frequensolve.seismic.trace_conversion import *  # noqa: F403
+from frequensolve.seismic.trace_conversion import __all__ as _trace_conversion_all
 from frequensolve.seismic.traces import *  # noqa: F403
 from frequensolve.seismic.traces import __all__ as _traces_all
 from frequensolve.seismic.wavelet import *  # noqa: F403
 from frequensolve.seismic.wavelet import __all__ as _wavelet_all
 
 __all__ = unique_exports(
+    _airgun_all,
     _acquisition_all,
     _boundary_loadings_all,
     _eikonal_all,
     _receivers_all,
     _sources_all,
+    _signature_all,
+    _spectra_all,
     _sparse_survey_all,
     _survey_all,
     _traces_all,
+    _trace_conversion_all,
     _wavelet_all,
 )

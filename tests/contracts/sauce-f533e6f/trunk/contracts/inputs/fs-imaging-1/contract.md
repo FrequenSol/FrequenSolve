@@ -35,22 +35,53 @@ plus imaging evaluation cases.
   optional `dataset`, `missing`, and `source_basis`. For an explicit `df`
   descriptor, `dataset` may name a receiver group in a packed FrequenSolve
   trace root; the reader resolves its active-frequency dataset before reading.
+- Sparse point receiver groups may read a dense parent HDF5 receiver gather.
+  Each selected row uses its original source ID, receiver ID and component;
+  its point range must equal that receiver ID. Component counts and catalog
+  bounds are checked. The reader loads bounded one-source receiver tiles.
+  Flat sparse vectors continue to use trace IDs. Receiver averaging or general
+  sample maps require an explicit observation representation instead.
 - Observed data `source_basis` is `source_encoding` by default, meaning source
   ids identify encoded RHS fields. When set to `source_geometry`, source ids
   identify physical SourcePoints and misfit forms encoded observed gathers by
   applying the active `Acquisition/source_encoding` weights.
+  Spectral derivative/window objectives support this physical-shot basis for
+  dense and sparse receiver sampling. Each observed derivative dataset (or
+  time-domain moment) is encoded independently with the active global weights;
+  derivatives of frequency-dependent encoding weights are not added.
 - `misfit/objective` selects the scalar data objective and defaults to `l2` when
   omitted, preserving the legacy objective behavior. Its `kind` accepts
   `l2`/`none`, `huber`/`hybrid`, and
   `studentst`/`student_t`/`student-t`; matching is case-insensitive. Huber uses
   positive `delta`. Student's t uses positive squared scale `c2` and positive
   degrees of freedom `nu`.
+- An explicit `misfit/objective_terms[*].objective.kind: hv` selects the 2D
+  acoustic HV data action and native material-control gradient in the ordinary
+  `rtm` workflow. It requires a complete, uniformly spaced physical pressure
+  receiver line, independent physical sources, identity projection, waveform
+  comparison, no preprocessing hooks, one fixed unit-bearing amplitude scale,
+  and `reduction: sum`. `kappa` and `epsilon` are positive, `lambda` is
+  nonnegative. The auxiliary H1 order and optional initial spatial cell count
+  are independent of receiver positions. Receiver signals are projected onto
+  the boundary trace, and its transpose maps reactions back to receiver data.
+  The path and receiver axes are doubled until both action and receiver covector
+  change by less than `relative_mesh_tolerance` (default 0.01), with at most
+  `max_refinements` steps (default 4). The task fails if either the inner solve
+  or mesh convergence is not reached. Other physics,
+  distributed execution, source controls, spectral windows, and mixed scalar
+  objective terms are currently unsupported. See the
+  [HV example](examples/acoustic-hv-gradient.json).
 - `misfit/comparison` selects the receiver attribute presented to the objective
   and defaults to `{"kind":"waveform"}`. `phase_derivative` compares the
   stabilized physical-frequency phase slope
   `Im(v^H df(v))/(2*pi*(v^H v + epsilon^2))`, in seconds, at fixed Laplace
   damping. Residuals retain the solver convention `observed - simulated`.
-- `phase_derivative` requires `observed_derivatives/df` for every receiver
+- `spectral_derivative` compares the full complex physical-frequency derivative
+  `df(v)` at fixed Laplace damping, in the channel's units per Hz. Unlike
+  `phase_derivative`, it retains amplitude information and has no amplitude-floor
+  quotient. Its `observed_rms` normalization uses the observed derivative energy.
+  Separate waveform and spectral objective terms may use independent scales and weights.
+- Both derivative comparisons require `observed_derivatives/df` for every receiver
   group. The derivative dataset must identify its base dataset and declare
   `derivative_axis=df`, `frequency_unit=Hz`, derivative units compatible with
   the base channel units per Hz, and the same `source_derivative` policy as the
@@ -142,7 +173,7 @@ plus imaging evaluation cases.
   simulated receiver dataset with `objective_role=linearized_residual`.
 - `lsrtm_gradient` requires exactly one Cartesian iterate source: `direction`
   names a read-only HDF5 file containing `image/<image-name>` datasets in the
-  normal solver image/value-frame representation, or `zero_direction: true`
+  normal solver image/value-convention representation, or `zero_direction: true`
   explicitly selects the zero iterate. Frequency tasks may safely read the same
   direction file concurrently; solver outputs never overwrite it. The workflow
   deliberately recomputes the background field for each task so randomized
@@ -199,6 +230,9 @@ kernel needs more than the local pressure/vertical-velocity decomposition.
   position using the `objective_term_<index>_` prefix; `id`, `weight`, and
   `value` identify each contribution, and the loss, comparison, and
   preprocessing attributes use the same prefix.
+  An HV term records `objective_kind=hv`, weighted `value_by_rhs`, maximum
+  inner iteration count and stationarity residual. Its coefficient
+  configuration is carried by the input term.
 - Durable per-task imaging fields are written to `fields<task>.h5`. Disposable
   fields are written to `fields<task>.transient.h5` and the complete transient
   file is deleted at image-manager teardown. Bulk field payloads are never

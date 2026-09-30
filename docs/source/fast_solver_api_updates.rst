@@ -154,6 +154,12 @@ self-contained and should store:
 * include enough frequency/task metadata to combine adjacent frequency-band jobs
   without task-number conflicts.
 
+Each rerun of a job replaces ``traces/traces.h5`` in place. To keep every
+superseded pack, for example the predicted traces of each FWI iteration run in
+one job directory, request ``TraceOutput(keep_history=True)``; earlier packs
+are then kept under ``traces/history/<generation>/`` with their own
+``manifest.json``.
+
 Before launching independent frequency tasks, the preliminary meshing/sizing
 :term:`job` should output receiver/source/component metadata for the finalizer. The
 frequency tasks can then write frequency-specific arrays and minimal task

@@ -4,11 +4,12 @@ This module defines the various types of receivers and their locations.
 """
 
 import copy
+import dataclasses
 import json
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from numbers import Number
+from numbers import Integral, Number
 from pathlib import Path
 from typing import (
     Any,
@@ -30,8 +31,8 @@ import xarray as xr
 
 from frequensolve.geometry.frame import CoordinateValue, Direction, direction_to_fs
 from frequensolve.geometry.grids import CartesianGrid, Grid
+from frequensolve.seismic.source_signature import ReceiverTransferFunction
 from frequensolve.seismic.sparse_survey import ReceiverSampling
-from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 from frequensolve.util.class_registry import class_registry, register_class
 from frequensolve.util.fields import canonical_field
@@ -163,13 +164,18 @@ class ReceiverComponent:
         direction: Optional measurement direction for vector fields.
         units: Optional output units for this component.
         weight: Optional constant complex weight applied to the component.
+        transfer: Optional ReceiverTransferFunction mapping ideal to measured fields.
+        response: Reserved for reciprocal surveys; not used for calibration.
     """
 
     name: str = "name"
     field: str
+    expression: Optional[Dict[str, Any]] = None
     direction: Optional[Union[List[float], Direction]] = None
     units: Optional[str] = None
     weight: Optional[Any] = None
+    transfer: Optional[Any] = None
+    response: Optional[Any] = dataclasses.field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.field = canonical_field(self.field)
@@ -183,9 +189,23 @@ class ReceiverComponent:
         table and are intentionally not embedded in component metadata.
         """
 
+        if isinstance(self.transfer, ReceiverTransferFunction):
+            raise ValueError(
+                "ReceiverTransferFunction requires export through a ReceiverGroup"
+            )
         return {
             "name": self.name,
             "field": canonical_field(self.field),
+            **(
+                {"expression": copy.deepcopy(self.expression)}
+                if self.expression is not None
+                else {}
+            ),
+            **(
+                {"transfer": copy.deepcopy(self.transfer)}
+                if self.transfer is not None
+                else {}
+            ),
             **(
                 {"direction": direction_to_fs(self.direction)}
                 if self.direction is not None
@@ -226,10 +246,13 @@ class ReceiverComponent:
             data["direction"] = Direction.from_fs(data["direction"])
         return cls(
             name=data["name"],
-            field=canonical_field(data["field"]),
+            field=canonical_field(data.get("field", data["name"])),
+            expression=data.get("expression"),
             direction=data.get("direction"),
             units=data.get("units"),
             weight=data.get("weight"),
+            transfer=data.get("transfer"),
+            response=data.get("response"),
         )
 
 
@@ -386,15 +409,14 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
     Args:
         name: Optional identifier for this receiver device.
         components: Components defining measured quantities.
-        response: Optional receiver response wavelet.
+        transfer: Optional dimensionless ReceiverTransferFunction (export via a group).
+        response: Reserved for reciprocal surveys; not used for calibration.
     """
 
     name: Optional[str] = None
     components: List[ReceiverComponent] = field(default_factory=list)
-    # TODO(receiver-response): replace Wavelet with a receiver-response contract
-    # that can evaluate a complex transfer function at job frequencies. Sauce
-    # must multiply synthetic channels by that response before trace output.
-    response: Optional[Wavelet] = None
+    transfer: Optional[ReceiverTransferFunction] = None
+    response: Optional[Any] = dataclasses.field(default=None, repr=False)
 
     def add_component(
         self,
@@ -404,6 +426,7 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
         *,
         units: Optional[str] = None,
         weight: Optional[Any] = None,
+        transfer: Optional[ReceiverTransferFunction] = None,
     ) -> "ReceiverComponent":
         """Add a measured component to this device.
 
@@ -413,6 +436,7 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
             direction: Optional measurement direction for vector fields.
             units: Optional output units.
             weight: Optional constant complex component weight.
+            transfer: Optional transfer function at the physical receiver nodes.
 
         Returns:
             Newly added ``ReceiverComponent``.
@@ -424,6 +448,7 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
             direction=direction,
             units=units,
             weight=weight,
+            transfer=transfer,
         )
         self.components.append(component)
         return component
@@ -431,11 +456,9 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
     def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
         """Serialize this receiver device for solver input."""
 
-        if self.response is not None:
+        if self.transfer is not None:
             raise NotImplementedError(
-                "Receiver spectral response is reserved but not implemented. "
-                "A solver contract for complex transfer functions must be added "
-                "before response can be exported."
+                "Receiver transfer functions must be exported through their ReceiverGroup."
             )
 
         return {
@@ -569,6 +592,7 @@ class ReceiverArray(ReceiverDevice):
         return cls(
             name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
+            transfer=data.get("transfer"),
             response=data.get("response"),
             offsets=data["offsets"],
             offset_units=data.get("offset_units"),
@@ -1010,6 +1034,7 @@ class EncodedReceiver(ReceiverDevice):
         return cls(
             name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
+            transfer=data.get("transfer"),
             response=data.get("response"),
             encoding_names=data.get("encoding_names"),
             encoding_count=data.get("encoding_count"),
@@ -1042,7 +1067,8 @@ class ReceiverFiber(ReceiverDevice):
         angle: Optional helical-fiber winding angle from the cable axis,
             mutually exclusive with ``pitch``. Plain numbers are degrees;
             unit-aware angular quantities are also accepted.
-        response: Optional receiver response wavelet.
+        transfer: Optional dimensionless ReceiverTransferFunction (export via a group).
+        response: Reserved for reciprocal surveys; not used for calibration.
 
     Raises:
         ValueError: If ``gauge_length`` is omitted or ``points_per_gauge`` is
@@ -1069,7 +1095,8 @@ class ReceiverFiber(ReceiverDevice):
         radius: Optional[Any] = None,
         pitch: Optional[Any] = None,
         angle: Optional[Any] = None,
-        response: Optional[Wavelet] = None,
+        transfer: Optional[ReceiverTransferFunction] = None,
+        response: Optional[Any] = None,
     ):
         if gauge_length is None:
             raise ValueError("ReceiverFiber requires gauge_length.")
@@ -1080,6 +1107,7 @@ class ReceiverFiber(ReceiverDevice):
 
         self.name = name
         self.components = list(components) if components is not None else []
+        self.transfer = transfer
         self.response = response
         self.gauge_length = gauge_length
         self.channel_spacing = (
@@ -1122,6 +1150,7 @@ class ReceiverFiber(ReceiverDevice):
         return cls(
             name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
+            transfer=data.get("transfer"),
             response=data.get("response"),
             gauge_length=data.get("gauge_length"),
             channel_spacing=data.get("channel_spacing"),
@@ -1165,6 +1194,7 @@ class ReceiverNodeArray(ReceiverArray):
         return cls(
             name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
+            transfer=data.get("transfer"),
             response=data.get("response"),
             offsets=data["offsets"],
             offset_units=data.get("offset_units"),
@@ -1189,6 +1219,7 @@ class ReceiverNode(ReceiverDevice):
         return cls(
             name=data.get("name"),
             components=[ReceiverComponent.from_fs(c) for c in data["components"]],
+            transfer=data.get("transfer"),
             response=data.get("response"),
         )
 
@@ -1275,7 +1306,7 @@ class CoordsFromFile(ReceiverCoords):
 
     def __init__(
         self,
-        file: Union[str, Path] = None,
+        file: Optional[Union[str, Path]] = None,
         format: Literal["HDF5"] = "HDF5",
         dset: Optional[str] = None,
         units: Optional[str] = None,
@@ -1290,6 +1321,8 @@ class CoordsFromFile(ReceiverCoords):
                 "CoordsFromFile does not support remote coordinate files yet; "
                 "provide a local file or inline/materialized coordinates."
             )
+        if file is None:
+            raise TypeError("A coordinate file path is required")
         self.file = Path(file).expanduser()
         if self.file.is_absolute():
             self.file = self.file.resolve()
@@ -1677,8 +1710,8 @@ class CoordsGrid(ReceiverCoords):
 
         # For slice, get all coords and then slice
         elif isinstance(indices, slice):
-            coords = self.grid.get_coords()
-            return coords[indices]
+            grid_coords = self.grid.get_coords()
+            return grid_coords[indices]
         else:
             raise ValueError("Invalid indices type")
 
@@ -1999,9 +2032,9 @@ class CoordsArray(ReceiverCoords):
         """
 
         if indices is None:
-            return np.asarray(self.coordinates.values, dtype=np.float64)
+            return np.asarray(self.coordinates, dtype=np.float64)
         else:
-            return np.asarray(self.coordinates[indices].values, dtype=np.float64)
+            return np.asarray(self.coordinates[indices], dtype=np.float64)
 
     def to_file(
         self, file_name: Union[str, Path], format: Optional[Literal["HDF5"]] = None
@@ -2035,7 +2068,7 @@ class CoordsArray(ReceiverCoords):
         if format == "HDF5":
             with h5py.File(file, "w") as f:
                 dset = f.create_dataset(
-                    "coords", data=(self.coordinates.values).astype(np.float64)
+                    "coords", data=np.asarray(self.coordinates, dtype=np.float64)
                 )
                 if self.units is not None:
                     dset.attrs["units"] = unit_expression(self.units)
@@ -2055,7 +2088,7 @@ class CoordsArray(ReceiverCoords):
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict:
         """Serialize inline receiver coordinates for solver input."""
 
-        values = np.asarray(self.coordinates.values, dtype=np.float64).tolist()
+        values = np.asarray(self.coordinates, dtype=np.float64).tolist()
         payload = {"_type": self.__class__.__name__, "value": values}
         if self.units is not None:
             payload["units"] = unit_expression(self.units)
@@ -2198,10 +2231,11 @@ class ReceiverGroup(ExtraFieldsMixin):
 
     Args:
         name: String identifier for this receiver group.
-        device: Device defining receiver type and components.
+        device: Receiver device, physical expression, or mapping of named expressions.
         coordinates: Receiver coordinates as an array, grid, file path, or
             ``ReceiverCoords`` object.
-        domain: Optional domain where the receiver group is evaluated.
+        domain: Mesh block ID or exact material layer name to sample.
+        materials: Optional named material expressions written as diagnostics.
         sampling: Optional sparse survey sampling reference.
         survey: Convenience sparse survey name/reference. Merged with
             ``sampling`` when both are supplied.
@@ -2215,7 +2249,7 @@ class ReceiverGroup(ExtraFieldsMixin):
 
     name: str = "group"
     device: ReceiverDevice = field(default_factory=ReceiverDevice)
-    domain: Optional[int] = None
+    domain: Optional[Union[int, str]] = None
     coordinates: ReceiverCoords = field(default_factory=ReceiverCoords)
     sampling: Optional[ReceiverSampling] = None
     extra: Dict = field(default_factory=dict)
@@ -2245,7 +2279,8 @@ class ReceiverGroup(ExtraFieldsMixin):
         name: str,
         device: ReceiverDevice,
         coordinates: Union[np.ndarray, xr.DataArray, str, Path, Grid, ReceiverCoords],
-        domain: Optional[int] = None,
+        domain: Optional[Union[int, str]] = None,
+        materials: Optional[Mapping[str, Any]] = None,
         sampling: Optional[Union[str, Dict, ReceiverSampling]] = None,
         survey: Optional[Union[str, ReceiverSampling]] = None,
         extra: Optional[Dict] = None,
@@ -2266,11 +2301,55 @@ class ReceiverGroup(ExtraFieldsMixin):
         elif survey_obj is not None and sampling_obj.survey is None:
             sampling_obj.survey = survey_obj.survey
         self.name = name
+        self._expressions = None
+        self._expression_dimension = None
+        from frequensolve.physics import ReceiverExpression
+
+        if isinstance(device, ReceiverExpression) or isinstance(device, Mapping):
+            outputs = (
+                {name: device}
+                if isinstance(device, ReceiverExpression)
+                else dict(device)
+            )
+            if not outputs or any(
+                not isinstance(value, ReceiverExpression) for value in outputs.values()
+            ):
+                raise TypeError(
+                    "Receiver outputs must be a non-empty mapping of expressions"
+                )
+            self._expressions = outputs
+            dimension = next(
+                (
+                    value.dimension
+                    for value in outputs.values()
+                    if value.dimension is not None
+                ),
+                None,
+            )
+            if dimension is None and isinstance(coords, CoordsArray):
+                dimension = coords.coordinates.shape[-1]
+            self._expression_dimension = dimension
+            device = ReceiverNode(components=[])
+        if not isinstance(device, ReceiverDevice):
+            raise TypeError(
+                "Receiver device must be a ReceiverDevice or physical expression"
+            )
         self.device = device
+        self.materials = dict(materials or {})
         self.coordinates = coords
-        self.domain = domain
+        if isinstance(domain, bool) or (
+            domain is not None and not isinstance(domain, (str, Integral))
+        ):
+            raise TypeError(
+                "Receiver domain must be a mesh block ID or material layer name"
+            )
+        if isinstance(domain, str) and not domain.strip():
+            raise ValueError("Receiver material layer name must not be empty")
+        self.domain = int(domain) if isinstance(domain, Integral) else domain
         self.sampling = sampling_obj
         self._init_extra(extra, **kwargs)
+        if self._expression_dimension is not None:
+            self.resolve_expressions()
         deprecated_frame_keys = {"frame", "source_frame", "receiver_frame"} & set(
             self.extra
         )
@@ -2278,6 +2357,30 @@ class ReceiverGroup(ExtraFieldsMixin):
             raise TypeError(
                 "ReceiverGroup frame is no longer supported; receiver coordinates are physical"
             )
+
+    def resolve_expressions(self, ctx: Optional[ExportContext] = None) -> None:
+        """Bind symbolic outputs to the simulation dimension before export or pairing."""
+        if not self._expressions:
+            return
+        dimension = getattr(ctx, "dimension", None) or self._expression_dimension
+        if dimension is None:
+            raise ValueError(
+                "Receiver expressions need a simulation dimension or physics factory dimension"
+            )
+        physics = getattr(ctx, "physics", None)
+        components = []
+        multiple = len(self._expressions) > 1
+        for name, expression in self._expressions.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("Receiver expression output names must be non-empty")
+            output = expression.receiver_components(name, dimension, physics)
+            if multiple:
+                for component in output:
+                    component.name = (
+                        name if expression.rank == 0 else f"{name}.{component.name}"
+                    )
+            components.extend(output)
+        self.device.components = components
 
     @property
     def survey(self) -> Optional[str]:
@@ -2297,6 +2400,7 @@ class ReceiverGroup(ExtraFieldsMixin):
     def _clean_coordinates(coords):
         # Allow coordinates to be defined either as a ReceiverCoords object
         # various other reasonble ways:
+        out: ReceiverCoords
         if isinstance(coords, CoordinateValue):
             values, units, system = coordinate_array_metadata(coords)
             out = CoordsArray(coordinates=values, units=units, system=system)
@@ -2330,6 +2434,7 @@ class ReceiverGroup(ExtraFieldsMixin):
         export directory when an export context is available.
         """
 
+        self.resolve_expressions(ctx)
         coords = self.coordinates
         if isinstance(self.device, EncodedReceiver):
             self.device.validate_size(self.size, ctx)
@@ -2413,6 +2518,7 @@ class ReceiverGroup(ExtraFieldsMixin):
                     attrs["system"] = coords.system
                 assert isinstance(coords.coordinates, xr.DataArray)
                 coordinate_dim = coords.coordinates.dims[1]
+                assert ctx.store is not None
                 ref = ctx.store.put_dataarray(
                     dataset,
                     coords.coordinates,
@@ -2450,15 +2556,45 @@ class ReceiverGroup(ExtraFieldsMixin):
         else:
             coords_payload = self.coordinates.to_fs(ctx)
 
+        device = copy.copy(self.device)
+        device.transfer = None
+        device.components = [copy.copy(c) for c in self.device.components]
+        for component in device.components:
+            component.transfer = None
         device_payload = (
-            self.device.to_fs(
-                ctx,
-                group_name=self.name,
-                point_count=self.size,
-            )
-            if isinstance(self.device, EncodedReceiver)
-            else self.device.to_fs(ctx)
+            device.to_fs(ctx, group_name=self.name, point_count=self.size)
+            if isinstance(device, EncodedReceiver)
+            else device.to_fs(ctx)
         )
+        for component, payload_component in zip(
+            self.device.components, device_payload["components"]
+        ):
+            transfer = (
+                component.transfer
+                if component.transfer is not None
+                else self.device.transfer
+            )
+            if transfer is None:
+                continue
+            if component.transfer is not None and self.device.transfer is not None:
+                raise ValueError(
+                    "Specify a device transfer or component transfer, not both"
+                )
+            if isinstance(device, ReceiverFiber):
+                raise ValueError(
+                    "ReceiverFiber spectral calibration requires a fiber-specific transfer contract"
+                )
+            if isinstance(transfer, ReceiverTransferFunction):
+                count = self.size * getattr(device, "node_count", 1)
+                payload_component["transfer"] = transfer.to_fs(
+                    ctx or ExportContext(), receiver_count=count
+                )
+            elif isinstance(transfer, Mapping):
+                payload_component["transfer"] = copy.deepcopy(dict(transfer))
+            else:
+                raise TypeError(
+                    "Receiver transfer must be a ReceiverTransferFunction or materialized mapping"
+                )
         payload = {
             "name": self.name,
             "device": device_payload,
@@ -2470,6 +2606,29 @@ class ReceiverGroup(ExtraFieldsMixin):
             ),
             "coordinates": coords_payload,
         }
+        if self.materials:
+            from frequensolve.physics import ReceiverExpression
+
+            if "material_samples" in self.extra:
+                raise ValueError("Specify materials or material_samples, not both")
+            payload["material_samples"] = []
+            for name, expression in self.materials.items():
+                if not isinstance(name, str) or not name:
+                    raise ValueError("Material diagnostic names must be non-empty")
+                if (
+                    not isinstance(expression, ReceiverExpression)
+                    or expression.wavefield
+                ):
+                    raise TypeError(
+                        "materials diagnostics require material expressions"
+                    )
+                payload["material_samples"].append(
+                    {
+                        "name": name,
+                        "coefficient": expression.coefficient(),
+                        "units": expression.units,
+                    }
+                )
         return merge_extra(payload, self.extra, "ReceiverGroup")
 
     @classmethod

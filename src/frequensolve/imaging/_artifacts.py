@@ -196,6 +196,18 @@ def unpack_support_mask(packed: Any, size: int) -> np.ndarray:
     return np.unpackbits(data, bitorder="little")[:size].astype(bool)
 
 
+def _normalize_control_spaces(blocks, identities, key_fn):
+    result = {}
+    for name, identity in identities.items():
+        key = key_fn(name)
+        if key not in blocks:
+            raise ValueError(f"control space names unknown block {key!r}")
+        if key in result or not isinstance(identity, str) or not identity.strip():
+            raise ValueError(f"invalid or duplicate control space identity for {key!r}")
+        result[key] = identity.rstrip(" \0")
+    return result
+
+
 def _normalize_support(
     blocks: Mapping[str, np.ndarray],
     support: Mapping[str, Any],
@@ -328,6 +340,7 @@ class ControlVectorFile:
     support: Dict[str, np.ndarray] = field(default_factory=dict)
     support_measure: Dict[str, np.ndarray] = field(default_factory=dict)
     support_min_support: Optional[float] = None
+    control_spaces: Dict[str, str] = field(default_factory=dict)
 
     def _block_key(self, name: str) -> str:
         key = _validate_block_name(name)
@@ -341,6 +354,9 @@ class ControlVectorFile:
                 raise ValueError(f"duplicate control block {key!r}")
             ordered[key] = _real_vector(_interleave(values), f"block {key!r}")
         self.blocks = ordered
+        self.control_spaces = _normalize_control_spaces(
+            self.blocks, self.control_spaces, self._block_key
+        )
         self.support, self.support_measure = _normalize_support(
             self.blocks, self.support, self.support_measure, self._block_key
         )
@@ -450,6 +466,8 @@ class ControlVectorFile:
             controls = h5.create_group("controls")
             for name, values in self.blocks.items():
                 controls.create_dataset(name, data=values, dtype=np.float64)
+            for name, identity in self.control_spaces.items():
+                _write_string(h5, "control_spaces/" + self._block_key(name), identity)
             if not self.native:
                 _write_string(h5, "schema", CONTROL_VECTOR_SCHEMA)
                 _write_string(h5, "packing", REAL_INTERLEAVED)
@@ -501,6 +519,10 @@ class ControlVectorFile:
                     None if native else _read_string(h5, "control_registry_fingerprint")
                 ),
                 native=native,
+                control_spaces={
+                    str(n): _read_string(h5["control_spaces"], n)
+                    for n in h5.get("control_spaces", {})
+                },
                 support=support,
                 support_measure=measure,
                 support_min_support=min_support,
@@ -605,6 +627,7 @@ class ControlStateFile:
     support_min_support: Optional[float] = None
     scaling: Dict[str, float] = field(default_factory=dict)
     scaling_units: Dict[str, str] = field(default_factory=dict)
+    control_spaces: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         ordered: Dict[str, np.ndarray] = {}
@@ -614,6 +637,9 @@ class ControlStateFile:
                 raise ValueError(f"duplicate control block {key!r}")
             ordered[key] = _real_vector(_interleave(values), f"block {key!r}")
         self.blocks = ordered
+        self.control_spaces = _normalize_control_spaces(
+            self.blocks, self.control_spaces, qualified_block_name
+        )
         self.support, self.support_measure = _normalize_support(
             self.blocks, self.support, self.support_measure, qualified_block_name
         )
@@ -654,6 +680,11 @@ class ControlStateFile:
         keys = [qualified_block_name(name) for name in names]
         return ControlVectorFile(
             {key: self[key] for key in keys},
+            control_spaces={
+                key: self.control_spaces[key]
+                for key in keys
+                if key in self.control_spaces
+            },
             support={key: self.support[key] for key in keys if key in self.support},
             support_measure={
                 key: self.support_measure[key]
@@ -673,6 +704,12 @@ class ControlStateFile:
                 raise ValueError(f"vector block {key!r} is not in the state")
             if values.size != blocks[key].size:
                 raise ValueError(f"vector block {key!r} has the wrong size")
+            identity = vector.control_spaces.get(name)
+            if identity and key in self.control_spaces:
+                if identity != self.control_spaces[key]:
+                    raise ValueError(
+                        f"vector block {key!r} has a different control basis"
+                    )
             blocks[key] = values
         return ControlStateFile(
             blocks,
@@ -681,6 +718,7 @@ class ControlStateFile:
             support_min_support=self.support_min_support,
             scaling=dict(self.scaling),
             scaling_units=dict(self.scaling_units),
+            control_spaces=dict(self.control_spaces),
         )
 
     def write(self, path: Union[str, Path]) -> Path:
@@ -694,6 +732,10 @@ class ControlStateFile:
             controls = h5.create_group("controls")
             for name, values in self.blocks.items():
                 controls.create_dataset(name, data=values, dtype=np.float64)
+            for name, identity in self.control_spaces.items():
+                _write_string(
+                    h5, "control_spaces/" + qualified_block_name(name), identity
+                )
             _write_support_datasets(
                 h5, self.support, self.support_measure, self.support_min_support
             )
@@ -723,6 +765,10 @@ class ControlStateFile:
             blocks = _read_control_blocks(h5, path)
             support, measure, min_support = _read_support_datasets(h5, blocks, path)
             scaling, units = _read_scaling_datasets(h5, blocks, path)
+            identities = {
+                str(n): _read_string(h5["control_spaces"], n)
+                for n in h5.get("control_spaces", {})
+            }
         return cls(
             blocks,
             support=support,
@@ -730,6 +776,7 @@ class ControlStateFile:
             support_min_support=min_support,
             scaling=scaling,
             scaling_units=units,
+            control_spaces=identities,
         )
 
 
@@ -1470,6 +1517,37 @@ class ExtensionSolveReport:
 # ---------------------------------------------------------------------------
 
 
+def _task_channel_to_output(
+    attrs: Mapping[str, Any], channel: int, values: np.ndarray
+) -> Tuple[np.ndarray, bool]:
+    """Convert one solver-stored task image channel to the aggregate's output units.
+
+    Task parts keep each frequency's solver frame; ``value_scale`` is the
+    solver-to-output factor, applied inversely to dual (gradient) channels.
+    Returns the values and whether they are now in output storage.
+    """
+
+    storage = _decode_attr(attrs.get("value_storage"))
+    if isinstance(storage, list):
+        storage = storage[0] if storage else None
+    if storage != "solver":
+        return values, False
+    roles = _decode_attr(
+        attrs.get("value_convention_roles", attrs.get("value_frame_roles"))
+    )
+    if isinstance(roles, str):
+        roles = [roles]
+    scales = np.asarray(attrs.get("value_scale", []), dtype=np.float64).reshape(-1)
+    if not isinstance(roles, list) or channel >= len(roles) or scales.size == 0:
+        return values, False
+    scale = scales[channel] if scales.size > 1 else scales[0]
+    if roles[channel] == "dual":
+        return values / scale, True
+    if roles[channel] == "primal":
+        return values * scale, True
+    return values, False
+
+
 @dataclass(kw_only=True)
 class ImageSet:
     """Reader for Cartesian image files written by imaging workflows.
@@ -1581,6 +1659,13 @@ class ImageSet:
         file = self.require_aggregate() if part is None else self.image_file(part)
         location = f"{root.rstrip('/')}/{group}" if group else root
         with h5py.File(file, "r") as h5:
+            if (
+                part is not None
+                and group == "raw"
+                and root == "/image"
+                and location not in h5
+            ):
+                location = root
             if location.strip("/") not in h5 and location not in h5:
                 raise KeyError(f"{file} has no image group {location!r}")
             h5group = h5[location]
@@ -1604,19 +1689,38 @@ class ImageSet:
                 coords = {
                     dim: np.linspace(x0[i], x1[i], n[i]) for i, dim in enumerate(dims)
                 }
-                array = xr.DataArray(
-                    data=h5data[:].reshape(n), dims=dims, coords=coords
-                )
+                values = h5data[:]
+                channel = None
+                if values.size != int(np.prod(n)):
+                    raw_labels = np.asarray(attrs.get("component", [])).reshape(-1)
+                    labels = [str(_decode(label)) for label in raw_labels]
+                    if group == "raw" and "numerator" in labels:
+                        channel = labels.index("numerator")
+                        values = values.reshape(len(labels), -1)[channel]
+                    else:
+                        raise ValueError(f"{file}:{h5data.name} is not a scalar image")
+                output = False
+                if part is not None:
+                    values, output = _task_channel_to_output(
+                        attrs, 0 if channel is None else channel, values
+                    )
+                array = xr.DataArray(data=values.reshape(n), dims=dims, coords=coords)
                 for dim, units in zip(dims, axis_units):
                     if units:
                         array.coords[dim].attrs["units"] = units
                 units = _decode_attr(attrs.get("units"))
+                if channel is not None and isinstance(units, list):
+                    units = units[channel]
                 if units:
                     array.attrs["units"] = units
                 for attr_name in ("coordinate_system", "value_scale", "value_storage"):
                     value = _decode_attr(attrs.get(attr_name))
+                    if channel is not None and isinstance(value, list):
+                        value = value[channel]
                     if value is not None:
                         array.attrs[attr_name] = value
+                if output:
+                    array.attrs["value_storage"] = "output"
                 images[prop] = array
         return images
 
@@ -1650,9 +1754,20 @@ def _decode_attr(value: Any) -> Any:
 class SmoothingConfig:
     """Representation-independent variational smoothing configuration.
 
-    ``to_control_fs`` emits the ``control_sensitivities.Smoothing`` contract
-    (Riesz map on control coefficients); ``to_image_fs`` emits the
-    ``Imaging.Smoothing`` contract applied while stacking Cartesian shards.
+    ``to_control_fs`` emits native control regularization settings. SmoothJob
+    uses them for vector processing; NativeRegularization uses them with
+    model-energy/proximal callbacks in FWI/LSRTM. ``to_image_fs`` emits the
+    separate ``Imaging.Smoothing`` contract for Cartesian shards.
+
+    Without explicit weights, ``wavelength_fraction`` (Sauce ``lambda``) counts
+    local wavelengths: Sauce sets the smoothing length ``L(x) = lambda*v(x)/f``
+    at every quadrature point from the local sizing wavespeed ``v(x)`` and the
+    job's largest frequency ``f`` (no ``2*pi``), so the strength varies with
+    velocity. Tikhonov/TV use ``alpha(x) = L(x)**(2*derivative_order)`` and TGV
+    ``alpha1(x) = L(x)``, ``alpha2(x) = tgv_ratio*L(x)**2``. A
+    ``reference_wavelength`` replaces ``L(x)`` by the uniform
+    ``lambda*reference_wavelength``. Values tuned against the former
+    ``lambda*v_min/(2*pi*f)`` length must be scaled by ``1/(2*pi)``.
     """
 
     kind: str = "tikhonov"
@@ -1763,30 +1878,45 @@ class SmoothingConfig:
             return self.alpha1 is None
         return self.alpha is None
 
+    def reference_length(self) -> float:
+        """Return the uniform smoothing length ``lambda*reference_wavelength``.
+
+        This is Sauce's ``L = lambda*v/f`` with the fixed wavelength ``v/f``
+        replaced by ``reference_wavelength`` (no ``2*pi``). Without a reference
+        wavelength the length is local, ``L(x) = lambda*v(x)/f``, and only Sauce
+        can evaluate it from the material model.
+        """
+
+        if self.reference_wavelength is None:
+            raise ValueError(
+                "a scalar smoothing length requires reference_wavelength; pass "
+                "lambda to Sauce, which sets L(x) = lambda*v(x)/f from the local "
+                "wavespeed of the material model"
+            )
+        return self.wavelength_fraction * self.reference_wavelength
+
     def resolved_alpha(self) -> float:
-        """Return the direct variational coefficient for local application."""
+        """Return the scalar Tikhonov/TV coefficient Sauce would use.
+
+        Explicit ``alpha`` wins; otherwise ``reference_length()**(2*p)`` for
+        derivative order ``p``. Spatially varying wavelength weights are not
+        resolvable here; send ``lambda`` to Sauce instead.
+        """
 
         if self.alpha is not None:
             return self.alpha
-        if self.reference_wavelength is None:
-            raise ValueError(
-                "local control smoothing requires alpha or reference_wavelength; "
-                "Sauce --smooth can derive wavelength from the material model"
-            )
-        length = self.wavelength_fraction * self.reference_wavelength / (2.0 * np.pi)
-        return length ** (2 * self.derivative_order)
+        return self.reference_length() ** (2 * self.derivative_order)
 
     def resolved_tgv_weights(self) -> Tuple[float, float]:
-        """Return the first- and second-order TGV weights."""
+        """Return the scalar TGV weights ``(L, tgv_ratio*L**2)`` Sauce would use.
+
+        Explicit ``alpha1``/``alpha2`` win; otherwise ``L`` is
+        :meth:`reference_length`.
+        """
 
         if self.alpha1 is not None and self.alpha2 is not None:
             return self.alpha1, self.alpha2
-        if self.reference_wavelength is None:
-            raise ValueError(
-                "local TGV smoothing requires alpha1/alpha2 or reference_wavelength; "
-                "Sauce --smooth can derive wavelength from the material model"
-            )
-        length = self.wavelength_fraction * self.reference_wavelength / (2.0 * np.pi)
+        length = self.reference_length()
         return length, self.tgv_ratio * length * length
 
     def _common_fs(self) -> Dict[str, Any]:
@@ -1809,19 +1939,25 @@ class SmoothingConfig:
     def to_control_fs(self) -> Dict[str, Any]:
         """Serialize the ``control_sensitivities.Smoothing`` Riesz-map contract."""
 
+        _require_control_smoothing(self)
         payload = self._common_fs()
         payload["input_role"] = self.input_role
         if self.reference_wavelength is not None:
             payload["reference_wavelength"] = self.reference_wavelength
+        if self.normalize_amplitude is not None:
+            payload["normalize_amplitude"] = self.normalize_amplitude
         return payload
 
     def to_image_fs(self) -> Dict[str, Any]:
         """Serialize the ``Imaging.Smoothing`` Cartesian stacking contract.
 
         Cartesian image smoothing uses mixed first-order FEM fields, so a
-        second derivative order is rejected. A reference wavelength is resolved
-        into explicit coefficients because the image smoother has no
-        ``reference_wavelength`` field.
+        second derivative order is rejected. Without explicit weights, ``lambda``
+        is passed through and Sauce applies the local ``L(x) = lambda*v(x)/f``.
+        A reference wavelength is resolved into the equivalent uniform
+        coefficients (``alpha = L**2``; TGV ``alpha1 = L``,
+        ``alpha2 = tgv_ratio*L**2`` with ``L = lambda*reference_wavelength``)
+        because the image smoother has no ``reference_wavelength`` field.
         """
 
         if self.derivative_order != 1:
@@ -1865,3 +2001,42 @@ class SmoothingConfig:
             )
         payload.pop("normalize_coordinate", None)
         return cls(**payload)
+
+
+def _require_control_smoothing(config: SmoothingConfig) -> None:
+    if config.illumination_normalization != "none":
+        raise ValueError(
+            "Control smoothing does not apply illumination normalization; "
+            "use SourceEnergy for control-energy preconditioning"
+        )
+
+
+def control_smoothing(value: Any) -> Optional[SmoothingConfig]:
+    """Coerce smoothing for a control context, where illumination modes do not apply.
+
+    Illumination normalization is a Cartesian-image option; requesting it for
+    control smoothing is rejected when the configuration is supplied.
+    """
+
+    config = SmoothingConfig.from_value(value)
+    if config is not None:
+        _require_control_smoothing(config)
+    return config
+
+
+WORKSPACE_DEPRECATION = (
+    "workspace_mb is deprecated and ignored: Sauce allocates the indivisible "
+    "source-batch workspace at its required size"
+)
+
+
+def validate_mesh_transfer(method: str, length: float) -> None:
+    """Reject unsupported transfer methods and ambiguous smoothing requests."""
+    if method not in {"nodal", "l2"}:
+        raise ValueError("mesh_transfer must be 'nodal' or 'l2'")
+    if not np.isfinite(length) or length < 0:
+        raise ValueError(
+            "mesh_smoothing_length must be finite and nonnegative (meters)"
+        )
+    if method != "l2" and length != 0:
+        raise ValueError("mesh_smoothing_length requires mesh_transfer='l2'")

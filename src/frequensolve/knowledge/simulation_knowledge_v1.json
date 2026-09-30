@@ -100,6 +100,7 @@
         "tolerance": 0.0001,
         "precision": "single"
       },
+      "tolerance_guidance": "Use relative tolerance 1e-4 by default for iterative solvers, smoothers, and regularization/proximal solves, not only TV. It rarely needs to change; most seismic imaging problems do not require tighter accuracy. Preserve explicit user-selected tolerances. A smaller tolerance may be justified for very hard problems or unusually high accuracy requirements, with a documented need and verified downstream benefit. Keep relative tolerances strictly above 1e-7 for single-precision solves. Do not transfer stringent diagnostic/test tolerances into production settings. Absolute tolerances depend on residual scaling and units and are not interchangeable with relative tolerances.",
       "additional_fields_status": "contract-dependent"
     },
     "frequencies": {

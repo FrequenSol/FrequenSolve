@@ -36,7 +36,7 @@ import numpy as np
 import xarray as xr
 
 from frequensolve.imaging.data import ObservedGroup
-from frequensolve.units import is_quantity, value_and_units_to_fs
+from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
 from frequensolve.util.mixins import ExportContext
 
 __all__ = [
@@ -305,16 +305,20 @@ class Comparison:
     ``phase_derivative`` compares the stabilized phase slope with respect to
     physical frequency (instantaneous travel time) and requires observed
     ``df`` derivative traces for every receiver group.
+    ``spectral_derivative`` compares the full complex frequency derivative,
+    retaining amplitude as well as phase information.
     """
 
-    kind: Literal["waveform", "phase_derivative"] = "waveform"
+    kind: Literal["waveform", "phase_derivative", "spectral_derivative"] = "waveform"
     source_derivative: Literal["frozen", "total"] = "frozen"
     relative_amplitude_floor: float = 0.01
 
     def __post_init__(self) -> None:
         kind = str(self.kind).strip().lower()
-        if kind not in {"waveform", "phase_derivative"}:
-            raise ValueError("comparison kind must be 'waveform' or 'phase_derivative'")
+        if kind not in {"waveform", "phase_derivative", "spectral_derivative"}:
+            raise ValueError(
+                "comparison kind must be 'waveform', 'phase_derivative', or 'spectral_derivative'"
+            )
         source_derivative = str(self.source_derivative).strip().lower()
         if source_derivative not in {"frozen", "total"}:
             raise ValueError("source_derivative must be 'frozen' or 'total'")
@@ -350,7 +354,17 @@ class Comparison:
     def requires_derivatives(self) -> Tuple[str, ...]:
         """Return the observed derivative axes this comparison needs."""
 
-        return ("df",) if self.kind == "phase_derivative" else ()
+        return (
+            ("df",) if self.kind in {"phase_derivative", "spectral_derivative"} else ()
+        )
+
+    @classmethod
+    def spectral_derivative(
+        cls, *, source_derivative: Literal["frozen", "total"] = "frozen"
+    ) -> "Comparison":
+        """Compare the full complex derivative with respect to Hz at fixed damping."""
+
+        return cls(kind="spectral_derivative", source_derivative=source_derivative)
 
     @classmethod
     def from_value(cls, value: Any) -> "Comparison":
@@ -371,6 +385,12 @@ class Comparison:
 
         if self.kind == "waveform":
             return {"kind": "waveform"}
+        if self.kind == "spectral_derivative":
+            return {
+                "kind": self.kind,
+                "derivative_axis": "frequency",
+                "source_derivative": self.source_derivative,
+            }
         return {
             "kind": self.kind,
             "derivative_axis": "frequency",
@@ -842,6 +862,52 @@ class Preprocess:
             if not name:
                 raise ValueError("preprocessing hook name must be non-empty")
             object.__setattr__(self, "name", name)
+
+    @classmethod
+    def material_weighting(
+        cls,
+        blocks: Mapping[Any, Any],
+        *,
+        units: Mapping[Any, Any],
+        name: Optional[str] = None,
+    ) -> "Preprocess":
+        """Apply material-defined W inside the residual norm, frozen for the objective lifetime.
+
+        Keys are one-based component IDs or tuples of coupled component IDs.
+        Values are material expressions. ``units`` specifies transformed trace
+        units for each block. Frequency-independent W also weights df traces.
+        """
+        from frequensolve.physics import ReceiverExpression
+
+        if not blocks or set(blocks) != set(units):
+            raise ValueError("Every material weighting block needs output units")
+        rows = []
+        used: set[int] = set()
+        for key, expression in blocks.items():
+            components = (key,) if isinstance(key, int) else tuple(key)
+            if not components or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+                for value in components
+            ):
+                raise ValueError("Weighting components must be positive one-based IDs")
+            if len(set(components)) != len(components) or used.intersection(components):
+                raise ValueError("Material weighting blocks must not overlap")
+            if not isinstance(expression, ReceiverExpression) or expression.wavefield:
+                raise TypeError("Material weighting requires material expressions")
+            used.update(components)
+            rows.append(
+                {
+                    "components": list(components),
+                    "coefficient": expression.coefficient(basis="physical"),
+                    "units": unit_expression(units[key]),
+                }
+            )
+        return cls(
+            "material_weighting",
+            "trace_pair",
+            {"model_policy": "frozen", "blocks": rows},
+            name=name,
+        )
 
     # -- objective weights ---------------------------------------------------
 

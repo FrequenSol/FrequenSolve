@@ -10,23 +10,22 @@ from frequensolve.imaging import (
     GridParameters,
     ImagingProblem,
     InterfaceParameters,
-    MeshParameters,
     ModelOperator,
     SourceParameters,
 )
-from frequensolve.imaging._artifacts import ControlRegistryManifest, ControlVectorFile
+from frequensolve.imaging._artifacts import ControlVectorFile
 from frequensolve.imaging._backend import Backend
 from frequensolve.imaging.jobs import SmoothJob
 from frequensolve.imaging.regularization import (
     TGV,
     TV,
-    BoundPenalty,
     BoundPreconditioner,
+    BoundRegularization,
     Diagonal,
     FromOperator,
     Identity,
-    Penalty,
     Quadratic,
+    Regularization,
     Scaled,
     Smoothing,
     Sum,
@@ -36,11 +35,9 @@ from frequensolve.imaging.regularization import (
 from frequensolve.inversion.least_squares import QuadraticRegularization
 from frequensolve.inversion.preconditioning import DiagonalInverseHessian
 from frequensolve.orchestrator.sites.base import JobStatus, RunResult
-from frequensolve.units import ureg
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
 pytestmark = pytest.mark.unit
-
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -80,27 +77,15 @@ def _random(space, seed=0):
     return space.random(seed) * 3.0
 
 
-PENALTIES = {
-    "tikhonov1": Tikhonov(0.7),
-    "tikhonov2": Tikhonov(0.3, order=2),
-    "tikhonov_ref": Tikhonov(0.5, weights={"src": 0.2, "salt": 1.5}),
-    "tv1": TV(0.5, epsilon=0.05),
-    "tv2": TV(0.2, epsilon=0.1, order=2),
-    "quadratic": Quadratic(
-        sp.random(9, 34, density=0.3, random_state=3, format="csr"), weight=2.0
-    ),
-    "sum": Tikhonov(0.4) + 0.5 * TV(0.3, epsilon=0.02),
-}
+REGULARIZATIONS = ("quadratic", "sum")
 
 
 def _bind(name, space):
-    penalty = PENALTIES[name]
-    if name == "tikhonov_ref":
-        penalty = Tikhonov(0.5, weights=penalty.weights, reference=_random(space, 9))
-    if name == "quadratic":
-        matrix = sp.random(9, space.size, density=0.3, random_state=3, format="csr")
-        penalty = Quadratic(matrix, weight=2.0, reference=space.random(4))
-    return penalty.bind(space)
+    matrix = sp.random(9, space.size, density=0.3, random_state=3, format="csr")
+    regularization = Quadratic(matrix, weight=2.0, reference=space.random(4))
+    if name == "sum":
+        regularization = regularization + 0.5 * Quadratic(sp.identity(space.size))
+    return regularization.bind(space)
 
 
 def _directional_derivative(bound, v, direction, h=1.0e-6):
@@ -108,197 +93,17 @@ def _directional_derivative(bound, v, direction, h=1.0e-6):
 
 
 # ---------------------------------------------------------------------------
-# penalties: values and gradients
+# regularization: values and gradients
 # ---------------------------------------------------------------------------
 
 
-def _unit(nodes):
-    nodes = np.asarray(nodes, dtype=float)
-    return (nodes - nodes[0]) / (nodes[-1] - nodes[0])
-
-
-def _trapezoid(xi):
-    h = np.diff(xi)
-    return np.concatenate([[0.0], h / 2]) + np.concatenate([h / 2, [0.0]])
-
-
-def test_tikhonov_is_the_quadrature_of_the_unit_domain_seminorm(space):
-    bound = Tikhonov(0.7).bind(space)
-    v = _random(space)
-    blocks = v.blocks()
-
-    def edge_sum(values, xi):
-        # int_0^1 |c'|^2 dxi for the piecewise-linear interpolant
-        return np.sum(np.diff(values) ** 2 / np.diff(xi))
-
-    vp_xi = _unit(space.block("vp").control.coordinates)
-    rho = space.block("rho").control
-    knots = np.asarray(rho.knots)
-    greville = np.array([knots[i + 1 : i + 4].mean() for i in range(rho.size)])
-    grid = space.block("grid").control
-    gx, gz = (_unit(axis) for axis in grid.axis_coordinates)
-    lattice = blocks["model.grid"].reshape(grid.shape, order="F")
-    grid_terms = np.sum(
-        _trapezoid(gz)[None, :] * np.diff(lattice, axis=0) ** 2 / np.diff(gx)[:, None]
-    ) + np.sum(
-        _trapezoid(gx)[:, None] * np.diff(lattice, axis=1) ** 2 / np.diff(gz)[None, :]
-    )
-    expected = (
-        0.5
-        * 0.7
-        * (
-            edge_sum(blocks["model.vp"], vp_xi)
-            + edge_sum(blocks["model.rho"], _unit(greville))
-            + grid_terms
-        )
-    )
-    assert bound.value(v) == pytest.approx(expected)
-    assert bound(v) == pytest.approx(expected)
-    # source and interface blocks carry no penalty by default
-    gradient = bound.gradient(v)
-    assert isinstance(gradient, ControlVector)
-    np.testing.assert_array_equal(gradient["salt"], 0.0)
-    np.testing.assert_array_equal(gradient["src.signature"]["source.1.signature"], 0.0)
-    # constants cost nothing
-    assert bound.value(space.ones()) == pytest.approx(0.0)
-
-
-def _integrate(values, x):
-    values = np.asarray(values)
-    h = np.diff(x)
-    return np.sum(0.5 * h * (values[..., 1:] + values[..., :-1]), axis=-1)
-
-
-def _profile_value(simulation, penalty, count, field):
-    space = ControlSpace(vp=DepthProfile("vp", "sediment", count=count)).bind(
-        simulation
-    )
-    xi = _unit(space.block("vp").control.coordinates)
-    return penalty.bind(space).value(space.pack({"vp": field(xi)}))
-
-
-@pytest.mark.parametrize(
-    "penalty",
-    [
-        Tikhonov(1.0),
-        Tikhonov(1.0, order=2),
-        TV(1.0, epsilon=1e-9),
-        TV(1.0, epsilon=1e-9, order=2),
-    ],
-    ids=["tikhonov1", "tikhonov2", "tv1", "tv2"],
-)
-def test_penalty_values_converge_under_node_refinement(simulation, penalty):
-    def field(xi):
-        return np.sin(3.0 * xi) + xi**2
-
-    # 2001 points put the trapezoid reference within 1e-7 of the closed form,
-    # three orders below the discrete errors it is compared against.
-    fine = np.linspace(0.0, 1.0, 2001)
-    first = 3.0 * np.cos(3.0 * fine) + 2.0 * fine
-    second = -9.0 * np.sin(3.0 * fine) + 2.0
-    integrand = {
-        ("Tikhonov", 1): 0.5 * first**2,
-        ("Tikhonov", 2): 0.5 * second**2,
-        ("TV", 1): np.abs(first),
-        ("TV", 2): np.abs(second),
-    }[(type(penalty).__name__, penalty.order)]
-    reference = _integrate(integrand, fine)
-    if isinstance(penalty, Tikhonov) and penalty.order == 1:
-        # 0.5 * int_0^1 (3 cos 3xi + 2 xi)^2 dxi in closed form
-        closed = 0.5 * (
-            4.5
-            + 0.75 * np.sin(6.0)
-            + 4.0 * np.sin(3.0)
-            + 4.0 * (np.cos(3.0) - 1.0) / 3.0
-            + 4.0 / 3.0
-        )
-        assert reference == pytest.approx(closed, rel=1e-6)
-    values = [_profile_value(simulation, penalty, n, field) for n in (11, 21, 41)]
-    errors = [abs(value - reference) for value in values]
-    # The value tracks the continuous seminorm, not the node count.  A discrete
-    # total variation is already exact for a field with this few sign changes,
-    # so successive errors may tie to the last bit; only a real increase fails.
-    slack = 1.0 + 1.0e-9
-    assert errors[2] <= errors[1] * slack <= errors[0] * slack**2
-    assert errors[2] <= 2.0e-2 * reference
-
-
-def test_lattice_penalties_converge_under_refinement(simulation):
-    def field(x, z):
-        return np.sin(2.0 * x) * np.cos(z) + x * z
-
-    def value(penalty, shape):
-        space = ControlSpace(grid=GridParameters("vp", "water", shape=shape)).bind(
-            simulation
-        )
-        gx, gz = (_unit(axis) for axis in space.block("grid").control.axis_coordinates)
-        grid = field(gx[:, None], gz[None, :])
-        return penalty.bind(space).value(space.pack({"grid": grid.ravel(order="F")}))
-
-    x = np.linspace(0.0, 1.0, 801)
-    X, Z = np.meshgrid(x, x, indexing="ij")
-    fx = 2.0 * np.cos(2.0 * X) * np.cos(Z) + Z
-    fz = -np.sin(2.0 * X) * np.sin(Z) + X
-    exact = {
-        "tikhonov": 0.5 * _integrate(_integrate(fx**2 + fz**2, x), x),
-        "tv": _integrate(_integrate(np.hypot(fx, fz), x), x),
-    }
-    for name, penalty in (("tikhonov", Tikhonov(1.0)), ("tv", TV(1.0, 1e-9))):
-        values = [value(penalty, (n, n)) for n in (6, 11, 21)]
-        errors = [abs(v - exact[name]) for v in values]
-        assert errors[2] < errors[1] < errors[0], name
-        assert errors[2] <= 1.0e-2 * exact[name], name
-
-
-def test_penalty_length_sets_a_physical_scale(simulation):
-    space = ControlSpace(
-        vp=DepthProfile("vp", "sediment", count=6),
-        grid=GridParameters("vp", "water", shape=[4, 3]),
-    ).bind(simulation)
-    nodes = space.block("vp").control.coordinates
-    span = float(nodes[-1] - nodes[0])
-    v = _random(space, 3)
-    only_vp = {"grid": 0.0}
-    default = Tikhonov(1.0, weights=only_vp).bind(space).value(v)
-    # xi' = x / L = (span / L) xi: first-order term scales by (L / span)
-    assert Tikhonov(1.0, weights=only_vp, length=span).bind(space).value(
-        v
-    ) == pytest.approx(default)
-    assert Tikhonov(1.0, weights=only_vp, length=2.0 * span).bind(space).value(
-        v
-    ) == pytest.approx(2.0 * default)
-    second = Tikhonov(1.0, order=2, weights=only_vp)
-    scaled = Tikhonov(1.0, order=2, weights=only_vp, length=2.0 * span)
-    assert scaled.bind(space).value(v) == pytest.approx(
-        8.0 * second.bind(space).value(v)
-    )
-    tv = TV(1.0, epsilon=1e-12, weights=only_vp)
-    tv_scaled = TV(1.0, epsilon=1e-12, weights=only_vp, length={"vp": 2.0 * span})
-    assert tv_scaled.bind(space).value(v) == pytest.approx(tv.bind(space).value(v))
-    # a mapping leaves unnamed blocks on their span; per-axis lengths for grids
-    grid = space.block("grid").control.axis_coordinates
-    spans = [float(axis[-1] - axis[0]) for axis in grid]
-    only_grid = {"vp": 0.0}
-    assert Tikhonov(1.0, weights=only_grid, length={"grid": spans}).bind(space).value(
-        v
-    ) == pytest.approx(Tikhonov(1.0, weights=only_grid).bind(space).value(v))
-    with pytest.raises(ValueError, match="positive"):
-        Tikhonov(1.0, length=0.0).bind(space)
-    with pytest.raises(ValueError, match="lattice axes"):
-        Tikhonov(1.0, length={"grid": [1.0, 2.0, 3.0]}).bind(space)
-    with pytest.raises(ValueError, match="not a length"):
-        Tikhonov(1.0, length=1.0 * ureg.s).bind(space)
-    with pytest.raises(KeyError):
-        Tikhonov(1.0, length={"nope": 1.0}).bind(space)
-
-
-@pytest.mark.parametrize("name", sorted(PENALTIES))
-def test_penalty_gradients_match_finite_differences(name, space):
+@pytest.mark.parametrize("name", sorted(REGULARIZATIONS))
+def test_regularization_gradients_match_finite_differences(name, space):
     bound = _bind(name, space)
     v = _random(space, 1)
     gradient = bound.gradient(v)
     assert isinstance(gradient, ControlVector) and gradient.size == space.size
-    tolerance = 1.0e-4 if "tv" in name or name == "sum" else 1.0e-6
+    tolerance = 1.0e-6
     for seed in (2, 3):
         direction = space.random(seed)
         expected = _directional_derivative(bound, v, direction)
@@ -309,7 +114,7 @@ def test_penalty_gradients_match_finite_differences(name, space):
     np.testing.assert_allclose(bound.gradient(v.values).values, gradient.values)
 
 
-@pytest.mark.parametrize("name", sorted(PENALTIES))
+@pytest.mark.parametrize("name", sorted(REGULARIZATIONS))
 def test_hessian_operators_are_self_adjoint_and_positive_semidefinite(name, space):
     bound = _bind(name, space)
     v = _random(space, 5)
@@ -333,9 +138,7 @@ def test_hessian_operators_are_self_adjoint_and_positive_semidefinite(name, spac
     np.testing.assert_allclose(dense, dense.T, rtol=1e-10, atol=1e-12)
 
 
-@pytest.mark.parametrize(
-    "name", ["tikhonov1", "tikhonov2", "tikhonov_ref", "quadratic"]
-)
+@pytest.mark.parametrize("name", ["quadratic"])
 def test_quadratic_operators_square_to_the_hessian(name, space):
     bound = _bind(name, space)
     R = bound.operator()
@@ -357,41 +160,12 @@ def test_quadratic_operators_square_to_the_hessian(name, space):
     assert isinstance(combined @ x, ControlVector)
 
 
-def test_tv_hessian_is_the_lagged_diffusivity_operator(space):
-    bound = TV(0.4, epsilon=0.03).bind(space)
-    v = _random(space, 11)
-    # gradient(v) == H(v) @ v for the IRLS operator frozen at v (reference 0)
-    np.testing.assert_allclose(
-        (bound.hessian_operator(v) @ v).values, bound.gradient(v).values
-    )
-    assert bound.value(space.zeros()) == pytest.approx(0.0)
-    assert bound.value(2.0 * space.ones()) == pytest.approx(0.0)
-    assert bound.operator() is None
-    second = TV(0.4, epsilon=0.03, order=2).bind(space)
-    nodes = space.block("vp").control.coordinates
-    linear = space.pack(
-        {
-            "vp": nodes,
-            "rho": np.zeros(5),
-            "grid": np.zeros(12),
-            "salt": np.zeros(3),
-            "src": {
-                "source.1.position": [0.0, 0.0],
-                "source.2.position": [0.0, 0.0],
-                "source.1.signature": [0.0],
-                "source.2.signature": [0.0],
-            },
-        }
-    )
-    assert second.value(linear) == pytest.approx(0.0)  # affine profiles are free
-
-
 def test_quadratic_wraps_quadratic_regularization_semantics(space):
     matrix = np.random.default_rng(1).standard_normal((5, space.size))
     reference = space.random(2)
-    penalty = Quadratic(matrix, weight=3.0, reference=reference)
-    bound = penalty.bind(space)
-    toolkit = penalty.least_squares_term(space)
+    regularization = Quadratic(matrix, weight=3.0, reference=reference)
+    bound = regularization.bind(space)
+    toolkit = regularization.least_squares_term(space)
     assert isinstance(toolkit, QuadraticRegularization)
     v = _random(space, 3)
     residual = toolkit.residual(v.values)
@@ -412,124 +186,23 @@ def test_quadratic_wraps_quadratic_regularization_semantics(space):
 # ---------------------------------------------------------------------------
 
 
-def test_frozen_dofs_drop_straddling_difference_rows(space, frozen_space):
-    assert frozen_space.size == space.size - 2
-    full = Tikhonov(1.0).bind(space)
-    frozen = Tikhonov(1.0).bind(frozen_space)
-    R_full = full.operator().matrix
-    R_frozen = frozen.operator().matrix
-    vp = space.slices["model.vp"]
-    grid = space.slices["model.grid"]
-    vp_rows = R_full[:, vp].getnnz(axis=1) > 0
-    grid_rows = R_full[:, grid].getnnz(axis=1) > 0
-    # profile: 5 edges, the two touching node 2 vanish; lattice: 9 + 8 edges,
-    # the two touching the corner node vanish
-    assert vp_rows.sum() == 5 and grid_rows.sum() == 17
-    vp_frozen_rows = R_frozen[:, frozen_space.slices["model.vp"]].getnnz(axis=1) > 0
-    grid_frozen_rows = R_frozen[:, frozen_space.slices["model.grid"]].getnnz(axis=1) > 0
-    assert vp_frozen_rows.sum() == 3 and grid_frozen_rows.sum() == 15
-    # the surviving rows are exactly the full rows that avoid the frozen nodes
-    keep = np.ones(space.size, dtype=bool)
-    keep[vp.start + 2] = False
-    keep[grid.start] = False
-    surviving = R_full[R_full[:, ~keep].getnnz(axis=1) == 0][:, keep]
-    np.testing.assert_allclose(R_frozen.toarray(), surviving.toarray())
-    # values agree on vectors that vanish at the frozen nodes
-    v = _random(frozen_space, 4)
-    lifted = space.from_sauce_vector(frozen_space.to_sauce_vector(v))
-    edge_rows = surviving @ v.values
-    assert frozen.value(v) == pytest.approx(0.5 * edge_rows @ edge_rows)
-    assert frozen.value(v) <= full.value(lifted) + 1e-12
-    tv = TV(1.0, epsilon=0.01)
-    assert tv.bind(frozen_space).gradient(v).size == frozen_space.size
-    with pytest.raises(ValueError, match="different control space"):
-        frozen.value(lifted)
-
-
-def test_weights_enable_ridge_terms_on_source_and_interface_blocks(space):
-    v = _random(space, 12)
-    weighted = Tikhonov(2.0, weights={"salt": 0.5, "src.signature": 1.0}).bind(space)
-    plain = Tikhonov(2.0).bind(space)
-    signature = np.concatenate(
-        [
-            space.to_sauce_vector(v)[space.full_slices[name]]
-            for name in ("source.1.signature", "source.2.signature")
-        ]
-    )
-    expected = 0.5 * 2.0 * (0.5 * np.sum(v["salt"] ** 2) + np.sum(signature**2))
-    assert weighted.value(v) - plain.value(v) == pytest.approx(expected)
-    gradient = weighted.gradient(v)
-    np.testing.assert_allclose(gradient["salt"], 2.0 * 0.5 * v["salt"])
-    np.testing.assert_array_equal(gradient["src.position"]["source.1.position"], 0.0)
-    silenced = Tikhonov(2.0, weights={"vp": 0.0, "grid": 0.0, "rho": 0.0}).bind(space)
-    assert silenced.value(v) == 0.0
-    assert silenced.operator().shape == (0, space.size)
-    with pytest.raises(KeyError):
-        Tikhonov(1.0, weights={"nope": 1.0}).bind(space)
-    with pytest.raises(ValueError, match="weight of"):
-        Tikhonov(1.0, weights={"vp": -1.0}).bind(space)
-
-
-def _registry_block(block_id, name, size, *, offset=1):
-    return {
-        "id": block_id,
-        "name": name,
-        "binding": [1, 1, block_id],
-        "layout": [offset, size, 2, 1],
-        "units": "",
-        "actions": 3,
-        "transform": 0,
-        "scaling": [0.0, 1.0, -1.7976931348623157e308, 1.7976931348623157e308],
-        "basis_identity": "",
-        "distributed": False,
-    }
-
-
-def test_mesh_blocks_raise_unless_weighted_zero(simulation):
-    bound = ControlSpace(
-        mesh=MeshParameters("vp", "sediment", frequency=8.0, epw=2.0),
-        rho=DepthProfile("rho", "sediment", count=4),
-    ).bind(simulation)
-    manifest = ControlRegistryManifest.from_dict(
-        {
-            "schema": "fs-control-registry-1",
-            "fingerprint": "sha256:" + "0" * 64,
-            "blocks": [
-                _registry_block(1, "model.mesh", 7),
-                _registry_block(2, "model.rho", 4, offset=8),
-            ],
-            "active_blocks": [1, 2],
-            "active_offsets": [1, 8],
-        }
-    )
-    sized = bound.with_manifest(manifest)
-    with pytest.raises(NotImplementedError, match="mesh block 'model.mesh'"):
-        Tikhonov(1.0).bind(sized)
-    with pytest.raises(NotImplementedError, match="Smoothing"):
-        TV(1.0).bind(sized)
-    excluded = Tikhonov(1.0, weights={"mesh": 0.0}).bind(sized)
-    v = sized.random(1)
-    np.testing.assert_array_equal(excluded.gradient(v)["mesh"], 0.0)
-    assert excluded.value(v) > 0.0
-
-
 # ---------------------------------------------------------------------------
 # composition
 # ---------------------------------------------------------------------------
 
 
 def test_composition_sums_scales_and_flattens(space):
-    tik = Tikhonov(0.4)
-    tv = TV(0.3, epsilon=0.02)
+    first = Quadratic(sp.identity(space.size), weight=0.4)
+    second = Quadratic(sp.diags(np.linspace(1, 2, space.size)), weight=0.3)
     quad = Quadratic(sp.identity(space.size, format="csr"), weight=0.1)
-    combined = tik + 0.5 * tv + quad
+    combined = first + 0.5 * second + quad
     assert isinstance(combined, Sum)
-    assert isinstance(combined.penalties[1], Scaled)
-    assert len(combined.penalties) == 3
-    assert isinstance(2.0 * tik, Penalty) and isinstance(tik * 2.0, Scaled)
+    assert isinstance(combined.regularizations[1], Scaled)
+    assert len(combined.regularizations) == 3
+    assert isinstance(2.0 * first, Regularization) and isinstance(first * 2.0, Scaled)
     bound = combined.bind(space)
     v = _random(space, 13)
-    parts = [tik.bind(space), tv.bind(space), quad.bind(space)]
+    parts = [first.bind(space), second.bind(space), quad.bind(space)]
     expected = parts[0].value(v) + 0.5 * parts[1].value(v) + parts[2].value(v)
     assert bound.value(v) == pytest.approx(expected)
     np.testing.assert_allclose(
@@ -544,8 +217,8 @@ def test_composition_sums_scales_and_flattens(space):
         + 0.5 * parts[1].curvature_diagonal(v)
         + parts[2].curvature_diagonal(v),
     )
-    assert bound.operator() is None  # TV has no square root
-    quadratic_only = (tik + 2.0 * quad).bind(space)
+    assert bound.operator() is not None
+    quadratic_only = (first + 2.0 * quad).bind(space)
     R = quadratic_only.operator()
     assert R is not None
     x = space.random(3)
@@ -553,19 +226,20 @@ def test_composition_sums_scales_and_flattens(space):
         ((R.H @ R) @ x).values, (quadratic_only.hessian_operator(x) @ x).values
     )
     with pytest.raises(TypeError):
-        Sum(tik, object())
+        Sum(first, object())
     with pytest.raises(ValueError, match="at least one"):
         Sum()
-    with pytest.raises(ValueError, match="penalty scale"):
-        -1.0 * tik
+    with pytest.raises(ValueError, match="regularization scale"):
+        -1.0 * first
 
 
-def test_tgv_is_not_implemented(space):
-    with pytest.raises(NotImplementedError, match="TV\\(order=2\\)"):
-        TGV(1.0, 2.0).bind(space)
+@pytest.mark.parametrize("spec", [Tikhonov(1), TV(1), TGV(1, 2)])
+def test_model_regularizers_require_native_binding(space, spec):
+    with pytest.raises(NotImplementedError, match="native callbacks"):
+        spec.bind(space)
 
 
-def test_penalty_validation():
+def test_regularization_validation():
     with pytest.raises(ValueError, match="alpha"):
         Tikhonov(-1.0)
     with pytest.raises(ValueError, match="order"):
@@ -607,22 +281,22 @@ def test_diagonal_preconditioner_reproduces_the_gauss_newton_diagonal(tmp_path):
     lin = problem.linearize()
     J = fake.linearizations[lin.state_fingerprint].J
     exact = np.sum(np.abs(J) ** 2, axis=0)
-    penalty = Tikhonov(0.2).bind(lin.space)
+    regularization = Quadratic(sp.identity(lin.space.size), weight=0.2).bind(lin.space)
 
     unit = Diagonal(probes="unit").bind(problem.space)
     assert isinstance(unit, BoundPreconditioner)
     with pytest.raises(RuntimeError, match="update"):
         unit.apply(lin.space.zeros())
-    unit.update(lin, penalty)
+    unit.update(lin, regularization)
     np.testing.assert_allclose(unit.estimate.data, exact, rtol=1e-8)
     np.testing.assert_allclose(
-        unit.estimate.regularization, penalty.curvature_diagonal(lin.point)
+        unit.estimate.regularization, regularization.curvature_diagonal(lin.point)
     )
     g = lin.space.random(3)
     applied = unit.apply(g)
     assert isinstance(applied, ControlVector) and applied.space is lin.space
     expected = DiagonalInverseHessian(
-        exact + penalty.curvature_diagonal(lin.point),
+        exact + regularization.curvature_diagonal(lin.point),
         block_sizes=[5, 3],
         relative_damping=1e-2,
         maximum_inverse_ratio=1e3,
@@ -660,14 +334,18 @@ def test_identity_and_from_operator_preconditioners(space):
         result = bound.apply(g)
         assert isinstance(result, ControlVector)
         np.testing.assert_allclose(result.values, 2.0 * g.values)
-    typed = FromOperator(Tikhonov(1.0).bind(space).hessian_operator(g)).bind(space)
+    typed = FromOperator(
+        Quadratic(sp.identity(space.size)).bind(space).hessian_operator(g)
+    ).bind(space)
     assert isinstance(typed.apply(g), ControlVector)
     with pytest.raises(ValueError, match="shape"):
         FromOperator(np.eye(space.size + 1)).bind(space)
     with pytest.raises(ValueError, match="entries"):
         FromOperator(lambda x: np.ones(3)).bind(space).apply(g)
     # the action drops into SciPy's cg as ``M``
-    H = Tikhonov(1.0).bind(space).hessian_operator(g) + sp.identity(space.size)
+    H = Quadratic(sp.identity(space.size)).bind(space).hessian_operator(
+        g
+    ) + sp.identity(space.size)
     solution, info = cg(
         H,
         g.values,
@@ -748,9 +426,9 @@ def test_smooth_reuses_the_latest_linearize_job(tmp_path, monkeypatch):
     assert seen[-1].source_job is lin.job
 
 
-def test_bound_penalty_requires_the_bound_space(space, frozen_space):
-    bound = Tikhonov(1.0).bind(space)
-    assert isinstance(bound, BoundPenalty)
+def test_bound_regularization_requires_the_bound_space(space, frozen_space):
+    bound = Quadratic(sp.identity(space.size)).bind(space)
+    assert isinstance(bound, BoundRegularization)
     with pytest.raises(ValueError, match="entries"):
         bound.value(np.ones(3))
     with pytest.raises(ValueError, match="different control space"):
@@ -764,37 +442,37 @@ def test_bound_penalty_requires_the_bound_space(space, frozen_space):
 # ---------------------------------------------------------------------------
 
 
-def test_penalty_and_diagonal_preconditioner_follow_sauce_support_masks(tmp_path):
+def test_regularization_and_diagonal_preconditioner_follow_sauce_support_masks(
+    tmp_path,
+):
     fake = FakeImagingSite(seed=5, support_masks={"model.vp": [1, 0, 1, 1, 0]})
     problem = _problem(tmp_path, fake)
     lin = problem.linearize()
     space = lin.space
     assert space.size == 6 and space.support.frozen_count == 2
 
-    penalty = Tikhonov(3.0).bind(space)
-    # the vp differences straddling frozen nodes 1 and 4 are dropped: only
-    # (2, 3) survives; rho keeps its two differences
-    R = penalty.operator().matrix.toarray()
-    assert R.shape == (1 + 2, 6)
-    nodes = space.block("vp").control.coordinates
-    expected_row = np.zeros(6)
-    # edge row: sqrt(alpha) * (c_3 - c_2) / sqrt(h_xi) on the unit coordinate
-    h_xi = (nodes[3] - nodes[2]) / (nodes[-1] - nodes[0])
-    expected_row[1:3] = np.sqrt(3.0) * np.array([-1.0, 1.0]) / np.sqrt(h_xi)
-    np.testing.assert_allclose(R[0], expected_row)
-    np.testing.assert_allclose(penalty.curvature_diagonal(lin.point), np.sum(R * R, 0))
-    v = space.random(2)
-    np.testing.assert_allclose(penalty.value(v), 0.5 * np.sum((R @ v.values) ** 2))
+    # A custom matrix acts on the active optimizer layout, independently of
+    # native spatial regularization and its full-model fixed coefficients.
+    matrix = np.arange(3 * space.size, dtype=float).reshape(3, space.size) / 10
+    regularization = Quadratic(matrix, weight=3.0).bind(space)
+    R = np.sqrt(3.0) * matrix
     np.testing.assert_allclose(
-        penalty.hessian_operator(v) @ v.values, R.T @ (R @ v.values)
+        regularization.curvature_diagonal(lin.point), np.sum(R * R, 0)
+    )
+    v = space.random(2)
+    np.testing.assert_allclose(
+        regularization.value(v), 0.5 * np.sum((R @ v.values) ** 2)
+    )
+    np.testing.assert_allclose(
+        regularization.hessian_operator(v) @ v.values, R.T @ (R @ v.values)
     )
     with pytest.raises(ValueError, match="entries"):
-        penalty.value(np.ones(8))
+        regularization.value(np.ones(8))
     with pytest.raises(ValueError, match="different control space"):
-        penalty.value(problem.full_space.without_support().zeros())
+        regularization.value(problem.full_space.without_support().zeros())
 
     unit = Diagonal(probes="unit").bind(space)
-    unit.update(lin, penalty)
+    unit.update(lin, regularization)
     J = fake.linearizations[lin.state_fingerprint].J[:, [0, 2, 3, 5, 6, 7]]
     np.testing.assert_allclose(unit.estimate.data, np.sum(np.abs(J) ** 2, axis=0))
     np.testing.assert_allclose(unit.estimate.regularization, np.sum(R * R, 0))
@@ -808,9 +486,14 @@ def test_penalty_and_diagonal_preconditioner_follow_sauce_support_masks(tmp_path
         maximum_inverse_ratio=1e3,
     ).apply(lin.gradient.values)
     np.testing.assert_allclose(applied.values, expected)
-    # a penalty bound to the unmasked full space is rejected
+    # a regularization bound to the unmasked full space is rejected
     with pytest.raises(ValueError, match="different control space"):
-        unit.update(lin, Tikhonov(1.0).bind(problem.full_space.without_support()))
+        unit.update(
+            lin,
+            Quadratic(sp.identity(problem.full_space.without_support().size)).bind(
+                problem.full_space.without_support()
+            ),
+        )
 
 
 def test_smooth_runs_on_the_fake_site_postprocess(tmp_path):

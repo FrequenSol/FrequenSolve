@@ -131,6 +131,7 @@ class JobSerializationMixin:
         class_name = data.get("_type")
         if class_name not in class_registry:
             import frequensolve.imaging.jobs  # noqa: F401
+            import frequensolve.simulation.jobs._patches  # noqa: F401
             import frequensolve.simulation.jobs.eikonal  # noqa: F401
             import frequensolve.simulation.jobs.forward  # noqa: F401
 
@@ -389,7 +390,7 @@ class JobSerializationMixin:
         f_list = np.asarray(self.f_list)
         if np.iscomplexobj(f_list):
             return [[float(f.real), -abs(float(f.imag))] for f in f_list]
-        return f_list.tolist()
+        return f_list.astype(float).tolist()
 
     def _wavenumber_payload(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
@@ -628,8 +629,7 @@ class JobSerializationMixin:
             or value.get("schema") != _ARTIFACT_METADATA_SCHEMA
         ):
             raise ValueError(
-                "job artifact_contract must use "
-                f"schema {_ARTIFACT_METADATA_SCHEMA!r}"
+                f"job artifact_contract must use schema {_ARTIFACT_METADATA_SCHEMA!r}"
             )
         if not set(value) <= {
             "schema",

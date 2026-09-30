@@ -25,9 +25,31 @@ channels.
 - SPS source geometry accepts `sps_revision` (`auto`, `1.0`, `2.1`) and places each
   source at surface elevation less point depth; see the
   [SPS import rules](../fs-acquisition-1/contract.md).
-- `monopole` is an isotropic pressure source. `gradient` and `dipole` are
+- In acoustic physics, explicit `volume_injection` sources are volume injection rates:
+  m^3/s in every dimension. Planar 2D distributes Q over a fixed physical 1 m
+  out-of-plane thickness, giving internal line rate Q / 1 m independently of
+  coordinate units and reference scales. Source metadata retains Q in m^3/s.
+  First-order pressure/velocity equations load Q; frequency-domain pressure
+  Galerkin loads i*omega*Q, with exp(+i*omega*t). There is no source-density
+  divisor. Their ideal reciprocal receiver measures pressure. This convention
+  applies only to `physics: acoustic` and must be selected by source kind.
+  Existing `scalar` and `monopole` inputs retain their moment-source units,
+  defaults, density scaling, and frequency/time-domain loading. For transient
+  volume injection, smooth time signatures are differentiated analytically. Step volume-rate signatures are
+  rejected because their derivative is an impulse. Fresh volume-injection runs require
+  initially quiet Q and dQ/dt (relative tolerance 1e-8); increase the pulse delay
+  or start earlier to match the solver's zero initial state. `gradient` and `dipole` are
   gradient-of-delta force sources, so their physical source strengths use
   moment units (`N*m`); `dipole` is directed while `gradient` is isotropic.
+- Without a physical strength, a source uses its kind's default strength:
+  1e6 N for `vector` (force) sources; explicit `volume_injection` sources use
+  1 m^3/s. Seismic scalar/monopole and `gradient`,
+  `dipole`, and `tensor` moment sources use 1e9 N m. The default scales the
+  authored direction or mechanism, so a force direction of length 2 gives 2e6 N.
+  A bare numeric `amplitude` multiplies the default; an amplitude with units, a
+  `moment_magnitude`, or unit-bearing direction components replace it. Current
+  sources default to 1 in their units and thermal sources to 1 W (1 W/m in 2D).
+  Traces are responses to this strength; `/survey/source_geometry` records it.
 - Cartesian Maxwell point sources accept `electric_current` and
   `magnetic_current`, with a three-component solver-frame direction. Their
   physical moment vector is amplitude times direction; direction is not
@@ -125,6 +147,16 @@ channels.
   values `q` are indexed by physical frequency, optional Laplace damping, and
   stable physical-source identifiers. The runtime requires an exact task
   coordinate and never extrapolates. When omitted, `q = 1` and `q_f = 0`.
+- HDF5 values use h5py order `(frequency, source, complex=2)`, optionally
+  `(laplace, frequency, source, complex=2)`. Complex parts are real then imaginary.
+  Laplace coordinates are nonpositive imaginary frequencies in Hz, so the
+  transform kernel is `exp(-2*pi*i*(f+i*laplace)*t)`. A rank-three undamped
+  table is invalid at nonzero Laplace frequency. Axes, values and derivatives
+  must be finite, frequency coordinates strictly increasing, and task matching
+  unambiguous within relative tolerance `1e-6` (absolute floor `1e-14` Hz).
+- A zero signature at a spectral notch is valid. A fully silenced field retains
+  the original encoding's finite normalization and reference position; a nonzero
+  signature derivative remains active.
 - Signatures are applied before encoding. The effective RHS map and its
   physical-Hz derivative are `C = E diag(q)` and
   `C_f = E_f diag(q) + E diag(q_f)`.
@@ -236,7 +268,18 @@ channels.
   logical `source_name`, `field_record`, `coordinates`, and `source_scale`.
   Generated identity names may be represented by name-encoding metadata instead
   of a materialized string dataset in trace-store outputs.
-- `/survey/source_geometry` describes the physical SourcePoints.
+- `/survey/source_geometry` describes the physical SourcePoints. Per source,
+  `source_kind_name` is the input kind, `strength` the physical strength of the
+  load behind the traces, in `strength_units` (the kind's default units, such as
+  `N`, `N*m`, or acoustic volume-rate units). Vector kinds report the Euclidean norm, tensors the scalar
+  moment `sqrt(sum(M_ij**2)/2)` and scalar kinds the magnitude; it reflects the
+  basis at write time, including updated source controls. `strength_origin` is
+  `specified` when the input fixed the strength physically, `default` when the
+  kind's default strength was assumed, `scaled_default` when a bare numeric
+  amplitude multiplied that default, and `none` for strength-free ray origins
+  (whose `strength` is NaN). Trace values are responses to this strength, not
+  per unit source; encoding weights in `/survey/source_encoding` are
+  dimensionless multipliers on top of it.
 - `/survey/source_encoding` describes source-encoding provenance.
 - `/survey/source_statistics` is present when covariance-factor RHSs exist. It
   joins to the source axis by `source_id` and marks those traces as
@@ -307,7 +350,7 @@ Angles and vectors are mutually exclusive.
 Use a source-level `amplitude = {"value": ..., "units": "N*m"}` for scalar moment,
 or `moment_magnitude` for Mw. They are mutually exclusive. Mw follows the GCMT
 conversion `M0 = 10^(1.5 Mw + 9.1)` N m. A bare numeric amplitude retains the
-shared source convention: it multiplies the default 1e9 N m strength. Omitted
+shared source convention: it multiplies the default 1e9 N m moment. Omitted
 strength also defaults to 1e9 N m. Mechanism-local `amplitude` remains accepted
 as a physical moment, with `units` defaulting to N*m; it cannot be combined with
 source-level strength. Scalar moments must be finite and positive.
@@ -456,3 +499,14 @@ real frequency and ordinary Cartesian poroelastic propagation; it rejects
 axisymmetric and 2.5D modes. Frequency/material derivatives of this incident
 source are not supplied. See [validation scope](../../../docs/imaging/poroelastic-validation.md)
 and the [example](examples/poroelastic-plane-wave.json).
+
+The [calibrated point survey example](examples/calibrated-point-survey.json)
+shows simultaneous source signatures and receiver component responses; supply
+the referenced HDF5 tables at the actual task coordinates.
+
+Experimental patch execution may supply `active_sources`, a nonempty unique list
+of physical source IDs. The full physical catalog and canonical source controls
+remain unchanged; only selected source batches execute. Source encoding and
+boundary loadings are unsupported with this selection. Receiver surveys must
+restrict observation rows consistently; source selection alone does not alter
+a receiver layout or objective normalization.

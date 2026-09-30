@@ -78,14 +78,8 @@ complex matrix ``B`` of shape ``(data_space.size, n_taps)`` per linearization
     with ``reduced_normal`` the Schur action ``G*G dv - G*B_S (B_S*B_S +
     D)^-1 B_S*G dv`` on the physical ``direction``.
 
-Three more job kinds run on the same surrogate:
+Two more job kinds run on the same surrogate:
 
-``ControlGradientJob(kind="focus")``
-    the focusing objective of task ``t`` is ``softening * 0.5 *
-    ||J[R] m - d[R]||^2`` with ``m`` read from ``current`` (native vector) or
-    the authored coefficients; ``gradient_<t>.h5`` (native) and
-    ``objective_<t>.h5`` (``/value``) are written per task, then the
-    weighted sums ``gradient.h5``, ``gradient_raw.h5`` and ``objective.h5``.
 ``ImageKernelJob`` (``workflow="rtm"``)
     every task writes ``image_<t>.h5`` under ``save_path`` holding
     ``/frequency`` and ``/image/raw`` with one dataset per image filled by
@@ -127,6 +121,7 @@ from frequensolve.imaging.jobs import (
     ControlGradientJob,
     FWIOperatorJob,
     ImageKernelJob,
+    RegularizationJob,
     SmoothJob,
     _task_path,
 )
@@ -143,7 +138,7 @@ from frequensolve.simulation.artifact_contract import (
     task_result_path,
 )
 
-FAKE_STATE_SCHEMA = "fake-imaging-state-1"
+FAKE_STATE_SCHEMA = "fs-objective-linearization-3"
 FAKE_IMAGE_SCHEMA = "fs-image-hdf5-1"
 _ZERO_DIGEST = "sha256:" + "0" * 64
 _FAKE_JOBS = (FWIOperatorJob, ControlGradientJob, ImageKernelJob, SmoothJob)
@@ -357,17 +352,6 @@ class FakeExtension:
         GB = np.real(G.conj().T @ Bs)
         BG = np.real(Bs.conj().T @ G)
         return GG - GB @ np.linalg.solve(self.normal_matrix(rows, solver), BG)
-
-
-def _write_scalar(path: Path, value: float) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with h5py.File(path, "w") as h5:
-        h5.create_dataset("value", data=float(value))
-
-
-def _read_scalar(path: Path) -> float:
-    with h5py.File(path, "r") as h5:
-        return float(h5["value"][()])
 
 
 class FakeImagingSite(BaseSite):
@@ -666,11 +650,15 @@ class FakeImagingSite(BaseSite):
     # -- execution ------------------------------------------------------------
 
     def _execute(self, job: Any) -> None:
+        if isinstance(job, RegularizationJob):
+            self._postprocess_regularization(job)
+            return
         if isinstance(job, SmoothJob):
             raise ValueError("SmoothJob runs as a postprocess-only submission")
         if isinstance(job, ControlGradientJob):
-            self._execute_focus(job)
-            return
+            raise NotImplementedError(
+                f"{type(self).__name__} does not execute control gradient jobs"
+            )
         if isinstance(job, ImageKernelJob):
             self._execute_images(job)
             return
@@ -1055,12 +1043,16 @@ class FakeImagingSite(BaseSite):
     def _postprocess(self, job: Any) -> None:
         """Emulate ``--smooth``: weighted sum at the stem, ``_raw`` beside it."""
 
+        if isinstance(job, RegularizationJob):
+            self._postprocess_regularization(job)
+            return
         if isinstance(job, SmoothJob):
             self._postprocess_smooth(job)
             return
         if isinstance(job, ControlGradientJob):
-            self._aggregate_focus(job)
-            return
+            raise NotImplementedError(
+                f"{type(self).__name__} does not postprocess control gradient jobs"
+            )
         if isinstance(job, ImageKernelJob):
             self._aggregate_images(job)
             return
@@ -1096,85 +1088,6 @@ class FakeImagingSite(BaseSite):
         )
         aggregate.write(job.covector_file(raw=True))
         aggregate.write(job.covector_file())
-
-    # -- focus ----------------------------------------------------------------
-
-    def _focus_coefficients(
-        self, job: ControlGradientJob
-    ) -> Tuple[List[str], Dict[str, int], np.ndarray]:
-        """Return the active blocks, their sizes and the packed ``m`` of a focus job."""
-
-        if job.current is not None:
-            current = ControlVectorFile.read(job.current)
-            names = list(job.active) if job.active is not None else list(current.names)
-            table = {qualified_block_name(n): int(current[n].size) for n in names}
-            return names, table, current.pack(names)
-        baselines = self._simulation_baselines(job.simulation)
-        for name, size in self.block_sizes.items():
-            baselines.setdefault(name, np.zeros(size))
-        names = (
-            list(job.active)
-            if job.active is not None
-            else [name for name in baselines if name.startswith("model.")]
-        )
-        missing = [n for n in names if qualified_block_name(n) not in baselines]
-        if missing:
-            raise ValueError(f"no authored coefficients for {', '.join(missing)}")
-        table = {
-            qualified_block_name(n): int(baselines[qualified_block_name(n)].size)
-            for n in names
-        }
-        m = np.concatenate([baselines[qualified_block_name(n)] for n in names])
-        return names, table, m
-
-    def _execute_focus(self, job: ControlGradientJob) -> None:
-        if job.kind != "focus":
-            raise NotImplementedError(
-                f"{type(self).__name__} executes focus control gradients only"
-            )
-        assert job.focus is not None
-        softening = float(job.focus["softening"])
-        names, sizes, m = self._focus_coefficients(job)
-        J, d, space = self.surrogate(job.simulation, names, sizes, job.f_list)
-        local = {qualified_block_name(n): sizes[qualified_block_name(n)] for n in names}
-        for task in range(1, job.n_tasks + 1):
-            rows = _rows(space, job.f_list[task - 1])
-            residual = J[rows] @ m - d[rows]
-            value = softening * 0.5 * float(np.vdot(residual, residual).real)
-            gradient = softening * np.real(J[rows].conj().T @ residual)
-            ControlVectorFile.from_packed(gradient, local, native=True).write(
-                job.gradient_file(task)
-            )
-            objective = job.objective_file(task)
-            assert objective is not None
-            _write_scalar(objective, value)
-        if job.requires_postprocess():
-            self._aggregate_focus(job)
-
-    def _aggregate_focus(self, job: ControlGradientJob) -> None:
-        """Weighted sums of the task gradients (native) and objectives."""
-
-        weights = (
-            np.ones(job.n_tasks) if job.weights is None else np.asarray(job.weights)
-        )
-        blocks: Dict[str, np.ndarray] = {}
-        total = 0.0
-        for task in range(1, job.n_tasks + 1):
-            path = job.gradient_file(task)
-            if not path.is_file():
-                raise FileNotFoundError(f"missing gradient part {path}")
-            part = ControlVectorFile.read(path, native=True)
-            for name, values in part.blocks.items():
-                blocks[name] = blocks.get(name, 0.0) + weights[task - 1] * values
-            objective = job.objective_file(task)
-            if objective is not None:
-                total += float(weights[task - 1]) * _read_scalar(objective)
-        aggregate = ControlVectorFile(blocks, native=True)
-        aggregate.write(job.gradient_file(raw=True))
-        aggregate.write(job.gradient_file())
-        objective = job.objective_file()
-        if objective is not None:
-            _write_scalar(objective, total)
 
     # -- images ---------------------------------------------------------------
 
@@ -1326,6 +1239,83 @@ class FakeImagingSite(BaseSite):
         )
 
     # -- explicit-vector smoothing --------------------------------------------
+
+    def _postprocess_regularization(self, job):
+        """Model callback fixture: native numerics are covered by compiled probes.
+
+        Use a diagonal convex energy so constrained proximal orchestration has
+        an independent exact answer, including full frozen coefficients.
+        """
+        source = ControlVectorFile.read(job.input_vector, native=True)
+        if job.operation == "prepare":
+            context = {
+                name: {
+                    "identity": source.control_spaces.get(
+                        name, f"fake-native-{name}-{len(v)}"
+                    ),
+                    "amplitude": (
+                        max(1.0, float(np.max(np.abs(v))))
+                        if job.smoothing.normalize_amplitude
+                        else 1.0
+                    ),
+                }
+                for name, v in source.blocks.items()
+            }
+            job.context.write_text(json.dumps(context))
+        else:
+            context = json.loads(job.context.read_text())
+        alpha = 0.1 if job.smoothing.alpha is None else job.smoothing.alpha
+        blocks = dict(source.blocks)
+        value = 0.0
+        for name, v in blocks.items():
+            if job.operation in {"mass", "mass_inverse", "mass_diagonal"}:
+                # Nonuniform SPD surrogate; different support sizes matter.
+                matrix = np.diag(np.linspace(0.5, 2.0, len(v)))
+                if len(v) > 1:
+                    matrix += np.diag(np.full(len(v) - 1, 0.05), 1)
+                    matrix += np.diag(np.full(len(v) - 1, 0.05), -1)
+                if job.operation == "mass_diagonal":
+                    blocks[name] = matrix.diagonal().copy()
+                else:
+                    blocks[name] = (
+                        matrix @ v
+                        if job.operation == "mass"
+                        else np.linalg.solve(matrix, v)
+                    )
+                continue
+            a = context[name]["amplitude"]
+            weight = np.sqrt(alpha) * a if job.smoothing.kind == "tv" else alpha
+            if job.operation == "proximal":
+                metric, lower, upper = (
+                    ControlVectorFile.read(job.regularization_inputs[k], native=True)[
+                        name
+                    ]
+                    for k in ("metric", "lower", "upper")
+                )
+                v = (
+                    np.sign(v) * np.maximum(np.abs(v) - job.tau * weight / metric, 0.0)
+                    if job.smoothing.kind == "tv"
+                    else v / (1.0 + job.tau * weight / metric)
+                )
+                v = np.clip(v, lower, upper)
+                blocks[name] = v
+            if job.operation == "gradient":
+                blocks[name] = weight * v
+            if job.operation == "diagonal":
+                blocks[name] = np.full_like(v, weight)
+            value += weight * float(
+                np.abs(v).sum() if job.smoothing.kind == "tv" else 0.5 * (v @ v)
+            )
+        ControlVectorFile(blocks, native=True).write(job.gradient_file())
+        job.result.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-control-regularization-result-1",
+                    "value": value,
+                    "converged": True,
+                }
+            )
+        )
 
     def _postprocess_smooth(self, job: SmoothJob) -> None:
         """Copy ``control_sensitivities.input`` to ``gradient`` (identity)."""
@@ -1604,7 +1594,8 @@ class FakeImagingSite(BaseSite):
             "compatibility": "same_mesh_partition",
         }
         payload["shards"] = []
-        residual = lin.J @ lin.m - lin.d
+        simulated = lin.J @ lin.m
+        residual = simulated - lin.d
         for rank in range(self.n_ranks):
             shard = path.with_name(f"{path.stem}_rank_{rank}.json")
             cache = shard.with_suffix(".h5")
@@ -1622,6 +1613,13 @@ class FakeImagingSite(BaseSite):
                     group["objective_residual"] = np.column_stack(
                         (values.real, values.imag)
                     )
+                    # The surrogate's residual is simulated - observed (Sauce's
+                    # contract is the opposite); record it so readers adapt.
+                    group["objective_residual"].attrs[
+                        "convention"
+                    ] = "simulated_minus_observed"
+                    modeled = simulated[layout.indices[select]]
+                    group["simulated"] = np.column_stack((modeled.real, modeled.imag))
                     terms.append(
                         {
                             "id": layout.id,

@@ -5,22 +5,30 @@ Layers, lowest first: the contract layer (:mod:`frequensolve.imaging.data`,
 :mod:`frequensolve.imaging.jobs`), control spaces
 (:mod:`frequensolve.imaging.controls`), the problem and its linearizations
 (:mod:`frequensolve.imaging.problem`) with Jacobian and normal operators
-(:mod:`frequensolve.imaging.operators`), penalties and preconditioners
+(:mod:`frequensolve.imaging.operators`), regularization and preconditioners
 (:mod:`frequensolve.imaging.regularization`), and the workflows
 (:mod:`frequensolve.imaging.workflows`, :mod:`frequensolve.imaging.results`),
-and the model extension (:mod:`frequensolve.imaging.extension`).
+the model extension (:mod:`frequensolve.imaging.extension`) and coherent
+focusing objectives (:mod:`frequensolve.imaging.focusing`).
 Import it as ``from frequensolve import imaging as im``.
 """
 
 from frequensolve._exports import unique_exports
 from frequensolve.imaging._artifacts import *  # noqa: F403
 from frequensolve.imaging._artifacts import __all__ as _artifacts_all
+from frequensolve.imaging._native_mass import NativeMass as NativeMass
+from frequensolve.imaging._native_regularization import (
+    NativeRegularization as NativeRegularization,
+)
 from frequensolve.imaging.controls import *  # noqa: F403
 from frequensolve.imaging.controls import __all__ as _controls_all
 from frequensolve.imaging.data import *  # noqa: F403
 from frequensolve.imaging.data import __all__ as _data_all
+from frequensolve.imaging.energy import SourceEnergy as SourceEnergy
 from frequensolve.imaging.extension import *  # noqa: F403
 from frequensolve.imaging.extension import __all__ as _extension_all
+from frequensolve.imaging.focusing import *  # noqa: F403
+from frequensolve.imaging.focusing import __all__ as _focusing_all
 from frequensolve.imaging.jobs import *  # noqa: F403
 from frequensolve.imaging.jobs import __all__ as _jobs_all
 from frequensolve.imaging.misfit import *  # noqa: F403
@@ -29,14 +37,25 @@ from frequensolve.imaging.operators import *  # noqa: F403
 from frequensolve.imaging.operators import __all__ as _operators_all
 from frequensolve.imaging.problem import *  # noqa: F403
 from frequensolve.imaging.problem import __all__ as _problem_all
+from frequensolve.imaging.property_mesh import PropertyMesh as PropertyMesh
 from frequensolve.imaging.regularization import *  # noqa: F403
 from frequensolve.imaging.regularization import __all__ as _regularization_all
 from frequensolve.imaging.results import *  # noqa: F403
 from frequensolve.imaging.results import __all__ as _results_all
+from frequensolve.imaging.transfer import Transfer as Transfer
+from frequensolve.imaging.windows import write_receiver_window as write_receiver_window
 from frequensolve.imaging.workflows import *  # noqa: F403
 from frequensolve.imaging.workflows import __all__ as _workflows_all
 
 __all__ = unique_exports(
+    [
+        "PropertyMesh",
+        "Transfer",
+        "NativeMass",
+        "NativeRegularization",
+        "SourceEnergy",
+        "write_receiver_window",
+    ],
     _controls_all,
     _data_all,
     _misfit_all,
@@ -48,4 +67,5 @@ __all__ = unique_exports(
     _workflows_all,
     _results_all,
     _extension_all,
+    _focusing_all,
 )

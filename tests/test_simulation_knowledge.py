@@ -92,7 +92,12 @@ def test_packaged_catalog_matches_its_json_schema():
     jsonschema.validate(payload, schema)
 
 
-def test_catalog_exposes_exact_installed_release_identities():
+def test_catalog_exposes_exact_installed_release_identities(monkeypatch):
+    # Editable source may change after package import. Runtime identities must
+    # retain the public version even if Versioneer now reports another checkout.
+    monkeypatch.setattr(
+        "frequensolve._version.get_versions", lambda: {"version": "0+changed"}
+    )
     catalog = fs.load_simulation_knowledge()
     compatibility = fs.load_solver_compatibility()
 

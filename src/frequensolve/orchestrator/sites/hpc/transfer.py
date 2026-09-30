@@ -13,7 +13,7 @@ import tarfile
 import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Sequence, Union
+from typing import Any, Iterable, Optional, Sequence, Union
 
 from frequensolve.orchestrator.sites.base import _wait_for_path
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
@@ -180,11 +180,12 @@ class SlurmTransferManager:
             return []
         local_root.mkdir(parents=True, exist_ok=True)
 
+        # Optional catalog files are a small set. Exact SFTP requests also work
+        # with system rsync versions that lack --ignore-missing-args.
+        if missing_ok:
+            return self._get_files_sftp(remote_root, local_root, paths)
         if self._uses_sftp():
-            if missing_ok:
-                self._get_files_sftp(remote_root, local_root, paths)
-            else:
-                self._get_files_tar(remote_root, local_root, paths)
+            self._get_files_tar(remote_root, local_root, paths)
         else:
             with tempfile.NamedTemporaryFile(
                 mode="wb",
@@ -198,8 +199,6 @@ class SlurmTransferManager:
                     "--from0",
                     f"--files-from={file_list.name}",
                 ]
-                if missing_ok:
-                    options.append("--ignore-missing-args")
                 self._run_rsync(
                     self._remote_spec(f"{remote_root}/"),
                     f"{local_root}/",
@@ -207,14 +206,11 @@ class SlurmTransferManager:
                 )
 
         local_paths = [local_root / Path(*path.parts) for path in paths]
-        if not missing_ok:
-            missing = [path for path in local_paths if not path.is_file()]
-            if missing:
-                names = ", ".join(str(path) for path in missing[:5])
-                raise FileNotFoundError(
-                    f"Exact remote transfer missed file(s): {names}"
-                )
-        return [path for path in local_paths if path.is_file()]
+        missing = [path for path in local_paths if not path.is_file()]
+        if missing:
+            names = ", ".join(str(path) for path in missing[:5])
+            raise FileNotFoundError(f"Exact remote transfer missed file(s): {names}")
+        return local_paths
 
     def _remote_spec(self, remote_path: Union[str, Path, PurePosixPath]) -> str:
         username = str(self.site.credentials.username)
@@ -369,20 +365,22 @@ class SlurmTransferManager:
         remote_root: Path,
         local_root: Path,
         paths: Sequence[PurePosixPath],
-    ) -> None:
+    ) -> list[Path]:
         """Fetch a small optional set through exact SFTP requests."""
 
+        downloaded = []
         sftp = self.site.login_client.open_sftp()
         try:
             for path in paths:
                 local = local_root / Path(*path.parts)
-                local.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    sftp.get(str(remote_root / Path(*path.parts)), str(local))
-                except OSError:
+                    self._get_file(sftp, PurePosixPath(remote_root) / path, local)
+                except FileNotFoundError:
                     continue
+                downloaded.append(local)
         finally:
             sftp.close()
+        return downloaded
 
     def _get_files_tar(
         self,
@@ -538,7 +536,7 @@ class SlurmTransferManager:
 
                 err = stderr.read().decode().strip()
                 exit_status = ssh_exit_status(stdout, stderr)
-                if err or exit_status not in {None, 0}:
+                if _remote_command_failed(err, exit_status):
                     raise RuntimeError("Remote directory extraction failed")
             finally:
                 self._remove_remote_tmp_file(remote_tar)
@@ -556,7 +554,7 @@ class SlurmTransferManager:
 
             err = stderr.read().decode().strip()
             exit_status = ssh_exit_status(stdout, stderr)
-            if err or exit_status not in {None, 0}:
+            if _remote_command_failed(err, exit_status):
                 raise RuntimeError("Remote directory archive failed")
 
             with tempfile.NamedTemporaryFile(
@@ -623,3 +621,11 @@ class SlurmTransferManager:
             return stat.S_ISDIR(sftp.stat(str(remote_path)).st_mode)
         except OSError:
             return False
+
+
+def _remote_command_failed(err: str, exit_status: Optional[int]) -> bool:
+    """Judge by exit status; login shells print module notices on stderr."""
+
+    if exit_status is not None:
+        return exit_status != 0
+    return bool(err)

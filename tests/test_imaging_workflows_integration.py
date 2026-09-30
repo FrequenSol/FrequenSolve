@@ -74,7 +74,9 @@ def test_lsrtm_solvers_and_fwi_checkpoint_through_public_api(tmp_path, site):
     problem = _problem(tmp_path, site)
     lin = problem.linearize()
     reference = np.linspace(0.01, 0.04, lin.space.size)
-    penalty = im.Quadratic(np.eye(lin.space.size), weight=0.2, reference=reference)
+    regularization = im.Quadratic(
+        np.eye(lin.space.size), weight=0.2, reference=reference
+    )
     images = {}
     for method in ("cg", "lsqr"):
         workflow = im.LSRTM(
@@ -83,7 +85,7 @@ def test_lsrtm_solvers_and_fwi_checkpoint_through_public_api(tmp_path, site):
             iterations=25,
             tolerance=1e-4,
             damping=0.1,
-            penalty=penalty,
+            regularization=regularization,
         )
         image = workflow.run()
         assert workflow.info["converged"], workflow.info
@@ -94,7 +96,7 @@ def test_lsrtm_solvers_and_fwi_checkpoint_through_public_api(tmp_path, site):
         gradient = (
             lin.vjp(residual).values
             + 0.1 * image.values
-            + penalty.bind(lin.space).gradient(image).values
+            + regularization.bind(lin.space).gradient(image).values
         )
         assert np.linalg.norm(gradient) < 1e-3 * max(
             np.linalg.norm(lin.gradient.values), 0.01
@@ -150,3 +152,95 @@ def test_saved_residual_and_adjoint_through_public_api(tmp_path, site, loss, spa
         lin.vjp(residual).values, lin.gradient.values, rtol=3e-3, atol=1e-6
     )
     assert lin.jacobian.dot_test(seed=3, tolerance=3e-3)["passed"]
+
+
+def test_native_tv_fwi_objective_through_local_orchestration(tmp_path, site):
+    """Execute native callbacks and PDE line-search trials through LocalSite."""
+    from frequensolve.imaging._native_regularization import bind_workflow_regularization
+
+    problem = _problem(tmp_path, site)
+    specification = im.TV(alpha=0.002)
+    result = im.FWI(
+        problem,
+        im.Stage([FREQUENCY], iterations=2),
+        regularization=specification,
+        step_limit=0.05,
+        optimizer=im.LBFGS(objective_tolerance=0, step_tolerance=0),
+    ).run()
+    stage = result.stages[0]
+    assert stage.final_loss.total < stage.initial_loss.total
+    assert result.history.iterations[-1].metrics["optimizer"] == "proximal_gradient"
+    point = result.state.vector(problem.space)
+    linearization = problem.linearize(point)
+    _, native = bind_workflow_regularization(
+        specification, linearization.space, problem, linearization
+    )
+    assert result.loss.regularization == pytest.approx(
+        native.value(point), rel=1e-6, abs=1e-10
+    )
+    assert result.loss.data == pytest.approx(linearization.value, rel=1e-5, abs=1e-10)
+    assert result.loss.total == pytest.approx(
+        result.loss.data + result.loss.regularization
+    )
+
+
+def test_reference_wavelength_weights_match_the_sdk_resolution(tmp_path, site):
+    """Sauce resolves ``lambda*reference_wavelength`` (no 2*pi) like the SDK."""
+    from frequensolve.imaging._native_regularization import bind_workflow_regularization
+
+    problem = _problem(tmp_path, site)
+    linearization = problem.linearize()
+    point = np.linspace(-0.1, 0.2, problem.space.size)
+    for kind in ("tikhonov", "tv", "tgv"):
+        wavelength = im.Smoothing(
+            kind=kind,
+            wavelength_fraction=0.25,
+            reference_wavelength=0.4,
+            tgv_ratio=2.0,
+            normalize_amplitude=False,
+        )
+        if kind == "tgv":
+            alpha1, alpha2 = wavelength.resolved_tgv_weights()
+            explicit = im.Smoothing(
+                kind=kind, alpha1=alpha1, alpha2=alpha2, normalize_amplitude=False
+            )
+        else:
+            explicit = im.Smoothing(
+                kind=kind, alpha=wavelength.resolved_alpha(), normalize_amplitude=False
+            )
+        values = []
+        for config in (wavelength, explicit):
+            _, native = bind_workflow_regularization(
+                config, linearization.space, problem, linearization
+            )
+            values.append(native.value(point))
+        assert values[0] > 0
+        assert values[0] == pytest.approx(values[1], rel=1e-6)
+
+
+def test_multifrequency_zero_data_kernel_stacks_native_task_images(tmp_path, site):
+    """Observed-RMS problems can request a zero-data kernel and native frequency mean."""
+    from frequensolve.geometry.grids import CartesianGrid
+
+    project = Project(name="kernel", path=tmp_path / "project", load_if_exists=False)
+    truth = _simulation(project, "truth", TRUTH_VP)
+    initial = _simulation(project, "initial", START_VP)
+    frequencies = [FREQUENCY - 1, FREQUENCY]
+    observed = FrequencyDomainJob("observed", truth, frequencies)
+    assert site.run(observed, check=True).successful
+    problem = im.ImagingProblem(
+        initial,
+        controls=im.DepthProfile("vp", "layer_2", count=4),
+        observed=im.ObservedData(observed),
+        frequencies=frequencies,
+        misfit=im.Misfit.huber(),
+        site=site,
+        name="kernel",
+    )
+    grid = CartesianGrid(n=[9, 7], x0=[0, 0], x1=[1.0, 0.6])
+    images = im.sensitivity_kernel(problem, grid, observed=None)
+    assert images.parts == 2
+    raw = images.raw["vp"].values
+    parts = [images.read_images("raw", part=task)["vp"].values for task in (1, 2)]
+    assert np.all(np.isfinite(raw)) and np.linalg.norm(raw) > 0
+    np.testing.assert_allclose(raw, (parts[0] + parts[1]) / 2, rtol=1e-4, atol=1e-12)

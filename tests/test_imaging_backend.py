@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -60,6 +61,70 @@ def _simulation(tmp_path):
     sim.acquisition = acq
     sim.save()
     return sim
+
+
+def test_wri_observed_energy_reduction_and_fixed_calibration(tmp_path):
+    import h5py
+
+    job = FWIOperatorJob(
+        "wri",
+        _simulation(tmp_path),
+        FREQUENCIES,
+        action="wri",
+        covector="gradient.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0},
+        weights=[1.0, 2.0],
+    )
+    for task, denominator, value, gradient in [(1, 2.0, 3.0, 4.0), (2, 8.0, 7.0, 10.0)]:
+        path = job.report_file(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, "w") as h:
+            h["value"] = value
+            h["penalty"] = 10.0
+            h["observed_energy"] = denominator / 10
+            h["objective_normalization"] = denominator
+            h["objective_normalization"].attrs["policy"] = ["observed_energy"]
+        ControlVectorFile(
+            {"model.vp": [gradient]},
+            state_fingerprint="state",
+            control_registry_fingerprint="registry",
+        ).write(job.covector_file(task))
+    assert job.wri_normalization_divisor() == pytest.approx(18.0)
+    np.testing.assert_allclose(job.wri_reduction_weights(), [2 / 18, 16 / 18])
+    assert job.objective_value() == pytest.approx((2 * 3 + 16 * 7) / 18)
+    np.testing.assert_allclose(
+        reduce_covectors(job).blocks["model.vp"], [(2 * 4 + 16 * 10) / 18]
+    )
+    job.wri["objective_normalization"] = 18.0
+    np.testing.assert_allclose(job.wri_reduction_weights(), [1, 2])
+
+
+def test_wri_calibration_payload_requires_no_covector(tmp_path):
+    job = FWIOperatorJob(
+        "calibration",
+        _simulation(tmp_path),
+        FREQUENCIES,
+        action="wri",
+        objective="calibration.h5",
+        wri={"penalty": 10.0, "normalization_only": True},
+    )
+    payload = job.to_fs()["fwi_operator"]
+    assert payload["wri"]["normalization_only"]
+    assert "model_covector" not in payload
+
+
+@pytest.mark.parametrize("normalization", [0.0, -1.0, float("nan"), "current_residual"])
+def test_wri_rejects_invalid_normalization(tmp_path, normalization):
+    with pytest.raises(ValueError, match="normalization"):
+        FWIOperatorJob(
+            "wri",
+            _simulation(tmp_path),
+            FREQUENCIES,
+            action="wri",
+            covector="g.h5",
+            wri={"penalty": 10.0, "objective_normalization": normalization},
+        )
 
 
 @pytest.fixture
@@ -178,6 +243,29 @@ def test_linearize_reduces_task_covectors_reports_state_and_manifest(setup):
     assert manifest.state_size == sum(SIZES.values())
 
 
+def test_covector_reduction_preserves_material_basis_identities(setup):
+    sim, _, backend = setup
+    job = _linearize(backend, sim)
+    identities = {"model.vp": "sha256:" + "a" * 64}
+    for task in (1, 2):
+        part = ControlVectorFile.read(job.covector_file(task))
+        part.control_spaces = identities
+        part.write(job.covector_file(task))
+    assert reduce_covectors(job).control_spaces == identities
+
+
+@pytest.mark.parametrize("other", [{}, {"model.vp": "sha256:" + "b" * 64}])
+def test_covector_reduction_rejects_incompatible_material_bases(setup, other):
+    sim, _, backend = setup
+    job = _linearize(backend, sim)
+    for task, identities in ((1, {"model.vp": "sha256:" + "a" * 64}), (2, other)):
+        part = ControlVectorFile.read(job.covector_file(task))
+        part.control_spaces = identities
+        part.write(job.covector_file(task))
+    with pytest.raises(ValueError, match="material basis identities"):
+        reduce_covectors(job)
+
+
 def test_linearize_without_control_state_uses_zero_baseline(setup):
     sim, fake, backend = setup
     job = _linearize(backend, sim)
@@ -219,7 +307,7 @@ def test_objective_vectors_round_trip_per_task(setup):
     state_fp = "sha256:" + "a" * 64
     paths = write_task_objective_vectors(job, r, space, state_fp)
     assert [p.name for p in paths] == ["dual_1.json", "dual_2.json"]
-    assert all(p.with_name(f"{p.stem}_rank_0.h5").is_file() for p in paths)
+    assert all(DataVector.shard_path(p).is_file() for p in paths)
     back = read_task_objective_vectors(job, space, state_fingerprint=state_fp)
     np.testing.assert_allclose(back.values, r.values)
     for task in (1, 2):
@@ -319,7 +407,7 @@ def test_jvp_vjp_normal_are_adjoint_consistent_through_files(setup):
         "normal",
         "vjp",
     ]
-    assert all(s["options"] == {"n_ranks": 2} for s in fake.submissions)
+    assert all(s["options"] == {"n_ranks": 2, "fetch": True} for s in fake.submissions)
 
 
 def test_direction_bound_to_another_state_fails_the_run(setup):
@@ -375,7 +463,7 @@ def test_smoothing_postprocess_writes_weighted_aggregate_and_raw(setup):
     result = backend.run(job, postprocess_only=True)
     assert result.successful
     np.testing.assert_allclose(read_smoothed_covector(job).pack(ACTIVE), expected)
-    assert fake.submissions[-1]["options"] == {"n_ranks": 2}
+    assert fake.submissions[-1]["options"] == {"n_ranks": 2, "fetch": True}
 
     plain = _linearize(backend, sim)
     with pytest.raises(ValueError, match="no smoothing postprocess"):
@@ -554,3 +642,150 @@ def test_fingerprint_is_stable_and_detects_changes(tmp_path):
     assert fingerprint(observed=first) != fingerprint(
         observed=content_fingerprint(path)
     )
+
+
+def test_stage_worker_accounting_includes_init_checks_and_shared_process_once(tmp_path):
+    from types import SimpleNamespace
+
+    from frequensolve.orchestrator.sites.base import JobStatus, RunResult
+
+    backend = Backend(FakeImagingSite(), tmp_path)
+    beginning = backend.timing_snapshot()
+    handle = SimpleNamespace(
+        backend={"mesh_result": {"duration_seconds": 2.0, "stdout": "init.log"}}
+    )
+    result = RunResult(
+        None,
+        JobStatus(
+            state="completed",
+            return_code=0,
+            raw={
+                "tasks": [
+                    {"duration_seconds": 3.0, "stdout": "shared.log"},
+                    {"duration_seconds": 3.0, "stdout": "shared.log"},
+                ],
+                "pack": {"duration_seconds": 0.5, "stdout": "pack.log"},
+                "smooth": {"duration_seconds": 0.25, "stdout": "smooth.log"},
+            },
+        ),
+    )
+    backend._record_timing(result, handle)
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 5.75
+    # Another evaluation (including rejected line-search trials or periodic
+    # combined checks) contributes to the same stage ledger.
+    backend._record_timing(result, handle)
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 11.5
+    backend._record_timing(
+        RunResult(None, JobStatus(state="skipped", return_code=0)), handle
+    )
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 11.5
+    backend._record_timing(
+        RunResult(None, JobStatus(state="completed", return_code=0)),
+        SimpleNamespace(backend={}),
+    )
+    cost = backend.cost_since(beginning)
+    assert cost["summed_worker_seconds"] is None
+    assert cost["unmeasured_native_runs"] == 1
+
+
+def test_backend_fetch_defaults_and_explicit_override(setup):
+    sim, fake, backend = setup
+    job = _linearize(backend, sim)
+    assert fake.submissions[-1]["options"]["fetch"] is True
+    remote_only = Backend(fake, sim.project_path, submit_options={"fetch": False})
+    remote_only.submit(job)
+    assert fake.submissions[-1]["options"]["fetch"] is False
+
+
+class _RemoteRecordingSite(FakeImagingSite):
+    """Fake remote site recording uploads under a remote project root."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.work_dir = Path("/remote/project")
+        self.uploads = []
+
+    def put(self, local_path, remote_path):
+        self.uploads.append((Path(local_path), Path(remote_path)))
+
+
+def test_remote_sites_receive_client_written_operator_inputs(tmp_path):
+    sim = _simulation(tmp_path)
+    # Imaging problems run derived simulations that know only their project path.
+    sim._project = None
+    site = _RemoteRecordingSite(SIZES, seed=7)
+    backend = Backend(site, sim.project_path)
+    ops = backend.staging_dir("ops", "0001")
+    for task in (1, 2):
+        (ops / f"direction_{task}.h5").write_bytes(b"d")
+    produced = Path(sim.project_path) / "jobs" / sim.name / "linearize" / "results"
+    produced.mkdir(parents=True)
+    (produced / "baseline.h5").write_bytes(b"b")
+    job = FWIOperatorJob(
+        backend.job_name("jvp"),
+        sim,
+        [4.0, 6.0],
+        action="jvp",
+        active=ACTIVE,
+        state="state.json",
+        direction=ops / "direction.h5",
+        control_state=produced / "baseline.h5",
+        objective_vector="jvp.json",
+    )
+
+    backend._stage_remote_inputs(job)
+
+    root = Path(sim.project_path).resolve()
+    # Local inputs travel even when they are inside a job result directory.
+    assert site.uploads == [
+        (
+            ops / f"direction_{task}.h5",
+            Path("/remote/project")
+            / (ops / f"direction_{task}.h5").resolve().relative_to(root),
+        )
+        for task in (1, 2)
+    ] + [
+        (
+            produced / "baseline.h5",
+            Path("/remote/project")
+            / (produced / "baseline.h5").resolve().relative_to(root),
+        )
+    ]
+    # Sites without a remote work directory read inputs in place.
+    site.uploads.clear()
+    site.work_dir = None
+    backend._stage_remote_inputs(job)
+    assert site.uploads == []
+
+
+def test_remote_staging_uploads_objective_vector_payloads(tmp_path):
+    sim = _simulation(tmp_path)
+    site = _RemoteRecordingSite(SIZES, seed=7)
+    backend = Backend(site, sim.project_path)
+    ops = backend.staging_dir("ops", "0002")
+    for task in (1, 2):
+        (ops / f"dual_{task}.h5").write_bytes(b"rows")
+        (ops / f"dual_{task}.json").write_text(json.dumps({"file": f"dual_{task}.h5"}))
+    job = FWIOperatorJob(
+        backend.job_name("vjp"),
+        sim,
+        [4.0, 6.0],
+        action="vjp",
+        active=ACTIVE,
+        state="state.json",
+        covector="vjp.h5",
+        objective_vector=ops / "dual.json",
+    )
+
+    backend._stage_remote_inputs(job)
+
+    assert sorted(local.name for local, _ in site.uploads) == [
+        "dual_1.h5",
+        "dual_1.json",
+        "dual_2.h5",
+        "dual_2.json",
+    ]
+    assert {remote.parent for _, remote in site.uploads} == {
+        Path("/remote/project")
+        / ops.resolve().relative_to(Path(sim.project_path).resolve())
+    }

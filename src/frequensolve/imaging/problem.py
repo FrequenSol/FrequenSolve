@@ -20,9 +20,9 @@ Conventions
   unweighted sum).  Frequency weighting is a Sauce preprocess hook
   (:meth:`~frequensolve.imaging.misfit.Preprocess.frequency_weight`) and is
   therefore already contained in the reported totals and covectors.
-- ``problem.smoothing`` is applied by Sauce's ``--smooth`` postprocess to
-  :attr:`Linearization.gradient` only; the Jacobian and normal operators stay
-  exact so adjoint identities hold.
+- ``problem.smoothing`` supplies native model regularization to FWI/LSRTM.
+  ``gradient`` is the data-objective derivative, paired with its Jacobian
+  and normal. Workflows assemble the regularization objective separately.
 - Support masks (§4.1.1) are taken from the first ``linearize`` of a problem
   view (the AND of every frequency task's masks) and held fixed for that
   view; a view created by :meth:`restrict` inherits the masks its parent
@@ -52,6 +52,7 @@ import itertools
 import math
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -66,12 +67,17 @@ from typing import (
 
 import numpy as np
 
+if TYPE_CHECKING:
+    from frequensolve.imaging._patch_problem import _PatchRuntime
+    from frequensolve.mesh.patches import PatchSet, PreparedPatchSet
+
 from frequensolve.imaging._artifacts import (
     ControlRegistryManifest,
     ControlStateFile,
     ControlVectorFile,
     ObjectiveReport,
     SmoothingConfig,
+    control_smoothing,
     unqualified_block_name,
 )
 from frequensolve.imaging._backend import (
@@ -83,25 +89,29 @@ from frequensolve.imaging._backend import (
     frequency_weights,
     read_manifest,
     read_report,
-    read_smoothed_covector,
     read_state_output,
     read_task_objective_vectors,
     reduce_covectors,
+    task_covectors,
     task_inputs,
     total_value,
 )
 from frequensolve.imaging._objective import (
     ObjectiveState,
     objective_residual,
+    objective_simulated,
     objective_space,
+    residual_sign,
 )
 from frequensolve.imaging.controls import (
     BoundControlSpace,
     ControlSpace,
     ControlState,
     ControlVector,
+    MeshParameters,
     ResolvedBlock,
     SupportMask,
+    _same_basis,
     source_metres_per_unit,
 )
 from frequensolve.imaging.data import (
@@ -111,9 +121,14 @@ from frequensolve.imaging.data import (
     ObservedGroup,
     TraceStoreRef,
 )
-from frequensolve.imaging.jobs import FWIOperatorJob
+from frequensolve.imaging.jobs import (
+    FWIOperatorJob,
+    _kernel_derivative,
+    _kernel_window_fingerprint,
+)
 from frequensolve.imaging.misfit import Loss, Misfit
 from frequensolve.imaging.operators import Jacobian, Normal
+from frequensolve.imaging.transfer import Transfer, resolve_transfer
 from frequensolve.inversion.validation import gradient_taylor_test, real_adjoint_test
 from frequensolve.orchestrator.sites.base import BaseSite
 
@@ -184,6 +199,9 @@ def _resolve_path(value: Any, project: Path) -> Path:
 def _vector_from_file(file: ControlVectorFile, space: ControlSpace) -> ControlVector:
     """Read a covector file onto ``space`` without adopting its support masks."""
 
+    from .controls import _check_artifact_basis
+
+    _check_artifact_basis(file, space)
     full = np.zeros(space.full_size, dtype=np.float64)
     for name, sl in space.full_slices.items():
         try:
@@ -283,6 +301,7 @@ class _Shared:
         min_support: Optional[float],
         submit_options: Optional[Mapping[str, Any]],
         cache_capacity: int,
+        kernel_derivative: Optional[Mapping[str, Any]] = None,
         parent: Optional["_Shared"] = None,
         working_name: Optional[str] = None,
     ) -> None:
@@ -311,6 +330,9 @@ class _Shared:
         if not isinstance(misfit, Misfit):
             raise TypeError("misfit must be a Misfit")
         self.misfit = misfit
+        self.kernel_derivative = _kernel_derivative(
+            kernel_derivative, residuals=("derivative", "window")
+        )
         self.misfit_payload = _MisfitPayload(misfit, self.groups)
         if frequencies is None:
             frequencies = self.observed_data.frequencies
@@ -320,9 +342,7 @@ class _Shared:
                     "declare them"
                 )
         self.frequencies: List[Any] = _normalize_frequencies(frequencies)
-        self.smoothing: Optional[SmoothingConfig] = SmoothingConfig.from_value(
-            smoothing
-        )
+        self.smoothing: Optional[SmoothingConfig] = control_smoothing(smoothing)
         if min_support is not None:
             threshold = float(min_support)
             if not math.isfinite(threshold) or threshold < 0.0:
@@ -430,6 +450,7 @@ class _Shared:
                 "problem": self.name,
                 "simulation": simulation,
                 "misfit": misfit,
+                "kernel_derivative": copy.deepcopy(self.kernel_derivative),
                 "observed": [_observed_descriptor(group) for group in self.groups],
                 "min_support": self.min_support,
                 "smoothing": (
@@ -515,10 +536,7 @@ class _Shared:
                 "the control layout is unknown until the first linearize supplies "
                 "the registry manifest"
             )
-        if (
-            state.space.blocks != self.space.blocks
-            or state.size != self.space.full_size
-        ):
+        if not state.space.without_support().equivalent(self.space.without_support()):
             raise ValueError("state does not cover the problem's control blocks")
         self.state = self.normalize(
             ControlState(
@@ -613,8 +631,8 @@ class ImagingProblem:
         frequencies: Frequencies solved per linearization; inferred from the
             observed data when omitted.
         site: Execution site; defaults to the configured ``Site()`` lazily.
-        smoothing: Optional :class:`SmoothingConfig` (or mapping) applied by
-            Sauce's ``--smooth`` postprocess to linearize gradients.
+        smoothing: Optional native regularization configuration inherited by FWI/LSRTM.
+            Problem derivatives remain derivatives of the data objective.
         workdir: Directory for staged inputs and cache bookkeeping; defaults
             to ``<project>/imaging/<name>``.
         name: Problem name, used for job prefixes and the default workdir.
@@ -622,6 +640,10 @@ class ImagingProblem:
             threshold (Sauce default ``1e-2``).
         submit_options: Site submission options pinned for every job.
         cache_capacity: Number of linearizations kept alive.
+        kernel_derivative: Optional spectral-data objective, using ``residual="derivative"``
+            with ``order=0..4``, or ``residual="window"`` with polynomial coefficients
+            in physical seconds. Applies to all waveform terms and all derivative
+            actions. Combine with complex frequencies for Laplace time windowing.
     """
 
     def __init__(
@@ -639,7 +661,16 @@ class ImagingProblem:
         min_support: Optional[float] = None,
         submit_options: Optional[Mapping[str, Any]] = None,
         cache_capacity: int = 2,
+        kernel_derivative: Optional[Mapping[str, Any]] = None,
+        patches: Any = None,
     ) -> None:
+        from frequensolve.mesh.patches import PatchSet
+
+        if patches is not None and not isinstance(patches, PatchSet):
+            raise TypeError("patches must be a PatchSet")
+        self._patches = patches
+        self._patch_runtime: _PatchRuntime | None = None
+        self._prepared_patches: PreparedPatchSet | None = None
         self._shared = _Shared(
             simulation,
             controls=controls,
@@ -653,12 +684,18 @@ class ImagingProblem:
             min_support=min_support,
             submit_options=submit_options,
             cache_capacity=cache_capacity,
+            kernel_derivative=kernel_derivative,
         )
         self._init_view()
 
     def _init_view(self) -> None:
         """Initialize the view-level attributes of a full (unrestricted) problem."""
 
+        if not hasattr(self, "_patches"):
+            self._patches = None
+            self._patch_runtime = None
+            self._prepared_patches = None
+        self._patch_selection: tuple[int, ...] | None = None
         self._active: Optional[Tuple[str, ...]] = None
         self._frequencies: Tuple[Any, ...] = tuple(self._shared.frequencies)
         self._masks: Dict[str, np.ndarray] = {}
@@ -674,6 +711,28 @@ class ImagingProblem:
                 "imaging problem is not supported by Sauce: "
                 + "; ".join(report["errors"])
             )
+
+    @property
+    def patches(self) -> PatchSet | None:
+        """Reusable patch selection policy, or ``None`` for full-domain execution."""
+        return self._patches
+
+    def prepare_patches(self, *, edge_samples: bool = False) -> PreparedPatchSet:
+        """Prepare and inspect patch geometry/acquisition without wave solves.
+
+        ``edge_samples=True`` retains native edge samples for ``prepared.plot()``.
+        """
+        if self.patches is None:
+            raise ValueError("this imaging problem has no patches")
+        from types import SimpleNamespace
+
+        self._prepared_patches = self.patches.prepare(
+            self.simulation,
+            self.frequencies,
+            site=SimpleNamespace(run=self.backend.run_preparation),
+            edge_samples=edge_samples,
+        )
+        return self._prepared_patches
 
     # -- identity -------------------------------------------------------------
 
@@ -739,6 +798,14 @@ class ImagingProblem:
         return self._shared.smoothing
 
     @property
+    def kernel_derivative(self) -> Optional[Dict[str, Any]]:
+        """Return the spectral-data selection, copied to keep cache identity stable."""
+
+        return copy.deepcopy(
+            self._overrides.get("kernel_derivative", self._shared.kernel_derivative)
+        )
+
+    @property
     def min_support(self) -> Optional[float]:
         """Return this view's relative support threshold (override or shared)."""
 
@@ -763,9 +830,16 @@ class ImagingProblem:
 
         return {
             **self._shared.identity(),
+            **({"patches": self.patches.to_dict()} if self.patches is not None else {}),
+            **(
+                {"patch_selection": self._patch_selection}
+                if self._patch_selection is not None
+                else {}
+            ),
             "active": list(self.space.blocks),
             "frequencies": list(self._frequencies),
             **self._override_identity(),
+            **_kernel_window_fingerprint(self.kernel_derivative, self._shared.project),
         }
 
     def _override_identity(self) -> Dict[str, Any]:
@@ -774,9 +848,15 @@ class ImagingProblem:
         parts: Dict[str, Any] = {}
         if "misfit" in self._overrides:
             try:
-                parts["misfit_override"] = self._misfit_payload.to_fs()
+                misfit: dict[str, Any] | str = self._misfit_payload.to_fs()
             except ValueError:  # large trace weights need an export context
-                parts["misfit_override"] = repr(self.misfit)
+                misfit = repr(self.misfit)
+            # Explicitly restating the shared misfit does not change the
+            # receiver state. Keep equivalent views on the same cache entry.
+            if fingerprint(misfit=misfit) != fingerprint(
+                misfit=self._shared.identity()["misfit"]
+            ):
+                parts["misfit_override"] = misfit
         if "smoothing" in self._overrides:
             smoothing = self._overrides["smoothing"]
             parts["smoothing_override"] = (
@@ -786,6 +866,11 @@ class ImagingProblem:
             parts["min_support_override"] = self._overrides["min_support"]
         if "weights" in self._overrides:
             parts["weights_override"] = list(self._overrides["weights"])
+        if (
+            "kernel_derivative" in self._overrides
+            and self.kernel_derivative != self._shared.kernel_derivative
+        ):
+            parts["kernel_derivative_override"] = self.kernel_derivative
         return parts
 
     @property
@@ -813,6 +898,8 @@ class ImagingProblem:
 
     @property
     def data_space(self) -> DataSpace:
+        if self.patches is not None:
+            return self.linearize(gradient=False).data_space
         if self._data_space is None:
             self._data_space = DataSpace.from_simulation(
                 self.simulation, frequencies=self._frequencies
@@ -882,7 +969,9 @@ class ImagingProblem:
         smoothing: Any = _UNSET,
         min_support: Any = _UNSET,
         weights: Any = _UNSET,
+        kernel_derivative: Any = _UNSET,
         support: str = "inherit",
+        patches: Any = _UNSET,
     ) -> "ImagingProblem":
         """Return a stage view sharing state, cache, backend and simulation.
 
@@ -907,6 +996,8 @@ class ImagingProblem:
             support: ``"inherit"`` reuses the support masks this view already
                 adopted; ``"refresh"`` makes the new view adopt masks from its
                 own first ``linearize`` (stage transitions, spec §4.1.1).
+            kernel_derivative: Replace the spectral-data selection for this stage;
+                ``None`` restores ordinary waveform data, omission inherits it.
         """
 
         if support not in {"inherit", "refresh"}:
@@ -915,6 +1006,23 @@ class ImagingProblem:
             raise ValueError("pass either misfit or loss, not both")
         view = object.__new__(ImagingProblem)
         view._shared = self._shared
+        from frequensolve.mesh.patches import PatchSet
+
+        view._patches = self.patches if patches is _UNSET else patches
+        if view._patches is not None and not isinstance(view._patches, PatchSet):
+            raise TypeError("patches must be a PatchSet")
+        same_patches = patches is _UNSET or patches is self.patches
+        view._patch_runtime = (
+            self._patch_runtime
+            if same_patches
+            and support == "inherit"
+            and misfit is None
+            and loss is None
+            and kernel_derivative is _UNSET
+            else None
+        )
+        view._patch_selection = self._patch_selection
+        view._prepared_patches = self._prepared_patches if same_patches else None
         view._data_space = None
         view._overrides = dict(self._overrides)
         view._misfit_payload_cache = None
@@ -925,7 +1033,11 @@ class ImagingProblem:
         elif loss is not None:
             view._overrides["misfit"] = _misfit_with_loss(self.misfit, loss)
         if smoothing is not _UNSET:
-            view._overrides["smoothing"] = SmoothingConfig.from_value(smoothing)
+            view._overrides["smoothing"] = control_smoothing(smoothing)
+        if kernel_derivative is not _UNSET:
+            view._overrides["kernel_derivative"] = _kernel_derivative(
+                kernel_derivative, residuals=("derivative", "window")
+            )
         if min_support is not _UNSET:
             if min_support is not None:
                 threshold = float(min_support)
@@ -994,7 +1106,15 @@ class ImagingProblem:
         return self.restrict(misfit=misfit, loss=loss)
 
     def with_controls(
-        self, controls: Any, *, state: Optional[ControlState] = None
+        self,
+        controls: Any,
+        *,
+        state: Optional[ControlState] = None,
+        mesh_averaging_wavelengths: float = 0.5,
+        mesh_transfer: Optional[str] = None,
+        mesh_smoothing_length: Optional[float] = None,
+        transfer: Optional[Transfer] = None,
+        discovery_frequencies: Optional[Iterable[Any]] = None,
     ) -> "ImagingProblem":
         """Return a problem over another control layout (resolution change).
 
@@ -1011,26 +1131,53 @@ class ImagingProblem:
                 mapping ``{block key: new block spec}`` replacing those blocks
                 of :attr:`full_space` and keeping the others (e.g.
                 ``{"vp": im.DepthProfile("vp", "sediment", spacing=25*u.m)}``).
+            mesh_averaging_wavelengths: Half-width of the sizing-only averaging
+                window in material-average wavelengths (default 0.5). Used when
+                explicitly replacing mesh blocks.
+            transfer: ``im.Transfer.nodal()`` (default) or
+                ``im.Transfer.l2(smooth=100 * u.m)`` for integral projection
+                with optional model smoothing. Bare smoothing lengths are meters.
+                Use ``smooth_wavelengths`` instead for accepted-wavespeed-dependent smoothing.
+                Cannot be combined with the legacy mesh transfer keywords.
+            mesh_transfer: Legacy spelling: ``"nodal"`` (default) or ``"l2"``. L2 transfer
+                integrates the source and target constrained bases on their
+                common partition, for refinement or coarsening.
+            mesh_smoothing_length: Nonnegative smoothing length in meters for
+                L2 transfer. Zero gives an L2 projection; positive values solve
+                the target mass-plus-length-squared-stiffness system. Smooths
+                control coefficients (log updates for log controls), not the
+                authored reference. Requires ``mesh_transfer="l2"``.
             state: The initial state.  ``None`` transfers the current state;
                 a state on this problem's layout is transferred; a state on
                 the new layout is adopted as is.
+            discovery_frequencies: Restrict native registry discovery to these
+                frequencies when changing layout. The returned problem still
+                supports the complete frequency schedule.
 
         The transfer is block-wise: blocks whose layout is unchanged are
         copied, material profile / lattice blocks are projected with
         :meth:`ControlSpace.transfer_to` (exact for fields the new basis
         represents, e.g. a hat profile refined by node bisection), blocks
         absent from this problem take the new problem's authored values, and
-        interface, source, reflectivity, mesh and registry blocks must keep
-        their layout (``ValueError`` otherwise).
+        mesh blocks explicitly listed in ``controls`` are rebuilt by Sauce from
+        the accepted, spatially averaged material and transferred by the selected
+        native interpolation or projection method. Their material, reference and
+        transform remain fixed.
+        Interface, source, reflectivity and registry blocks must keep their layout.
+        General mesh coarsening is approximate; native setup currently uses one
+        MPI rank, while subsequent solves may use distributed controls.
 
         Raises:
             KeyError: A mapping names a block key this problem does not have.
-            ValueError: The layouts cannot be transferred, or the new space
-                has mesh blocks whose layout Sauce has not reported yet.
+            ValueError: The layouts cannot be transferred.
         """
 
+        policy = resolve_transfer(transfer, mesh_transfer, mesh_smoothing_length)
+        mesh_transfer, mesh_smoothing_length = policy.method, policy.smoothing_length
         shared = self._shared
+        self._ensure_registry()
         old_full = shared.space
+        explicit_keys = set(controls) if isinstance(controls, Mapping) else None
         if isinstance(controls, Mapping) and not isinstance(controls, ControlSpace):
             unknown = [key for key in controls if key not in old_full.keys]
             if unknown:
@@ -1046,6 +1193,43 @@ class ImagingProblem:
             space = controls
         else:
             space = ControlSpace(controls)
+        transferred_mesh = None
+        mesh_keys = {
+            key
+            for key, spec in space.specs.items()
+            if isinstance(spec, MeshParameters)
+            and (explicit_keys is None or key in explicit_keys)
+        }
+        if not mesh_keys and (mesh_transfer != "nodal" or mesh_smoothing_length):
+            raise ValueError(
+                "mesh transfer options require an explicit MeshParameters replacement"
+            )
+        if mesh_keys:
+            from ._mesh_adaptation import adapt_meshes
+
+            if state is None:
+                state = self._require_state()
+            if not state.space.without_support().equivalent(old_full.without_support()):
+                raise ValueError(
+                    "mesh adaptation needs the accepted state on the previous layout"
+                )
+            space, transferred_mesh = adapt_meshes(
+                self,
+                space,
+                state,
+                mesh_averaging_wavelengths,
+                mesh_keys,
+                transfer=mesh_transfer,
+                smoothing_length=mesh_smoothing_length,
+                **(
+                    {
+                        "smoothing_wavelengths": policy.smoothing_wavelengths,
+                        "smoothing_frequency": policy.frequency,
+                    }
+                    if policy.smoothing_wavelengths is not None
+                    else {}
+                ),
+            )
         layout = fingerprint(
             space=[[key, repr(spec)] for key, spec in space.specs.items()]
         )
@@ -1063,18 +1247,23 @@ class ImagingProblem:
             min_support=shared.min_support,
             submit_options=shared.submit_options,
             cache_capacity=shared.cache.capacity,
+            kernel_derivative=shared.kernel_derivative,
             parent=shared,
             working_name=f"{source.name}__{shared.name}__{layout.split(':')[-1][:10]}",
         )
-        if derived.pending_manifest:
-            derived.family.remove(derived)
-            raise ValueError(
-                "with_controls cannot build a layout with mesh blocks before Sauce "
-                "reports it; keep mesh blocks out of resolution changes"
-            )
         problem = object.__new__(ImagingProblem)
         problem._shared = derived
+        problem._patches = self.patches
+        problem._patch_runtime = None
+        problem._prepared_patches = None
         problem._init_view()
+        if derived.pending_manifest:
+            discovery = (
+                problem
+                if discovery_frequencies is None
+                else problem.restrict(frequencies=discovery_frequencies)
+            )
+            discovery._ensure_registry()
         new_full = derived.space.without_support()
         if state is None:
             state = self._require_state()
@@ -1082,10 +1271,12 @@ class ImagingProblem:
         # problem's coordinates are the same ``physical / s_ref``.
         if shared.reference_scaling:
             derived.pin_reference(shared.reference_scaling, shared.reference_units)
-        if state.space.blocks == new_full.blocks and state.size == new_full.full_size:
+        if state.space.without_support().equivalent(new_full):
             derived.set_state(state)
         else:
-            derived.set_state(_transfer_state(state, old_full, derived))
+            derived.set_state(
+                _transfer_state(state, old_full, derived, transferred_mesh)
+            )
         return problem
 
     # -- states and vectors ---------------------------------------------------
@@ -1184,9 +1375,10 @@ class ImagingProblem:
         *,
         gradient: bool,
         discover: bool = False,
+        receiver_diagonal: Optional[Mapping[str, Any]] = None,
     ) -> FWIOperatorJob:
         shared = self._shared
-        smoothing = self.smoothing if gradient else None
+        smoothing = None  # Model regularization is assembled by the workflow.
         # The registry discovery linearize asks for ``state_output`` and
         # ``manifest`` (task-suffixed when the job has several tasks); a
         # space with active mechanism blocks asks for ``state_output`` on
@@ -1204,10 +1396,12 @@ class ImagingProblem:
             objective="report.json",
             control_state=control_state,
             state_output="baseline.h5" if discover or wants_scaling else None,
-            manifest="registry.json" if discover else None,
+            manifest="registry.json" if discover or not gradient else None,
             min_support=self.min_support,
             misfit=self._misfit_payload,
             reflectivity=self._reflectivity(space),
+            receiver_diagonal=receiver_diagonal,
+            kernel_derivative=self.kernel_derivative,
             source_controls=self._source_controls(space),
             # Sauce only accepts weights on covector-carrying jobs (they drive
             # the --smooth aggregation); value-only linearizations weight the
@@ -1282,6 +1476,7 @@ class ImagingProblem:
             misfit=self._misfit_payload,
             reflectivity=self._reflectivity(space),
             source_controls=self._source_controls(space),
+            kernel_derivative=self.kernel_derivative,
             **kwargs,
         )
 
@@ -1356,6 +1551,28 @@ class ImagingProblem:
             or self._inline_authoring()
         ):
             return stage, None
+        self._complete_state_file(state).write(stage / "state.h5")
+        return stage, stage / "state.h5"
+
+    def save_state(self, path: Union[str, Path], v: Any = None) -> Path:
+        """Save a complete solver control state, including inactive registry blocks.
+
+        Unlike ``problem.state.save``, this includes Sauce-owned source
+        baselines and mesh basis identities needed to replay a standalone job.
+        Registry discovery runs when necessary.
+        """
+        if self._shared.baseline is None:
+            self._discover_registry()
+        state = self._state_at(v)
+        return self._complete_state_file(state).write(path)
+
+    def _complete_state_file(self, state: ControlState) -> ControlStateFile:
+        """Overlay active state values on the complete discovered registry."""
+        baseline = self._shared.baseline
+        if baseline is None:
+            raise RuntimeError(
+                "Complete control-state export requires registry discovery"
+            )
         blocks = dict(baseline.blocks)
         for name, values in state.blocks().items():
             if name not in blocks:
@@ -1381,9 +1598,18 @@ class ImagingProblem:
         }
         scaling.update(state.scaling)
         units.update(state.scaling_units)
-        path = stage / "state.h5"
-        ControlStateFile(blocks, scaling=scaling, scaling_units=units).write(path)
-        return stage, path
+        identities = dict(baseline.control_spaces)
+        if self._shared.manifest is not None:
+            identities.update(
+                {
+                    b.name: b.basis_identity
+                    for b in self._shared.manifest.blocks
+                    if b.basis_identity
+                }
+            )
+        return ControlStateFile(
+            blocks, scaling=scaling, scaling_units=units, control_spaces=identities
+        )
 
     def _read_masks(
         self, job: FWIOperatorJob, space: ControlSpace
@@ -1489,12 +1715,20 @@ class ImagingProblem:
         self._masks_adopted = True
 
     def _linearize_state(
-        self, state: Optional[ControlState], *, gradient: bool
+        self,
+        state: Optional[ControlState],
+        *,
+        gradient: bool,
+        receiver_diagonal: Optional[Mapping[str, Any]] = None,
     ) -> "Linearization":
         shared = self._shared
         key = self._fingerprint(state)
         cached = shared.linearizations.get(key)
-        if cached is not None and (cached.gradient is not None or not gradient):
+        if (
+            receiver_diagonal is None
+            and cached is not None
+            and (cached.gradient is not None or not gradient)
+        ):
             shared.cache.get(key)
             self._adopt_masks(cached.support_masks)
             if self.space.equivalent(cached.space):
@@ -1512,7 +1746,11 @@ class ImagingProblem:
                 state = shared.state
                 key = self._fingerprint(state)
                 cached = shared.linearizations.get(key)
-                if cached is not None and (cached.gradient is not None or not gradient):
+                if (
+                    receiver_diagonal is None
+                    and cached is not None
+                    and (cached.gradient is not None or not gradient)
+                ):
                     shared.cache.get(key)
                     self._adopt_masks(cached.support_masks)
                     if self.space.equivalent(cached.space):
@@ -1521,7 +1759,11 @@ class ImagingProblem:
         self._sync_simulation(state)
         stage, control_state = self._stage_state(key, state)
         job = self._linearize_job(
-            space, control_state, gradient=gradient, discover=discover
+            space,
+            control_state,
+            gradient=gradient,
+            discover=discover,
+            receiver_diagonal=receiver_diagonal,
         )
         self._run_job(job)
 
@@ -1571,22 +1813,7 @@ class ImagingProblem:
         entry.extra["mechanism_factors"] = factors
         gradient_file: Optional[ControlVectorFile] = None
         if gradient:
-            if job.requires_postprocess():
-                gradient_file = read_smoothed_covector(job)
-                # Sauce's ``--smooth`` aggregate sums the mechanism parts in
-                # each task's own coordinates (they are not smoothed): replace
-                # them with the converted reduction.
-                mechanisms = [
-                    name
-                    for name in _mechanism_blocks(space)
-                    if name in gradient_file.blocks
-                ]
-                if mechanisms:
-                    converted = reduce_covectors(job, factors=factors)
-                    for name in mechanisms:
-                        gradient_file.blocks[name] = converted.blocks[name]
-            else:
-                gradient_file = reduce_covectors(job, factors=factors)
+            gradient_file = reduce_covectors(job, factors=factors)
         linearization = Linearization(
             self,
             space=space,
@@ -1614,10 +1841,17 @@ class ImagingProblem:
         """
 
         shared = self._shared
-        self._linearize_state(shared.authored, gradient=False)
+        parent = self if self.patches is None else self.restrict(patches=None)
+        parent._linearize_state(shared.authored, gradient=False)
         assert shared.baseline is not None
 
-    def linearize(self, v: Any = None, *, gradient: bool = True) -> "Linearization":
+    def linearize(
+        self,
+        v: Any = None,
+        *,
+        gradient: bool = True,
+        receiver_diagonal: Optional[Mapping[str, Any]] = None,
+    ) -> "Linearization":
         """Save (or reuse) the Sauce state at ``v`` and return its linearization.
 
         Args:
@@ -1625,6 +1859,9 @@ class ImagingProblem:
                 ``ControlState``, or ``None`` for the current state.
             gradient: Request the covector.  A cached gradient-carrying
                 linearization of the same point is reused either way.
+            receiver_diagonal: Request shared receiver probes in the same run.
+                ``{}`` uses min(16, source RHS); ``{"probes": 32, "seed": 0}``
+                overrides it. This explicit request refreshes the linearization.
 
         The first linearize of a problem learns Sauce's complete registry
         baseline from ``state_output``/``manifest``: a linearize at the
@@ -1641,7 +1878,20 @@ class ImagingProblem:
         is one job over the view's frequencies (one task per frequency).
         """
 
-        return self._linearize_state(self._linearization_point(v), gradient=gradient)
+        if self.patches is not None:
+            from ._patch_problem import linearize_patches
+
+            return linearize_patches(
+                self,
+                self._linearization_point(v),
+                gradient=gradient,
+                receiver_diagonal=receiver_diagonal,
+            )
+        return self._linearize_state(
+            self._linearization_point(v),
+            gradient=gradient,
+            receiver_diagonal=receiver_diagonal,
+        )
 
     def value(self, v: Any = None) -> float:
         """Return the misfit value at ``v``."""
@@ -1649,7 +1899,7 @@ class ImagingProblem:
         return self.linearize(v, gradient=False).value
 
     def gradient(self, v: Any = None) -> ControlVector:
-        """Return the misfit gradient (real covector) at ``v``."""
+        """Return the raw misfit derivative (real covector) at ``v``."""
 
         gradient = self.linearize(v, gradient=True).gradient
         assert gradient is not None
@@ -1676,6 +1926,8 @@ class ImagingProblem:
         on :meth:`simulation_at` and its traces are packed.
         """
 
+        if self.patches is not None:
+            return self.linearize(v, gradient=False).simulated()
         state = self._state_at(v)
         hook = getattr(self.site, "forward", None)
         if callable(hook):
@@ -1709,6 +1961,10 @@ class ImagingProblem:
         the workflow layer.
         """
 
+        if self.patches is not None:
+            from ._patch_problem import patch_observed_vector
+
+            return patch_observed_vector(self)
         hook = getattr(self.site, "observed", None)
         space = self.space
         if callable(hook):
@@ -1889,8 +2145,8 @@ class ImagingProblem:
         """Return ``(errors, warnings)`` of a reflectivity-carrying space.
 
         ``fwi_operator.reflectivity`` needs full-dimensional first-order
-        acoustic or classic elastic DPG with unrelaxed assembly and waveform
-        objectives; it rejects ``extension``, coupled physics, Galerkin,
+        acoustic or classic elastic DPG and waveform objectives (relaxed
+        assembly is an accepted approximation); it rejects ``extension``, coupled physics, Galerkin,
         2.5D, axisymmetry, phase objectives, interface (geometry) controls and
         ``signature_df`` source blocks (spectral observation support).
         """
@@ -1905,7 +2161,7 @@ class ImagingProblem:
         phase = sorted(comparisons - {"waveform"})
         if phase:
             errors.append(
-                "reflectivity requires waveform comparisons " f"(misfit uses {phase})"
+                f"reflectivity requires waveform comparisons (misfit uses {phase})"
             )
         interface = [b.name for b in blocks if b.kind == "interface"]
         if interface:
@@ -1944,15 +2200,6 @@ class ImagingProblem:
             errors.append(
                 f"reflectivity requires Discretization(method='DPG') (got {method!r})"
             )
-        solver = getattr(getattr(simulation, "solver", None), "extra", None) or {}
-        relaxed = solver.get("relaxed_assembly")
-        if relaxed is None:
-            relaxed = str(solver.get("mode", "")).strip().lower() == "fast"
-        if relaxed:
-            errors.append(
-                "reflectivity requires unrelaxed assembly "
-                "(SolverConfig(relaxed_assembly=False))"
-            )
         return errors, warnings
 
     def capabilities(self, *, extension: Any = None) -> Dict[str, Any]:
@@ -1977,6 +2224,19 @@ class ImagingProblem:
             term.comparison.kind
             for term in misfit.objective_terms([group.name for group in shared.groups])
         }
+        if self.kernel_derivative is not None:
+            if comparisons - {"waveform"}:
+                errors.append("kernel_derivative requires waveform comparisons")
+            if kinds.intersection({"source", "reflectivity"}) or extension is not None:
+                errors.append(
+                    "kernel_derivative requires fixed sources and no model extension"
+                )
+            discretization = getattr(self.simulation, "discretization", None)
+            method = str(
+                (getattr(discretization, "extra", None) or {}).get("method", "DPG")
+            )
+            if method.upper() != "DPG":
+                errors.append("kernel_derivative requires DPG")
         if "source" in kinds and comparisons - {"waveform"}:
             errors.append(
                 "source controls require waveform comparisons "
@@ -2015,6 +2275,8 @@ class ImagingProblem:
 
         self._shared.forget(self._shared.cache.clear())
         self._shared.linearizations.clear()
+        if self._patch_runtime is not None:
+            self._patch_runtime.cache.clear()
 
     def extend(self, extension: Any) -> Any:
         """Return an :class:`~frequensolve.imaging.extension.ExtendedProblem`.
@@ -2027,6 +2289,18 @@ class ImagingProblem:
         from frequensolve.imaging.extension import ExtendedProblem
 
         return ExtendedProblem(self, extension)
+
+    def focus(self, focusing: Any) -> Any:
+        """Return a :class:`~frequensolve.imaging.focusing.FocusingProblem`.
+
+        The view's objective becomes the frequency-coherent time-reversal
+        focus of :class:`~frequensolve.imaging.focusing.Focusing`; it shares
+        this view's state, cache and simulation.
+        """
+
+        from frequensolve.imaging.focusing import FocusingProblem
+
+        return FocusingProblem(self, focusing)
 
     def check(
         self,
@@ -2093,15 +2367,15 @@ _FIXED_LAYOUT_KINDS = {"interface", "source", "reflectivity", "mesh", "registry"
 
 
 def _transfer_state(
-    state: ControlState, old: ControlSpace, shared: "_Shared"
+    state: ControlState,
+    old: ControlSpace,
+    shared: "_Shared",
+    mesh_transfer: Optional[ControlVectorFile] = None,
 ) -> ControlState:
     """Transfer a full state on ``old`` to ``shared.space`` block by block."""
 
     source_space = old.without_support()
-    if (
-        state.space.blocks != source_space.blocks
-        or state.size != source_space.full_size
-    ):
+    if not state.space.without_support().equivalent(source_space):
         raise ValueError(
             "with_controls state covers neither the current nor the new layout"
         )
@@ -2134,6 +2408,15 @@ def _transfer_state(
         if same:
             values[sl] = old_values
             continue
+        if target.kind == source.kind == "mesh" and mesh_transfer is not None:
+            name = unqualified_block_name(target.name)
+            if mesh_transfer.control_spaces.get(name) != target.basis_identity:
+                raise ValueError(f"transferred mesh basis differs for {target.name}")
+            mesh_values = np.asarray(mesh_transfer.blocks[name], dtype=float)
+            if mesh_values.size != target.size or not np.all(np.isfinite(mesh_values)):
+                raise ValueError(f"invalid transferred coefficients for {target.name}")
+            values[sl] = np.clip(mesh_values, target.lower, target.upper)
+            continue
         if target.kind in _FIXED_LAYOUT_KINDS or source.kind in _FIXED_LAYOUT_KINDS:
             raise ValueError(
                 f"with_controls cannot change the layout of {target.kind} block "
@@ -2162,12 +2445,7 @@ def _transfer_state(
 
 
 def _same_layout(a: ResolvedBlock, b: ResolvedBlock) -> bool:
-    if a.control is None or b.control is None:
-        return a.control is None and b.control is None
-    try:
-        return bool(a.control.to_fs() == b.control.to_fs())
-    except Exception:
-        return False
+    return _same_basis(a, b)
 
 
 def _install_material(simulation: Any, block_id: str, values: np.ndarray) -> None:
@@ -2296,10 +2574,11 @@ def _install_source_mechanism(
     dimension = int(simulation.dimension)
     real, phase = _real_components(values, block.name)
     physical = real * float(scale)
-    if kind in {"scalar", "monopole"}:
+    if kind in {"scalar", "monopole", "volume_injection"}:
         if physical.size != 1:
             raise ValueError(f"{block.name!r} must have one component for {kind}")
-        point.amplitude = {"value": float(physical[0]), "units": units or "N*m"}
+        default_units = "m^3/s" if kind == "volume_injection" else "N*m"
+        point.amplitude = {"value": float(physical[0]), "units": units or default_units}
         return phase
     if kind in {"vector", "dipole"}:
         if physical.size != dimension:
@@ -2402,7 +2681,7 @@ def _uninstallable_message(block: ResolvedBlock) -> str:
             f"source block {block.name!r} differs from its authored baseline; "
             f"the {block.quantity} coefficients have no representation on the "
             "authored sources (signature_df is an additive per-Hz term and "
-            "FrequenSolve authors no Acquisition/source_signature spectrum), so "
+            "installing it requires rematerializing the authored spectral response), so "
             "simulation_at cannot install them"
         )
     if block.kind == "mesh":
@@ -2446,8 +2725,8 @@ class Linearization:
         frequency_weights: One objective weight per task (unit by default).
         value: Total misfit value (weighted sum over tasks).
         report: ``term id -> weighted value`` summed over tasks.
-        gradient: Real covector on ``space`` (smoothed when the problem has a
-            smoothing), or ``None`` for a value-only linearization.
+        gradient: Raw objective derivative on ``space``, or ``None`` for a
+            value-only linearization.
     """
 
     def __init__(
@@ -2468,7 +2747,7 @@ class Linearization:
         self.state = state
         self.point = state.vector(space)
         self.entry = entry
-        self.job: FWIOperatorJob = entry.job
+        self._job: FWIOperatorJob = entry.job
         self.frequencies: List[Any] = list(self.job.f_list)
         self.fingerprint = entry.fingerprint
         assert entry.state_fingerprint is not None
@@ -2522,6 +2801,30 @@ class Linearization:
     # -- descriptors ----------------------------------------------------------
 
     @property
+    def job(self) -> FWIOperatorJob:
+        """Native job backing this single-context linearization."""
+        return self._job
+
+    @property
+    def regularization_job(self) -> FWIOperatorJob:
+        """Full physical model context for one global regularization term."""
+        return self.job
+
+    @property
+    def jobs(self) -> tuple[FWIOperatorJob, ...]:
+        """Native child jobs in execution order."""
+        return (self.job,)
+
+    @property
+    def receiver_diagonal(self) -> ControlVector:
+        """Sum control-basis GN diagonals with the objective's frequency weights."""
+        diagonal = self.space.zeros()
+        for task, weight in enumerate(self.frequency_weights, 1):
+            part = ControlVectorFile.read(self.job.diagonal_file(task), native=True)
+            diagonal = diagonal + float(weight) * _vector_from_file(part, self.space)
+        return diagonal
+
+    @property
     def support(self) -> SupportMask:
         """Return the per-DOF support mask of ``space``."""
 
@@ -2539,6 +2842,34 @@ class Linearization:
     def objective_residual(self) -> DataVector:
         """Return the frozen, weighted comparison residual used by the Jacobian."""
         return objective_residual(self.data_space, self.objective_states)
+
+    @property
+    def residual_sign(self) -> float:
+        """Return ``s`` with ``objective_residual = s W (observed - simulated)``.
+
+        Sauce's ``fs-objective-linearization-3`` residual is observed minus
+        simulated (``s = +1``); :attr:`jacobian` is that residual's derivative.
+        """
+
+        return residual_sign(self.objective_states)
+
+    def simulated(self) -> DataVector:
+        """Return the modeled receiver values in the rows of :attr:`data_space`."""
+
+        return objective_simulated(self.data_space, self.objective_states)
+
+    def observed(self) -> DataVector:
+        """Return the observed values of the objective rows.
+
+        Recovered as ``simulated + s * residual``, which is exact for
+        unit-weight waveform terms (explicit unit scale, ``sum`` reduction, no
+        preprocessing or projection); other misfits weight the residual.
+        """
+
+        residual = self.objective_residual().values
+        return DataVector(
+            self.simulated().values + self.residual_sign * residual, self.data_space
+        )
 
     @property
     def data_space(self) -> DataSpace:
@@ -2607,6 +2938,8 @@ class Linearization:
                 part = ControlVectorFile.read(job.covector_file(task), native=False)
                 state_fp = part.state_fingerprint
                 registry_fp = part.control_registry_fingerprint
+            if registry_fp is None and job.manifest is not None:
+                registry_fp = read_manifest(job, task=task).fingerprint
             if state_fp is None:
                 state_fp = report.state_fingerprint
             pairs.append(
@@ -2651,6 +2984,7 @@ class Linearization:
                     frequency=self.frequencies[task - 1]
                 ),
                 n_ranks=self.objective_states[task - 1].n_ranks,
+                schema=self.objective_states[task - 1].vector_schema,
             )
         return stem
 
@@ -2729,12 +3063,10 @@ class Linearization:
 
         return self._memo("jvp", _digest(direction.values), compute)
 
-    def vjp(self, r: Any) -> ControlVector:
-        """Return the real covector ``Re(J^H r)`` on ``space`` (memoized)."""
+    def _vjp_job(self, dual: DataVector) -> FWIOperatorJob:
+        """Run (once per dual) the ``vjp`` job whose task parts hold ``J_t^H r_t``."""
 
-        dual = self._data_vector(r)
-
-        def compute() -> ControlVector:
+        def compute() -> FWIOperatorJob:
             directory = self._ops_dir()
             job = self._action_job(
                 "vjp",
@@ -2742,12 +3074,53 @@ class Linearization:
                 covector="vjp.h5",
             )
             self.problem._run_job(job)
+            return job
+
+        return self._memo("vjp_job", _digest(dual.values), compute)
+
+    def vjp(self, r: Any) -> ControlVector:
+        """Return the real covector ``Re(J^H r)`` on ``space`` (memoized)."""
+
+        dual = self._data_vector(r)
+
+        def compute() -> ControlVector:
+            job = self._vjp_job(dual)
             return _vector_from_file(
                 reduce_covectors(job, [1.0] * job.n_tasks, self.task_factors),
                 self.space,
             )
 
         return self._memo("vjp", _digest(dual.values), compute)
+
+    def vjp_tasks(self, r: Any) -> List[ControlVector]:
+        """Return ``Re(J_t^H r_t)`` per frequency task, unsummed (one ``vjp`` job).
+
+        Mechanism blocks are converted to reference coordinates like
+        :meth:`vjp`; the sum of the parts equals ``vjp(r)``.
+        """
+
+        dual = self._data_vector(r)
+
+        def compute() -> List[ControlVector]:
+            job = self._vjp_job(dual)
+            return [
+                _vector_from_file(part, self.space)
+                for part in task_covectors(job, self.task_factors)
+            ]
+
+        return self._memo("vjp_tasks", _digest(dual.values), compute)
+
+    def modeled_vjp(self, g: Any, *, per_task: bool = False) -> Any:
+        """Return ``Re((d simulated / dm)^H g)`` for a dual ``g`` on the modeled rows.
+
+        The Jacobian is the residual's, ``-s d(simulated)/dm`` for unit-weight
+        waveform terms, so this runs ``vjp(-s g)``.  ``per_task`` returns the
+        unsummed task parts (:meth:`vjp_tasks`).
+        """
+
+        dual = self._data_vector(g)
+        flipped = DataVector(-self.residual_sign * dual.values, self.data_space)
+        return self.vjp_tasks(flipped) if per_task else self.vjp(flipped)
 
     def apply_normal(self, dv: Any) -> ControlVector:
         """Return ``Re(J^H W J) dv`` from Sauce's ``normal`` action (memoized)."""

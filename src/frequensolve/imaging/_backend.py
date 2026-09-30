@@ -5,8 +5,9 @@ and an execution site.  It owns three concerns that the operator layer should
 not repeat:
 
 - **Submission.** :class:`Backend` submits jobs with one pinned set of site
-  options so every action of one linearization runs with the same rank count
-  and mesh partition, names jobs consistently, and waits for job families.
+  options, stages client-written operator inputs on remote sites, names jobs
+  consistently, and waits for job families.  Saved states and objective
+  vectors do not depend on the MPI rank count.
 - **Artifact reduction.** Sauce writes one task-suffixed output per frequency
   task (``<stem>_<task><ext>``).  The module-level helpers reduce per-task
   covectors with the misfit frequency weights, assemble per-task objective
@@ -26,6 +27,7 @@ import shutil
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 from typing import (
     Any,
     Dict,
@@ -48,8 +50,9 @@ from frequensolve.imaging._artifacts import (
     ObjectiveReport,
 )
 from frequensolve.imaging.data import DataSpace, DataVector
-from frequensolve.imaging.jobs import FWIOperatorJob
+from frequensolve.imaging.jobs import FWIOperatorJob, _task_path
 from frequensolve.orchestrator.sites.base import BaseSite, RunHandle, RunResult
+from frequensolve.project import Project
 from frequensolve.simulation.jobs.base import BaseJob
 
 __all__ = [
@@ -168,6 +171,30 @@ def _require_file(path: Path, what: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def task_covectors(
+    job: FWIOperatorJob,
+    factors: Optional[Sequence[Mapping[str, float]]] = None,
+) -> Iterable[ControlVectorFile]:
+    """Read each unsummed task covector once, in reference coordinates."""
+
+    if factors is not None and len(factors) != job.n_tasks:
+        raise ValueError(f"expected {job.n_tasks} per-task block factor tables")
+    first = None
+    for task in _tasks(job):
+        path = _require_file(job.covector_file(task), f"task {task} covector")
+        part = ControlVectorFile.read(path, native=False)
+        if first is None:
+            first = (part.names, part.sizes)
+        elif (part.names, part.sizes) != first:
+            raise ValueError(f"{path} has a different block layout than task 1")
+        if factors is not None:
+            for name in part.blocks:
+                part.blocks[name] = part.blocks[name] * float(
+                    factors[task - 1].get(name, 1.0)
+                )
+        yield part
+
+
 def reduce_covectors(
     job: FWIOperatorJob,
     weights: Optional[Sequence[float]] = None,
@@ -182,11 +209,13 @@ def reduce_covectors(
     task's coordinates, and FrequenSolve converts each task's part to its
     reference coordinates with ``s_ref / s_task``.  Sauce fingerprints every
     task's saved state on its own (per-frequency mesh adaptation makes them
-    differ), so only the block layout must agree; the reduced file carries
-    task 1's fingerprints.
+    differ), so the block layout and material-basis identities must agree;
+    the reduced file preserves those identities and carries task 1's fingerprints.
     """
 
     weight = frequency_weights(job, weights)
+    if job.action == "wri":
+        weight = job.wri_reduction_weights(weight)
     if factors is not None and len(factors) != job.n_tasks:
         raise ValueError(
             f"expected {job.n_tasks} per-task block factor tables, "
@@ -212,6 +241,10 @@ def reduce_covectors(
             continue
         if part.names != first.names or part.sizes != first.sizes:
             raise ValueError(f"{path} has a different block layout than task 1")
+        if part.control_spaces != first.control_spaces:
+            raise ValueError(
+                f"{path} has different material basis identities than task 1"
+            )
         for name, values in part.blocks.items():
             blocks[name] = blocks[name] + scale(task, name) * values
             support[name] = support[name] & part.support_mask(name)
@@ -222,6 +255,7 @@ def reduce_covectors(
         control_registry_fingerprint=first.control_registry_fingerprint,
         support={name: mask for name, mask in support.items() if not mask.all()},
         support_min_support=first.support_min_support,
+        control_spaces=dict(first.control_spaces),
     )
 
 
@@ -404,6 +438,47 @@ def read_manifest(job: FWIOperatorJob, task: int = 1) -> ControlRegistryManifest
 # ---------------------------------------------------------------------------
 
 
+def _operator_input_files(job: BaseJob) -> List[Path]:
+    """Return the existing input files a job reads, including per-task siblings."""
+
+    candidates: List[Any] = [
+        getattr(job, name, None)
+        for name in ("direction", "objective_vector", "control_state", "input_vector")
+    ]
+    extension = getattr(job, "extension", None)
+    if isinstance(extension, Mapping):
+        candidates.append(extension.get("direction"))
+    n_tasks = int(getattr(job, "n_tasks", 1) or 1)
+    files: List[Path] = []
+    for value in candidates:
+        if not isinstance(value, (str, Path)):
+            continue
+        path = Path(value)
+        variants = [path, *(_task_path(path, task) for task in range(1, n_tasks + 1))]
+        for variant in variants:
+            if variant.is_file():
+                files.append(variant)
+                files.extend(_manifest_payload(variant))
+    return list(dict.fromkeys(files))
+
+
+def _manifest_payload(path: Path) -> List[Path]:
+    """Return the data file an objective-vector manifest names beside itself."""
+
+    if path.suffix != ".json":
+        return []
+    try:
+        name = json.loads(path.read_text()).get("file")
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not isinstance(name, str) or not name:
+        return []
+    payload = Path(name)
+    if not payload.is_absolute():
+        payload = path.parent / payload
+    return [payload] if payload.is_file() else []
+
+
 class Backend:
     """Submit imaging jobs to one site with pinned submission options.
 
@@ -413,9 +488,7 @@ class Backend:
             bookkeeping.  Cache eviction deletes job directories only when
             they live inside it.
         submit_options: Site submission keyword arguments applied to every
-            submission (rank count, partition, validation flags, ...).  Every
-            action of one linearization must use the same profile so Sauce
-            states and objective vectors stay partition-compatible.
+            submission (rank count, partition, validation flags, ...).
         prefix: Job name prefix; names are ``f"{prefix}_{counter:04d}"``.
     """
 
@@ -437,6 +510,58 @@ class Backend:
         if not self.prefix:
             raise ValueError("Backend prefix must be non-empty")
         self._counter = itertools.count(1)
+        self._timing_lock = RLock()
+        self._worker_seconds = 0.0
+        self._unmeasured_runs = 0
+
+    def timing_snapshot(self) -> Tuple[float, int]:
+        """Return counters for measuring a complete stage through this backend."""
+        with self._timing_lock:
+            return self._worker_seconds, self._unmeasured_runs
+
+    def cost_since(self, snapshot: Tuple[float, int]) -> Dict[str, Any]:
+        seconds, missing = self.timing_snapshot()
+        missing -= snapshot[1]
+        return {
+            "summed_worker_seconds": None if missing else seconds - snapshot[0],
+            "worker_time_scope": "site-reported native initialization, tasks and postprocessing",
+            "unmeasured_native_runs": missing,
+        }
+
+    def _record_timing(self, result: RunResult, handle: RunHandle) -> None:
+        if result.status.state == "skipped":
+            return
+        raw = result.status.raw or {}
+        rows = list(raw.get("tasks", []))
+        backend = getattr(handle, "backend", {})
+        for name in ("pack", "smooth"):
+            if isinstance(raw.get(name), Mapping):
+                rows.append(raw[name])
+        if isinstance(backend.get("mesh_result"), Mapping):
+            rows.append(backend["mesh_result"])
+        # A shared-frequency worker reports one row per frequency. Count its
+        # common process log only once rather than multiplying its duration.
+        seen = set()
+        seconds = 0.0
+        measured = bool(rows)
+        for row in rows:
+            duration = row.get("duration_seconds")
+            if duration is None:
+                measured = False
+                continue
+            log = row.get("stdout")
+            if log is not None and log in seen:
+                continue
+            if log is not None:
+                seen.add(log)
+            seconds += float(duration)
+        # Serial benchmark sites can report a complete job duration including
+        # input staging, initialization and packing through this explicit field.
+        if "worker_seconds" in raw:
+            seconds, measured = float(raw["worker_seconds"]), True
+        with self._timing_lock:
+            self._worker_seconds += seconds
+            self._unmeasured_runs += int(not measured)
 
     # -- naming and staging ---------------------------------------------------
 
@@ -468,6 +593,7 @@ class Backend:
 
     def _options(self, *, postprocess_only: bool) -> Dict[str, Any]:
         options = dict(self.submit_options)
+        options.setdefault("fetch", True)
         if postprocess_only:
             options["postprocess_only"] = True
         return options
@@ -475,7 +601,47 @@ class Backend:
     def submit(self, job: BaseJob, *, postprocess_only: bool = False) -> RunHandle:
         """Submit ``job`` with the pinned options and return its handle."""
 
+        if getattr(job, "frequency_groups", 1) > 1 and not getattr(
+            self.site, "supports_frequency_groups", False
+        ):
+            raise NotImplementedError(
+                "This site does not yet launch shared-frequency workers; use LocalSite or the native --frequency-groups launcher"
+            )
+        self._stage_remote_inputs(job)
         return self.site.submit(job, **self._options(postprocess_only=postprocess_only))
+
+    def _stage_remote_inputs(self, job: BaseJob) -> None:
+        """Upload operator inputs written on this machine to a remote site.
+
+        Project sync carries only simulations, and remote jobs see their own
+        results; client-written directions and objective vectors live under
+        the project's ``imaging`` tree and must be uploaded explicitly.  Paths
+        are mapped under the remote project root exactly as the job payload
+        rewrites them.
+        """
+
+        # Local sites read inputs in place; only remote sites expose a work_dir.
+        if getattr(self.site, "work_dir", None) is None or not callable(
+            getattr(self.site, "put", None)
+        ):
+            return
+        try:
+            root = job._project_path()
+        except (AttributeError, ValueError):
+            return
+        remote_root = Path(Project.remote_root_for(self.site, root))
+        upload = getattr(self.site, "put")
+        input_files = getattr(job, "remote_input_files", None)
+        if callable(input_files):
+            for local, remote in input_files(remote_root):
+                upload(local, remote)
+            return
+        for path in _operator_input_files(job):
+            try:
+                relative = path.resolve().relative_to(root.resolve())
+            except ValueError:
+                continue
+            upload(path, remote_root / relative)
 
     def run(
         self,
@@ -494,7 +660,10 @@ class Backend:
                 when the run does not succeed.
         """
 
-        return self.submit(job, postprocess_only=postprocess_only).wait(check=check)
+        handle = self.submit(job, postprocess_only=postprocess_only)
+        result = handle.wait(check=check)
+        self._record_timing(result, handle)
+        return result
 
     def run_many(
         self, jobs: Iterable[BaseJob], *, check: bool = True
@@ -514,14 +683,26 @@ class Backend:
         keep_cluster = bool(getattr(site, "shutdown_on_completion", False))
         extra = {"shutdown_on_completion": False} if keep_cluster else {}
         try:
+            for job in jobs:
+                self._stage_remote_inputs(job)
             handles = [
                 site.submit(job, **self._options(postprocess_only=False), **extra)
                 for job in jobs
             ]
-            return site.wait_all(handles, check=check)
+            results = site.wait_all(handles, check=check)
+            for result, handle in zip(results, handles):
+                self._record_timing(result, handle)
+            return results
         finally:
             if keep_cluster:
                 site.close(wait=True, retire=True)
+
+    def run_preparation(self, job: BaseJob, *, check: bool = True) -> RunResult:
+        """Account geometry-only preparation with the site's default rank profile."""
+        handle = self.site.submit(job)
+        result = handle.wait(check=check)
+        self._record_timing(result, handle)
+        return result
 
     def dry_run(self, job: BaseJob) -> Dict[str, Any]:
         """Describe what :meth:`run` would submit without touching the site.

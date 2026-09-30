@@ -12,7 +12,7 @@ This module binds the objective side of an imaging problem:
   trace data and :class:`DataVector` wraps one such vector.
 * :meth:`DataVector.write_objective_vector` and
   :meth:`DataVector.read_objective_vector` implement the
-  ``fs-objective-vector-3`` manifest and shard format used by Sauce's
+  ``fs-objective-vector-3`` distributed and ``fs-objective-vector-4`` canonical formats used by Sauce's
   ``fwi_operator`` ``jvp``/``vjp`` actions.
 """
 
@@ -422,7 +422,7 @@ def _sorted_f_map(metadata: Mapping[str, Any]) -> List[Any]:
 class _ObservedSource:
     """Normalized form of one observed-data argument."""
 
-    kind: Literal["job", "stem", "mapping", "dataset", "ref"]
+    kind: Literal["job", "stem", "mapping", "dataset", "ref", "zero"]
     stem: Optional[Path] = None
     ref: Optional[TraceStoreRef] = None
     groups: Mapping[str, ObservedRef] = field(default_factory=dict)
@@ -439,6 +439,8 @@ class _ObservedSource:
     ) -> Optional[ObservedRef]:
         """Return the reference for ``group`` or ``None`` when unbound."""
 
+        if self.kind == "zero":
+            return None
         if self.kind == "mapping":
             if group not in self.groups:
                 return None
@@ -478,6 +480,8 @@ class _ObservedSource:
 
 
 def _normalize_source(value: Any, *, label: str) -> _ObservedSource:
+    if value is None:
+        return _ObservedSource(kind="zero")
     if isinstance(value, ObservedData):
         raise TypeError(f"{label} cannot be another ObservedData")
     if _is_job(value):
@@ -546,6 +550,8 @@ class ObservedData:
 
     Accepted ``source`` forms:
 
+    * ``None`` for zero observed data with explicitly scaled waveform terms
+      (legacy objectives retain their unit-adjoint sensitivity behavior);
     * a FrequenSolve forward job: its packed trace product (or, before it has
       run, its trace output directory) is the observed path stem and its
       ``f_list`` gives the frequencies;
@@ -1296,6 +1302,7 @@ class DataVector:
         state_fingerprint: str,
         term_layout: Union[TermLayout, Sequence[TermLayout]],
         n_ranks: int = 1,
+        schema: str = "fs-objective-vector-3",
     ) -> Path:
         """Write this vector as an ``fs-objective-vector-3`` manifest and shard.
 
@@ -1308,11 +1315,20 @@ class DataVector:
                 state the dual belongs to.
             term_layout: One or more :class:`TermLayout` objects whose
                 ``indices`` select the vector entries of each term.
-            n_ranks: Partition rank count declared in the manifest.
+            n_ranks: Partition rank count declared in a version-3 manifest.
+            schema: Version-3 distributed or version-4 canonical vector format.
+                Linearization actions select this from their saved state.
 
         Returns:
             The manifest path.
         """
+
+        if schema == "fs-objective-vector-4":
+            return self.write_objective_vector_v4(
+                path, state_fingerprint=state_fingerprint, term_layout=term_layout
+            )
+        if schema != "fs-objective-vector-3":
+            raise ValueError(f"unsupported objective vector schema {schema!r}")
 
         import h5py
 
@@ -1394,6 +1410,8 @@ class DataVector:
 
         manifest_path = Path(path)
         manifest = json.loads(manifest_path.read_text())
+        if manifest.get("schema") == "fs-objective-vector-4":
+            return DataVector.read_objective_manifest_v4(path, verify=verify)
         required = {
             "schema",
             "state_fingerprint",
@@ -1470,6 +1488,8 @@ class DataVector:
 
         import h5py
 
+        if manifest["schema"] == "fs-objective-vector-4":
+            return DataVector._gather_rows_v4(manifest)
         n_terms = len(manifest["terms"])
         ids: List[List[np.ndarray]] = [[] for _ in range(n_terms)]
         keys: List[List[np.ndarray]] = [[] for _ in range(n_terms)]
@@ -1622,3 +1642,152 @@ class DataVector:
                 )
             values[layout.indices[order]] = row_values
         return cls(values, space)
+
+    def write_objective_vector_v4(
+        self,
+        path: Union[str, Path],
+        *,
+        state_fingerprint: str,
+        term_layout: Union[TermLayout, Sequence[TermLayout]],
+    ) -> Path:
+        """Write this vector as an ``fs-objective-vector-4`` manifest and file.
+
+        Rows are stored in canonical row-id order in ``<stem>.h5`` beside the
+        manifest; Sauce reads them on any MPI rank count.
+
+        Args:
+            path: Manifest JSON path.
+            state_fingerprint: ``sha256:`` fingerprint of the frozen objective
+                state the dual belongs to.
+            term_layout: One or more :class:`TermLayout` objects whose
+                ``indices`` select the vector entries of each term.
+
+        Returns:
+            The manifest path.
+        """
+
+        import h5py
+
+        layouts = (
+            [term_layout] if isinstance(term_layout, TermLayout) else list(term_layout)
+        )
+        if not layouts:
+            raise ValueError("write_objective_vector requires at least one term")
+        ids = [layout.id for layout in layouts]
+        if len(set(ids)) != len(ids):
+            raise ValueError("objective term ids must be unique")
+        state = _normalize_hash(state_fingerprint)
+        if not state.startswith("sha256:") or len(state) != 71:
+            raise ValueError("state_fingerprint must be a sha256 fingerprint")
+        for layout in layouts:
+            if layout.indices is None or not layout.complete:
+                raise ValueError(
+                    f"term {layout.id!r} needs complete data-space indices"
+                )
+
+        manifest_path = Path(path)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        data_path = manifest_path.with_suffix(".h5")
+        with h5py.File(data_path, "w") as h5:
+            for index, layout in enumerate(layouts):
+                assert layout.indices is not None  # Validated above.
+                order = np.argsort(layout.row_ids, kind="stable")
+                values = self.values[layout.indices[order]]
+                group = h5.create_group(f"/terms/{index}")
+                group.create_dataset(
+                    "coordinate_keys",
+                    data=layout.coordinate_keys[order].astype(np.int32),
+                )
+                group.create_dataset(
+                    "values",
+                    data=np.column_stack((values.real, values.imag)).astype(np.float64),
+                )
+
+        manifest: Dict[str, Any] = {
+            "schema": "fs-objective-vector-4",
+            "state_fingerprint": state,
+            "file": data_path.name,
+            "sha256": file_sha256(data_path),
+            "terms": [layout.manifest_entry() for layout in layouts],
+        }
+        manifest["manifest_fingerprint"] = canonical_json_sha256(manifest)
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        return manifest_path
+
+    @staticmethod
+    def read_objective_manifest_v4(
+        path: Union[str, Path], *, verify: bool = True
+    ) -> Dict[str, Any]:
+        """Load and validate an ``fs-objective-vector-4`` manifest.
+
+        Args:
+            path: Manifest JSON path.
+            verify: Recompute the manifest fingerprint and payload hash.
+
+        Returns:
+            The manifest with ``file`` resolved to an absolute path.
+        """
+
+        manifest_path = Path(path)
+        manifest = json.loads(manifest_path.read_text())
+        required = {
+            "schema",
+            "state_fingerprint",
+            "manifest_fingerprint",
+            "file",
+            "sha256",
+            "terms",
+        }
+        if manifest.get("schema") != "fs-objective-vector-4":
+            raise ValueError(
+                "obsolete objective vector format; regenerate using version 4"
+            )
+        missing = sorted(required.difference(manifest))
+        if missing:
+            raise ValueError(f"objective manifest is missing {', '.join(missing)}")
+        if not manifest["terms"]:
+            raise ValueError("objective manifest requires terms")
+        if verify:
+            basis = {k: v for k, v in manifest.items() if k != "manifest_fingerprint"}
+            if canonical_json_sha256(basis) != _normalize_hash(
+                manifest["manifest_fingerprint"]
+            ):
+                raise ValueError("objective manifest fingerprint mismatch")
+        data_path = Path(manifest["file"])
+        if not data_path.is_absolute():
+            data_path = manifest_path.parent / data_path
+        if not data_path.exists():
+            raise FileNotFoundError(f"missing objective vector file {data_path}")
+        if verify and file_sha256(data_path) != _normalize_hash(manifest["sha256"]):
+            raise ValueError(f"corrupt objective vector file {data_path}")
+        manifest["file"] = str(data_path)
+        return manifest
+
+    @staticmethod
+    def _gather_rows_v4(
+        manifest: Mapping[str, Any],
+    ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Read every term's canonical rows; row ``i`` is stored at position ``i``."""
+
+        import h5py
+
+        result = []
+        with h5py.File(manifest["file"], "r") as h5:
+            for index, term in enumerate(manifest["terms"]):
+                group = h5.get(f"terms/{index}")
+                if group is None:
+                    raise ValueError(f"objective vector file lacks term {index}")
+                keys = np.asarray(group["coordinate_keys"][()], dtype=np.int64).reshape(
+                    -1, 3
+                )
+                raw = np.asarray(group["values"][()], dtype=np.float64).reshape(-1, 2)
+                n_global = int(term["n_global_rows"])
+                if not (keys.shape[0] == raw.shape[0] == n_global):
+                    raise ValueError(
+                        f"objective term {term['id']!r} stores {raw.shape[0]} rows; "
+                        f"expected {n_global}"
+                    )
+                result.append(
+                    (np.arange(1, n_global + 1), keys, raw[:, 0] + 1j * raw[:, 1])
+                )
+        return result

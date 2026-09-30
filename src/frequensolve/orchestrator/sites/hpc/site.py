@@ -1800,6 +1800,8 @@ class SlurmSite(BaseSite):
                                 "hdf5_shard",
                                 "packed_hdf5",
                                 "collection_manifest",
+                                "packed_trace",
+                                "packed_manifest",
                             ),
                             retention="durable",
                         ),
@@ -1868,7 +1870,10 @@ class SlurmSite(BaseSite):
 
         local_results = job._local_path / "results"
         local_results.mkdir(parents=True, exist_ok=True)
-        self.fetch_artifacts(job, requests=requests, include_defaults=True)
+        # The packed trace manifest lives only in the pack operation result.
+        self.fetch_artifacts(
+            job, requests=requests, include_defaults=True, operations=("pack",)
+        )
         if _job_requires_postprocess(job):
             self.fetch_postprocess(job)
         return local_results
@@ -1908,8 +1913,11 @@ class SlurmSite(BaseSite):
     ):
         """Fetch authoritative task metadata and named operation results."""
 
-        tasks = tuple(range(1, job.n_tasks + 1))
-        requested_operations = tuple(dict.fromkeys(operations))
+        postprocess_only = bool(getattr(job, "postprocess_only", False))
+        tasks = () if postprocess_only else tuple(range(1, job.n_tasks + 1))
+        requested_operations = tuple(
+            dict.fromkeys((*operations, "smooth") if postprocess_only else operations)
+        )
         remote_root = self._remote_result_dir(job)
         local_root = job._result_path
         local_root.parent.mkdir(parents=True, exist_ok=True)
@@ -1929,26 +1937,24 @@ class SlurmSite(BaseSite):
             prefix=".fs-catalog-", dir=local_root.parent
         ) as temporary:
             stage = Path(temporary)
-            self._transfer.get_files(
-                remote_root,
-                stage,
-                (index_path,),
-                missing_ok=True,
-            )
             use_index = False
-            try:
-                catalog = TaskIndex.read(stage)
-                self._validate_remote_catalog(job, catalog, tasks)
-                use_index = True
-            except (ArtifactContractError, OSError, RuntimeError):
+            catalog: Union[ArtifactCatalog, TaskIndex]
+            if postprocess_only:
+                catalog = ArtifactCatalog.read_task_results(stage, tasks=())
+            else:
                 self._transfer.get_files(
-                    remote_root,
-                    stage,
-                    result_paths,
-                    missing_ok=True,
+                    remote_root, stage, (index_path,), missing_ok=True
                 )
-                catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
-                self._validate_remote_catalog(job, catalog, tasks)
+                try:
+                    catalog = TaskIndex.read(stage)
+                    self._validate_remote_catalog(job, catalog, tasks)
+                    use_index = True
+                except (ArtifactContractError, OSError, RuntimeError):
+                    self._transfer.get_files(
+                        remote_root, stage, result_paths, missing_ok=True
+                    )
+                    catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
+                    self._validate_remote_catalog(job, catalog, tasks)
 
             if operation_paths:
                 self._transfer.get_files(
@@ -1970,6 +1976,10 @@ class SlurmSite(BaseSite):
                 self._validate_remote_operation(job, result)
                 operation_results[operation] = result
 
+            if postprocess_only and "smooth" not in operation_results:
+                raise RuntimeError(
+                    "Current successful smooth operation metadata is missing"
+                )
             candidates = (index_path,) if use_index else result_paths
             publish = [path for path in candidates if (stage / path).is_file()]
             publish.extend(
@@ -1982,7 +1992,7 @@ class SlurmSite(BaseSite):
                 target = local_root / relative
                 with atomic_output_path(target) as temporary_path:
                     shutil.copyfile(source, temporary_path)
-            if not use_index:
+            if not use_index and not postprocess_only:
                 (local_root / index_path).unlink(missing_ok=True)
             for operation, relative in operation_paths.items():
                 if operation not in operation_results:
@@ -2679,11 +2689,22 @@ class SlurmSite(BaseSite):
         if scheduler_state in {"failed", "cancelled", "canceled", "timeout"}:
             reason = payload.get("abort_reason")
             detail = f": {reason}" if reason else ""
+            message = f"Adaptive scheduler reported {scheduler_state}{detail}"
+            failed_reasons = payload.get("failed_reasons")
+            if isinstance(failed_reasons, Mapping) and failed_reasons:
+                tasks = ", ".join(
+                    f"task {task} ({task_reason})"
+                    for task, task_reason in list(failed_reasons.items())[:5]
+                )
+                message = f"{message}; failed tasks: {tasks}"
+                if len(failed_reasons) > 5:
+                    message = f"{message}, {len(failed_reasons) - 5} more"
             return {
-                "message": f"Adaptive scheduler reported {scheduler_state}{detail}",
+                "message": message,
                 "raw": {
                     "state": scheduler_state,
                     "stale": False,
+                    **({"phase": payload["phase"]} if payload.get("phase") else {}),
                 },
             }
         if slurm_status != "running":
@@ -3604,6 +3625,7 @@ class SlurmSite(BaseSite):
             "mem_cushion": mem_cushion,
             "boost_max_factor": boost_max_factor,
             "failure_tolerance": tolerate_failures,
+            "require_all_tasks": bool(postprocess_job),
             "sizing_json": str(sizing_json),
             "launch_delay_seconds": launch_delay_seconds,
         }

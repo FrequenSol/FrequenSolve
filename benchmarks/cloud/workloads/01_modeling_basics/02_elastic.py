@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 01_modeling_basics/02_elastic.ipynb
-Source SHA-256: f1a04347a94621c215a9a792637f8fb987c2a43f117c37a4fc208de2be6082f1
+Source SHA-256: 0d19c1d172b87424905303c0b08b9555f6539a8d203cb20c7127ee6715c4f525
 """
 
 # %% source cell 2
@@ -23,6 +23,8 @@ sim = project.new_simulation(
     dimension=2,
     units={"length": "km", "velocity": "km/s", "density": "g/cm^3"},
 )
+sim += fs.Discretization(method="Galerkin")
+sim += fs.SolverConfig(grids=1)
 model = fs.LayeredModel(name="model", dimension=2, x_limits=[0.0, 1.0])
 model.add_surface(name="top", depth=0.0 * u.km)
 model.add_layer(
@@ -47,7 +49,7 @@ sim += model
 
 # %% source cell 8
 sim += model.hex_mesh_generator([8, 4])
-sim.mesh.set_adapt(elems_per_wave=2.0, order=4, f_low=5.0)
+sim.mesh.set_adapt(elems_per_wave=1.0, order=4, f_low=5.0)
 sim.mesh.set_source_grading(d1=0.05, factor=4.0)
 sim += fs.BoundaryCondition(conditions=["free"], boundaries=["z_min"])
 sim += fs.BoundaryCondition(
@@ -69,7 +71,12 @@ sim += acq
 # %% source cell 12
 site = fs.Site()
 job = fs.TimeDomainJob(
-    name="time_no_q", simulation=sim, f_min=0.0, f_max=45.0, T_max=1.0
+    name="time_no_q",
+    simulation=sim,
+    f_min=0.0,
+    f_max=45.0,
+    T_max=1.0,
+    damping_factor=10,
 )
 result = site.submit(job).wait()
 traces = result.traces(upscale=4)
@@ -89,7 +96,12 @@ for layer in attenuated.model.layers:
     layer.properties["Qs"] = 5.0
 project += attenuated
 q_job = fs.TimeDomainJob(
-    name="time_q", simulation=attenuated, f_min=0.0, f_max=45.0, T_max=1.0
+    name="time_q",
+    simulation=attenuated,
+    f_min=0.0,
+    f_max=45.0,
+    T_max=1.0,
+    damping_factor=10,
 )
 q_result = site.submit(q_job).wait()
 q_traces = q_result.traces(upscale=4)
@@ -103,7 +115,7 @@ site_fd = fs.Site()
 elastic_pv_output = fs.VtkOutput.domain(
     name="pv_elastic",
     path="paraview",
-    fields=["velocity_z", "stress_zz"],
+    fields=["displacement_z"],
     properties=["vp", "vs"],
     show_pml=True,
     upscale=1,

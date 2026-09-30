@@ -365,7 +365,7 @@ def test_objective_vector_write_read_round_trip(tmp_path, space):
         "n_ranks": 1,
         "compatibility": "same_mesh_partition",
     }
-    shard = Path(manifest["shards"][0]["file"])
+    shard = tmp_path / manifest["shards"][0]["file"]
     assert shard == (tmp_path / "dual_rank_0.h5").resolve()
     assert manifest["shards"][0]["sha256"] == file_sha256(shard)
     assert manifest["terms"] == [layouts[0].manifest_entry()]
@@ -403,7 +403,7 @@ def test_objective_vector_reader_reassembles_multiple_shards(tmp_path, space):
         manifest_path, state_fingerprint=STATE, term_layout=layout
     )
     manifest = json.loads(manifest_path.read_text())
-    original = Path(manifest["shards"][0]["file"])
+    original = tmp_path / manifest["shards"][0]["file"]
 
     with h5py.File(original, "r") as h5:
         ids = h5["/terms/0/row_ids"][()]
@@ -440,7 +440,7 @@ def test_objective_vector_reader_rejects_corrupt_or_incomplete_files(tmp_path, s
         manifest_path, state_fingerprint=STATE, term_layout=single.term_layouts()
     )
     manifest = json.loads(manifest_path.read_text())
-    shard = Path(manifest["shards"][0]["file"])
+    shard = tmp_path / manifest["shards"][0]["file"]
 
     tampered = dict(manifest, state_fingerprint="sha256:" + "11" * 32)
     (tmp_path / "tampered.json").write_text(json.dumps(tampered))
@@ -522,3 +522,82 @@ def test_objective_vector_writer_covers_every_rank_including_empty(
         np.testing.assert_array_equal(
             restored.values[layout.indices], vector.values[layout.indices]
         )
+
+
+def test_zero_observed_data_resolves_without_a_trace_file():
+    from types import SimpleNamespace
+
+    data = ObservedData(None)
+    simulation = SimpleNamespace(
+        acquisition=SimpleNamespace(receiver_groups=[SimpleNamespace(name="surface")])
+    )
+    groups = data.resolve(simulation)
+    assert groups[0].to_fs() == {"name": "surface"}
+
+
+@pytest.mark.parametrize("schema", ["fs-objective-vector-3", "fs-objective-vector-4"])
+def test_objective_vectors_relocate_and_detect_corruption(tmp_path, space, schema):
+    import shutil
+
+    one = DataSpace(frequencies=[5.0], segments=space.segments)
+    vector = one.random(seed=6)
+    original = tmp_path / "original"
+    original.mkdir()
+    path = vector.write_objective_vector(
+        original / "dual.json",
+        state_fingerprint=STATE,
+        term_layout=one.term_layouts(),
+        schema=schema,
+    )
+    destination = tmp_path / "remote"
+    shutil.copytree(original, destination)
+    shutil.rmtree(original)
+    got = DataVector.read_objective_vector(
+        destination / path.name, one, state_fingerprint=STATE
+    )
+    np.testing.assert_array_equal(got.values, vector.values)
+    with pytest.raises(ValueError, match="another baseline"):
+        DataVector.read_objective_vector(
+            destination / path.name, one, state_fingerprint="sha256:" + "f" * 64
+        )
+    payload = next(destination.glob("*.h5"))
+    with h5py.File(payload, "r+") as h5:
+        h5["terms/0/values"][0, 0] += 1
+    with pytest.raises(ValueError, match="corrupt"):
+        DataVector.read_objective_vector(destination / path.name, one)
+
+
+def test_canonical_state_keeps_simulated_and_term_configuration(tmp_path):
+    from frequensolve.imaging._objective import ObjectiveState
+
+    cache = tmp_path / "state.h5"
+    with h5py.File(cache, "w") as h5:
+        term = h5.create_group("terms/0")
+        term["coordinate_keys"] = [[1, 2, 1], [1, 4, 1]]
+        term["n_global_rows"] = [2]
+        term["simulated"] = [[2.0, 1.0], [4.0, 2.0]]
+        term["objective_residual"] = [[1.0, 0.0], [2.0, 0.0]]
+    payload = {
+        "schema": "fs-objective-linearization-4",
+        "terms": [
+            {
+                "id": "waveform",
+                "receiver_group": "surface",
+                "normalization": {"scale": 1.0},
+                "cache": {"file": cache.name, "group": "/terms/0"},
+                "runtime": {"cache_fingerprint": file_sha256(cache)},
+            }
+        ],
+    }
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(payload))
+    state = ObjectiveState(path)
+    assert state.vector_schema == "fs-objective-vector-4"
+    np.testing.assert_array_equal(
+        state.terms["waveform"]["simulated"], [2 + 1j, 4 + 2j]
+    )
+    assert state.term_configs["waveform"][0]["normalization"] == {"scale": 1.0}
+    with h5py.File(cache, "r+") as h5:
+        h5["terms/0/simulated"][0, 0] += 1
+    with pytest.raises(ValueError, match="cache hash"):
+        ObjectiveState(path)

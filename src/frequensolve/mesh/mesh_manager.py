@@ -15,6 +15,7 @@ from frequensolve.util.mixins import (
     merge_extra,
 )
 
+from ._root_patch import RootPatchDescriptor
 from .mesh_generators import BaseMeshGenerator
 
 __all__ = [
@@ -148,7 +149,7 @@ def _serialize_adapt_extra(extra: Mapping[str, Any], ctx=None) -> Dict[str, Any]
 def _serialize_hp_payload(value: Any, ctx=None) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(
-            "hp adaptivity settings must be a mapping, " f"got {type(value).__name__}"
+            f"hp adaptivity settings must be a mapping, got {type(value).__name__}"
         )
     payload = copy.deepcopy(dict(value))
     if "order" in payload and "p_order" in payload:
@@ -177,7 +178,7 @@ def _serialize_hp_payload(value: Any, ctx=None) -> Dict[str, Any]:
 def _serialize_hp_overrides(value: Any, ctx=None) -> List[Dict[str, Any]]:
     if not isinstance(value, (list, tuple)):
         raise TypeError(
-            "hp.overrides must be a list of mappings, " f"got {type(value).__name__}"
+            f"hp.overrides must be a list of mappings, got {type(value).__name__}"
         )
 
     out = []
@@ -865,6 +866,7 @@ class MeshManager:
     format: Optional[str] = None
     parallel: Optional[MeshParallelism] = None
     adapt: Optional[MeshAdaptor] = None
+    root_patch: Optional["RootPatchDescriptor"] = None
 
     def set_adapt(
         self,
@@ -1065,6 +1067,10 @@ class MeshManager:
 
         data = copy.deepcopy(data)
         manager = cls()
+        if "root_patch" in data:
+            from frequensolve.mesh._root_patch import RootPatchDescriptor
+
+            manager.root_patch = RootPatchDescriptor.from_fs(data["root_patch"])
 
         # From file
         file = data.get("file")
@@ -1087,23 +1093,7 @@ class MeshManager:
             )
 
         if "adapt" in data:
-            a = copy.deepcopy(data["adapt"])
-            manager.set_adapt(
-                elems_per_wave=_pop_elems_per_wave(a),
-                order=a.pop("order", 3),
-                adapt_sources=a.pop("adapt_sources", 0),
-                adapt_receivers=a.pop("adapt_receivers", 0),
-                jump_tolerance=a.pop("jump_tolerance", None),
-                jump_factor=a.pop("jump_factor", None),
-                smooth_refs=a.pop("smooth_refs", False),
-                f_low=_pop_f_low(a),
-                f_high=a.pop("f_high", None),
-                adapt_order=a.pop("adapt_order", False),
-                source_grading=_pop_alias(a, "source_grading", "src_grading"),
-                receiver_grading=_pop_alias(a, "receiver_grading", "rcv_grading"),
-                surface_gradings=a.pop("surface_gradings", None),
-                **a,
-            )
+            manager.adapt = MeshAdaptor.from_fs(data["adapt"])
 
         return manager
 
@@ -1134,6 +1124,10 @@ class MeshManager:
         mesh_dict = {
             "adapt": self.adapt.to_fs(ctx),
         }
+        if self.root_patch is not None:
+            if self.mesh is not None or self.file is None:
+                raise ValueError("A root patch requires its immutable parent mesh file")
+            mesh_dict["root_patch"] = self.root_patch.to_fs()
 
         if self.parallel:
             mesh_dict["parallel"] = self.parallel.to_fs(ctx)

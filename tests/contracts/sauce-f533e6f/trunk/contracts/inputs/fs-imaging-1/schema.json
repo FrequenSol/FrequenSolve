@@ -98,13 +98,47 @@
       },
       "additionalProperties": false
     },
+    "hvObjective": {
+      "type": "object",
+      "required": ["kind", "kappa", "lambda", "epsilon", "discretization", "inner_solver"],
+      "properties": {
+        "kind": {"const": "hv"},
+        "kappa": {"type": "number", "exclusiveMinimum": 0, "description": "Positive transport-velocity penalty in normalized receiver coordinates."},
+        "lambda": {"type": "number", "minimum": 0, "description": "Nonnegative velocity-curvature penalty."},
+        "epsilon": {"type": "number", "exclusiveMinimum": 0, "description": "Positive velocity-gradient penalty."},
+        "discretization": {
+          "type": "object",
+          "required": ["path_intervals", "order"],
+          "properties": {
+            "path_intervals": {"type": "integer", "minimum": 1},
+            "spatial_intervals": {"type": "integer", "minimum": 1, "description": "Initial auxiliary spatial cells, independent of receiver positions. Defaults to path_intervals."},
+            "order": {"type": "integer", "minimum": 1, "description": "Auxiliary H1 element order."},
+            "max_refinements": {"type": "integer", "minimum": 0, "default": 4},
+            "relative_mesh_tolerance": {"type": "number", "exclusiveMinimum": 0, "default": 0.01}
+          },
+          "additionalProperties": false
+        },
+        "inner_solver": {
+          "type": "object",
+          "required": ["max_iterations", "relative_energy_tolerance", "relative_stationarity_tolerance"],
+          "properties": {
+            "max_iterations": {"type": "integer", "minimum": 1},
+            "relative_energy_tolerance": {"type": "number", "exclusiveMinimum": 0},
+            "relative_stationarity_tolerance": {"type": "number", "exclusiveMinimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "misfitComparison": {
       "type": "object",
       "properties": {
         "kind": {
           "enum": [
             "waveform",
-            "phase_derivative"
+            "phase_derivative",
+            "spectral_derivative"
           ],
           "default": "waveform",
           "description": "Attribute compared before the radial objective is applied."
@@ -336,7 +370,7 @@
         "kind": {
           "type": "string",
           "minLength": 1,
-          "description": "Built-ins include offset_power, offset_taper, source_scalar_fit, source_spectrum_correction, component_scale, trace_normalize, frequency_weight, trace_mask, trace_weight, receiver_ar1_whiten, scholte_notch, slow_velocity_mute, amplitude_clip, and wavefield_source_taper."
+          "description": "Built-ins include offset_power, offset_taper, source_scalar_fit, source_spectrum_correction, component_scale, trace_normalize, frequency_weight, trace_mask, trace_weight, material_weighting, receiver_ar1_whiten, scholte_notch, slow_velocity_mute, amplitude_clip, and wavefield_source_taper."
         },
         "stage": {
           "enum": [
@@ -350,11 +384,79 @@
         },
         "params": {
           "type": "object",
-          "description": "Hook-specific deterministic parameters. trace_weight accepts finite nonnegative weights and an explicit receiver, component_receiver, source_component_receiver, or sparse_trace layout; production arrays use an HDF5Dense reference while compact inline arrays remain supported. receiver_ar1_whiten accepts a finite correlation with absolute value below one and applies the exact stationary AR(1) inverse covariance factor along an ordered dense receiver axis. source_scalar_fit accepts norm (default inherit), max_iterations, relative_tolerance, and matching robust-loss parameters; n_irls is a deprecated max_iterations alias. source_spectrum_correction requires simulated stage plus complex scale and frequency_derivative arrays, each containing one broadcast value or global per-RHS values; complex entries are [real, imaginary] pairs and the derivative is with respect to physical Hz. scholte_notch accepts exactly one of phase_velocity or angular wavenumber plus relative_half_width, relative_taper_width, spacing_tolerance, and total or frozen spectral_derivative. slow_velocity_mute accepts stop_velocity, pass_velocity, reject_slow or keep_slow mode, spacing_tolerance, and the same spectral_derivative policy. Receiver-wavenumber hooks require a regularly sampled dense cable and use trace_pair stage. For taper hooks, absolute d0/d1 values may carry physical units via a shared units field or per-value {value, units} objects; domain_fraction d0/d1 values are dimensionless fractions of the largest domain extent. Acquisition-spacing scales are unsupported.",
+          "description": "Hook-specific deterministic parameters. trace_weight accepts finite nonnegative weights and an explicit receiver, component_receiver, source_component_receiver, or sparse_trace layout; production arrays use an HDF5Dense reference while compact inline arrays remain supported. receiver_ar1_whiten accepts a finite correlation with absolute value below one and applies the exact stationary AR(1) inverse covariance factor along an ordered dense receiver axis. source_scalar_fit accepts norm (default inherit), max_iterations, relative_tolerance, and matching robust-loss parameters; n_irls is a deprecated max_iterations alias. source_spectrum_correction requires simulated stage plus complex scale and frequency_derivative arrays, each containing one broadcast value or global per-RHS values; complex entries are [real, imaginary] pairs and the derivative is with respect to physical Hz. scholte_notch accepts exactly one of phase_velocity or angular wavenumber plus relative_half_width, relative_taper_width, spacing_tolerance, and total or frozen spectral_derivative. slow_velocity_mute accepts stop_velocity, pass_velocity, reject_slow or keep_slow mode, spacing_tolerance, and the same spectral_derivative policy. Receiver-wavenumber hooks require a regularly sampled dense cable and use trace_pair stage. For taper hooks, absolute d0/d1 values may carry physical units via a shared units field or per-value {value, units} objects; domain_fraction d0/d1 values are dimensionless fractions of the largest domain extent. Acquisition-spacing scales are unsupported. material_weighting defines disjoint one-based component blocks, a material coefficient and output units. It freezes receiver-local factors on first application, applies W to both traces and W^H to covectors, and requires frequency-independent coefficients. Unspecified components keep their input coordinates; live model-dependent weighting is unavailable.",
           "additionalProperties": true
         }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "material_weighting"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "stage": {
+                "const": "trace_pair"
+              },
+              "params": {
+                "type": "object",
+                "required": [
+                  "blocks"
+                ],
+                "properties": {
+                  "model_policy": {
+                    "const": "frozen",
+                    "default": "frozen"
+                  },
+                  "blocks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "components",
+                        "coefficient",
+                        "units"
+                      ],
+                      "properties": {
+                        "components": {
+                          "type": "array",
+                          "minItems": 1,
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        },
+                        "coefficient": {
+                          "$ref": "../../fragments/fs-material-coefficient.schema.json"
+                        },
+                        "units": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      ]
     },
     "preprocessConfig": {
       "description": "Preprocessing hook list or object. An explicit empty array disables default legacy preprocessing at that scope.",
@@ -461,7 +563,7 @@
           "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
         },
         "receiver_group": {"type": "string", "minLength": 1},
-        "objective": {"$ref": "#/$defs/misfitObjective"},
+        "objective": {"oneOf": [{"$ref": "#/$defs/misfitObjective"}, {"$ref": "#/$defs/hvObjective"}]},
         "comparison": {"$ref": "#/$defs/misfitComparison"},
         "weight": {
           "type": "number",
@@ -472,6 +574,25 @@
         "normalization": {"$ref": "#/$defs/objectiveNormalization"},
         "preprocess": {"$ref": "#/$defs/preprocessConfig"}
       },
+      "allOf": [{
+        "if": {
+          "required": ["objective"],
+          "properties": {"objective": {"required": ["kind"], "properties": {"kind": {"const": "hv"}}}}
+        },
+        "then": {
+          "required": ["comparison"],
+          "properties": {
+            "comparison": {"required": ["kind"], "properties": {"kind": {"const": "waveform"}}},
+            "normalization": {
+              "properties": {
+                "scale": {"required": ["kind", "value"], "properties": {"kind": {"const": "explicit"}}},
+                "reduction": {"const": "sum"}
+              },
+              "required": ["scale", "reduction"]
+            }
+          }
+        }
+      }],
       "additionalProperties": false
     },
     "misfit": {
@@ -542,7 +663,7 @@
               "comparison": {
                 "required": ["kind"],
                 "properties": {
-                  "kind": {"const": "phase_derivative"}
+                  "kind": {"enum": ["phase_derivative", "spectral_derivative"]}
                 }
               }
             },
@@ -687,7 +808,7 @@
     },
     "direction": {
       "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-      "description": "Read-only HDF5 Cartesian direction file consumed by incremental imaging workflows. The file contains image/<image-name> datasets in the same solver image/value-frame format as an aggregate image file."
+      "description": "Read-only HDF5 Cartesian direction file consumed by incremental imaging workflows. The file contains image/<image-name> datasets in the same solver image/value-convention format as an aggregate image file."
     },
     "zero_direction": {
       "type": "boolean",

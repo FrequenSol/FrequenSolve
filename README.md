@@ -91,7 +91,7 @@ lin = problem.linearize()          # value, gradient, jacobian, normal
 result = im.FWI(
     problem,
     stages=im.Stage.bands([[4.0], [4.0, 6.0, 8.0]], iterations=[10, 15]),
-    penalty=im.Tikhonov(alpha=1e-2),
+    regularization=im.Tikhonov(alpha=1e-2),
     checkpoint="checkpoint.h5",
 ).run()
 ```

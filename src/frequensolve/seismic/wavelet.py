@@ -1,14 +1,16 @@
 """Analytical wavelet and taper utilities for seismic source signals."""
 
+import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Callable, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 from scipy.signal import chirp, correlate, hilbert
 from scipy.stats import norm
 
 from frequensolve._optional import optional_dependency_error
+from frequensolve.seismic.spectra import SampledWavelet, _readonly
 from frequensolve.util.fft import get_fft_backend
 
 __all__ = [
@@ -191,10 +193,10 @@ class Wavelet:
     _center: float = field(default=0.0, init=False, repr=False)
     _causal: bool = field(default=False, init=False, repr=False)
     _scale: float = field(default=1.0, init=False, repr=False)
-    _times: np.ndarray = field(default=None, init=False)
-    _signal: np.ndarray = field(default=None, init=False)
-    _frequencies: np.ndarray = field(default=None, init=False)
-    _spectrum: np.ndarray = field(default=None, init=False)
+    _times: Optional[np.ndarray] = field(default=None, init=False)
+    _signal: Optional[np.ndarray] = field(default=None, init=False)
+    _frequencies: Optional[np.ndarray] = field(default=None, init=False)
+    _spectrum: Optional[np.ndarray] = field(default=None, init=False)
 
     def __init__(
         self,
@@ -239,7 +241,7 @@ class Wavelet:
         return self._scale
 
     @property
-    def times(self) -> np.ndarray:
+    def times(self) -> Optional[np.ndarray]:
         """Return the time samples used by the cached wavelet signal."""
 
         return self._times
@@ -252,15 +254,31 @@ class Wavelet:
             times: The new time samples.
         """
 
-        times = np.asarray(times)
+        times = np.asarray(times, dtype=float)
+        if (
+            times.ndim != 1
+            or len(times) < 2
+            or not np.all(np.isfinite(times))
+            or times[1] <= times[0]
+            or not np.allclose(
+                np.diff(times), times[1] - times[0], rtol=1e-7, atol=1e-12
+            )
+        ):
+            raise ValueError("Wavelet times must be finite, uniform and increasing")
         if self._times is not None and np.array_equal(times, self._times):
             return
         self._generate_for_times(times, invalidate_frequencies=True)
 
+    def _generate(
+        self, times: np.ndarray, taper: Optional[Callable[[int], np.ndarray]]
+    ) -> None:
+        """Generate samples on the requested grid in a concrete wavelet class."""
+        raise NotImplementedError("Use a concrete analytical wavelet")
+
     def _generate_for_times(
         self, times: np.ndarray, *, invalidate_frequencies: bool
     ) -> None:
-        self._times = np.asarray(times)
+        self._times = _readonly(times, np.float64)
         self._spectrum = None
         if invalidate_frequencies:
             self._frequencies = None
@@ -274,7 +292,8 @@ class Wavelet:
 
         # if self.causal:
         #     self._signal = Wavelet._make_causal(self.signal)
-        self._signal = np.roll(self._signal, shift=offset)
+        assert self._signal is not None
+        self.signal = np.roll(self._signal, shift=offset)
 
     def recenter(self, center: float, times: Optional[np.ndarray] = None) -> np.ndarray:
         """Set the center time and regenerate cached time/frequency samples.
@@ -294,10 +313,11 @@ class Wavelet:
             self._generate_for_times(self._times, invalidate_frequencies=False)
         else:
             self._evaluate_initial()
+        assert self.signal is not None
         return self.signal
 
     @property
-    def signal(self) -> np.ndarray:
+    def signal(self) -> Optional[np.ndarray]:
         """Return the cached time-domain wavelet signal."""
 
         return self._signal
@@ -306,7 +326,22 @@ class Wavelet:
     def signal(self, signal: np.ndarray) -> None:
         """Set the cached time-domain wavelet signal."""
 
-        self._signal = signal
+        values = np.asarray(signal)
+        if (
+            values.ndim != 1
+            or values.dtype.kind not in "fiu"
+            or not np.all(np.isfinite(values))
+        ):
+            raise ValueError(
+                "Wavelet signal must be a finite real one-dimensional array"
+            )
+        if self._times is None or len(values) != len(self._times):
+            raise ValueError(
+                "Signal length must match an explicit time grid; use SampledWavelet for recordings"
+            )
+        self._signal = _readonly(values, np.float64)
+        self._spectrum = None
+        self._frequencies = None
 
     @property
     def spectrum(self):
@@ -318,7 +353,7 @@ class Wavelet:
         if self._spectrum is None:
             self._evaluate_initial()
             fft = get_fft_backend()
-            self._spectrum = fft.rfft(self.signal).astype(np.complex64)
+            self._spectrum = _readonly(fft.rfft(self.signal), np.complex128)
         return self._spectrum
 
     @property
@@ -330,10 +365,11 @@ class Wavelet:
         """
         if self._frequencies is None:
             self._evaluate_initial()
-            n = len(self._times) - 1
+            assert self.signal is not None and self.times is not None
+            n = len(self.signal)
             dt = self.times[1] - self.times[0]
             fft = get_fft_backend()
-            self._frequencies = fft.rfftfreq(n, d=dt).astype(np.float32)
+            self._frequencies = _readonly(fft.rfftfreq(n, d=dt), np.float64)
         return self._frequencies
 
     def evaluate(self, times: np.ndarray) -> np.ndarray:
@@ -348,7 +384,39 @@ class Wavelet:
 
         # Setting times will trigger re-evaluation if needed
         self.times = times
+        assert self.signal is not None
         return self.signal
+
+    def sample(
+        self, times: np.ndarray, *, normalization: str = "dft"
+    ) -> SampledWavelet:
+        """Evaluate on an explicit grid without changing this definition or caches.
+
+        Every supplied time is one sample, including the last. For an FFT grid
+        with n samples, pass t0 + arange(n) * dt, not a repeated endpoint.
+        """
+        evaluated = copy.deepcopy(self)
+        evaluated._times = None
+        evaluated.times = times
+        assert evaluated.times is not None
+        # Generate zero-lag samples, then shift spectrally rather than rounding
+        # the center to a sample index. The underlying analytical grid is periodic.
+        taper = self._get_window_callable(evaluated.times, evaluated.window)
+        evaluated._generate(evaluated.times, taper)
+        dt = evaluated.times[1] - evaluated.times[0]
+        signal = evaluated.signal
+        assert signal is not None
+        if not self.causal:
+            phase = np.exp(
+                -2j
+                * np.pi
+                * np.fft.rfftfreq(len(signal), dt)
+                * (self.center - evaluated.times[0])
+            )
+            signal = np.fft.irfft(np.fft.rfft(signal) * phase, n=len(signal))
+        return SampledWavelet(
+            signal, dt=dt, t0=evaluated.times[0], normalization=normalization
+        )
 
     def _evaluate_initial(self):
         if self.times is None:
@@ -363,7 +431,7 @@ class Wavelet:
             Union[WindowFunction, Tuple[Literal["gaussian", "blackman"], float]]
         ] = None,
         sigma: Optional[float] = None,
-    ) -> Callable[[int], np.ndarray]:
+    ) -> Optional[Callable[[int], np.ndarray]]:
         """Get a callable that returns a window of length n."""
 
         if isinstance(window, tuple):
@@ -411,6 +479,12 @@ class Wavelet:
         return signal_min
 
     def plot(self, ax_time=None, ax_freq=None, **kwargs):
+        """Plot on a private display grid without modifying evaluation state."""
+        return copy.deepcopy(self)._plot(ax_time=ax_time, ax_freq=ax_freq, **kwargs)
+
+    def _plot(
+        self, ax_time: Any = None, ax_freq: Any = None, **kwargs: Any
+    ) -> Tuple[Any, Any]:
         """Plot the time-domain signal and frequency spectrum.
 
         Args:
@@ -436,6 +510,7 @@ class Wavelet:
 
         self._evaluate_initial()
 
+        assert self.times is not None and self.signal is not None
         f_max = kwargs.pop("f_max", self.f_max)
 
         # Axis limit kwargs
@@ -577,7 +652,9 @@ class RickerWavelet(Wavelet):
 
         self.f_max = 3 * self.f
 
-    def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
+    def _generate(
+        self, times: np.ndarray, taper: Optional[Callable[[int], np.ndarray]]
+    ) -> None:
         """Generate the wavelet signal."""
 
         tau = _zero_phase_times(times)
@@ -628,7 +705,9 @@ class OrmsbyWavelet(Wavelet):
             )
         self.f_max = 1.2 * self.f[-1]
 
-    def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
+    def _generate(
+        self, times: np.ndarray, taper: Optional[Callable[[int], np.ndarray]]
+    ) -> None:
         """Generate the wavelet signal."""
 
         if len(times) < 2:
@@ -682,7 +761,9 @@ class KlauderWavelet(Wavelet):
 
         self.f_max = 1.2 * self.f[-1]
 
-    def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
+    def _generate(
+        self, times: np.ndarray, taper: Optional[Callable[[int], np.ndarray]]
+    ) -> None:
         """Generate the wavelet signal."""
 
         if len(times) < 2:

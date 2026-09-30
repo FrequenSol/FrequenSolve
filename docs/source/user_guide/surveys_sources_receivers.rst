@@ -17,6 +17,47 @@ Related tutorials:
 - :download:`Sparse surveys <../../../tutorials/05_surveys/04_sparse_surveys.ipynb>`
   for offset windows and explicit source-receiver layouts.
 
+Calibrated airgun sources
+-------------------------
+
+``AirgunSignature`` accepts a ghost-free far-field pressure-distance signature,
+not chamber pressure or an imposed pressure at the source. It lowers to the
+existing acoustic ``volume_injection`` source and source-spectrum contract:
+
+.. code-block:: python
+
+   from frequensolve.seismic import AirgunSignature, SampledWavelet
+   from frequensolve.units import ureg as u
+
+   airgun = AirgunSignature(
+       SampledWavelet(samples, dt=0.001, units="bar*m", normalization="dft"),
+       ghost="excluded", water_density=1025 * u.kg / u.m**3,
+   )
+   acq = airgun.acquisition(
+       coords=[[0.5, 0.02]], frequencies=[1, 1.5, 2, 2.5, 3],
+       out_of_plane_thickness=100 * u.m,
+   )
+
+Add receivers and source encoding to ``acq`` normally. In planar 2D an explicit
+thickness is required: the total volume rate is divided by that thickness.
+This does not equate 2D line-source spreading with a 3D airgun at every range.
+For Cartesian 3D omit the thickness. These sources currently require acoustic
+physics and frequency-domain/frequency-synthesis jobs.
+
+To calibrate a synthetic shape, use ``AirgunSignature.from_wavelet(shape,
+strength=10*u.bar*u.m, measure="peak_to_peak", ghost="excluded")`` with a
+dimensionless ``SampledWavelet``. ``measure="peak"`` means maximum absolute
+sample. There is no implicit wavelet normalization. ``dft`` matches Sauce's
+sampled-data transform; ``integral`` multiplies by the time step and must match
+the transform convention of the observations.
+
+The monopole conversion is ``Q(f)=4*pi*S(f)/(rho*2*pi*i*f)`` and supports
+nonpositive imaginary frequencies and the analytic first frequency derivative.
+Zero complex frequency is rejected. The supplied signature must exclude the
+source ghost; deghost measured signatures and remove the measurement propagation
+delay before conversion so the clock is source-relative. Array directivity
+and airgun bubble dynamics are not inferred from a single signature.
+
 Survey Receivers
 ----------------
 
@@ -50,6 +91,60 @@ Supported fields depend on physics:
      - ``velocity``, ``stress``, ``strain``, ``pressure``
    * - Poroelastic
      - ``velocity``, ``fluid_flux``, ``stress``, ``pressure``, ``strain``, ``displacement``, ``fluid_displacement``
+
+Typed Fields and Material Expressions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Physics namespaces expose symbolic quantities as attributes:
+``fs.physics.acoustic()``, ``fs.physics.elastic()``,
+``fs.physics.poroelastic()``, and ``fs.physics.electromagnetic()``.
+Fields and materials carry units and tensor shape; values resolve against the
+simulation at receiver locations. Select components with ``velocity.z``,
+``strain.xx``, or ``strain["x", "z"]``. Use ``.to("MPa")`` for output units.
+
+.. code-block:: python
+
+   elastic = fs.physics.elastic()
+   momentum = elastic.materials.rho * elastic.fields.velocity
+   strain = elastic.materials.compliance @ elastic.fields.stress
+   acq.add_receiver_group("momentum", momentum, coords=coords, domain="solid")
+   acq.add_receiver_group("strain_xx", strain.xx, coords=coords, domain="solid")
+
+A full vector or symmetric tensor records all its independent components;
+a selected entry records one. For multiple quantities in one group, pass a
+mapping such as ``{"pressure": acoustic.fields.pressure,
+"momentum": acoustic.materials.rho * acoustic.fields.velocity}``.
+Labels are ``x,z`` and ``xx,zz,xz`` in Cartesian 2D, or ``x,y,z`` and
+``xx,yy,zz,yz,xz,xy`` in 3D. Coupled group labels include the quantity name,
+for example ``momentum.z``. Simulation export resolves dimensions; standalone
+authoring may supply ``dimension=2`` or ``dimension=3`` to the factory.
+
+``*`` permits scalar material scaling, ``+``/``-`` combine compatible
+expressions, and ``@`` applies elastic compliance or stiffness to a symmetric
+field tensor. Expressions remain linear in wavefields. Symmetric tensor
+intermediates use Mandel packing; public shear entries are physical values.
+Tensor expressions currently require Cartesian 2D or 3D. Constitutive component
+selection and general nonlinear wavefield products are not supported.
+
+Only registered channels are written. To record source-independent material
+diagnostics explicitly, use ``materials={"rho": elastic.materials.rho,
+"S": elastic.materials.compliance}`` on the receiver group. Compliance diagnostics
+use Mandel matrices in the ``<receiver_group>_properties`` HDF5 dataset.
+Internal compliance dependencies are never automatically
+written. Material-only outputs use this diagnostics path, which preserves
+source-independent physical values. Material diagnostics currently require
+dense sampling; ordinary expression channels also support sparse sampling. ``domain`` accepts a numeric
+mesh block ID or an exact, unique material layer name; interface material
+sampling needs an explicit side.
+
+The poroelastic namespace initially exposes velocity, fluid flux, stress, and
+pressure with scalar frame/fluid properties. Elastic constitutive tensors are
+available through the elastic namespace. Electromagnetic quantities retain the
+solver's existing field-unit conventions. In single precision, the existing
+automatic electromagnetic scaling can overflow material/field products; explicit
+unit scales or ``disable_scaling=True`` may be needed. Availability is checked against
+the selected native formulation. This API requires an expression-aware Sauce
+backend; older backends cannot consume expression-bearing receiver components.
 
 Physical and Encoded Receiver Arrays
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -218,11 +313,20 @@ automatically.
 Source Amplitudes
 ~~~~~~~~~~~~~~~~~
 
-``amplitude`` follows the Sauce ``fs-acquisition-2`` source-basis contract. A
-plain number is a dimensionless multiplier. It scales explicit unit-bearing
-direction components when present; otherwise it scales the default physical
-strength for the source kind. A Pint quantity or explicit ``value``/``units``
-mapping is an exact physical source strength:
+``amplitude`` follows the Sauce ``fs-acquisition-2`` source-basis contract.
+Without a physical strength, a source uses its kind's default strength:
+
+- ``vector`` (force) sources: 1e6 N.
+- Opt-in acoustic ``volume_injection``: volume injection rate, 1 m³/s in every
+  dimension. Planar 2D distributes this rate over a fixed 1 m out-of-plane thickness;
+  the internal line-source rate is Q / 1 m, independent of coordinate units.
+- Seismic ``scalar``, ``monopole``, ``gradient``, ``dipole`` and ``tensor``: 1e9 N·m.
+
+The default scales the direction or mechanism, so a force direction of length 2
+gives 2e6 N. A plain number is a dimensionless multiplier. It scales explicit
+unit-bearing direction components when present; otherwise it scales the default
+strength, so ``amplitude=3.0`` on a ``volume_injection`` source gives 3 m³/s. A Pint quantity
+or explicit ``value``/``units`` mapping is an exact physical source strength:
 
 .. code-block:: python
 
@@ -230,9 +334,9 @@ mapping is an exact physical source strength:
 
    acoustic = fs.Acquisition()
    acoustic.add_sources(
-       kind="scalar",
+       kind="volume_injection",
        coords=[[0.5, 0.05]],
-       amplitude=1.0e6 * u.N * u.m,
+       amplitude=1.0 * u.m**3 / u.s,
    )
 
    elastic = fs.Acquisition()
@@ -243,15 +347,43 @@ mapping is an exact physical source strength:
        amplitude=20.0 * u.kN,
    )
 
-Vector and dipole amplitudes have force dimensions, conventionally ``N``.
-Scalar, tensor, and monopole amplitudes have moment dimensions, conventionally
-``N*m``. If a direction already contains physical units, use a dimensionless
+Vector amplitudes have force dimensions, conventionally ``N``. Explicit acoustic
+``volume_injection`` amplitudes are volume rates; seismic scalar/monopole moments
+retain ``N*m``. If a direction already contains physical units, use a dimensionless
 top-level amplitude; Sauce rejects simultaneous physical units on both the
 direction and amplitude. Physical strength belongs to ``source_geometry``;
 ``source_encoding`` coefficients remain dimensionless complex multipliers.
 
+For ``volume_injection``, signatures describe the volume rate Q(t), not measured
+pressure. Sauce loads Q in the pressure–velocity equations and iωQ in the frequency-domain
+pressure equation, using the exp(+iωt) convention. No source-density division is
+applied. The reciprocal measurement for a unit volume-injection source is pressure::
+
+   pressure = acoustic.source_geometry.reciprocal_receiver(physics="acoustic")
+   hydrophone = fs.ReceiverNode(name="hydrophone", components=[pressure])
+
+``PointSource.reciprocal_receiver`` provides the same component for one explicitly
+typed source. These helpers define ideal measurements; they do not swap survey
+geometry, copy source signatures or instrument transfer functions, or run a
+reciprocal simulation. ``response`` remains unused.
+
+Volumetric injection is explicitly opt-in. Existing ``scalar`` and ``monopole``
+inputs retain their original units, default strengths, density scaling, and
+loading behavior. The pressure reciprocal helper requires ``volume_injection``;
+it does not reinterpret legacy sources. The new kind requires an updated Sauce
+build and is supported for ``physics="acoustic"`` only.
+For volume injection, transient acoustic pressure loads the analytic time
+derivative of smooth source signatures. A step volume-rate signature is rejected because its derivative is
+an impulse. Fresh volume-injection transient runs require an initially quiet signature
+(value and first derivative below 1e-8 of their characteristic scales); delay a
+Gaussian or Ricker pulse sufficiently, or start the run earlier.
+
 The same amplitude forms are accepted by :class:`frequensolve.PointSource` and
 inside the ``defaults`` mapping for inline, HDF5, and SPS source geometries.
+
+Traces are responses to this physical strength, not to a unit source. Trace
+reads record it in ``source_strength``, ``source_strength_units`` and
+``source_strength_origin``; see :doc:`traces_paraview_outputs`.
 
 Sparse Survey Layouts
 ---------------------

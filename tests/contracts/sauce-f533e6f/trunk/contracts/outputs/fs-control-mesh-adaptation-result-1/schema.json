@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/outputs/fs-control-mesh-adaptation-result-1/schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "source_identity",
+    "averaging_wavelengths",
+    "averaging_radius_m",
+    "artifacts"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-control-mesh-adaptation-result-1"
+    },
+    "source_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "averaging_wavelengths": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "averaging_radius_m": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "transfer": {
+      "type": "string",
+      "enum": [
+        "nodal",
+        "l2"
+      ],
+      "default": "nodal"
+    },
+    "smoothing_length_m": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0
+    },
+    "smoothing_wavelengths": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Local wavelength fraction. The frozen accepted wavespeed defines length(x)=fraction*v(x)/frequency."
+    },
+    "smoothing_frequency_hz": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Reference frequency for local-wavelength smoothing; defaults to the target sizing frequency."
+    }
+  },
+  "additionalProperties": false,
+  "title": "Control Mesh Adaptation Result",
+  "x-fs-contract": "fs-control-mesh-adaptation-result-1"
+}

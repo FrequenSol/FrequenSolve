@@ -500,7 +500,9 @@ def test_fetch_outputs_downloads_complete_configured_artifact_set():
         "traces": "trace-data",
         "wavefields": "wave-data",
     }
-    assert calls == [{"requests": (), "include_defaults": True, "operations": ()}]
+    assert calls == [
+        {"requests": (), "include_defaults": True, "operations": ("pack",)}
+    ]
 
 
 def test_fetch_outputs_fetches_postprocess_roles_for_postprocessed_jobs():

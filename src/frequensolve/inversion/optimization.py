@@ -14,6 +14,7 @@ __all__ = [
     "LBFGSOptions",
     "minimize_inexact_newton",
     "minimize_lbfgs",
+    "minimize_proximal_gradient",
 ]
 
 
@@ -52,9 +53,97 @@ def _positive(value: float, name: str, *, allow_zero: bool = False) -> float:
     return normalized
 
 
+def _validate_stopping_options(options: Any) -> None:
+    """Validate optional tolerances and the fixed restart reference."""
+    for name in (
+        "gradient_tolerance",
+        "objective_tolerance",
+        "grad_rel_tole",
+        "obj_rel_tol",
+    ):
+        value = getattr(options, name)
+        if value is not None:
+            object.__setattr__(options, name, _positive(value, name, allow_zero=True))
+    if options.gradient_tolerance is not None and options.grad_abs_tol != 0:
+        raise ValueError("Use grad_abs_tol or gradient_tolerance, not both")
+    if options.objective_tolerance is not None and options.obj_rel_tol is not None:
+        raise ValueError("Use obj_rel_tol or objective_tolerance, not both")
+    if options.initial_objective is not None:
+        value = float(options.initial_objective)
+        if not np.isfinite(value):
+            raise ValueError("initial_objective must be finite")
+        object.__setattr__(options, "initial_objective", value)
+
+
+class _StoppingCriteria:
+    """Fixed initial-objective thresholds and an absolute improvement average."""
+
+    def __init__(self, options: Any, initial_value: float):
+        self.reference = abs(
+            initial_value
+            if options.initial_objective is None
+            else options.initial_objective
+        )
+        gradient_atol = (
+            options.grad_abs_tol
+            if options.gradient_tolerance is None
+            else options.gradient_tolerance
+        )
+        gradient_rtol = options.grad_rel_tole
+        if gradient_rtol is None:
+            gradient_rtol = 1e-6 if options.gradient_tolerance is None else 0.0
+        objective_rtol = options.obj_rel_tol
+        if objective_rtol is None:
+            objective_rtol = (
+                1e-9
+                if options.objective_tolerance is None
+                else options.objective_tolerance
+            )
+        self.gradient_threshold = gradient_atol + gradient_rtol * self.reference
+        self.objective_threshold = options.obj_abs_tol + objective_rtol * self.reference
+        self.momentum = options.objective_tolerance_momentum
+        self.improvement: Optional[float] = None
+
+    def relative(self, value: float) -> float:
+        """Report relative progress without imposing a unit-dependent floor."""
+        if self.reference == 0:
+            return 0.0 if value == 0 else float("inf")
+        return value / self.reference
+
+    def update(self, old_value: float, new_value: float) -> Tuple[float, float]:
+        decrease = max(0.0, old_value - new_value)
+        self.improvement = (
+            decrease
+            if self.improvement is None
+            else self.momentum * self.improvement + (1 - self.momentum) * decrease
+        )
+        return self.relative(decrease), self.relative(self.improvement)
+
+    def objective_converged(self) -> bool:
+        return (
+            self.improvement is not None
+            and self.improvement <= self.objective_threshold
+        )
+
+
 @dataclass(frozen=True)
 class InexactNewtonOptions:
     """Controls for Newton-CG, Eisenstat-Walker forcing, and line search.
+
+    Gradient norm and objective-decrease tests each use
+    ``absolute_tolerance + relative_tolerance * abs(initial_objective)``.
+    Absolute defaults are zero; relative defaults are ``1e-6`` for the
+    projected gradient and ``1e-9`` for objective decrease. The reference
+    is fixed at the first evaluation, or supplied via ``initial_objective``
+    on restart. A zero reference contributes no relative tolerance.
+    Gradient norms are measured in optimizer coordinates; these options
+    do not rescale the objective, gradient, or search direction.
+
+    ``gradient_tolerance`` is the legacy absolute-gradient spelling and,
+    when supplied, disables the default relative-gradient term.
+    ``objective_tolerance`` is the legacy relative-objective spelling,
+    now also relative to the fixed initial objective. Prefer the explicit
+    absolute/relative names; do not supply two spellings of the same term.
 
     ``objective_tolerance_momentum`` replaces the instantaneous relative
     objective reduction used by the objective stopping test with an
@@ -69,9 +158,14 @@ class InexactNewtonOptions:
     max_objective_evaluations: Optional[int] = None
     max_cg_iterations: Optional[int] = None
     max_line_search_trials: Optional[int] = None
-    gradient_tolerance: float = 1.0e-6
+    gradient_tolerance: Optional[float] = None
     step_tolerance: float = 1.0e-9
-    objective_tolerance: float = 1.0e-9
+    objective_tolerance: Optional[float] = None
+    grad_abs_tol: float = 0.0
+    grad_rel_tole: Optional[float] = None
+    obj_abs_tol: float = 0.0
+    obj_rel_tol: Optional[float] = None
+    initial_objective: Optional[float] = None
     objective_target: Optional[float] = None
     objective_tolerance_momentum: float = 0.0
     objective_minimum_iterations: int = 1
@@ -105,9 +199,9 @@ class InexactNewtonOptions:
                 raise ValueError(f"{field_name} must be positive when supplied")
             object.__setattr__(self, field_name, None if value is None else int(value))
         for field_name in (
-            "gradient_tolerance",
             "step_tolerance",
-            "objective_tolerance",
+            "grad_abs_tol",
+            "obj_abs_tol",
             "minimum_forcing",
             "minimum_step_length",
             "curvature_tolerance",
@@ -118,6 +212,7 @@ class InexactNewtonOptions:
                 field_name,
                 _positive(getattr(self, field_name), field_name, allow_zero=True),
             )
+        _validate_stopping_options(self)
         if self.objective_target is not None:
             object.__setattr__(
                 self,
@@ -151,15 +246,27 @@ class InexactNewtonOptions:
 
 @dataclass(frozen=True)
 class LBFGSOptions:
-    """Controls for projected limited-memory BFGS and Armijo line search."""
+    """Controls for projected limited-memory BFGS and Armijo line search.
+
+    ``max_line_search_trials`` caps attempted steps per update across both
+    the L-BFGS direction and any projected-gradient recovery direction.
+
+    Absolute/relative stopping tolerances, their defaults and the fixed
+    ``initial_objective`` reference follow :class:`InexactNewtonOptions`.
+    """
 
     max_iterations: int = 50
     max_objective_evaluations: Optional[int] = None
     max_line_search_trials: Optional[int] = None
     history_size: int = 10
-    gradient_tolerance: float = 1.0e-6
+    gradient_tolerance: Optional[float] = None
     step_tolerance: float = 1.0e-9
-    objective_tolerance: float = 1.0e-9
+    objective_tolerance: Optional[float] = None
+    grad_abs_tol: float = 0.0
+    grad_rel_tole: Optional[float] = None
+    obj_abs_tol: float = 0.0
+    obj_rel_tol: Optional[float] = None
+    initial_objective: Optional[float] = None
     objective_target: Optional[float] = None
     objective_tolerance_momentum: float = 0.0
     objective_minimum_iterations: int = 1
@@ -192,9 +299,9 @@ class LBFGSOptions:
                 raise ValueError(f"{field_name} must be positive when supplied")
             object.__setattr__(self, field_name, None if value is None else int(value))
         for field_name in (
-            "gradient_tolerance",
             "step_tolerance",
-            "objective_tolerance",
+            "grad_abs_tol",
+            "obj_abs_tol",
             "minimum_step_length",
             "curvature_tolerance",
             "bound_tolerance",
@@ -204,6 +311,7 @@ class LBFGSOptions:
                 field_name,
                 _positive(getattr(self, field_name), field_name, allow_zero=True),
             )
+        _validate_stopping_options(self)
         if self.objective_target is not None:
             object.__setattr__(
                 self,
@@ -257,6 +365,7 @@ class InexactNewtonIteration:
     objective_evaluations: int
     gradient_evaluations: int
     hessian_products: int
+    optimizer_state: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -612,6 +721,7 @@ def minimize_inexact_newton(
         return value
 
     value = evaluate(model)
+    stopping = _StoppingCriteria(options, value)
     grad = evaluate_gradient(model)
     free, projected_gradient = _free_variables(
         model, grad, lower, upper, options.bound_tolerance
@@ -668,7 +778,7 @@ def minimize_inexact_newton(
             negative_curvature_events,
             steepest_descent_fallbacks,
         )
-    if projected_norm <= options.gradient_tolerance:
+    if projected_norm <= stopping.gradient_threshold:
         return InexactNewtonResult(
             True,
             1,
@@ -689,7 +799,6 @@ def minimize_inexact_newton(
     previous_forcing = forcing
     previous_gradient: Optional[np.ndarray] = None
     previous_hessian_step: Optional[np.ndarray] = None
-    objective_reduction_momentum: Optional[float] = None
     for iteration in range(1, options.max_iterations + 1):
         if previous_gradient is not None and previous_hessian_step is not None:
             denominator = max(
@@ -874,18 +983,9 @@ def minimize_inexact_newton(
         step = trial - old_model
         model = trial
         value = trial_value
-        objective_relative_reduction = max(
-            0.0,
-            (old_value - value) / max(1.0, abs(old_value)),
+        objective_relative_reduction, objective_reduction_momentum = stopping.update(
+            old_value, value
         )
-        if objective_reduction_momentum is None:
-            objective_reduction_momentum = objective_relative_reduction
-        else:
-            momentum = options.objective_tolerance_momentum
-            objective_reduction_momentum = (
-                momentum * objective_reduction_momentum
-                + (1.0 - momentum) * objective_relative_reduction
-            )
         grad = evaluate_gradient(model)
         free, projected_gradient = _free_variables(
             model, grad, lower, upper, options.bound_tolerance
@@ -945,7 +1045,7 @@ def minimize_inexact_newton(
         message = ""
         if options.objective_target is not None and value <= options.objective_target:
             status, message = 4, "objective target reached"
-        elif projected_norm <= options.gradient_tolerance:
+        elif projected_norm <= stopping.gradient_threshold:
             status, message = 1, "projected gradient tolerance reached"
         elif float(np.linalg.norm(step)) <= options.step_tolerance * max(
             1.0, float(np.linalg.norm(model))
@@ -953,7 +1053,7 @@ def minimize_inexact_newton(
             status, message = 3, "step tolerance reached"
         elif (
             iteration >= options.objective_minimum_iterations
-            and objective_reduction_momentum <= options.objective_tolerance
+            and stopping.objective_converged()
         ):
             status, message = 2, "objective tolerance reached"
         if status:
@@ -1006,6 +1106,7 @@ def minimize_lbfgs(
     step_limit: Optional[StepLimit] = None,
     step_transform: Optional[StepTransform] = None,
     callback: Optional[IterationCallback] = None,
+    restart: Optional[dict[str, Any]] = None,
 ) -> InexactNewtonResult:
     """Minimize a real objective with projected limited-memory BFGS.
 
@@ -1102,7 +1203,75 @@ def minimize_lbfgs(
             )
         return result
 
+    steps: list[np.ndarray] = []
+    gradient_differences: list[np.ndarray] = []
+    inverse_curvatures: list[float] = []
+    accepted_before = 0
+    if restart is not None:
+        if restart.get("schema") != "fs-lbfgs-restart-1":
+            raise ValueError("Unsupported L-BFGS restart state")
+        if not np.array_equal(
+            _finite_vector(restart["model"], name="restart model", size=model.size),
+            model,
+        ):
+            raise ValueError("L-BFGS restart belongs to a different model or scaling")
+        if restart["history_size"] != options.history_size:
+            raise ValueError("L-BFGS restart history size changed")
+        pairs = restart["pairs"]
+        if len(pairs) > options.history_size:
+            raise ValueError("L-BFGS restart exceeds its history size")
+        for pair in pairs:
+            step = _finite_vector(pair["step"], name="restart step", size=model.size)
+            difference = _finite_vector(
+                pair["difference"], name="restart difference", size=model.size
+            )
+            curvature = float(np.dot(step, difference))
+            if not np.isfinite(curvature) or curvature <= 0:
+                raise ValueError("L-BFGS restart requires positive finite curvature")
+            steps.append(step)
+            gradient_differences.append(difference)
+            inverse_curvatures.append(1.0 / curvature)
+        accepted_before = int(restart["accepted_iterations"])
+        if accepted_before < 0:
+            raise ValueError("L-BFGS restart has a negative iteration count")
+
     value = evaluate(model)
+    reference = (
+        value
+        if restart is None
+        else _positive(
+            restart["initial_objective"], "restart initial objective", allow_zero=True
+        )
+    )
+    if (
+        restart is not None
+        and options.initial_objective is not None
+        and abs(options.initial_objective) != reference
+    ):
+        raise ValueError("L-BFGS restart initial objective changed")
+    stopping = _StoppingCriteria(options, reference)
+    if restart is not None:
+        improvement = restart.get("improvement")
+        if improvement is not None and (
+            not np.isfinite(improvement) or improvement < 0
+        ):
+            raise ValueError("L-BFGS restart has invalid stopping momentum")
+        stopping.improvement = improvement
+
+    def restart_state(iteration: int) -> dict[str, Any]:
+        return {
+            "schema": "fs-lbfgs-restart-1",
+            "model": model.tolist(),
+            "history_size": options.history_size,
+            "accepted_iterations": accepted_before + iteration,
+            "improvement": stopping.improvement,
+            "initial_objective": stopping.reference,
+            "pairs": [
+                {"step": step.tolist(), "difference": difference.tolist()}
+                for step, difference in zip(steps, gradient_differences)
+            ],
+        }
+
     grad = evaluate_gradient(model)
     free, projected_gradient = _free_variables(
         model, grad, lower, upper, options.bound_tolerance
@@ -1137,6 +1306,7 @@ def minimize_lbfgs(
                 objective_evaluations=objective_evaluations,
                 gradient_evaluations=gradient_evaluations,
                 hessian_products=0,
+                optimizer_state=restart_state(0),
             )
         )
     if options.objective_target is not None and value <= options.objective_target:
@@ -1156,7 +1326,7 @@ def minimize_lbfgs(
             0,
             steepest_descent_fallbacks,
         )
-    if projected_norm <= options.gradient_tolerance:
+    if projected_norm <= stopping.gradient_threshold:
         return InexactNewtonResult(
             True,
             1,
@@ -1174,10 +1344,6 @@ def minimize_lbfgs(
             steepest_descent_fallbacks,
         )
 
-    steps: list[np.ndarray] = []
-    gradient_differences: list[np.ndarray] = []
-    inverse_curvatures: list[float] = []
-    objective_reduction_momentum: Optional[float] = None
     for iteration in range(1, options.max_iterations + 1):
         direction = -inverse_hessian_action(projected_gradient)
         if free is not None:
@@ -1204,6 +1370,7 @@ def minimize_lbfgs(
         bounded_raw_step = np.zeros_like(model)
         step = np.zeros_like(model)
         recovery_attempted = fallback
+        line_search_trials = 0
         try:
             while not accepted:
                 maximum_step = np.inf
@@ -1221,7 +1388,6 @@ def minimize_lbfgs(
                     break
 
                 step_length = min(1.0, maximum_step)
-                line_search_trials = 0
                 while step_length >= options.minimum_step_length and (
                     options.max_line_search_trials is None
                     or line_search_trials < options.max_line_search_trials
@@ -1268,13 +1434,17 @@ def minimize_lbfgs(
                         break
                     step_length *= options.backtrack_factor
 
-                if accepted or recovery_attempted:
+                budget_exhausted = (
+                    options.max_line_search_trials is not None
+                    and line_search_trials >= options.max_line_search_trials
+                )
+                if accepted or recovery_attempted or budget_exhausted:
                     break
 
                 # A stale L-BFGS metric can yield a descent direction whose
                 # local model is nevertheless poor enough that every bounded
                 # Armijo trial fails.  Discard that metric and give the
-                # projected gradient one independent line search in the
+                # projected gradient the remaining trial budget in the
                 # supplied inverse-Hessian metric before abandoning the
                 # nonlinear continuation stage.
                 steps.clear()
@@ -1337,18 +1507,9 @@ def minimize_lbfgs(
         model = trial
         value = trial_value
         step = model - old_model
-        objective_relative_reduction = max(
-            0.0,
-            (old_value - value) / max(1.0, abs(old_value)),
+        objective_relative_reduction, objective_reduction_momentum = stopping.update(
+            old_value, value
         )
-        if objective_reduction_momentum is None:
-            objective_reduction_momentum = objective_relative_reduction
-        else:
-            momentum = options.objective_tolerance_momentum
-            objective_reduction_momentum = (
-                momentum * objective_reduction_momentum
-                + (1.0 - momentum) * objective_relative_reduction
-            )
         grad = evaluate_gradient(model)
         free, projected_gradient = _free_variables(
             model, grad, lower, upper, options.bound_tolerance
@@ -1409,6 +1570,7 @@ def minimize_lbfgs(
                     objective_evaluations=objective_evaluations,
                     gradient_evaluations=gradient_evaluations,
                     hessian_products=0,
+                    optimizer_state=restart_state(iteration),
                 )
             )
 
@@ -1416,15 +1578,15 @@ def minimize_lbfgs(
         message = ""
         if options.objective_target is not None and value <= options.objective_target:
             status, message = 4, "objective target reached"
-        elif projected_norm <= options.gradient_tolerance:
+        elif projected_norm <= stopping.gradient_threshold:
             status, message = 1, "projected gradient tolerance reached"
         elif float(np.linalg.norm(step)) <= options.step_tolerance * max(
             1.0, float(np.linalg.norm(model))
         ):
             status, message = 3, "step tolerance reached"
         elif (
-            iteration >= options.objective_minimum_iterations
-            and objective_reduction_momentum <= options.objective_tolerance
+            accepted_before + iteration >= options.objective_minimum_iterations
+            and stopping.objective_converged()
         ):
             status, message = 2, "objective tolerance reached"
         if status:
@@ -1461,3 +1623,201 @@ def minimize_lbfgs(
         0,
         steepest_descent_fallbacks,
     )
+
+
+def minimize_proximal_gradient(
+    objective: Objective,
+    gradient: Gradient,
+    regularization: Objective,
+    proximal: Callable[[np.ndarray, float, Tuple[np.ndarray, np.ndarray]], np.ndarray],
+    initial_model: Any,
+    *,
+    bounds: Optional[Tuple[Any, Any]] = None,
+    options: Optional[InexactNewtonOptions | LBFGSOptions] = None,
+    callback: Optional[IterationCallback] = None,
+    step_limit: Optional[StepLimit] = None,
+) -> InexactNewtonResult:
+    """Minimize a smooth objective plus a native convex regularizer.
+
+    ``proximal(v, tau, bounds)`` solves the constrained proximal problem in
+    these optimizer coordinates. Backtracking tests the smooth majorization
+    inequality and composite decrease. Stationarity uses the proximal-gradient
+    mapping, including at nonsmooth points and fixed bounds.
+    """
+    options = InexactNewtonOptions() if options is None else options
+    x = _finite_vector(initial_model, name="initial model")
+    lower, upper = _bounds(bounds, x.size, None)
+    box = (
+        np.full(x.size, -np.inf) if lower is None else lower,
+        np.full(x.size, np.inf) if upper is None else upper,
+    )
+    if np.any(x < box[0]) or np.any(x > box[1]):
+        raise ValueError("initial model violates its bounds")
+    evaluations = gradients = searches = 0
+
+    def evaluate(v: np.ndarray) -> Tuple[float, float]:
+        nonlocal evaluations
+        if (
+            options.max_objective_evaluations is not None
+            and evaluations >= options.max_objective_evaluations
+        ):
+            raise _EvaluationLimit
+        f = float(objective(v.copy()))
+        r = float(regularization(v.copy()))
+        evaluations += 1
+        if not np.isfinite(f + r):
+            raise ValueError("composite objective must be finite")
+        return f, r
+
+    f, reg = evaluate(x)
+    stopping = _StoppingCriteria(options, f + reg)
+    g = _finite_vector(gradient(x.copy()), name="gradient", size=x.size)
+    gradients += 1
+    tau = 1.0
+    stable_tau: Optional[float] = None
+
+    def finish(
+        success: bool, status: int, message: str, iteration: int
+    ) -> InexactNewtonResult:
+        return InexactNewtonResult(
+            success,
+            status,
+            message,
+            x.copy(),
+            f + reg,
+            g.copy(),
+            iteration,
+            evaluations,
+            gradients,
+            0,
+            0,
+            searches,
+            0,
+            0,
+        )
+
+    for iteration in range(1, options.max_iterations + 1):
+        accepted = False
+        trials = 0
+        previous = x.copy()
+        old_gradient = g.copy()
+        old_total = f + reg
+        try:
+            while tau >= options.minimum_step_length:
+                if (
+                    options.max_line_search_trials is not None
+                    and trials >= options.max_line_search_trials
+                ):
+                    break
+                trials += 1
+                trial = _finite_vector(
+                    proximal(x - tau * g, tau, box), name="proximal model", size=x.size
+                )
+                if np.any(trial < box[0] - options.bound_tolerance) or np.any(
+                    trial > box[1] + options.bound_tolerance
+                ):
+                    raise ValueError("proximal result violates the supplied bounds")
+                step = trial - x
+                mapping = float(np.linalg.norm(step) / tau)
+                if mapping <= stopping.gradient_threshold:
+                    return finish(
+                        True, 0, "proximal gradient tolerance reached", iteration - 1
+                    )
+                if (
+                    step_limit is not None
+                    and float(step_limit(x.copy(), step.copy())) < 1.0
+                ):
+                    tau *= options.backtrack_factor
+                    continue
+                trial_f, trial_reg = evaluate(trial)
+                searches += 1
+                slope = float(g @ step)
+                norm2 = float(step @ step)
+                roundoff = (
+                    32
+                    * np.finfo(float).eps
+                    * max(1.0, abs(f), abs(trial_f), abs(old_total))
+                )
+                # At machine precision the value test cannot distinguish large
+                # unstable steps. Keep the last step certified above roundoff.
+                if (
+                    stable_tau is not None
+                    and norm2 / tau < 100 * roundoff
+                    and tau > stable_tau
+                ):
+                    tau = stable_tau
+                    continue
+                majorized = trial_f <= f + slope + 0.5 * norm2 / tau + roundoff
+                composite_slope = slope + trial_reg - reg
+                if (
+                    majorized
+                    and composite_slope <= roundoff - 0.5 * norm2 / tau
+                    and trial_f + trial_reg
+                    <= old_total
+                    + options.armijo_constant * min(composite_slope, 0.0)
+                    + roundoff
+                ):
+                    if norm2 / tau >= 100 * roundoff:
+                        stable_tau = tau
+                    accepted = True
+                    break
+                tau *= options.backtrack_factor
+        except _EvaluationLimit:
+            return finish(
+                False,
+                -2,
+                "objective evaluation limit reached during line search",
+                iteration - 1,
+            )
+        if not accepted:
+            return finish(False, -1, "composite line search failed", iteration - 1)
+        x = trial
+        f, reg = trial_f, trial_reg
+        g = _finite_vector(gradient(x.copy()), name="gradient", size=x.size)
+        gradients += 1
+        reduction, momentum = stopping.update(old_total, f + reg)
+        if callback is not None:
+            callback(
+                InexactNewtonIteration(
+                    iteration=iteration,
+                    model=x.copy(),
+                    objective=f + reg,
+                    objective_relative_reduction=reduction,
+                    objective_reduction_momentum=momentum,
+                    gradient=g.copy(),
+                    linearization_gradient=old_gradient,
+                    projected_gradient_norm=mapping,
+                    step=step.copy(),
+                    raw_step=-tau * old_gradient,
+                    directional_derivative=composite_slope,
+                    raw_directional_derivative=-tau
+                    * float(old_gradient @ old_gradient),
+                    step_length=tau,
+                    forcing=0.0,
+                    cg_iterations=0,
+                    cg_residual_norm=0.0,
+                    cg_relative_residual=0.0,
+                    step_transform_cosine=1.0,
+                    step_transform_norm_ratio=1.0,
+                    negative_curvature=False,
+                    steepest_descent_fallback=False,
+                    line_search_evaluations=trials,
+                    objective_evaluations=evaluations,
+                    gradient_evaluations=gradients,
+                    hessian_products=0,
+                )
+            )
+        if options.objective_target is not None and f + reg <= options.objective_target:
+            return finish(True, 0, "objective target reached", iteration)
+        if options.step_tolerance > 0 and np.linalg.norm(
+            step
+        ) <= options.step_tolerance * max(1.0, float(np.linalg.norm(previous))):
+            return finish(True, 0, "step tolerance reached", iteration)
+        if (
+            iteration >= options.objective_minimum_iterations
+            and stopping.objective_converged()
+        ):
+            return finish(True, 0, "objective tolerance reached", iteration)
+        if norm2 / tau >= 100 * roundoff:
+            tau = min(1.0, tau / options.backtrack_factor)
+    return finish(False, 1, "maximum iterations reached", options.max_iterations)

@@ -234,6 +234,16 @@ class TraceManifest:
         run = RunMetadata.read(result_path)
         fingerprint_reader = getattr(job, "_task_reuse_fingerprints", None)
         fingerprints = fingerprint_reader() if callable(fingerprint_reader) else None
+        remote_reader = getattr(job, "downloaded_task_fingerprints", None)
+        if callable(remote_reader):
+            catalog = load_task_catalog(result_path, tasks=frequencies)
+            for candidate in [fingerprints, *remote_reader()]:
+                if candidate is not None and any(
+                    cls._task_fingerprints_match(catalog, task, candidate)
+                    for task in frequencies
+                ):
+                    fingerprints = candidate
+                    break
         pack = (
             cls._receiver_pack(
                 result_path,

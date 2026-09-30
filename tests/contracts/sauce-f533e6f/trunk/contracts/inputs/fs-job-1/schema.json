@@ -36,7 +36,6 @@
         "adjoint",
         "smooth",
         "rtm",
-        "focus",
         "born",
         "lsrtm_gradient",
         "fwi_operator",
@@ -44,7 +43,8 @@
         "size",
         "raytrace",
         "eikonal",
-        "transient"
+        "transient",
+        "patch_prepare"
       ],
       "description": "Workflow selected for this job."
     },
@@ -114,13 +114,47 @@
           "description": "Data dual driving the adjoint hierarchy. base freezes the ordinary base-frequency residual. derivative compares the raw order-n simulated and observed traces, i.e. a t^n time weighting. window compares the time-polynomial combination given by window with one common residual. jet sums one l2 misfit per derivative order, weighted by order_weights, through the triangular transpose of the derivative recurrence. Every mode returns the exact gradient of its objective for the frozen discretization quantities."
         },
         "window": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 5,
-          "items": {
-            "type": "number"
-          },
-          "description": "Real coefficients a_k of the time window p(t) = sum_k a_k t^k, t in seconds, applied to the damped traces; required by and only used with residual window. The polynomial degree sets the derivative order and the last coefficient must be nonzero."
+          "oneOf": [
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 5,
+              "items": {
+                "type": "number"
+              }
+            },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          ],
+          "description": "Real coefficients a_k of p(t)=sum_k a_k t^k, t in seconds, applied to damped traces with residual window. A list defines common coefficients and its last coefficient must be nonzero. Alternatively map each objective receiver-group name to an HDF5 dataset locator: finite real array in Python/HDF5 order (order+1, global receiver, source field), shared across components. This requires explicit order, dense point receivers without averaging, frequency/material-independent receivers, and FWI; WRI and probe diagonals are unsupported. Rows refer to the solver source-field basis, not individual physical sources hidden by encoding."
+        },
+        "field_storage": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "memory",
+            "disk"
+          ],
+          "default": "auto",
+          "description": "Auto estimates the complete retained recurrence and forward trial payload after the base solve and uses read-only, demand-paged rank-local scratch when it exceeds the available-memory budget. Explicit memory and disk override selection. Disk mode changes storage only; it is not a persistent checkpoint or a strict RSS limit."
+        },
+        "field_memory_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.8,
+          "description": "Fraction of currently available host/cgroup memory reserved for retained spectral fields in auto mode, divided conservatively among MPI ranks sharing the host. Zero forces scratch for nonempty hierarchies. Unknown availability selects disk. Does not limit solver or process RSS."
+        },
+        "export_lower_orders": {
+          "type": "boolean",
+          "default": false,
+          "description": "Control-sensitivity RTM with residual derivative only: independently export orders 0 through order-1 beside the primary order gradient and objective. Reuses the forward hierarchy and factors; each objective has its own adjoint hierarchy. Adds _dK before .h5 and before the task suffix. Postprocessing stacks each order independently. Not available for fwi_operator or image kernels."
         },
         "order_weights": {
           "type": "array",
@@ -251,8 +285,23 @@
     },
     "control_sensitivities": {
       "type": "object",
-      "description": "Native material-control JVP/VJP configuration for Born, RTM, and time-reversal focus workflows.",
+      "description": "Native material-control JVP/VJP configuration for Born and RTM workflows.",
       "properties": {
+        "receiver_diagonal": {
+          "$ref": "#/properties/fwi_operator/properties/receiver_diagonal",
+          "description": "Spectral derivative RTM GN diagonals in the constrained material-control basis. export_lower_orders exports matching lower-order diagonals; frequency aggregation uses the gradient weights without smoothing."
+        },
+        "quadrature": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "wavefield",
+            "material_intersections",
+            "tensor_points"
+          ],
+          "default": "auto",
+          "description": "Volume sensitivity integration policy. With Discretization/material_quadrature=material_intersections, auto, wavefield and material_intersections inherit matched assembly quadrature for coefficient derivatives; tensor_points is rejected. The following sensitivity-only behavior applies to standard wavefield assembly. Defaults to auto: tensor-node volume sensitivities for RTM and FWI pullback actions, with native quadrature for other controls and discrete Born/JVP, normal and WRI curvature actions. Explicit wavefield retains matched discrete coefficient derivatives. material_intersections is an approximate continuous pullback; tensor_points returns approximate unweighted nodal volume sensitivities. tensor_points samples full-dimensional axis-aligned Cartesian tensor nodes through the gridded-image mapper, including curved elements, with cached reference locations and shared-element averaging, without tensor-cell volume weights. These values are not integrated coefficient covectors. Tensor controls must share a layout within each material layer; depth-only layers retain native quadrature and mixed tensor/other active controls in a layer are rejected. material_intersections intersects wavefield and meshed-material leaves in initial-root coordinates for material pullbacks only. Forward assembly, face terms and JVP quadrature are unchanged, so the result is not the exact discrete objective gradient. Supports RTM and FWI linearize/vjp/receiver_vjp/wri, including receiver-probe diagonal contractions as preconditioner approximations; excludes normal, Born/JVP and WRI curvature/diagonal export."
+        },
         "gram_derivative": {
           "type": "string",
           "enum": [
@@ -260,7 +309,7 @@
             "total"
           ],
           "default": "frozen",
-          "description": "DPG material derivative mode; frozen is the default approximation. Total differentiates Gram and trial-to-test maps for supported full-dimensional Cartesian acoustic, classic elastic and Maxwell Born/RTM and fwi_operator linearize/jvp/vjp/normal actions, and supported WRI objective gradients. Requires Solver/relaxed_assembly=false. WRI normals require frozen Gram. Ordinary Maxwell includes fixed-stretch PML constitutive pullbacks wherever authored controls have support; seismic and WRI gradients exclude PML. Total excludes focus, phase objectives, geometry controls, source tapers, spatial windows and modal formulations. Receiver and incident-source restrictions remain physics-specific."
+          "description": "DPG material derivative mode; frozen is the default approximation. Total differentiates Gram and trial-to-test maps for supported full-dimensional Cartesian acoustic, classic elastic and Maxwell Born/RTM and fwi_operator linearize/jvp/vjp/normal actions, and supported WRI objective gradients. With relaxed assembly this is an approximation; use Solver/relaxed_assembly=false for verification. WRI normals require frozen Gram. Ordinary Maxwell includes fixed-stretch PML constitutive pullbacks wherever authored controls have support; seismic and WRI gradients exclude PML. Total excludes phase objectives, geometry controls, source tapers, spatial windows and modal formulations. Receiver and incident-source restrictions remain physics-specific."
         },
         "active": {
           "type": "array",
@@ -366,7 +415,7 @@
         },
         "Smoothing": {
           "type": "object",
-          "description": "Optional representation-owned variational Riesz map applied after frequency aggregation.",
+          "description": "Optional representation-owned variational regularization solve applied to the aggregated or explicit control vector.",
           "properties": {
             "type": {
               "enum": [
@@ -420,7 +469,8 @@
             "epsilon": {
               "type": "number",
               "exclusiveMinimum": 0,
-              "default": 0.001
+              "default": 0.001,
+              "description": "Positive split-Bregman parameter for TV/TGV; does not smooth the norm."
             },
             "iterations": {
               "type": "integer",
@@ -433,6 +483,10 @@
                 "primal"
               ],
               "default": "dual"
+            },
+            "normalize_amplitude": {
+              "type": "boolean",
+              "description": "Normalize native control amplitudes before regularization."
             }
           },
           "dependentRequired": {
@@ -444,38 +498,409 @@
             ]
           },
           "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
-    },
-    "focus": {
-      "type": "object",
-      "description": "Unnormalized negative spectral energy from observed-data backpropagation. Frequencies are evaluated independently.",
-      "required": [
-        "objective",
-        "softening"
-      ],
-      "properties": {
-        "objective": {
-          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-          "description": "HDF5 destination for the frequency-aggregated scalar objective. Task i writes a sibling path with suffix _i."
         },
-        "softening": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Positive length in km: Gaussian standard deviation for trfwi, or aperture half-width in each coordinate for weft. The mesh and quadrature must resolve this length."
-        },
-        "kind": {
-          "type": "string",
-          "enum": [
-            "trfwi",
-            "weft"
+        "Regularization": {
+          "type": "object",
+          "description": "Native full-model regularization value or constrained proximal callback; invoked with --smooth and explicit input.",
+          "properties": {
+            "type": {
+              "enum": [
+                "none",
+                "tikhonov",
+                "l2",
+                "tv",
+                "tgv"
+              ],
+              "default": "tikhonov"
+            },
+            "lambda": {
+              "type": "number",
+              "minimum": 0,
+              "default": 1,
+              "description": "Multiplier of wavelength/(2*pi) for the native regularization length; alpha=length^(2*derivative_order) for Tikhonov/TV."
+            },
+            "alpha": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Direct native coefficient: Tikhonov energy is alpha/2 times the squared derivative integral; TV energy is sqrt(alpha) times the derivative norm integral. Not valid for TGV."
+            },
+            "alpha1": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Optional direct first-order TGV weight. Must be supplied with alpha2."
+            },
+            "alpha2": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Optional direct second-order TGV weight. Must be supplied with alpha1."
+            },
+            "tgv_ratio": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1,
+              "description": "Dimensionless second-order TGV balance; wavelength scaling gives alpha1=length and alpha2=tgv_ratio*length^2."
+            },
+            "reference_wavelength": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Optional reference wavelength used with lambda instead of deriving one from the material model and f_list."
+            },
+            "derivative_order": {
+              "enum": [
+                1,
+                2
+              ],
+              "default": 1,
+              "description": "Spatial derivative order; order two requires a spline of degree at least two. TGV requires order one."
+            },
+            "epsilon": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 0.001,
+              "description": "Positive initial split-Bregman parameter for TV/TGV; residual balancing may adapt splitting coefficients. It does not smooth the norm or change the energy."
+            },
+            "iterations": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1000
+            },
+            "input_role": {
+              "enum": [
+                "dual",
+                "primal"
+              ],
+              "default": "dual",
+              "description": "Accepted shared smoothing setting, ignored by model callbacks: input always contains primal full-model coefficients; proximal fidelity uses metric."
+            },
+            "normalize_amplitude": {
+              "type": "boolean",
+              "description": "Freeze scale a=max(abs(input)) per block during prepare (a=1 for a zero block), then evaluate a^2*R(input/a). Defaults to true for wavelength-derived weights and false for explicit alpha or alpha1/alpha2."
+            },
+            "operation": {
+              "enum": [
+                "prepare",
+                "value",
+                "gradient",
+                "diagonal",
+                "mass",
+                "mass_inverse",
+                "mass_diagonal",
+                "proximal"
+              ]
+            },
+            "context": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Prepared stage context: output for prepare; required immutable input for every other operation, including mass, mass_inverse and mass_diagonal, whose recorded native basis identities must match the bound controls."
+            },
+            "result": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+            },
+            "tau": {
+              "type": "number",
+              "minimum": 0,
+              "default": 1,
+              "description": "Nonnegative multiplier of the regularization energy in the proximal objective; not included in the reported energy."
+            },
+            "relative_tolerance": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1e-06
+            },
+            "absolute_tolerance": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1e-08
+            },
+            "metric": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Full positive coefficient diagonal H for proximal fidelity 0.5*(u-input)^T H (u-input)."
+            },
+            "lower": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Full finite coefficient lower bounds for the proximal model, in the same coordinates as input. Equal bounds freeze a coefficient."
+            },
+            "upper": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+              "description": "Full finite coefficient upper bounds for the proximal model, in the same coordinates as input. Equal bounds freeze a coefficient."
+            }
+          },
+          "dependentRequired": {
+            "alpha1": [
+              "alpha2"
+            ],
+            "alpha2": [
+              "alpha1"
+            ]
+          },
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "context",
+            "result"
           ],
-          "default": "trfwi",
-          "description": "trfwi focuses acoustic pressure energy with a Gaussian aperture; weft focuses acoustic volumetric strain or elastic strain energy with a compact cosine aperture."
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "operation": {
+                    "const": "proximal"
+                  }
+                },
+                "required": [
+                  "operation"
+                ]
+              },
+              "then": {
+                "required": [
+                  "metric",
+                  "lower",
+                  "upper"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "tgv"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "alpha"
+                  ]
+                },
+                "properties": {
+                  "derivative_order": {
+                    "const": 1
+                  }
+                }
+              },
+              "else": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "alpha1"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "alpha2"
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "alpha1": {
+                    "const": 0
+                  }
+                },
+                "required": [
+                  "alpha1"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "alpha2": {
+                    "const": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "alpha2": {
+                    "const": 0
+                  }
+                },
+                "required": [
+                  "alpha2"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "alpha1": {
+                    "const": 0
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "MeshAdaptation": {
+          "type": "object",
+          "description": "Single-rank stage setup: size immutable property spaces from accepted material coefficients and transfer by nodal interpolation or integral smooth-and-project. Invoked with --smooth.",
+          "required": [
+            "source_identity",
+            "frequency",
+            "averaging_wavelengths",
+            "model",
+            "result"
+          ],
+          "properties": {
+            "source_identity": {
+              "type": "string",
+              "minLength": 1
+            },
+            "frequency": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "averaging_wavelengths": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 0.5
+            },
+            "model": {
+              "type": "object",
+              "required": [
+                "property_spaces"
+              ],
+              "properties": {
+                "property_spaces": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": {
+                    "type": "object",
+                    "required": [
+                      "artifact",
+                      "frequency",
+                      "epw"
+                    ],
+                    "properties": {
+                      "artifact": {
+                        "type": "string",
+                        "pattern": "\\.h5$"
+                      },
+                      "frequency": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      },
+                      "epw": {
+                        "oneOf": [
+                          {
+                            "type": "number",
+                            "exclusiveMinimum": 0
+                          },
+                          {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 3,
+                            "items": {
+                              "type": "number",
+                              "exclusiveMinimum": 0
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "result": {
+              "type": "string",
+              "minLength": 1
+            },
+            "transfer": {
+              "type": "string",
+              "enum": [
+                "nodal",
+                "l2"
+              ],
+              "default": "nodal"
+            },
+            "smoothing_length_m": {
+              "type": "number",
+              "minimum": 0,
+              "default": 0,
+              "description": "Physical H1 smoothing length in meters; requires transfer=l2 when nonzero. Zero gives ordinary L2 projection."
+            },
+            "smoothing_wavelengths": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Local wavelength fraction. The frozen accepted wavespeed defines length(x)=fraction*v(x)/frequency."
+            },
+            "smoothing_frequency_hz": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Reference frequency for local-wavelength smoothing; defaults to the target sizing frequency."
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "transfer": {
+                    "const": "l2"
+                  }
+                },
+                "required": [
+                  "transfer"
+                ]
+              },
+              "then": {},
+              "else": {
+                "properties": {
+                  "smoothing_length_m": {
+                    "const": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "smoothing_wavelengths"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "transfer": {
+                    "const": "l2"
+                  },
+                  "smoothing_length_m": {
+                    "const": 0
+                  }
+                },
+                "required": [
+                  "transfer"
+                ]
+              }
+            }
+          ],
+          "dependentRequired": {
+            "smoothing_frequency_hz": [
+              "smoothing_wavelengths"
+            ]
+          }
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "dependentRequired": {
+        "Regularization": [
+          "input",
+          "gradient"
+        ],
+        "MeshAdaptation": [
+          "input",
+          "gradient"
+        ]
+      }
     },
     "fwi_operator": {
       "type": "object",
@@ -488,6 +913,9 @@
           "enum": [
             "calibrate",
             "linearize",
+            "receiver_linearize",
+            "receiver_jvp",
+            "receiver_vjp",
             "jvp",
             "vjp",
             "normal",
@@ -495,9 +923,65 @@
             "solve"
           ]
         },
+        "receiver_diagonal": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Shared globally encoded receiver GN diagonal alongside material linearize or spectral derivative RTM. Requires DPG, frozen Gram, common dense receivers, source-independent quadratic weights and no preprocessing. Spectral orders 0-4 share one probe hierarchy when receiver weights differ only by an order scalar; frequency/material-dependent channels are excluded. All mixed terms are assembled in constrained controls and MPI-reduced before per-source squaring. Default probes is min(16, encoded source RHS count).",
+          "properties": {
+            "probes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "seed": {
+              "type": "integer",
+              "default": 0
+            },
+            "output": {
+              "type": "string",
+              "pattern": "\\.h5$",
+              "default": "receiver_diagonal.h5"
+            }
+          }
+        },
         "state": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
           "description": "Required output fs-objective-linearization-3 path for linearize (task-suffixed), or saved state input for jvp, vjp and normal. With several f_list entries the input first tries <stem>_<task><ext>, then the exact path; the saved task index must match. Reuse requires the same realized mesh partition."
+        },
+        "receiver_state": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Receiver state manifest stem (fs-receiver-state-1 for one group, fs-receiver-state-bundle-1 for multiple groups); output for receiver_linearize, input for receiver_jvp/receiver_vjp."
+        },
+        "receiver_vector": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Receiver tangent/dual manifest stem (fs-receiver-vector-1 for one group, fs-receiver-vector-bundle-1 for multiple groups); output for receiver_jvp, input for receiver_vjp."
+        },
+        "channel": {
+          "enum": [
+            "base",
+            "base_df"
+          ],
+          "description": "Physical receiver channels exported by receiver_linearize."
+        },
+        "source_derivative": {
+          "enum": [
+            "total",
+            "frozen"
+          ],
+          "description": "Physical-frequency source derivative policy for base_df."
+        },
+        "field_retention": {
+          "enum": [
+            "checkpoint",
+            "replay"
+          ],
+          "description": "receiver_linearize field storage policy. Checkpoint persists rank-local base and df fields; replay stores receiver values only. Defaults to checkpoint."
+        },
+        "field_reuse": {
+          "enum": [
+            "checkpoint",
+            "replay"
+          ],
+          "description": "receiver_vjp field source. Defaults to the saved state's retention policy; a requested checkpoint must be valid."
         },
         "objective_vector": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
@@ -531,11 +1015,20 @@
         },
         "wri": {
           "type": "object",
-          "description": "DPG wavefield-reconstruction subproblem. Sauce solves the data-assimilated wavefield and optionally returns the reduced model covector; outer alternating updates remain orchestrator responsibilities.",
+          "description": "DPG wavefield-reconstruction subproblem. Sauce solves the data-assimilated wavefield and optionally returns the reduced model covector; outer alternating updates remain orchestrator responsibilities. Coupled acoustic-elastic DPG with classic elasticity is supported; the PDE objective includes the registered material-independent interface penalties.",
           "required": [
             "penalty"
           ],
           "properties": {
+            "formulation": {
+              "type": "string",
+              "enum": [
+                "centered",
+                "original"
+              ],
+              "default": "centered",
+              "description": "Centered subtracts the current model's minimum PDE energy and its gradient using an ordinary forward reference solve. Original retains the uncentered broken-test residual objective without that solve. Reconstruction is identical; the objective artifact records the formulation."
+            },
             "penalty": {
               "type": "number",
               "exclusiveMinimum": 0,
@@ -554,6 +1047,27 @@
               "default": "auto",
               "description": "Auto, including omission, uses one solver unit per component expressed in its receiver coordinate units. This avoids an implicit 1 Pa or 1 mm/s default and is independent of source amplitudes and observed values. A positive number explicitly applies that scale in each component's coordinate units. The resolved component scales are written to the WRI objective artifact; the penalty still controls data/PDE balance."
             },
+            "objective_normalization": {
+              "oneOf": [
+                {
+                  "enum": [
+                    "observed_energy",
+                    "none"
+                  ]
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ],
+              "default": "observed_energy",
+              "description": "Common divisor of the entire objective, gradient and curvature; never changes reconstruction. Observed_energy uses penalty times the weighted observed energy across all source batches. Frequency-task products must be combined using their saved divisors, as a ratio of weighted sums. A positive numeric divisor can freeze a full-survey pre-inversion calibration."
+            },
+            "normalization_only": {
+              "type": "boolean",
+              "default": false,
+              "description": "Read and preprocess observations to save their energy and normalization divisor without assembly, wavefield solves or gradients. Mutually exclusive with curvature."
+            },
             "receiver_group": {
               "type": "string",
               "minLength": 1,
@@ -569,13 +1083,20 @@
               },
               "description": "Select imaging receiver groups whose observation penalties are summed. Supports dense or sparse point receivers, identity or up_down projection, and fixed point-local linear simulated preprocessing with nonnegative residual weights. Source-dependent operators are reconstructed separately."
             },
+            "diagonal": {
+              "type": "string",
+              "pattern": "\\.h5$",
+              "description": "Output task-suffixed fs-control-vector-1 containing the fixed-wavefield frozen-Gram GN diagonal alongside the gradient. Uses the same objective normalization; excludes curvature actions and normalization_only."
+            },
             "curvature": {
               "type": "string",
               "enum": [
+                "metric_frozen",
+                "exact_gn",
                 "fixed_wavefield",
                 "joint_schur"
               ],
-              "description": "Return a frozen-Gram model normal in model_covector. fixed_wavefield holds the reconstruction fixed; joint_schur eliminates the wavefield increment from joint Gauss-Newton using one additional reconstruction solve per batch. Requires model_direction, Solver/relaxed_assembly=false, and unwindowed material controls. Omit to return the reduced gradient."
+              "description": "Return a frozen-Gram model normal in model_covector. For centered WRI, metric_frozen is the default when model_direction is supplied (two extra solves); exact_gn differentiates the full centered residual (four extra solves). Both include the nonlocal reference response. Original WRI defaults to joint_schur (one extra solve). Explicit fixed_wavefield and joint_schur remain uncentered surrogates when used with centered WRI. Requires model_direction and unwindowed material controls. Without a direction or curvature request, return the reduced gradient. Supports acoustic, classic elastic, coupled acoustic-elastic and Maxwell DPG; excludes 2.5-D and total Gram derivatives."
             }
           },
           "not": {
@@ -584,6 +1105,27 @@
               "receiver_groups"
             ]
           },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "normalization_only": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "normalization_only"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "curvature"
+                  ]
+                }
+              }
+            }
+          ],
           "additionalProperties": false
         },
         "source_controls": {
@@ -591,7 +1133,10 @@
           "description": "Fixed-baseline source location and mechanism controls; FrequenSolve owns parameter updates and optimization. Requires waveform linearize/jvp/vjp. Location/mechanism controls currently require one MPI rank; OpenMP is supported.",
           "properties": {
             "location_method": {
-              "enum": ["analytic", "local_fd4"],
+              "enum": [
+                "analytic",
+                "local_fd4"
+              ],
               "default": "analytic",
               "description": "Analytic basis and coefficient product rule. Unsupported derivatives fail. local_fd4 is a deprecated alias for analytic; it does not enable finite differences."
             },
@@ -641,12 +1186,102 @@
               "type": "boolean",
               "default": false,
               "description": "Also write /support_measure/<block>: uint8 round(255 s_i / max_i s_i) per DOF for diagnostics."
+            },
+            "pml_stage": {
+              "type": "object",
+              "x-fs-visibility": "internal",
+              "x-fs-docs": false,
+              "description": "Verified fs-patch-stage-1 bundle restored before the explicit candidate state. Controlled patch PML remains experimental until stage mesh and derivative integration are complete.",
+              "required": [
+                "manifest",
+                "identity"
+              ],
+              "properties": {
+                "manifest": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "identity": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "stage_mesh": {
+              "type": "object",
+              "x-fs-visibility": "internal",
+              "x-fs-docs": false,
+              "description": "Capture the canonical stage frequency mesh without wave solves, or replay an immutable fs-stage-mesh-1 companion. Requires a verified PML stage and explicit canonical candidate state.",
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "capture",
+                    "replay"
+                  ]
+                },
+                "manifest": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "identity": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "capture"
+                    }
+                  },
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "manifest"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "identity"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "replay"
+                    }
+                  },
+                  "required": [
+                    "manifest",
+                    "identity"
+                  ]
+                }
+              ]
             }
           },
           "additionalProperties": false,
           "required": [
             "active"
-          ]
+          ],
+          "dependentRequired": {
+            "pml_stage": [
+              "state"
+            ],
+            "stage_mesh": [
+              "pml_stage",
+              "state"
+            ]
+          }
         },
         "direction": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
@@ -658,7 +1293,7 @@
         },
         "extension": {
           "type": "object",
-          "description": "Auxiliary physical-property extension over material control bases. Auxiliary actions hold the background fixed; active physical model controls select the optional reduced background gradient after solve. Volume scattering excludes PML and boundary terms; the DPG test metric is held fixed.",
+          "description": "Auxiliary physical-property extension over material control bases. Auxiliary actions hold the background fixed; active physical model controls select the optional reduced background gradient after solve. Volume scattering excludes PML and boundary terms; the DPG test metric is held fixed. Real or complex physical frequencies are supported. For f=f_real+i*f_imag, lag factors are exp(2*pi*f_imag*tau)*exp(-i*2*pi*f_real*tau); adjoints retain their conjugate amplitudes.",
           "required": [
             "fields"
           ],
@@ -705,7 +1340,8 @@
                         "minLength": 1,
                         "description": "Explicit time unit, such as s or ms."
                       }
-                    }
+                    },
+                    "description": "Uniform real tap amplitudes at physical time lags. Contraction uses the complete complex job frequency, in Hz, and lag coordinates converted to seconds. Nonfinite frequencies and factors not representable in the solver working precision are rejected."
                   },
                   "offsets": {
                     "type": "object",
@@ -827,6 +1463,26 @@
                   },
                   "description": "One physical property amplitude per extension field. Krylov coordinates z satisfy taps = field_scale * z."
                 },
+                "frequency_weights": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "description": "Opt into one shared L2 tap fit over the full f_list. Requires one --frequency-groups MPI worker group per frequency, common material bases, and at least one positive weight. The regularizer is added once. Reduced Schur and robust band solves are not yet supported."
+                },
+                "gradient_checkpoint_interval": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1,
+                  "description": "Compute and export gradient checkpoints only at CG iteration multiples of this interval. Other iterations incur no checkpoint propagation solves."
+                },
+                "gradient_checkpoints": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Optional output prefix for fixed-tap model gradients at gradient_checkpoint_interval multiples (L2 only). Files use <prefix>_cg_<iteration>_<task>.h5 and a matching JSON completion record. Adds three propagation solves per source batch and frequency per checkpoint. Nonstationary checkpoints are not reduced gradients."
+                },
                 "relative_tolerance": {
                   "type": "number",
                   "exclusiveMinimum": 0,
@@ -862,7 +1518,8 @@
                   "type": "number",
                   "exclusiveMinimum": 0,
                   "default": 512,
-                  "description": "Per-rank byte limit in MiB for the retained reduced-gradient wavefield session, separate from incident checkpoint storage."
+                  "deprecated": true,
+                  "description": "Deprecated and ignored. The retained reduced-gradient source-batch workspace is indivisible and allocated at its required size; allocation failure is reported."
                 },
                 "offset_penalty": {
                   "type": "number",
@@ -972,7 +1629,8 @@
               "type": "number",
               "exclusiveMinimum": 0,
               "default": 512,
-              "description": "Per-rank retained joint field workspace budget in MiB, excluding solver factors and acquisition-owned buffers."
+              "deprecated": true,
+              "description": "Deprecated and ignored. The retained joint source-batch workspace is indivisible and allocated at its required size; allocation failure is reported."
             },
             "fields": {
               "type": "array",
@@ -1325,7 +1983,8 @@
                 "action": {
                   "enum": [
                     "jvp",
-                    "normal"
+                    "normal",
+                    "receiver_jvp"
                   ]
                 }
               }
@@ -1357,7 +2016,8 @@
                   "enum": [
                     "linearize",
                     "vjp",
-                    "normal"
+                    "normal",
+                    "receiver_vjp"
                   ]
                 }
               }
@@ -1666,9 +2326,183 @@
       "type": "boolean",
       "default": false,
       "description": "Retain raw task files after packing and allow successful tasks to be reused after numerical solver-setting changes. Physical inputs, mesh-defining Solver fields and requested outputs must still match. Original producer fingerprints remain unchanged."
+    },
+    "PatchPreparation": {
+      "$ref": "../../internal/fs-patch-preparation-1/schema.json",
+      "x-fs-visibility": "internal",
+      "x-fs-docs": false
+    },
+    "patches": {
+      "type": "object",
+      "x-fs-visibility": "internal",
+      "x-fs-docs": false,
+      "description": "SDK-only patch forward policy. Execute with site.run; native child jobs omit this metadata.",
+      "additionalProperties": false,
+      "required": [
+        "patches",
+        "shots_per_patch",
+        "max_offset_m",
+        "padding_m",
+        "depth_m",
+        "pml"
+      ],
+      "properties": {
+        "patches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "roots",
+              "sources"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "roots": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "sources": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "shots_per_patch": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_offset_m": {
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 3,
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          ]
+        },
+        "padding_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "depth_m": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number"
+          }
+        },
+        "pml": {
+          "type": "object"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "shots_per_patch": {
+              "type": "null"
+            },
+            "patches": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "shots_per_patch": {
+              "type": "integer"
+            },
+            "patches": {
+              "maxItems": 0
+            }
+          }
+        }
+      ]
     }
   },
   "allOf": [
+    {
+      "if": {
+        "required": [
+          "kernel_derivative"
+        ],
+        "properties": {
+          "kernel_derivative": {
+            "required": [
+              "export_lower_orders"
+            ],
+            "properties": {
+              "field_memory_fraction": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.8,
+                "description": "Fraction of currently available host/cgroup memory reserved for retained spectral fields in auto mode, divided conservatively among MPI ranks sharing the host. Zero forces scratch for nonempty hierarchies. Unknown availability selects disk. Does not limit solver or process RSS."
+              },
+              "export_lower_orders": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "control_sensitivities",
+          "workflow"
+        ],
+        "properties": {
+          "workflow": {
+            "const": "rtm"
+          },
+          "kernel_derivative": {
+            "required": [
+              "residual"
+            ],
+            "properties": {
+              "residual": {
+                "const": "derivative"
+              }
+            }
+          }
+        },
+        "not": {
+          "required": [
+            "fwi_operator"
+          ]
+        }
+      }
+    },
     {
       "not": {
         "required": [
@@ -1761,6 +2595,23 @@
       "if": {
         "properties": {
           "workflow": {
+            "const": "patch_prepare"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "required": [
+          "PatchPreparation"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
             "const": "eikonal"
           }
         },
@@ -1818,7 +2669,6 @@
               "forward",
               "born",
               "rtm",
-              "focus",
               "fwi_operator"
             ]
           }
@@ -1848,6 +2698,22 @@
         "properties": {
           "workflow": {
             "const": "forward"
+          },
+          "control_sensitivities": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "Regularization"
+                  ]
+                },
+                {
+                  "required": [
+                    "MeshAdaptation"
+                  ]
+                }
+              ]
+            }
           }
         },
         "required": [
@@ -1900,32 +2766,6 @@
         ]
       },
       "then": {
-        "properties": {
-          "control_sensitivities": {
-            "required": [
-              "gradient"
-            ]
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "workflow": {
-            "const": "focus"
-          }
-        },
-        "required": [
-          "workflow"
-        ]
-      },
-      "then": {
-        "required": [
-          "control_sensitivities",
-          "focus",
-          "Imaging"
-        ],
         "properties": {
           "control_sensitivities": {
             "required": [

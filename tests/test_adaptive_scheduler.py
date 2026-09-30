@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -259,3 +261,105 @@ def test_adaptive_scheduler_mpirun_uses_full_allocation_without_ibrun_flags(
 
     with pytest.raises(SystemExit, match="requires exclusive use"):
         instance._launch_command(task_id=1, offset=1, ranks=3)
+
+
+def _write_job(tmp_path):
+    job = tmp_path / "job.json"
+    job.write_text(
+        json.dumps({"project_path": str(tmp_path), "result_path": "results"})
+    )
+    return job
+
+
+def _write_error_json(tmp_path, relative, message, *, mtime=None):
+    path = tmp_path / "results" / "_fs_run" / relative / "error.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": "fs-error-1", "message": message}))
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_step_failure_reason_prefers_error_json_then_log_line(tmp_path):
+    scheduler = _load_scheduler_module()
+    job = _write_job(tmp_path)
+    log = tmp_path / "task_2.log"
+    log.write_text("Error: Objective needs observed data\n   at: x.f90:3\n")
+
+    _write_error_json(tmp_path, "tasks/task_000002", "error.json reason")
+    assert scheduler.step_failure_reason(job, 2, log, 1, not_before=0.0) == (
+        "solver exited with status 1: error.json reason"
+    )
+
+    # An error.json from an earlier attempt must not explain this one.
+    stale = time.time() - 3600
+    _write_error_json(tmp_path, "tasks/task_000002", "old reason", mtime=stale)
+    assert scheduler.step_failure_reason(job, 2, log, 1, not_before=time.time()) == (
+        "solver exited with status 1: Objective needs observed data"
+    )
+
+
+@pytest.mark.parametrize("return_code", [-11, 139])
+def test_step_failure_reason_names_signal_deaths(tmp_path, return_code):
+    scheduler = _load_scheduler_module()
+
+    reason = scheduler.step_failure_reason(
+        tmp_path / "missing.json", 1, None, return_code, not_before=0.0
+    )
+
+    assert reason == "solver terminated by SIGSEGV"
+
+
+def test_record_failure_names_operation_step_and_keeps_existing_reason(tmp_path):
+    scheduler = _load_scheduler_module()
+    job = _write_job(tmp_path)
+    _write_error_json(tmp_path, "operations/init", "mesh file is unreadable")
+    status = tmp_path / "scheduler_status.json"
+    status.write_text(json.dumps({"state": "running", "total": 3}))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            scheduler.__file__,
+            "--record-failure",
+            "--status",
+            str(status),
+            "--job",
+            str(job),
+            "--tasks",
+            "3",
+            "--step",
+            "init",
+            "--log",
+            str(tmp_path / "init.log"),
+            "--return-code",
+            "1",
+            "--not-before",
+            "0",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(status.read_text())
+    assert payload["state"] == "failed"
+    assert payload["phase"] == "init"
+    assert payload["return_code"] == 1
+    assert payload["abort_reason"] == (
+        "Mesh preparation failed: solver exited with status 1: "
+        "mesh file is unreadable; see init.log"
+    )
+
+    payload["abort_reason"] = "MPI health check failed"
+    status.write_text(json.dumps(payload))
+    scheduler.record_step_failure(
+        status,
+        job_file=str(job),
+        n_tasks=3,
+        step="smooth",
+        log_file="",
+        return_code=1,
+        not_before=0.0,
+    )
+    assert json.loads(status.read_text())["abort_reason"] == "MPI health check failed"

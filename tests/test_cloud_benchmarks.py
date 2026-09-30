@@ -106,6 +106,21 @@ def test_behavior_hash_ignores_formatting_and_generated_source_header():
     assert _behavior_sha256(compact) == _behavior_sha256(reformatted)
 
 
+def test_generator_preserves_existing_corpus_when_source_is_empty(tmp_path):
+    source = tmp_path / "tutorials"
+    source.mkdir()
+    output = tmp_path / "generated"
+    output.mkdir()
+    (output / ".generated-cloud-benchmark-workloads").touch()
+    script = output / "existing.py"
+    script.write_text("value = 1\n")
+
+    with pytest.raises(RuntimeError, match="No tutorial notebooks found"):
+        generate(source, output)
+
+    assert script.read_text() == "value = 1\n"
+
+
 def test_sanitizer_redacts_credentials_but_keeps_performance_authorization():
     value = sanitize(
         {

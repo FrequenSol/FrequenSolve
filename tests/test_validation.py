@@ -276,14 +276,13 @@ def test_validation_catches_bad_source_kind(tmp_path):
         _simple_job(tmp_path, source_kind="moment")
 
 
-def test_validation_catches_point_kind_that_differs_from_geometry(tmp_path):
+def test_validation_accepts_inline_point_kind_overrides(tmp_path):
     job = _simple_job(tmp_path)
     job.simulation.acquisition.source_geometry.sources[0].kind = "vector"
 
     report = job.validate()
 
-    assert not report.ok
-    assert "acquisition.source.kind.mismatch" in _codes(report)
+    assert report.ok
 
 
 def test_validation_catches_wavefield_grid_outside_domain(tmp_path):
@@ -1060,3 +1059,18 @@ def test_remote_site_submit_logs_unverified_source_once_per_validation(
         if "files.remote_unverified" in record.message
     ]
     assert len(remote_warnings) == 1
+
+
+def test_validation_accepts_explicit_acoustic_volume_injection(tmp_path):
+    job = _simple_job(tmp_path, source_kind="volume_injection")
+    assert job.validate().ok
+
+
+def test_validation_rejects_volume_injection_in_elastic_physics(tmp_path):
+    job = _simple_job(
+        tmp_path,
+        source_kind="volume_injection",
+        physics="elastic",
+        receiver_field="velocity_z",
+    )
+    assert "acquisition.source.kind.unsupported" in _codes(job.validate())

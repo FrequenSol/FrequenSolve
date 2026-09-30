@@ -43,7 +43,7 @@ from .geometry import (
 from .outputs import _validate_field
 from .report import ValidationReport
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole"}
+_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
 
 
 def _validate_simulation(ctx: _ValidationContext) -> None:
@@ -326,7 +326,9 @@ def _validate_source_geometry(
             path=f"{path}.kind",
         )
     else:
-        _validate_source_kind(kind, f"{path}.kind", ctx.report)
+        _validate_source_kind(
+            kind, f"{path}.kind", ctx.report, physics=ctx.simulation.physics
+        )
 
     _validate_domain_id(getattr(geometry, "domain", None), f"{path}.domain", ctx)
 
@@ -390,14 +392,9 @@ def _validate_source_point(
 ) -> None:
     kind = getattr(source, "kind", None)
     if kind is not None:
-        _validate_source_kind(kind, f"{path}.kind", ctx.report)
-        if str(kind).strip().lower() != str(geometry_kind).strip().lower():
-            ctx.report.error(
-                "acquisition.source.kind.mismatch",
-                f"Point source kind {kind!r} does not match source geometry "
-                f"kind {geometry_kind!r}.",
-                path=f"{path}.kind",
-            )
+        _validate_source_kind(
+            kind, f"{path}.kind", ctx.report, physics=ctx.simulation.physics
+        )
 
     coordinates = getattr(source, "coordinates", None)
     if coordinates is None:
@@ -1025,8 +1022,17 @@ def _is_unverified_remote_file(
     return True
 
 
-def _validate_source_kind(kind: Any, path: str, report: ValidationReport) -> None:
+def _validate_source_kind(
+    kind: Any, path: str, report: ValidationReport, *, physics: Any
+) -> None:
     value = str(kind).strip().lower()
+    if value == "volume_injection" and physics != "acoustic":
+        report.error(
+            "acquisition.source.kind.unsupported",
+            "volume_injection requires acoustic physics.",
+            path=path,
+        )
+        return
     if value in _SOURCE_KINDS:
         return
     hint = None

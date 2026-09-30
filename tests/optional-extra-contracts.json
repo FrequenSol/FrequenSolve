@@ -160,9 +160,7 @@
       ],
       "selectors": [
         "tests/test_seismic_plotting.py",
-        "tests/test_ex01_simple.py::test_model_plot",
-        "tests/test_ex01_simple.py::test_time_domain_wavelet_time_plot",
-        "tests/test_ex01_simple.py::test_time_domain_wavelet_freq_plot"
+        "tests/test_ex01_simple.py::test_model_plot"
       ],
       "pytest_args": [
         "--mpl",

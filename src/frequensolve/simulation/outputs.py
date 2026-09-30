@@ -291,8 +291,17 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 class TraceOutput(Output):
     """Receiver trace output request.
 
+    Released Sauce producers publish ``<path>/traces.h5``. Development
+    producers may publish immutable generation segments instead. Resolve
+    both layouts through the job's trace manifest.
+
     Args:
         path: Trace output directory relative to the job result directory.
+        keep_history: Keep each superseded pack under
+            ``<path>/history/<generation>/`` instead of discarding it, e.g. to
+            retain the traces of every FWI iteration run in one job directory.
+            Immutable generation producers retain superseded manifests and
+            segments in their original generation directories when enabled.
         **kwargs: Additional solver-facing trace output fields.
 
     Raises:
@@ -300,11 +309,20 @@ class TraceOutput(Output):
     """
 
     path: Optional[Union[str, Path]] = None
+    keep_history: bool = False
 
-    def __init__(self, path: Union[str, Path] = "traces", **kwargs):
+    def __init__(
+        self,
+        path: Union[str, Path] = "traces",
+        keep_history: bool = False,
+        **kwargs,
+    ):
         """Create a trace output request with a job-relative path."""
 
         self.path = _relative_output_path(path)
+        if not isinstance(keep_history, bool):
+            raise TypeError("keep_history must be a boolean")
+        self.keep_history = keep_history
         self._init_extra(None, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -317,11 +335,11 @@ class TraceOutput(Output):
             JSON-compatible trace output payload.
         """
 
-        return merge_extra(
-            {"_type": self.__class__.__name__, "path": self.path},
-            self.extra,
-            self.__class__.__name__,
-        )
+        payload: Dict[str, Any] = {"_type": self.__class__.__name__, "path": self.path}
+        # Omitted when false so existing job fingerprints are unchanged.
+        if self.keep_history:
+            payload["keep_history"] = True
+        return merge_extra(payload, self.extra, self.__class__.__name__)
 
     @classmethod
     def from_fs(cls, data: Dict) -> "TraceOutput":
@@ -336,7 +354,11 @@ class TraceOutput(Output):
 
         data = copy.deepcopy(data)
         data.pop("_type", None)
-        return cls(path=data.pop("path", "traces"), **data)
+        return cls(
+            path=data.pop("path", "traces"),
+            keep_history=data.pop("keep_history", False),
+            **data,
+        )
 
 
 @dataclass(kw_only=True)
@@ -643,7 +665,6 @@ class VtkOutput(Output):
         format: Writer format, one of ``"vtu"``, ``"xdmf"``, ``"xmf"``, or
             ``"vtr"``.
         encoding: Optional writer encoding.
-        execute_on: Solver phase where output is produced.
         order: Optional output interpolation/order.
         parts: Optional complex parts for field output.
         target: Output target: ``"volume"``, ``"surface"``, ``"grid"``, or a
@@ -675,7 +696,6 @@ class VtkOutput(Output):
     show_pml: bool = True
     format: str = "vtu"
     encoding: Optional[str] = None
-    execute_on: Optional[str] = None
     order: Optional[int] = None
     parts: Optional[List[str]] = None
     target: Optional[Union[str, Mapping[str, Any]]] = None
@@ -693,8 +713,7 @@ class VtkOutput(Output):
     _target_mesh: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     _FORMATS = {"vtu", "xdmf", "xmf", "vtr"}
-    _TARGETS = {"volume", "surface", "grid"}
-    _EXECUTE_ON = {"adapt", "initial", "special", "solve", "final", "none"}
+    _TARGETS = {"volume", "surface", "grid", "property_mesh"}
     _PARTS = {"re", "real", "im", "imag", "imaginary", "abs", "mag", "magnitude"}
 
     def __init__(
@@ -709,7 +728,6 @@ class VtkOutput(Output):
         show_pml: bool = True,
         format: str = "vtu",
         encoding: Optional[str] = None,
-        execute_on: Optional[str] = None,
         order: Optional[int] = None,
         parts: Optional[Union[str, Iterable[str]]] = None,
         target: Optional[Union[str, Mapping[str, Any]]] = None,
@@ -771,7 +789,6 @@ class VtkOutput(Output):
         if self.format == "xmf":
             self.format = "xdmf"
         self.encoding = str(encoding).lower() if encoding is not None else None
-        self.execute_on = _choice(execute_on, self._EXECUTE_ON, "VtkOutput.execute_on")
         self.order = int(order) if order is not None else None
         self.parts = _normalize_parts(parts)
         self.target = self._normalize_target(target)
@@ -797,6 +814,25 @@ class VtkOutput(Output):
         if upscale is not None:
             self._set_target_upscale(upscale)
         self._init_extra(None, **kwargs)
+
+    @classmethod
+    def property_mesh(
+        cls, space: str, *, subdomain: Optional[str] = None, **kwargs
+    ) -> "VtkOutput":
+        """Export current physical properties on a named mesh control space.
+
+        Uses the property's adapted leaf topology, independent of the solution
+        mesh. Cells use linear vertex geometry; vertices are evaluated with
+        live model geometry and material transforms. Requires a Sauce build
+        supporting the ``property_mesh`` target. Only property items and VTU
+        are supported.
+        """
+        if not str(space).strip():
+            raise ValueError("property_mesh requires a named space")
+        target = {"kind": "property_mesh", "space": str(space)}
+        if subdomain is not None:
+            target["subdomain"] = str(subdomain)
+        return cls(target=target, **kwargs)
 
     @classmethod
     def domain(
@@ -908,6 +944,15 @@ class VtkOutput(Output):
 
         if self._inferred_target() == "grid" and self.format != "vtr":
             raise ValueError("ParaView grid targets require format='vtr'")
+        if self._inferred_target() == "property_mesh":
+            if not isinstance(self.target, Mapping) or not self.target.get("space"):
+                raise ValueError("property_mesh requires a named space")
+            if (
+                self.format != "vtu"
+                or self.fields
+                or any(item.get("kind") != "property" for item in self._items_payload())
+            ):
+                raise ValueError("property_mesh supports property items and VTU only")
 
         payload = {
             "_type": "ParaviewOutput",
@@ -925,10 +970,8 @@ class VtkOutput(Output):
         if self.source is not None:
             payload["source"] = copy.deepcopy(self.source)
 
-        for key in ["execute_on", "order"]:
-            value = getattr(self, key)
-            if value is not None:
-                payload[key] = value
+        if self.order is not None:
+            payload["order"] = self.order
 
         if self.coordinates is not None:
             payload["coordinates"] = {"system": self.coordinates}
@@ -1144,7 +1187,6 @@ class VtkOutput(Output):
             show_pml=data.pop("show_pml", True),
             format=_format_from_writer(writer),
             encoding=(writer or {}).get("encoding") if writer is not None else None,
-            execute_on=data.pop("execute_on", None),
             order=data.pop("order", None),
             target=target,
             coordinates=coordinates,

@@ -16,6 +16,7 @@ from frequensolve.imaging import (
     Normal,
     ObservedData,
     SourceParameters,
+    TraceStoreRef,
 )
 from frequensolve.imaging._artifacts import ControlStateFile, ControlVectorFile
 from frequensolve.model.parameterization import ParameterizedProperty
@@ -65,6 +66,129 @@ def _surrogate(fake, lin):
 # ---------------------------------------------------------------------------
 # construction
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("order", [1, 2, 3, 4])
+def test_spectral_fwi_selection_reaches_every_action(tmp_path, fake, order):
+    selection = {"axis": "fourier", "residual": "derivative", "order": order}
+    _, problem = _problem(
+        tmp_path,
+        fake,
+        kernel_derivative=selection,
+        frequencies=[1.0 - 0.1j, 2.0 - 0.1j],
+    )
+    selection["order"] = 0
+    job = problem._linearize_job(problem.space, None, gradient=True)
+    assert job.to_fs()["kernel_derivative"]["order"] == order
+    assert job.f_list == problem.frequencies
+    for action, inputs in (
+        ("jvp", {"direction": "direction.h5", "objective_vector": "jvp.json"}),
+        ("vjp", {"objective_vector": "dual.json", "covector": "gradient.h5"}),
+        ("normal", {"direction": "direction.h5", "covector": "normal.h5"}),
+    ):
+        job = problem._operator_job(
+            problem.space,
+            action,
+            frequencies=problem.frequencies,
+            state="state.json",
+            **inputs,
+        )
+        assert job.to_fs()["kernel_derivative"]["order"] == order
+    job = problem._linearize_job(
+        problem.space, None, gradient=True, receiver_diagonal={"probes": 16}
+    )
+    assert job.to_fs()["fwi_operator"]["receiver_diagonal"]["probes"] == 16
+
+
+def test_spectral_window_stage_identity_and_control_layout(tmp_path, fake):
+    _, problem = _problem(tmp_path, fake)
+    window = {"axis": "fourier", "residual": "window", "window": [0, 0, 0, 0, 1]}
+    stage = problem.restrict(kernel_derivative=window)
+    assert stage._fingerprint(None) != problem._fingerprint(None)
+    assert stage.restrict(frequencies=[4.0]).kernel_derivative == window
+    assert stage.restrict(kernel_derivative=None).kernel_derivative is None
+    returned = stage.kernel_derivative
+    returned["window"][4] = 9
+    assert stage.kernel_derivative == window
+    _, spectral = _problem(tmp_path, fake, kernel_derivative=window)
+    assert spectral.with_controls(_space()).kernel_derivative == window
+    with pytest.raises(ValueError, match="waveform comparisons"):
+        stage.with_misfit(Misfit(comparison="phase_derivative"))
+    total = stage.restrict(kernel_derivative={**window, "source_derivative": "total"})
+    assert (
+        total._linearize_job(total.space, None, gradient=True).kernel_derivative[
+            "source_derivative"
+        ]
+        == "total"
+    )
+    with pytest.raises(ValueError, match="frozen source"):
+        total._operator_job(
+            total.space,
+            "normal",
+            frequencies=total.frequencies,
+            state="state.json",
+            direction="direction.h5",
+            covector="normal.h5",
+        )
+
+
+@pytest.mark.parametrize("action", ["jvp", "normal"])
+def test_first_spectral_action_accepts_total_source_derivative(tmp_path, fake, action):
+    _, problem = _problem(
+        tmp_path,
+        fake,
+        kernel_derivative={
+            "residual": "derivative",
+            "order": 1,
+            "source_derivative": "total",
+        },
+    )
+    outputs = (
+        {"objective_vector": "jvp.json"}
+        if action == "jvp"
+        else {"covector": "normal.h5"}
+    )
+    job = problem._operator_job(
+        problem.space,
+        action,
+        frequencies=problem.frequencies,
+        state="state.json",
+        direction="direction.h5",
+        **outputs,
+    )
+    assert job.to_fs()["kernel_derivative"]["source_derivative"] == "total"
+
+
+def test_spectral_fwi_accepts_physical_shot_trace_store(tmp_path, fake):
+    observed_file = tmp_path / "field_traces.h5"
+    observed = ObservedData(
+        TraceStoreRef(observed_file), source_basis="source_geometry"
+    )
+    _, problem = _problem(
+        tmp_path,
+        fake,
+        observed=observed,
+        kernel_derivative={"axis": "fourier", "residual": "derivative", "order": 4},
+    )
+    job = problem._linearize_job(problem.space, None, gradient=True)
+    group = job.to_fs()["Image"]["misfit"]["receiver_groups"][0]
+    assert group["observed"]["source_basis"] == "source_geometry"
+    assert group["observed"]["file"] == str(observed_file)
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"residual": "derivative", "order": 5},
+        {"residual": "derivative", "order": 1.5},
+        {"residual": "window", "window": [0, float("nan")]},
+        {"residual": "window", "window": [0, 1], "order": 4},
+        {"residual": "jet", "order": 4},
+    ],
+)
+def test_invalid_spectral_fwi_selection(tmp_path, fake, selection):
+    with pytest.raises(ValueError, match="kernel_derivative"):
+        _problem(tmp_path, fake, kernel_derivative=selection)
 
 
 def test_construction_binds_a_renamed_copy_and_leaves_the_simulation_untouched(
@@ -200,6 +324,22 @@ def test_state_vector_and_state_from_round_trip(setup):
 # ---------------------------------------------------------------------------
 # linearize
 # ---------------------------------------------------------------------------
+
+
+def test_receiver_diagonal_uses_frequency_weights_and_refreshes_cache(setup):
+    _, problem = setup
+    previous = problem.linearize()
+    lin = problem.restrict(weights=[0.25, 0.75]).linearize(
+        receiver_diagonal={"probes": 7}
+    )
+    assert lin is not previous
+    assert lin.job.receiver_diagonal["probes"] == 7
+    expected = lin.space.zeros()
+    for task, weight in enumerate(lin.frequency_weights, 1):
+        part = lin.space.ones() * task
+        part.to_file(native=True).write(lin.job.diagonal_file(task))
+        expected = expected + weight * part
+    np.testing.assert_allclose(lin.receiver_diagonal.values, expected.values)
 
 
 def test_linearize_matches_the_surrogate_value_gradient_and_report(setup, fake):
@@ -358,27 +498,16 @@ def test_restricted_views_share_state_and_submit_only_their_tasks(setup, fake):
     assert problem.restrict().space.blocks == tuple(ACTIVE)
 
 
-def test_smoothing_reads_the_smoothed_aggregate_covector(tmp_path, fake):
+def test_smoothing_is_a_workflow_regularizer_and_does_not_process_derivatives(
+    tmp_path, fake
+):
     _sim, problem = _problem(tmp_path, fake, smoothing={"type": "tv", "lambda": 0.3})
-
-    assert problem.smoothing is not None and problem.smoothing.kind == "tv"
+    assert problem.smoothing.kind == "tv"
     lin = problem.linearize()
-
-    assert lin.job.requires_postprocess()
-    assert lin.job.control_active == ["vp", "rho"]  # unqualified model blocks
-    assert lin.job.smoothing.kind == "tv"
-    assert (
-        lin.job.covector_file().is_file() and lin.job.covector_file(raw=True).is_file()
-    )
-    smoothed = ControlVectorFile.read(lin.job.covector_file()).pack(ACTIVE)
-    np.testing.assert_allclose(lin.gradient.values, smoothed)
+    assert not lin.job.requires_postprocess()
+    assert lin.job.smoothing is None
     np.testing.assert_allclose(lin.gradient.values, _surrogate(fake, lin).gradient)
-    plan = problem.dry_run()
-    assert plan["requires_postprocess"]
-    assert plan["job"]["control_sensitivities"]["Smoothing"]["type"] == "tv"
-
-    value_only = problem.restrict(frequencies=[4.0]).linearize(gradient=False)
-    assert not value_only.job.requires_postprocess()
+    assert not problem.dry_run()["requires_postprocess"]
 
 
 def test_frozen_dofs_are_dropped_from_vectors_and_expanded_to_sauce_layout(
@@ -1018,7 +1147,14 @@ def test_mechanism_reference_scale_is_fixed_across_stages_and_layouts(tmp_path):
 
     # a layout change keeps s_ref, even when the new problem's own
     # discovery runs in a 6 Hz stage
-    finer = problem.with_controls({"vp": DepthProfile("vp", "sediment", count=6)})
+    before = len(fake.jobs)
+    finer = problem.with_controls(
+        {"vp": DepthProfile("vp", "sediment", count=6)},
+        discovery_frequencies=[6.0],
+    )
+    # These specs are already resolved, so no discovery solve is needed.
+    assert len(fake.jobs) == before
+    assert finer.frequencies == problem.frequencies
     assert finer.mechanism_scaling == s_ref
     finer.restrict(frequencies=[6.0]).linearize(gradient=False)
     assert finer.mechanism_scaling == s_ref
@@ -1143,6 +1279,23 @@ def test_support_masks_combine_every_frequency_task(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_save_complete_state_preserves_inactive_registry_and_basis(setup, tmp_path):
+    _sim, problem = setup
+    state = problem.state
+    baseline = dict(state.blocks())
+    baseline["source.1.position"] = np.array([0.25, 0.5])
+    problem._shared.baseline = ControlStateFile(
+        baseline, control_spaces={"model.vp": "basis"}
+    )
+    problem.state = state.with_update(ControlVector(np.arange(8.0), problem.space))
+    path = problem.save_state(tmp_path / "complete.h5")
+    saved = ControlStateFile.read(path)
+    np.testing.assert_array_equal(saved["source.1.position"], [0.25, 0.5])
+    for name, values in problem.state.blocks().items():
+        np.testing.assert_array_equal(saved[name], values)
+    assert saved.control_spaces == {"model.vp": "basis"}
+
+
 def test_dry_run_describes_the_linearize_job_without_submitting(setup, fake):
     _sim, problem = setup
 
@@ -1193,3 +1346,21 @@ def test_check_reports_passing_adjoint_normal_and_taylor_tests(setup):
         "normal",
         "passed",
     }
+
+
+def test_volume_injection_mechanism_keeps_volumetric_units(tmp_path, fake):
+    _sim, problem = _source_problem(tmp_path, fake, mechanism=True, signature=False)
+    geometry = problem.simulation.acquisition.source_geometry
+    geometry.kind = "volume_injection"
+    for point in geometry.sources:
+        point.kind = "volume_injection"
+    state = _mechanism_state(
+        problem,
+        tmp_path,
+        [2.0],
+        scaling={"source.1.mechanism": 1.0, "source.2.mechanism": 1.0},
+    )
+    installed = problem.simulation_at(state)
+    points = installed.acquisition.source_geometry.sources
+    assert points[0].amplitude == {"value": 1.0, "units": "m^3/s"}
+    assert points[1].amplitude == {"value": 2.0, "units": "m^3/s"}
