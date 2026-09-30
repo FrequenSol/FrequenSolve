@@ -36,11 +36,6 @@ control sockets; use it from the supported Python host. Temporary files,
 credential stores and optional binary wheels must also belong to that host.
 Installing a missing extra alone does not establish native Windows support.
 
-Required SDK checks exercise supported Python versions; the native platform
-workflow covers Linux and macOS. A native Windows import smoke must not be
-advertised as supported execution. Deterministic tests simulate the support
-message only; they do not claim live Windows, WSL2, container or solver coverage.
-
 Basic Install
 -------------
 
@@ -48,6 +43,8 @@ Install the released FrequenSolve Python API from :term:`PyPI` with pip:
 
 .. code-block:: bash
 
+   python -m venv .venv
+   source .venv/bin/activate
    python -m pip install frequensolve
 
 Because the repository is public, you can also install from a source checkout
@@ -173,19 +170,28 @@ Verify that the Python package imports:
 
    print(fs.__version__)
 
-Check :term:`site configuration file` setup before running a solver job:
+Check :term:`site configuration file` setup without logging in or running a solver job:
+
+.. code-block:: console
+
+   frequensolve site check --profile cloud
+
+This reads an existing TOML file only. Copy the configuration from Cloud
+**Compute** first. A valid local configuration does not prove Cloud access or
+compute readiness. Check those separately in the app.
+
+For an interactive sign-in after configuration:
 
 .. code-block:: python
 
    import frequensolve as fs
 
-   site = fs.Site()
-   print(type(site).__name__)
+   site = fs.Site(profile="cloud", interactive=True)
 
 If this is the first ``fs.Site()`` call on the machine, FrequenSolve may create
 ``~/.frequensolve/site.toml`` and raise an exception asking you to review it.
 Edit that file, then rerun the same check. See :doc:`user_guide/site_configuration`
 for the configuration workflow.
 
-Then run the :doc:`quickstart` or download the first tutorial notebook from
+Then run :doc:`acoustic_starter`, the :doc:`quickstart` or download the first tutorial notebook from
 :doc:`tutorials/index`.

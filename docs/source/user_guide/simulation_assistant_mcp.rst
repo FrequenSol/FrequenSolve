@@ -30,6 +30,24 @@ claim that another frequency is supported by this fixed starter mesh.
 It cannot submit, run, upload, change, or delete a simulation. It does not
 provide raw GraphQL access.
 
+Choose your first path
+----------------------
+
+- **Learn or draft without signing in:** a configured public onboarding server
+  prepares and validates the fixed starter entirely in memory. Find its usable
+  endpoint in the Cloud documentation; a placeholder URL is not a connection.
+- **Prepare on your computer:** install the local MCP, run ``doctor``, and
+  configure your client as below. Local files are readable only under a root you
+  explicitly allow. No Cloud login is required for drafting.
+- **Monitor Cloud work:** use a configured authenticated Cloud endpoint with
+  its browser sign-in, or the local MCP with your existing Cloud profile/cache.
+  This adds read-only readiness, recent runs, diagnostics and artifact metadata.
+
+First ask: “Prepare the known-small 2D acoustic starter, explain its assumptions,
+validate it and show me the Python. Do not submit or run anything.” Compare the
+result with :doc:`../acoustic_starter`. An AI draft is a preparation aid; inspect
+its units, boundaries, source and outputs before the explicit Python submission.
+
 Capability profiles
 -------------------
 
@@ -66,14 +84,14 @@ Install and check
 -----------------
 
 Install FrequenSolve with its optional MCP support in a long-lived virtual
-environment. Replace the example absolute path once, then use that same path
+environment. Resolve the executable’s absolute path (expand ``~`` to your home directory), then use that same path
 when configuring your MCP client:
 
 .. code-block:: console
 
-   python -m venv /absolute/path/to/frequensolve-mcp-venv
-   /absolute/path/to/frequensolve-mcp-venv/bin/python -m pip install "frequensolve[mcp]"
-   /absolute/path/to/frequensolve-mcp-venv/bin/frequensolve-mcp doctor
+   python -m venv ~/.venvs/frequensolve-mcp
+   ~/.venvs/frequensolve-mcp/bin/python -m pip install "frequensolve[mcp]"
+   ~/.venvs/frequensolve-mcp/bin/frequensolve-mcp doctor
 
 The doctor uses an in-memory connection. It does not contact the network,
 submit a simulation, or require credentials.
@@ -217,7 +235,7 @@ Read-only Cloud tools
 
 Four Cloud tools help an agent monitor the signed-in user's work:
 
-- check seat, subscription, SCU availability and usage, storage, and compute
+- check seat, subscription, Credit availability and usage, storage, and compute
   readiness;
 - list a bounded page of the user's simulations;
 - read one simulation summary or its bounded stored diagnostics; and

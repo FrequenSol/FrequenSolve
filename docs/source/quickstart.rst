@@ -7,6 +7,10 @@ outputs. For deeper runnable examples with plots and output inspection, see the
 :doc:`tutorial collection
 <tutorials/index>`.
 
+For your first Cloud run, use :doc:`acoustic_starter` before this broader
+authoring reference. Its prepared inputs, explicit submission and interpretation
+checkpoints use the same small model as the MCP assistant.
+
 Core Workflow
 -------------
 
