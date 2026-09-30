@@ -641,3 +641,47 @@ def test_fingerprint_is_stable_and_detects_changes(tmp_path):
     assert fingerprint(observed=first) != fingerprint(
         observed=content_fingerprint(path)
     )
+
+
+def test_stage_worker_accounting_includes_init_checks_and_shared_process_once(tmp_path):
+    from types import SimpleNamespace
+
+    from frequensolve.orchestrator.sites.base import JobStatus, RunResult
+
+    backend = Backend(FakeImagingSite(), tmp_path)
+    beginning = backend.timing_snapshot()
+    handle = SimpleNamespace(
+        backend={"mesh_result": {"duration_seconds": 2.0, "stdout": "init.log"}}
+    )
+    result = RunResult(
+        None,
+        JobStatus(
+            state="completed",
+            return_code=0,
+            raw={
+                "tasks": [
+                    {"duration_seconds": 3.0, "stdout": "shared.log"},
+                    {"duration_seconds": 3.0, "stdout": "shared.log"},
+                ],
+                "pack": {"duration_seconds": 0.5, "stdout": "pack.log"},
+                "smooth": {"duration_seconds": 0.25, "stdout": "smooth.log"},
+            },
+        ),
+    )
+    backend._record_timing(result, handle)
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 5.75
+    # Another evaluation (including rejected line-search trials or periodic
+    # combined checks) contributes to the same stage ledger.
+    backend._record_timing(result, handle)
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 11.5
+    backend._record_timing(
+        RunResult(None, JobStatus(state="skipped", return_code=0)), handle
+    )
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 11.5
+    backend._record_timing(
+        RunResult(None, JobStatus(state="completed", return_code=0)),
+        SimpleNamespace(backend={}),
+    )
+    cost = backend.cost_since(beginning)
+    assert cost["summed_worker_seconds"] is None
+    assert cost["unmeasured_native_runs"] == 1

@@ -44,7 +44,11 @@ def _remove_candidate_artifacts(root, paths):
 class _CandidateArtifacts:
     def __init__(self, root, directory):
         self.paths = [directory]
-        weakref.finalize(self, _remove_candidate_artifacts, root.resolve(), self.paths)
+        self.root = root.resolve()
+
+    def activate(self):
+        # Failed native evaluations retain their inputs and logs for diagnosis.
+        weakref.finalize(self, _remove_candidate_artifacts, self.root, self.paths)
 
     def track(self, job):
         self.paths.append(Path(job._result_path).parent)
@@ -115,7 +119,16 @@ class _PatchRuntime:
                 context = problem.restrict(frequencies=[frequency], patches=None)
                 context.__class__ = _ChildProblem
                 context._shared = copy(problem._shared)
-                context._shared.simulation = simulation
+                context._shared.simulation = deepcopy(simulation)
+                # Native acquisition caches live beside Mesh/file. Separate
+                # immutable copies prevent sibling jobs from replacing a cache
+                # while another patch or frequency is reading it.
+                mesh_directory = directory / "contexts" / f"{index:04d}" / f"{task:04d}"
+                mesh_directory.mkdir(parents=True)
+                mesh_file = mesh_directory / "parent.gmp"
+                shutil.copyfile(directory / "parent.gmp", mesh_file)
+                context.simulation.mesh.file = str(mesh_file)
+                context.simulation.name = f"{simulation.name}_f{task:04d}"
                 context._masks = {}
                 context._masks_adopted = True
                 context._patch_stage = self.stage
@@ -128,7 +141,7 @@ class _PatchRuntime:
                 )
                 capture = FWIOperatorJob(
                     problem.backend.job_name("patch_capture"),
-                    simulation,
+                    context.simulation,
                     [frequency],
                     action="linearize",
                     active=[],
@@ -349,6 +362,7 @@ class _PatchRuntime:
             )
         composite = CompositeLinearization(problem, state, key, children)
         composite._patch_artifacts = artifacts
+        artifacts.activate()
         self.cache[key] = composite
         # Retain the same bounded number of candidate points as ordinary imaging.
         while len(self.cache) > problem.cache.capacity:

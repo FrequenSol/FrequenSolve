@@ -406,6 +406,38 @@ class PreparedPatchSet:
     def geometry(self):
         return deepcopy(self._geometry)
 
+    @property
+    def storage_estimates(self):
+        """Known input/preview storage; solver allocations require a realized mesh."""
+        from pathlib import Path
+
+        parent_bytes = None
+        if self.jobs and "parent_file" in self._geometry:
+            parent = Path(self.jobs[-1]._result_path) / self._geometry["parent_file"]
+            if parent.is_file():
+                parent_bytes = parent.stat().st_size
+        roots = {root["root"]: root for root in self._geometry["roots"]}
+        return {
+            "parent_mesh_file_bytes": parent_bytes,
+            "geometry_json_utf8_bytes": len(
+                json.dumps(self._geometry, separators=(",", ":")).encode("utf-8")
+            ),
+            "geometry_json_encoding": "compact UTF-8 JSON",
+            "patches": [
+                {
+                    "name": patch["name"],
+                    "root_id_payload_bytes": 8 * len(patch["descriptor"]["roots"]),
+                    "preview_float64_payload_bytes": sum(
+                        np.asarray(roots[root]["edge_points"], dtype=np.float64).nbytes
+                        for root in patch["descriptor"]["roots"]
+                    ),
+                }
+                for patch in self._geometry["patches"]
+            ],
+            "wavefield_bytes": None,
+            "solver_workspace_bytes": None,
+        }
+
     def freeze_stage(self, control_state, *, name, directory):
         """Pin stage inputs atomically for controlled patch execution and restart."""
         from frequensolve.mesh._stage_snapshot import PatchStageSnapshot

@@ -641,6 +641,7 @@ class LocalTaskSubmission:
 
     futures: List["Future"]
     task_plan: Dict[str, object]
+    mesh_result: Optional[Dict[str, Any]] = None
 
 
 @dataclass(kw_only=True)
@@ -864,6 +865,8 @@ class LocalSite(BaseSite):
             _cancel_fn=self._cancel_local_run,
         )
         handle.backend["futures"] = futures
+        if isinstance(submission, LocalTaskSubmission):
+            handle.backend["mesh_result"] = submission.mesh_result
         handle.backend["task_plan"] = task_plan
         handle.backend["pack_after_tasks"] = pack
         handle.backend["fresh"] = fresh_run
@@ -1626,7 +1629,9 @@ class LocalSite(BaseSite):
                 resources={"CPU": total_threads},
             )
             self._futures.append(future)
-            return LocalTaskSubmission(futures=[future], task_plan=task_plan)
+            return LocalTaskSubmission(
+                futures=[future], task_plan=task_plan, mesh_result=mesh_result
+            )
 
         self._ensure_dask_for_tasks(len(pending_indices))
         client = self._dask_client_or_raise()
@@ -1656,7 +1661,9 @@ class LocalSite(BaseSite):
                 raise
 
         self._futures.extend(futures)
-        return LocalTaskSubmission(futures=futures, task_plan=task_plan)
+        return LocalTaskSubmission(
+            futures=futures, task_plan=task_plan, mesh_result=mesh_result
+        )
 
     def fetch_traces(
         self,

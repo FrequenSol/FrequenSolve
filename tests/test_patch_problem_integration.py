@@ -277,9 +277,20 @@ def test_global_patch_checkpoint_reopens_the_frozen_stage(tmp_path):
             resume=False
         )
         assert len(full_models) == 2 and len(resumed_models) == 1
-        np.testing.assert_array_equal(saved.model, full_models[0])
-        np.testing.assert_array_equal(resumed_models[0], full_models[1])
-        np.testing.assert_array_equal(full.state.values, result.state.values)
+        # Fresh FP32 native assemblies can differ in their final reduction bits.
+        # Optimizer-only restart tests separately require exact iterates; this
+        # comparison uses the same native vector tolerance as local resume.
+        for resumed, uninterrupted in zip(
+            [saved.model, resumed_models[0]], full_models
+        ):
+            assert np.linalg.norm(resumed - uninterrupted) <= 1e-3 * max(
+                np.linalg.norm(uninterrupted), 1e-12
+            )
+        assert result.stages[0].metrics["summed_worker_seconds"] > 0
+        assert result.stages[0].metrics["unmeasured_native_runs"] == 0
+        np.testing.assert_allclose(
+            full.state.values, result.state.values, rtol=1e-3, atol=1e-9
+        )
 
 
 @pytest.mark.parametrize("mode", ["local_serial", "local_parallel"])
@@ -463,3 +474,76 @@ def test_cut_mesh_local_updates_only_touch_parent_core_coefficients(
             previous = full
         assert result.stages[0].success
         assert view.full_size == original.size
+
+
+@pytest.mark.parametrize("dimension", [2, 3])
+def test_central_sparse_vertex_cache_and_concurrent_evaluation(tmp_path, dimension):
+    import h5py
+
+    from frequensolve.seismic.receivers import CoordsArray
+
+    parent = _parent(tmp_path, dimension, "acoustic", root_columns=40)
+    parent.mesh.set_adapt(elems_per_wave=0.5, order=3, f_low=3, f_high=7.5)
+    parent.solver.grids = 2
+    parent.acquisition.source_geometry = SourceGeometry.points(
+        kind="scalar",
+        coords=[[x, 0.08] if dimension == 2 else [x, 0.2, 0.08] for x in (0.50, 0.51)],
+    )
+    parent.acquisition.receiver_groups[0].coordinates = CoordsArray(
+        coordinates=np.array(
+            [
+                [x, 0.05] if dimension == 2 else [x, 0.2, 0.05]
+                for x in (0.49, 0.50, 0.51)
+            ]
+        )
+    )
+    options = dict(
+        solver=_solver(dimension),
+        threads_per_worker=2,
+        shutdown_on_completion=False,
+        solver_policy="warn",
+    )
+    with LocalSite(n_workers=1, **options) as serial:
+        problem = ImagingProblem(
+            parent,
+            controls=DepthProfile("vp", "lower", count=2),
+            observed=None,
+            frequencies=[3, 7.5],
+            site=serial,
+            misfit=Misfit(normalization=1),
+            patches=PatchSet.around_sources(
+                shots_per_patch=1, max_offset=30 * ureg.m, padding=0 * ureg.m
+            ),
+        )
+        baseline = problem.linearize()
+        prediction = baseline.simulated().values.copy()
+        saw_sparse_ids = False
+        for _, _, context, _ in problem._patch_runtime.children:
+            from pathlib import Path
+
+            mesh_file = Path(context.simulation.mesh.file)
+            if not mesh_file.is_absolute():
+                mesh_file = Path(context.simulation.project_path) / mesh_file
+            cache = mesh_file.parent / "root_point_mapping.h5"
+            with h5py.File(cache) as container:
+                ids = container["mesh/connectivity"][:]
+                ids = ids[ids > 0]
+                extent = container["mesh/points"].shape[0]
+                assert ids.max() <= extent
+                saw_sparse_ids |= ids.max() > len(np.unique(ids))
+        assert saw_sparse_ids
+        # Reevaluate the same point and immutable frequency meshes through two
+        # workers, retaining the first operator across cache eviction.
+        problem._patch_runtime.cache.clear()
+        with LocalSite(n_workers=2, **options) as concurrent:
+            problem.backend.site = concurrent
+            repeated = problem.linearize()
+            assert repeated.value == pytest.approx(baseline.value, rel=1e-3)
+            np.testing.assert_allclose(
+                repeated.gradient.values, baseline.gradient.values, rtol=1e-3, atol=1e-9
+            )
+            np.testing.assert_allclose(
+                repeated.simulated().values, prediction, rtol=1e-3, atol=1e-8
+            )
+            # A retained operator must still work after its cache slot is evicted.
+            assert np.isfinite(baseline.jvp(baseline.space.random(42)).values).all()

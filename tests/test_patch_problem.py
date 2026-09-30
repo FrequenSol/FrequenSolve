@@ -138,3 +138,33 @@ def test_duplicate_physical_observation_rejected(composite):
         CompositeLinearization(
             problem, lin.state, "duplicate", [*children, children[0]]
         )
+
+
+def test_candidate_artifacts_live_with_operators_and_preserve_stage_inputs(tmp_path):
+    import gc
+
+    from frequensolve.imaging._patch_problem import _CandidateArtifacts
+
+    root = tmp_path / "stage"
+    directory = root / "candidates" / "point"
+    directory.mkdir(parents=True)
+    (directory / "candidate.h5").write_bytes(b"candidate")
+    stage_input = root / "baseline.h5"
+    stage_input.write_bytes(b"immutable")
+    outside = tmp_path / "external"
+    outside.mkdir()
+    owner = _CandidateArtifacts(root, directory)
+    job_directory = root / "jobs" / "child" / "linearize"
+    (job_directory / "results").mkdir(parents=True)
+    owner.track(SimpleNamespace(_result_path=job_directory / "results"))
+    owner.paths.extend([outside, root])
+    owner.activate()
+    retained_operator = SimpleNamespace(artifacts=owner)
+    del owner
+    gc.collect()
+    assert directory.exists() and job_directory.exists()
+    del retained_operator
+    gc.collect()
+    assert not directory.exists() and not job_directory.exists()
+    assert stage_input.read_bytes() == b"immutable"
+    assert outside.is_dir()

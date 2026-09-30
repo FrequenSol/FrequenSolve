@@ -716,8 +716,12 @@ class ImagingProblem:
         """Prepare and inspect patch geometry/acquisition without wave solves."""
         if self.patches is None:
             raise ValueError("this imaging problem has no patches")
+        from types import SimpleNamespace
+
         self._prepared_patches = self.patches.prepare(
-            self.simulation, self.frequencies, site=self.site
+            self.simulation,
+            self.frequencies,
+            site=SimpleNamespace(run=self.backend.run_preparation),
         )
         return self._prepared_patches
 

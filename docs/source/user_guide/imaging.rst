@@ -78,6 +78,9 @@ receiver apertures through a composite linearization:
 Preparation inspects geometry and acquisition without wave solves. Named meshed
 material artifacts must already exist when explicitly preparing; ordinary
 linearization first discovers the full-parent registry and material basis.
+``prepared.storage_estimates`` reports available geometry input and preview
+payload sizes. Wavefield and solver workspace estimates are unavailable before
+frequency meshes are realized; those fields are ``None``.
 The first stage evaluation also resolves objective scales and reduction mass
 on the full parent. Children inherit those values. Original observation keys
 determine canonical data rows, and shared coefficients receive contributions
@@ -107,6 +110,18 @@ One local stage iteration is one sweep. Combined objective checks run after each
 sweep by default; increases are recorded and updates retained. ``check_every=None``
 disables periodic checks while retaining endpoint evaluations. History labels
 local patch iterations separately from combined objective evaluations.
+
+Stage metrics report elapsed wall time including preparation, evaluations,
+reductions and checkpoint writes. ``summed_worker_seconds`` sums site-reported
+native initialization, frequency tasks and postprocessing, including rejected
+trials and combined checks. Sites without complete timing records report
+``None`` and an ``unmeasured_native_runs`` count. Local modes also report
+``summed_local_visit_seconds`` for proposal preparation and optimization;
+that narrower measurement excludes combined checks.
+
+Candidate caching retains a bounded number of points. An evicted point's owned
+files remain available while callers hold its linearization or child operators,
+then are released. Immutable stage inputs and failed-run diagnostics persist.
 
 Patch checkpoints preserve immutable stages, frequency meshes, model epochs,
 global L-BFGS history and partial local visits/proposals. Resume verifies those

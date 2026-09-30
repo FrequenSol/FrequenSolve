@@ -26,6 +26,7 @@ import shutil
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 from typing import (
     Any,
     Dict,
@@ -468,6 +469,58 @@ class Backend:
         if not self.prefix:
             raise ValueError("Backend prefix must be non-empty")
         self._counter = itertools.count(1)
+        self._timing_lock = RLock()
+        self._worker_seconds = 0.0
+        self._unmeasured_runs = 0
+
+    def timing_snapshot(self) -> Tuple[float, int]:
+        """Return counters for measuring a complete stage through this backend."""
+        with self._timing_lock:
+            return self._worker_seconds, self._unmeasured_runs
+
+    def cost_since(self, snapshot: Tuple[float, int]) -> Dict[str, Any]:
+        seconds, missing = self.timing_snapshot()
+        missing -= snapshot[1]
+        return {
+            "summed_worker_seconds": None if missing else seconds - snapshot[0],
+            "worker_time_scope": "site-reported native initialization, tasks and postprocessing",
+            "unmeasured_native_runs": missing,
+        }
+
+    def _record_timing(self, result: RunResult, handle: RunHandle) -> None:
+        if result.status.state == "skipped":
+            return
+        raw = result.status.raw or {}
+        rows = list(raw.get("tasks", []))
+        backend = getattr(handle, "backend", {})
+        for name in ("pack", "smooth"):
+            if isinstance(raw.get(name), Mapping):
+                rows.append(raw[name])
+        if isinstance(backend.get("mesh_result"), Mapping):
+            rows.append(backend["mesh_result"])
+        # A shared-frequency worker reports one row per frequency. Count its
+        # common process log only once rather than multiplying its duration.
+        seen = set()
+        seconds = 0.0
+        measured = bool(rows)
+        for row in rows:
+            duration = row.get("duration_seconds")
+            if duration is None:
+                measured = False
+                continue
+            log = row.get("stdout")
+            if log is not None and log in seen:
+                continue
+            if log is not None:
+                seen.add(log)
+            seconds += float(duration)
+        # Serial benchmark sites can report a complete job duration including
+        # input staging, initialization and packing through this explicit field.
+        if "worker_seconds" in raw:
+            seconds, measured = float(raw["worker_seconds"]), True
+        with self._timing_lock:
+            self._worker_seconds += seconds
+            self._unmeasured_runs += int(not measured)
 
     # -- naming and staging ---------------------------------------------------
 
@@ -531,7 +584,10 @@ class Backend:
                 when the run does not succeed.
         """
 
-        return self.submit(job, postprocess_only=postprocess_only).wait(check=check)
+        handle = self.submit(job, postprocess_only=postprocess_only)
+        result = handle.wait(check=check)
+        self._record_timing(result, handle)
+        return result
 
     def run_many(
         self, jobs: Iterable[BaseJob], *, check: bool = True
@@ -555,10 +611,20 @@ class Backend:
                 site.submit(job, **self._options(postprocess_only=False), **extra)
                 for job in jobs
             ]
-            return site.wait_all(handles, check=check)
+            results = site.wait_all(handles, check=check)
+            for result, handle in zip(results, handles):
+                self._record_timing(result, handle)
+            return results
         finally:
             if keep_cluster:
                 site.close(wait=True, retire=True)
+
+    def run_preparation(self, job: BaseJob, *, check: bool = True) -> RunResult:
+        """Account geometry-only preparation with the site's default rank profile."""
+        handle = self.site.submit(job)
+        result = handle.wait(check=check)
+        self._record_timing(result, handle)
+        return result
 
     def dry_run(self, job: BaseJob) -> Dict[str, Any]:
         """Describe what :meth:`run` would submit without touching the site.

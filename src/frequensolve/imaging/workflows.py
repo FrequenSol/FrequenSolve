@@ -1733,6 +1733,10 @@ class FWI:
 
         # First linearization of the stage: adopts the support masks that
         # define the stage space (held fixed until the next transition).
+        timing_backend = getattr(view, "backend", None)
+        timing_snapshot = (
+            timing_backend.timing_snapshot() if timing_backend is not None else None
+        )
         first = view.linearize(gradient=True)
         space = view.space
         x0 = np.array(first.point.values, dtype=np.float64, copy=True)
@@ -1785,7 +1789,7 @@ class FWI:
         if self.patch_updates is not None:
             from ._patch_updates import solve_local_stage
 
-            return solve_local_stage(
+            local_result = solve_local_stage(
                 self,
                 index,
                 stage,
@@ -1796,6 +1800,9 @@ class FWI:
                 native_regularization,
                 stage_started=stage_started,
             )
+            if timing_snapshot is not None:
+                local_result.metrics.update(timing_backend.cost_since(timing_snapshot))
+            return local_result
         metrics = self._stage_metrics(index, stage, space, optimizer, regularization)
         if native_regularization is not None:
             metrics["optimizer"] = "proximal_gradient"
@@ -2009,6 +2016,8 @@ class FWI:
                 "gradient_norm": float(np.linalg.norm(result.gradient)),
             },
         )
+        if timing_snapshot is not None:
+            stage_result.metrics.update(timing_backend.cost_since(timing_snapshot))
         self.results.append(stage_result)
         return stage_result
 
