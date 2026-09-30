@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/internal/fs-patch-stage-1/schema.json",
+  "title": "fs-patch-stage-1",
+  "x-fs-contract": "fs-patch-stage-1",
+  "x-fs-visibility": "internal",
+  "x-fs-docs": false,
+  "type": "object",
+  "required": [
+    "schema",
+    "name",
+    "frequencies",
+    "parent_geometry",
+    "material_basis",
+    "pml",
+    "geometry_identity",
+    "acquisition_identity",
+    "simulation",
+    "control_state",
+    "parent_mesh",
+    "files"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-patch-stage-1"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "frequencies": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          {
+            "type": "number"
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "parent_geometry": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{16}$"
+    },
+    "material_basis": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "pml": {
+      "type": "object",
+      "description": "Prepared cut-boundary PML policy in native BoundaryCondition form."
+    },
+    "geometry_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "acquisition_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "simulation": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Bundle-relative POSIX file path; absolute paths and parent traversal are rejected."
+    },
+    "control_state": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Bundle-relative POSIX file path; absolute paths and parent traversal are rejected."
+    },
+    "parent_mesh": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Bundle-relative POSIX file path; absolute paths and parent traversal are rejected."
+    },
+    "files": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "bytes",
+          "sha256"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Bundle-relative POSIX file path; absolute paths and parent traversal are rejected."
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

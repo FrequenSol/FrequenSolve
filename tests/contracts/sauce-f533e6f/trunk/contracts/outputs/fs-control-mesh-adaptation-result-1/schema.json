@@ -35,6 +35,29 @@
         "type": "string",
         "minLength": 1
       }
+    },
+    "transfer": {
+      "type": "string",
+      "enum": [
+        "nodal",
+        "l2"
+      ],
+      "default": "nodal"
+    },
+    "smoothing_length_m": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0
+    },
+    "smoothing_wavelengths": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Local wavelength fraction. The frozen accepted wavespeed defines length(x)=fraction*v(x)/frequency."
+    },
+    "smoothing_frequency_hz": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Reference frequency for local-wavelength smoothing; defaults to the target sizing frequency."
     }
   },
   "additionalProperties": false,

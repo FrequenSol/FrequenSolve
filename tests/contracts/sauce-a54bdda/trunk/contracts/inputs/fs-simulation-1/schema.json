@@ -159,7 +159,7 @@
         "geom_tol": {
           "type": "number",
           "exclusiveMinimum": 0.0,
-          "default": 1.0e-8,
+          "default": 1e-08,
           "description": "Geometry coordinate tolerance used by GMP and reference-coordinate checks. This is currently configured under Discretization alongside geometry; it may move under Mesh in a future contract."
         },
         "force_iso_quadrature": {
@@ -404,6 +404,12 @@
             }
           },
           "additionalProperties": true
+        },
+        "root_patch": {
+          "$ref": "../../internal/fs-root-patch-1/schema.json",
+          "x-fs-visibility": "internal",
+          "x-fs-docs": false,
+          "description": "Prepared physical root selection against the authored Mesh/file fingerprint. Child IDs preserve parent geometry identity."
         }
       },
       "additionalProperties": true
@@ -416,24 +422,24 @@
         {
           "type": "object",
           "properties": {
-        "units": {
-          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
-        },
-        "x_limits": {
-          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
-        },
-        "y_limits": {
-          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
-        },
-        "layers": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        }
-      },
-      "additionalProperties": true
+            "units": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+            },
+            "x_limits": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
+            },
+            "y_limits": {
+              "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/vec2"
+            },
+            "layers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "additionalProperties": true
         }
       ]
     },
@@ -608,12 +614,12 @@
         "tolerance": {
           "type": "number",
           "exclusiveMinimum": 0.0,
-          "default": 1.0e-5
+          "default": 0.0001
         },
         "coarse_tol": {
           "type": "number",
           "exclusiveMinimum": 0.0,
-          "default": 1.0e-4
+          "default": 0.0001
         },
         "sparse_rhs": {
           "type": "boolean",
@@ -631,7 +637,7 @@
         },
         "sparse_rhs_tol": {
           "type": "number",
-          "default": 1e-8
+          "default": 1e-08
         },
         "mitigate_blowup": {
           "type": "boolean",

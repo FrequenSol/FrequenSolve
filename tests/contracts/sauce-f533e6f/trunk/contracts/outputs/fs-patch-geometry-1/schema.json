@@ -1,0 +1,344 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/outputs/fs-patch-geometry-1/schema.json",
+  "title": "fs-patch-geometry-1",
+  "x-fs-visibility": "internal",
+  "x-fs-docs": false,
+  "type": "object",
+  "required": [
+    "schema",
+    "dimension",
+    "units",
+    "root_count",
+    "parent_fingerprint",
+    "parent_file",
+    "roots",
+    "patches"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-patch-geometry-1"
+    },
+    "dimension": {
+      "enum": [
+        2,
+        3
+      ]
+    },
+    "units": {
+      "const": "m"
+    },
+    "root_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "parent_fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{16}$"
+    },
+    "parent_file": {
+      "type": "string",
+      "minLength": 1
+    },
+    "roots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "root",
+          "cell",
+          "material",
+          "lower",
+          "upper",
+          "edge_count",
+          "edge_points",
+          "sampled_lower",
+          "sampled_upper"
+        ],
+        "properties": {
+          "root": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "cell": {
+            "type": "integer"
+          },
+          "material": {
+            "type": "integer"
+          },
+          "lower": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "upper": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "edge_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "edge_points": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "sampled_lower": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "sampled_upper": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "patches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "core_roots",
+          "buffer_roots",
+          "added_roots",
+          "topology_layers",
+          "requested_lower",
+          "requested_upper",
+          "realized_lower",
+          "realized_upper",
+          "padding",
+          "cut_boundary",
+          "root_fraction",
+          "descriptor",
+          "boundaries",
+          "support_roots",
+          "material_coverage"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "core_roots": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "buffer_roots": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "added_roots": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "topology_layers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "requested_lower": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "requested_upper": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "realized_lower": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "realized_upper": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "padding": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cut_boundary": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "root_fraction": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1
+          },
+          "descriptor": {
+            "$ref": "../../internal/fs-root-patch-1/schema.json"
+          },
+          "boundaries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "id",
+                "edges",
+                "triangles",
+                "quads"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "edges": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "triangles": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "quads": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "support_roots": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "material_coverage": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "space",
+                "basis_identity",
+                "material_roots",
+                "physical_roots",
+                "control_ids"
+              ],
+              "properties": {
+                "space": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "basis_identity": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "material_roots": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "physical_roots": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "control_ids": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "acquisition_checked": {
+            "type": "boolean",
+            "description": "Whether every requested acquisition point was verified inside retained native roots."
+          },
+          "point_roots": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Containing parent root for each acquisition point, in request order; shared-boundary points use the first retained root."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

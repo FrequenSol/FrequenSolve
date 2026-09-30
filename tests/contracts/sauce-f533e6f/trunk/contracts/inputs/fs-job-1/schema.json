@@ -43,7 +43,8 @@
         "size",
         "raytrace",
         "eikonal",
-        "transient"
+        "transient",
+        "patch_prepare"
       ],
       "description": "Workflow selected for this job."
     },
@@ -118,19 +119,28 @@
               "type": "array",
               "minItems": 1,
               "maxItems": 5,
-              "items": {"type": "number"}
+              "items": {
+                "type": "number"
+              }
             },
             {
               "type": "object",
               "minProperties": 1,
-              "additionalProperties": {"type": "string", "minLength": 1}
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           ],
           "description": "Real coefficients a_k of p(t)=sum_k a_k t^k, t in seconds, applied to damped traces with residual window. A list defines common coefficients and its last coefficient must be nonzero. Alternatively map each objective receiver-group name to an HDF5 dataset locator: finite real array in Python/HDF5 order (order+1, global receiver, source field), shared across components. This requires explicit order, dense point receivers without averaging, frequency/material-independent receivers, and FWI; WRI and probe diagonals are unsupported. Rows refer to the solver source-field basis, not individual physical sources hidden by encoding."
         },
         "field_storage": {
           "type": "string",
-          "enum": ["auto", "memory", "disk"],
+          "enum": [
+            "auto",
+            "memory",
+            "disk"
+          ],
           "default": "auto",
           "description": "Auto estimates the complete retained recurrence and forward trial payload after the base solve and uses read-only, demand-paged rank-local scratch when it exceeds the available-memory budget. Explicit memory and disk override selection. Disk mode changes storage only; it is not a persistent checkpoint or a strict RSS limit."
         },
@@ -283,7 +293,12 @@
         },
         "quadrature": {
           "type": "string",
-          "enum": ["auto", "wavefield", "material_intersections", "tensor_points"],
+          "enum": [
+            "auto",
+            "wavefield",
+            "material_intersections",
+            "tensor_points"
+          ],
           "default": "auto",
           "description": "Volume sensitivity integration policy. With Discretization/material_quadrature=material_intersections, auto, wavefield and material_intersections inherit matched assembly quadrature for coefficient derivatives; tensor_points is rejected. The following sensitivity-only behavior applies to standard wavefield assembly. Defaults to auto: tensor-node volume sensitivities for RTM and FWI pullback actions, with native quadrature for other controls and discrete Born/JVP, normal and WRI curvature actions. Explicit wavefield retains matched discrete coefficient derivatives. material_intersections is an approximate continuous pullback; tensor_points returns approximate unweighted nodal volume sensitivities. tensor_points samples full-dimensional axis-aligned Cartesian tensor nodes through the gridded-image mapper, including curved elements, with cached reference locations and shared-element averaging, without tensor-cell volume weights. These values are not integrated coefficient covectors. Tensor controls must share a layout within each material layer; depth-only layers retain native quadrature and mixed tensor/other active controls in a layer are rejected. material_intersections intersects wavefield and meshed-material leaves in initial-root coordinates for material pullbacks only. Forward assembly, face terms and JVP quadrature are unchanged, so the result is not the exact discrete objective gradient. Supports RTM and FWI linearize/vjp/receiver_vjp/wri, including receiver-probe diagonal contractions as preconditioner approximations; excludes normal, Born/JVP and WRI curvature/diagonal export."
         },
@@ -575,7 +590,7 @@
             },
             "context": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-              "description": "Prepared stage context: output for prepare, immutable input for value/gradient/diagonal/proximal."
+              "description": "Prepared stage context: output for prepare; required immutable input for every other operation, including mass, mass_inverse and mass_diagonal, whose recorded native basis identities must match the bound controls."
             },
             "result": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
@@ -725,7 +740,7 @@
         },
         "MeshAdaptation": {
           "type": "object",
-          "description": "Single-rank stage setup: size immutable property spaces from accepted material coefficients and transfer their nodal updates. Invoked with --smooth.",
+          "description": "Single-rank stage setup: size immutable property spaces from accepted material coefficients and transfer by nodal interpolation or integral smooth-and-project. Invoked with --smooth.",
           "required": [
             "source_identity",
             "frequency",
@@ -799,9 +814,80 @@
             "result": {
               "type": "string",
               "minLength": 1
+            },
+            "transfer": {
+              "type": "string",
+              "enum": [
+                "nodal",
+                "l2"
+              ],
+              "default": "nodal"
+            },
+            "smoothing_length_m": {
+              "type": "number",
+              "minimum": 0,
+              "default": 0,
+              "description": "Physical H1 smoothing length in meters; requires transfer=l2 when nonzero. Zero gives ordinary L2 projection."
+            },
+            "smoothing_wavelengths": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Local wavelength fraction. The frozen accepted wavespeed defines length(x)=fraction*v(x)/frequency."
+            },
+            "smoothing_frequency_hz": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Reference frequency for local-wavelength smoothing; defaults to the target sizing frequency."
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "transfer": {
+                    "const": "l2"
+                  }
+                },
+                "required": [
+                  "transfer"
+                ]
+              },
+              "then": {},
+              "else": {
+                "properties": {
+                  "smoothing_length_m": {
+                    "const": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "smoothing_wavelengths"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "transfer": {
+                    "const": "l2"
+                  },
+                  "smoothing_length_m": {
+                    "const": 0
+                  }
+                },
+                "required": [
+                  "transfer"
+                ]
+              }
+            }
+          ],
+          "dependentRequired": {
+            "smoothing_frequency_hz": [
+              "smoothing_wavelengths"
+            ]
+          }
         }
       },
       "additionalProperties": false,
@@ -1100,12 +1186,102 @@
               "type": "boolean",
               "default": false,
               "description": "Also write /support_measure/<block>: uint8 round(255 s_i / max_i s_i) per DOF for diagnostics."
+            },
+            "pml_stage": {
+              "type": "object",
+              "x-fs-visibility": "internal",
+              "x-fs-docs": false,
+              "description": "Verified fs-patch-stage-1 bundle restored before the explicit candidate state. Controlled patch PML remains experimental until stage mesh and derivative integration are complete.",
+              "required": [
+                "manifest",
+                "identity"
+              ],
+              "properties": {
+                "manifest": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "identity": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "stage_mesh": {
+              "type": "object",
+              "x-fs-visibility": "internal",
+              "x-fs-docs": false,
+              "description": "Capture the canonical stage frequency mesh without wave solves, or replay an immutable fs-stage-mesh-1 companion. Requires a verified PML stage and explicit canonical candidate state.",
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "capture",
+                    "replay"
+                  ]
+                },
+                "manifest": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "identity": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "capture"
+                    }
+                  },
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "manifest"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "identity"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "replay"
+                    }
+                  },
+                  "required": [
+                    "manifest",
+                    "identity"
+                  ]
+                }
+              ]
             }
           },
           "additionalProperties": false,
           "required": [
             "active"
-          ]
+          ],
+          "dependentRequired": {
+            "pml_stage": [
+              "state"
+            ],
+            "stage_mesh": [
+              "pml_stage",
+              "state"
+            ]
+          }
         },
         "direction": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
@@ -1290,7 +1466,10 @@
                 "frequency_weights": {
                   "type": "array",
                   "minItems": 1,
-                  "items": {"type": "number", "minimum": 0},
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  },
                   "description": "Opt into one shared L2 tap fit over the full f_list. Requires one --frequency-groups MPI worker group per frequency, common material bases, and at least one positive weight. The regularizer is added once. Reduced Schur and robust band solves are not yet supported."
                 },
                 "gradient_checkpoint_interval": {
@@ -2147,6 +2326,128 @@
       "type": "boolean",
       "default": false,
       "description": "Retain raw task files after packing and allow successful tasks to be reused after numerical solver-setting changes. Physical inputs, mesh-defining Solver fields and requested outputs must still match. Original producer fingerprints remain unchanged."
+    },
+    "PatchPreparation": {
+      "$ref": "../../internal/fs-patch-preparation-1/schema.json",
+      "x-fs-visibility": "internal",
+      "x-fs-docs": false
+    },
+    "patches": {
+      "type": "object",
+      "x-fs-visibility": "internal",
+      "x-fs-docs": false,
+      "description": "SDK-only patch forward policy. Execute with site.run; native child jobs omit this metadata.",
+      "additionalProperties": false,
+      "required": [
+        "patches",
+        "shots_per_patch",
+        "max_offset_m",
+        "padding_m",
+        "depth_m",
+        "pml"
+      ],
+      "properties": {
+        "patches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "roots",
+              "sources"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "roots": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "sources": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "shots_per_patch": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_offset_m": {
+          "oneOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 3,
+              "items": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          ]
+        },
+        "padding_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "depth_m": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number"
+          }
+        },
+        "pml": {
+          "type": "object"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "shots_per_patch": {
+              "type": "null"
+            },
+            "patches": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "shots_per_patch": {
+              "type": "integer"
+            },
+            "patches": {
+              "maxItems": 0
+            }
+          }
+        }
+      ]
     }
   },
   "allOf": [
@@ -2162,13 +2463,13 @@
             ],
             "properties": {
               "field_memory_fraction": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.8,
-          "description": "Fraction of currently available host/cgroup memory reserved for retained spectral fields in auto mode, divided conservatively among MPI ranks sharing the host. Zero forces scratch for nonempty hierarchies. Unknown availability selects disk. Does not limit solver or process RSS."
-        },
-        "export_lower_orders": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.8,
+                "description": "Fraction of currently available host/cgroup memory reserved for retained spectral fields in auto mode, divided conservatively among MPI ranks sharing the host. Zero forces scratch for nonempty hierarchies. Unknown availability selects disk. Does not limit solver or process RSS."
+              },
+              "export_lower_orders": {
                 "const": true
               }
             }
@@ -2287,6 +2588,23 @@
       "then": {
         "required": [
           "RayTracing"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "patch_prepare"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "then": {
+        "required": [
+          "PatchPreparation"
         ]
       }
     },

@@ -259,7 +259,9 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   See [WRI curvature and costs](../../../docs/imaging/wri.md).
 - `control_sensitivities.quadrature` defaults to `auto`: unweighted tensor-node
   volume sensitivities for RTM/FWI pullbacks, with native quadrature for other
-  controls and discrete JVP/normal actions. Use explicit `wavefield` for exact
+  controls, unsupported tensor layers, `fwi_operator.extension`, intersected
+  assembly, jobs with active geometry controls, and discrete JVP/normal actions.
+  Use explicit `wavefield` for exact
   coefficient derivatives and transpose tests.
   Explicit `material_intersections` subdivides volume material pullbacks at material-cell
   boundaries; assembly, face rules and JVPs remain unchanged. These covectors
@@ -511,6 +513,9 @@ Cost is `order+2` solves for the objective/reconstruction and `2*(order+1)` with
 the gradient, per source batch. See [windowed WRI](../../../docs/imaging/wri.md#spectral-windows).
 `"source_derivative": "total"` includes the point-source frequency derivative
 in the forward hierarchy, matching `forward_df` and recorded time moments.
+First-order spectral Born and normal actions also support this source policy,
+including the mixed material/source-frequency load. Higher-order Born actions
+require a frozen source spectrum. Gram derivatives remain frozen.
 
 The initial scope is Cartesian 2D/3D acoustic DPG, nonzero complex frequency,
 point sources, native receivers, and lossless or Kjartansson material response.
@@ -532,6 +537,17 @@ receive the `_<task>` suffix before the extension when `f_list` has more than on
 entry. A `state_output` records each mechanism block's physical scaling, so a
 baseline written by one frequency task replays in another
 ([fs-control-state-1](../fs-control-state-1/contract.md)).
+
+The internal, experimental `controls/pml_stage` object supplies `manifest` and
+`identity` for an immutable [patch stage bundle](../../internal/fs-patch-stage-1/contract.md).
+It requires `controls/state` as the candidate. The runtime verifies the pinned
+material definition and context and restores the model baseline before initial
+mesh and PML sizing. After acquisition initialization, it validates and restores
+the complete stage baseline, captures the PML owner, then applies the candidate.
+Stage identity participates in native state reuse checks. Reference-window refresh
+verifies the pinned inputs and reloads both material owners. Acoustic/coupled
+sizing queries select frozen materials in PML. Controlled patch PML remains gated
+pending stage geometry/mesh and application derivative integration.
 
 Operator inputs `state` (jvp, vjp, normal), `direction`, `objective_vector`
 (vjp), `extension/direction` and `model_direction` are resolved per task when
@@ -789,15 +805,20 @@ same native energy with that context; `gradient` returns the exact Tikhonov
 coefficient covector and its energy (no mass inversion). The latter operation
 rejects TV/TGV; on a zero-padded tangent it applies the Tikhonov Hessian.
 `diagonal` returns the exact coefficient Hessian diagonal for Tikhonov, with
-zero reported energy; its input values are ignored. Both derivative operations
+zero reported energy; its input values are otherwise unused. Both derivative operations
 include constrained-basis assembly and use the frozen context weights.
 `mass` applies the consistent material mass matrix to primal coefficients;
 `mass_inverse` solves the mass system for an input coefficient covector.
 `mass_diagonal` returns the positive diagonal of the consistent mass matrix,
-including constrained-basis cross terms; its input values are ignored. These
-operations use native geometry and the constrained basis, ignore regularization
-weights/amplitude, and report zero energy. The inverse uses `iterations`,
+including constrained-basis cross terms; its input values are otherwise unused.
+These operations use native geometry and the constrained basis, ignore the
+context's weights/amplitude, and report zero energy. The inverse uses `iterations`,
 `relative_tolerance` and `absolute_tolerance`, and fails on nonconvergence.
+Every operation other than `prepare`, including the mass operations, requires a
+prepared `context`: it identifies the native basis, and a block whose recorded
+identity differs from the bound control is rejected. Every operation reads a
+full, finite `input` vector; non-finite values are rejected even where the
+values are unused.
 `proximal` minimizes metric fidelity plus
 `tau` times that energy with full coefficient `lower`/`upper` bounds. Equal bounds
 fix coefficients. `metric` is a positive coefficient diagonal. All vectors must
@@ -842,7 +863,8 @@ not performed by this callback.
 
 FrequenSolve's `Tikhonov`, `TV` and `TGV` objects configure these callbacks;
 they do not implement separate Python discretizations or derivatives.
-FWI/LSRTM use composite proximal-gradient backtracking for a native model term.
+FWI preserves its requested smooth optimizer for Tikhonov using `gradient`.
+TV/TGV and native LSRTM terms use composite proximal-gradient backtracking.
 Explicit custom smooth terms remain SDK-owned and may be added to that term.
 
 ### Shared receiver groups
@@ -871,9 +893,23 @@ remain unchanged. Output basis identities refer to the new property artifacts.
 The sizing-only reference averages recovered slowness without crossing material
 interfaces; its physical window is fixed before refinement from the old material's
 volume-weighted harmonic-mean wavelength. Five-point Gauss quadrature per axis
-approximates a truncated Gaussian window. Native nodal interpolation transfers
-coefficient updates; general coarsening is approximate. This is not a gradient
-transfer or a regularization callback. Artifacts must use immutable paths keyed
+approximates a truncated Gaussian window. `transfer="nodal"` (default) interpolates
+coefficient updates. `transfer="l2"` integrates the source and target constrained
+bases on their cell intersections and solves the target projection. Optional
+`smoothing_length_m >= 0` adds that physical length squared times the target
+stiffness operator; nonzero smoothing requires `transfer="l2"`. Zero length is
+ordinary L2 projection. Both refinement and coarsening are supported, with native
+geometry and a checked matrix-free solve. Constants are preserved; general
+coarsening loses unresolved structure. Alternatively, `smoothing_wavelengths`
+(nonnegative, L2 only, with zero fixed length) sets the local smoothing length to
+`fraction * accepted_wavespeed(x) / smoothing_frequency_hz`. The frequency defaults
+to the requested sizing frequency and must be positive. The source model is
+restored before sampling the wavespeed; the resulting coefficient is frozen during
+the linear solve and integrated inside the stiffness operator. For acoustics the
+speed is Vp; elastic materials use the native minimum propagating wavespeed.
+Positive smoothing acts on model
+coefficients (log updates for log controls), retaining the reference. This is not
+a gradient transfer or an optimization regularization callback. Artifacts must use immutable paths keyed
 by the source state and sizing policy; retain them for all stage evaluations and
 restarts. The result follows `fs-control-mesh-adaptation-result-1`.
 
@@ -890,14 +926,41 @@ derivative of the discrete objective.
 Explicit `"tensor_points"` requests the same sampling. Explicit `"wavefield"`
 retains the discrete coefficient gradient for derivative/transpose tests. Auto
 keeps native quadrature for depth-only and other non-tensor layers, Born/JVP,
-normal actions, and WRI curvature/diagonal actions. Forward assembly and face
-terms remain unchanged. Full-dimensional axis-aligned Cartesian tensor controls
-must share one layout per material layer; mixed tensor/other active controls
-within a layer are rejected. Depth-strip integration is deferred.
+normal actions, WRI curvature/diagonal actions, `fwi_operator.extension`,
+intersected assembly, and jobs with active geometry controls. Forward assembly
+and face terms remain unchanged. Sampling requires full-dimensional,
+axis-aligned Cartesian tensor controls sharing one layout per material layer.
+Auto integrates any other layer natively, including layers that mix tensor and
+other active controls and every layer sharing a tensor parameter with such a
+layer. Explicit `"tensor_points"` rejects those layers, active geometry
+controls, and `fwi_operator.extension`. Depth-strip integration is deferred.
 
 Diagnostics include `tensor_nodal_sensitivity`, `control_quadrature_points`,
 `control_quadrature_original_points`, `control_quadrature_cache_bytes`,
-`control_quadrature_setup_us`, and `control_quadrature_reuse`. Cache bytes count
-reference-point and averaging-weight payload only. Smoothing of generated tensor
-sensitivities uses nodal (primal) input; explicit input vectors retain their
+`control_quadrature_setup_us`, and `control_quadrature_reuse`.
+`tensor_nodal_sensitivity` is `1` only when at least one layer was sampled.
+Point and cache-byte counts are summed over ranks; `control_quadrature_reuse` is
+the maximum per-rank reuse count. Cache bytes count reference-point and
+averaging-weight payload only. Smoothing of generated tensor sensitivities uses
+nodal (primal) input in sampled layers only; explicit input vectors retain their
 requested input role.
+
+## Internal root preparation
+
+The experimental top-level `patches` field is SDK-only metadata for saved
+frequency-domain forward wrappers. It records explicit roots or automatic shot
+grouping, scalar radial or per-axis box aperture, buffering, depth and PML policy.
+Run these wrappers through `site.run`; direct site submission is rejected.
+The SDK prepares ordinary native child jobs without this field, preserving the
+source catalog and selecting `Acquisition/active_sources` plus sparse receiver
+rows. Receiver groups with no retained rows are omitted from that child.
+
+`patch_prepare` runs one geometry-only operation with a `PatchPreparation`
+request (`fs-patch-preparation-1`) and a positive stage `f_list`. It publishes
+the parent snapshot and `fs-patch-geometry-1` report without wave solves.
+
+Experimental `fwi_operator/controls/stage_mesh` captures or replays a verified
+[frequency mesh companion](../../internal/fs-stage-mesh-1/contract.md). It requires
+`pml_stage` and an explicit candidate `state`. Capture uses the canonical stage
+baseline with `action: linearize` and stops before wave solves. Replay preserves
+the captured h/p mesh and solver hierarchy; changed execution context is an error.
