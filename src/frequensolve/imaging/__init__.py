@@ -73,10 +73,12 @@ __all__ = unique_exports(
     _focusing_all,
 )
 
+from ._curvature_transfer import CurvatureTransfer
 from .illumination import IlluminationCalibration, ReferenceIllumination
 from .statistics import BFGSUncertainty, GaussianPrior, UncertaintyResult
 
 __all__ += [
+    "CurvatureTransfer",
     "BFGSUncertainty",
     "GaussianPrior",
     "UncertaintyResult",

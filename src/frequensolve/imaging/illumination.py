@@ -47,7 +47,11 @@ class ReferenceIllumination:
 
 
 class IlluminationCalibration:
-    """Reusable calibration; reference modeling/remigration runs once."""
+    """Reusable calibration; reference modeling, remigration and Rickett run once.
+
+    Sauce forms the envelope weights at construction. ``apply`` multiplies
+    images by those stored weights, which is Sauce's ``weights * image``.
+    """
 
     def __init__(self, lin: Any, config: ReferenceIllumination):
         self.space = lin.space
@@ -138,41 +142,42 @@ class IlluminationCalibration:
         ).hexdigest()
         # Joint action retains coupling between multiple material blocks.
         remigrated = np.asarray(lin.normal @ reference)
-        self._normal_reference = remigrated.copy()
-        results = self._apply(np.ones(self.space.size))
-        self.weights = ControlVector(results, self.space)
-
-    def _apply(self, values: np.ndarray) -> np.ndarray:
-        output = np.empty(self.space.size)
-        for block, section, reference, depth, radii in self._blocks:
-            normal = self._normal_reference[section].reshape(block.shape, order="F")
-            image = values[section].reshape(block.shape, order="F")
+        weights = np.empty(self.space.size)
+        for block, section, values, depth, radii in self._blocks:
             result = self.native.rickett(
-                reference,
-                image,
-                normal_reference=normal,
+                values,
+                np.ones(block.shape),
+                normal_reference=remigrated[section].reshape(block.shape, order="F"),
                 state=self.state,
                 coordinates=self.coordinates,
                 depth_axis=depth,
                 smoothing_radii=radii,
                 relative_damping=self.config.relative_damping,
                 padding=(
-                    reference.shape[depth]
+                    values.shape[depth]
                     if self.config.padding == "reflect"
                     else self.config.padding
                 ),
             )
-            packed_shape = np.moveaxis(reference, depth, -1).shape
+            packed_shape = np.moveaxis(values, depth, -1).shape
             restored = np.moveaxis(
-                result.read("normalized").reshape(packed_shape), -1, depth
+                result.read("weights").reshape(packed_shape), -1, depth
             )
-            output[section] = restored.ravel(order="F")
-        return output
+            weights[section] = restored.ravel(order="F")
+        weights.flags.writeable = False
+        self._weights = weights
+        self.weights = ControlVector(weights, self.space)
 
     def apply(self, image: ControlVector) -> ControlVector:
-        """Apply native envelope weights without modeling the reference again."""
+        """Weight an image by the calibrated envelopes without running Sauce."""
         if not isinstance(image, ControlVector) or not self.space.equivalent(
             image.space
         ):
             raise ValueError("Image must be a ControlVector on the calibration space")
-        return ControlVector(self._apply(image.values), self.space)
+        if not np.isfinite(image.values).all():
+            raise ValueError("Rickett migration values must be finite")
+        with np.errstate(over="ignore"):
+            normalized = self._weights * image.values
+        if not np.isfinite(normalized).all():
+            raise ValueError("Rickett normalization overflow")
+        return ControlVector(normalized, self.space)

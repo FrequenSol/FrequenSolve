@@ -15,6 +15,7 @@ from frequensolve.imaging.curvature import CurvatureResult, NativeCurvature
 from frequensolve.imaging.statistics import mesh_descriptor
 from frequensolve.model.parameterization import MeshControl, MeshPropertySpace
 from tests.statistical_mesh_fixture import write_mesh
+from tests.test_imaging_curvature import solver_output, spec_digests
 from tests.test_imaging_statistics import StatisticalSite, oracle_runner
 from tests.test_imaging_workflows import _problem
 
@@ -109,9 +110,8 @@ def _mesh_runner(request_path):
     request = json.loads(request_path.read_text())
     if request["method"] != "mesh_prior":
         return oracle_runner(request_path)
-    with h5py.File(request["input"]) as h5:
-        mean, std = h5["reference"][()], h5["prior_std"][()]
-        metadata = json.loads(h5["metadata"][()])
+    arrays, metadata = solver_output(request)
+    mean, std = arrays["reference"], arrays["prior_std"]
     with h5py.File(request["target_mesh"]) as h5:
         size = int(h5["property_space/header"][1])
     weights = (
@@ -135,7 +135,6 @@ def _mesh_runner(request_path):
         )
     )
     assert len(mean) == 4  # Every stage lifts the original declaration directly.
-    metadata["schema"] = "fs-curvature-output-1"
     with h5py.File(request["output"], "w") as h5:
         h5["metadata"] = np.bytes_(json.dumps(metadata))
         h5["reference"] = interpolation @ mean
@@ -177,18 +176,23 @@ def test_saved_uncertainty_restores_original_mesh_against_refined_problem(tmp_pa
     old, new = _mesh_space(problem.space, coarse), _mesh_space(problem.space, refined)
     native = NativeCurvature(workdir=tmp_path / "native", runner=oracle_runner)
     path = tmp_path / "factors.h5"
+    stored = dict(
+        base_inverse_diagonal=np.arange(1.0, 5.0),
+        prior_std=np.ones(4),
+        variance=np.arange(1.0, 5.0),
+        standard_deviation=np.sqrt(np.arange(1.0, 5.0)),
+    )
     metadata = dict(
         schema="fs-curvature-output-1",
         state="old-stage",
         coordinates="old-basis",
         rank=0,
+        output_digests=spec_digests(stored),
     )
     with h5py.File(path, "w") as h5:
         h5["metadata"] = np.bytes_(json.dumps(metadata))
-        h5["base_inverse_diagonal"] = np.arange(1, 5)
-        h5["prior_std"] = np.ones(4)
-        h5["variance"] = np.arange(1, 5)
-        h5["standard_deviation"] = np.sqrt(np.arange(1, 5))
+        for name, value in stored.items():
+            h5[name] = value
     result = im.UncertaintyResult(
         CurvatureResult(path, metadata),
         im.ControlVector([2, 5, 4, 1], old),

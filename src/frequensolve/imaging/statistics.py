@@ -2,13 +2,22 @@
 # Proprietary and confidential. Unauthorized use, copying, modification,
 # or distribution is prohibited except under a written license.
 
-"""Statistical imaging declarations and typed Sauce covariance results."""
+"""Statistical imaging declarations and typed Sauce covariance results.
+
+Sauce forms covariance factors, mesh prior transfers and grid projections.
+Gaussian prior terms and covariance actions reuse fixed diagonals and stored
+factors, so they mirror Sauce's ``covariance_fields`` formulas in NumPy
+instead of starting a solver process per evaluation.
+"""
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import shutil
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -19,8 +28,109 @@ import xarray as xr
 from scipy.sparse import csr_matrix, hstack
 
 from .controls import ControlSpace, ControlState, ControlVector, _BindContext
-from .curvature import CurvatureResult, _integer
+from .curvature import CurvatureResult, _finite, _integer
 from .regularization import BoundRegularization, Regularization, _SymmetricModelOperator
+
+# Hard links are unavailable across filesystems or on filesystems without them.
+_UNLINKABLE = frozenset(
+    {errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP, errno.EOPNOTSUPP}
+)
+
+
+def _publish_artifact(source: Path, target: Path) -> None:
+    """Hard-link an immutable artifact, copying only where a link is impossible.
+
+    Factor and mesh files are never modified after they are recorded (readers
+    verify their digests), so a saved result shares their storage instead of
+    duplicating up to controls-by-rank bytes. The link is published atomically.
+    """
+    if target.exists() and os.path.samefile(source, target):
+        return
+    pending = target.with_name(f".{target.name}.{uuid.uuid4().hex}")
+    try:
+        try:
+            os.link(source, pending)
+        except OSError as error:
+            if error.errno not in _UNLINKABLE:
+                raise
+            shutil.copy2(source, pending)
+        os.replace(pending, target)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def _gaussian_terms(
+    point: np.ndarray, reference: np.ndarray, std: np.ndarray, diagonal: np.ndarray
+) -> tuple[float, np.ndarray]:
+    """Value and gradient of Sauce ``gaussian_prior`` (``diagonal = 1/std**2``)."""
+    if not (np.isfinite(point).all() and np.isfinite(reference).all()):
+        raise ValueError("Gaussian prior coordinates must be finite")
+    delta = point - reference
+    with np.errstate(over="ignore"):
+        gradient = delta * diagonal
+        value = 0.5 * float(np.sum((delta / std) ** 2))
+    if not np.isfinite(value) or not np.isfinite(gradient).all():
+        raise ValueError("Gaussian prior evaluation overflow")
+    return value, gradient
+
+
+class _Covariance(_SymmetricModelOperator):
+    """``C = S (B0 + V diag(eigenvalues) V^T) S`` with ``S = diag(prior_std)``.
+
+    Mirrors Sauce ``covariance_fields::covariance_action`` on factors that are
+    read once and checked against their recorded dataset digests in memory;
+    blocks of directions use two dense products.
+    """
+
+    def __init__(self, factors: CurvatureResult, space: ControlSpace) -> None:
+        rank = factors.metadata.get("rank")
+        with h5py.File(factors.path, "r") as h5:
+            stored = {name for name in ("eigenvalues", "modes") if name in h5}
+        if stored not in (set(), {"eigenvalues", "modes"}) or (
+            not stored and int(rank or 0) > 0
+        ):
+            raise ValueError("Covariance factors are incomplete")
+        arrays = factors.read_verified(
+            "base_inverse_diagonal", "prior_std", *sorted(stored)
+        )
+        self.base = arrays["base_inverse_diagonal"]
+        self.scale = arrays["prior_std"]
+        self.eigenvalues = arrays.get("eigenvalues", np.empty(0))
+        self.modes = arrays.get("modes", np.empty((0, self.base.size)))
+        if rank is not None and int(rank) != self.eigenvalues.size:
+            raise ValueError("Covariance rank disagrees with stored factors")
+        if (
+            self.base.shape != (space.size,)
+            or self.scale.shape != self.base.shape
+            or self.modes.shape != (self.eigenvalues.size, self.base.size)
+        ):
+            raise ValueError("Covariance factor shapes disagree with the control space")
+        if not all(
+            _finite(a) for a in (self.base, self.scale, self.modes, self.eigenvalues)
+        ):
+            raise ValueError("Covariance factors must be finite")
+        if np.any(self.base <= 0) or np.any(self.scale < 0):
+            raise ValueError("Invalid covariance baseline or coordinate scale")
+        super().__init__(self._apply, space)
+
+    def _apply(self, vectors: np.ndarray) -> np.ndarray:
+        values = np.asarray(vectors, dtype=np.float64)
+        if not np.isfinite(values).all():
+            raise ValueError("Covariance directions must be finite")
+        block = values.reshape(self.base.size, -1)
+        with np.errstate(over="ignore", invalid="ignore"):
+            direction = self.scale[:, None] * block
+            actions = self.base[:, None] * direction
+            if self.eigenvalues.size:
+                coefficients = self.eigenvalues[:, None] * (self.modes @ direction)
+                actions += self.modes.T @ coefficients
+            actions *= self.scale[:, None]
+        if not np.isfinite(actions).all():
+            raise ValueError("Covariance action overflow")
+        return actions.reshape(values.shape)
+
+    def _matmat(self, X: np.ndarray) -> np.ndarray:
+        return self._apply(X)
 
 
 def material_units(space: ControlSpace, block: Any) -> Optional[str]:
@@ -148,6 +258,7 @@ class GaussianPrior(Regularization):
     ``mesh_measure="coefficients"`` instead defines independent nodal priors
     whose strength depends on resolution. Neither policy carries a posterior
     across stages. Statistical mesh operations require linear root geometry.
+    Only mesh transfers run in Sauce; penalty evaluations use NumPy.
     """
 
     reference: ControlState
@@ -166,13 +277,18 @@ class GaussianPrior(Regularization):
                 "GaussianPrior needs a problem's Sauce execution site; bind through FWI"
             )
         baseline = linearization.state if linearization is not None else problem.state
-        return BoundGaussianPrior(
-            self, space, problem.backend.curvature(), baseline=baseline
-        )
+        meshed = any(space.block(name).kind == "mesh" for name in space.blocks)
+        native = problem.backend.curvature() if meshed else None
+        return BoundGaussianPrior(self, space, native, baseline=baseline)
 
 
 class BoundGaussianPrior(BoundRegularization):
-    """Cached native evaluation of one Gaussian prior on a stage's active space."""
+    """One Gaussian prior on a stage's active space.
+
+    Mesh means and scales are lifted by Sauce once at binding. Value, gradient
+    and the constant curvature diagonal ``1/std**2`` then follow Sauce's
+    ``gaussian_prior`` formula in NumPy on every evaluation.
+    """
 
     def __init__(
         self,
@@ -282,6 +398,11 @@ class BoundGaussianPrior(BoundRegularization):
                 raise ValueError(f"Unknown Gaussian prior blocks: {sorted(unknown)}")
         if not np.isfinite(self.std).all() or np.any(self.std <= 0):
             raise ValueError("Gaussian prior std must be positive finite")
+        with np.errstate(over="ignore", divide="ignore"):
+            self._diagonal = 1.0 / self.std**2
+        if not np.isfinite(self._diagonal).all():
+            raise ValueError("Gaussian prior std is too small for float64 curvature")
+        self._diagonal.flags.writeable = False
         self.native = native
         self.frozen_value = 0.0
         frozen_identity = b""
@@ -292,14 +413,11 @@ class BoundGaussianPrior(BoundRegularization):
             frozen_identity = (
                 fixed.tobytes() + fixed_mean.tobytes() + fixed_std.tobytes()
             )
-            frozen_result = native.gaussian_prior(
-                fixed,
-                fixed_mean,
-                fixed_std,
-                state="frozen_prior",
-                coordinates="frozen_prior",
-            )
-            self.frozen_value = float(frozen_result.read("value")[0])
+            with np.errstate(over="ignore", divide="ignore"):
+                fixed_diagonal = 1.0 / fixed_std**2
+            self.frozen_value = _gaussian_terms(
+                fixed, fixed_mean, fixed_std, fixed_diagonal
+            )[0]
         self.identity = hashlib.sha256(
             self.reference.tobytes()
             + self.std.tobytes()
@@ -311,33 +429,22 @@ class BoundGaussianPrior(BoundRegularization):
                 ]
             ).encode()
         ).hexdigest()
-        self._point: Optional[np.ndarray] = None
-        self._result = None
 
-    def _evaluate(self, v: Any) -> CurvatureResult:
-        point = self._values(v)
-        if self._point is None or not np.array_equal(point, self._point):
-            self._result = self.native.gaussian_prior(
-                point,
-                self.reference,
-                self.std,
-                state=self.identity,
-                coordinates=self.identity,
-            )
-            self._point = point.copy()
-        assert self._result is not None
-        return self._result
+    def _terms(self, v: Any) -> tuple[float, np.ndarray]:
+        return _gaussian_terms(
+            self._values(v), self.reference, self.std, self._diagonal
+        )
 
     def value(self, v: Any) -> float:
-        return self.frozen_value + float(self._evaluate(v).read("value")[0])
+        return self.frozen_value + self._terms(v)[0]
 
     def gradient(self, v: Any) -> ControlVector:
-        return self._wrap(self._evaluate(v).read("gradient"))
+        return self._wrap(self._terms(v)[1])
 
     def curvature_diagonal(self, v: Any = None) -> np.ndarray:
-        return self._evaluate(self.reference if v is None else v).read(
-            "curvature_diagonal"
-        )
+        if v is not None and not np.isfinite(self._values(v)).all():
+            raise ValueError("Gaussian prior coordinates must be finite")
+        return self._diagonal.copy()
 
     def hessian_operator(self, v: Any = None) -> Any:
         diagonal = self.curvature_diagonal(v)
@@ -373,7 +480,12 @@ class BFGSUncertainty:
 
 
 class UncertaintyResult:
-    """A posterior approximation with labelled marginals and native covariance actions."""
+    """A posterior approximation with labelled marginals and covariance actions.
+
+    ``covariance`` applies the factors in memory; grid projections and mesh
+    sampling run in Sauce through ``native``. Factor datasets are checked
+    against the digests Sauce recorded when it wrote them, as they are read.
+    """
 
     def __init__(
         self,
@@ -383,12 +495,15 @@ class UncertaintyResult:
         native: Any = None,
         units: Optional[Mapping[str, Optional[str]]] = None,
         meshes: Optional[dict] = None,
+        provenance: Optional[dict] = None,
     ):
+        self._covariance: Optional[_Covariance] = None
         self.factors = factors
         self.point = point
         self.space = point.space
         self.native = native
         self.units = dict(units or {})
+        self._provenance = json.dumps(provenance or {}, sort_keys=True, allow_nan=False)
         self.meshes = dict(
             meshes
             or {
@@ -397,23 +512,29 @@ class UncertaintyResult:
                 if self.space.block(k).kind == "mesh"
             }
         )
-        if len(factors.read("variance")) != self.space.size:
+        with h5py.File(factors.path, "r") as h5:
+            shape = h5["variance"].shape  # Metadata only; no marginals are read.
+        if shape != (self.space.size,):
             raise ValueError("Uncertainty artifact does not match its control space")
 
     def _native(self) -> Any:
         if self.native is None:
             raise ValueError(
-                "Grid projection and covariance actions need a problem; pass problem to FWIResult.load"
+                "Grid projection needs a problem; pass problem to FWIResult.load"
             )
         return self.native
 
     @property
+    def provenance(self) -> dict:
+        """Stage identities and whether transferred curvature was refreshed."""
+        return json.loads(self._provenance)
+
+    @property
     def covariance(self) -> Any:
-        native = self._native()
-        return _SymmetricModelOperator(
-            lambda x: native.covariance(self.factors, vectors=x).read("actions")[0],
-            self.space,
-        )
+        """Covariance operator on the active coefficients (``@``, ``matmat``)."""
+        if self._covariance is None:
+            self._covariance = _Covariance(self.factors, self.space)
+        return self._covariance
 
     def _field(self, key: str, grid: Any, dataset: str) -> xr.DataArray:
         block = self.space.block(key)
@@ -421,7 +542,7 @@ class UncertaintyResult:
         section = self.space.slices[block.name]
         if grid is None:
             values = np.full(block.size, np.nan)
-            values[mask] = self.factors.read(dataset)[section]
+            values[mask] = self.factors.read_verified(dataset)[dataset][section]
             dims = block.dims or ("coefficient",)
             coords = block.coords or {"coefficient": np.arange(block.size)}
             field = xr.DataArray(
@@ -474,34 +595,40 @@ class UncertaintyResult:
         return self._field(block, grid, "variance")
 
     def save(self, path: Any) -> Path:
+        """Publish the result; factor and mesh files are hard-linked, not copied.
+
+        Coefficient arrays (the point and support masks) are HDF5 datasets in
+        ``uncertainty.h5``; ``uncertainty.json`` holds only the layout.
+        """
         directory = Path(path).expanduser().resolve()
         directory.mkdir(parents=True, exist_ok=True)
-        target = directory / "covariance.h5"
-        if self.factors.path.resolve() != target:
-            shutil.copy2(self.factors.path, target)
+        _publish_artifact(self.factors.path, directory / "covariance.h5")
         meshes = {}
         for key, descriptor in self.meshes.items():
             target_mesh = directory / f"{key}.mesh.h5"
-            if Path(descriptor["path"]).resolve() != target_mesh:
-                shutil.copy2(descriptor["path"], target_mesh)
+            _publish_artifact(Path(descriptor["path"]), target_mesh)
             meshes[key] = {
                 **descriptor,
                 "path": target_mesh.name,
                 "roots": descriptor["roots"].tolist(),
             }
+        support = self.space.support_masks()
+        with h5py.File(directory / "uncertainty.h5", "w") as h5:
+            h5.create_dataset("point", data=self.point.values)
+            group = h5.create_group("support")
+            for position, mask in enumerate(support.values()):
+                group.create_dataset(str(position), data=mask)
         (directory / "uncertainty.json").write_text(
             json.dumps(
                 dict(
-                    schema="fs-uncertainty-1",
+                    schema="fs-uncertainty-2",
                     metadata=self.factors.metadata,
                     blocks=list(self.space.blocks),
                     sizes=self.space.sizes,
-                    support={
-                        k: v.astype(int).tolist()
-                        for k, v in self.space.support_masks().items()
-                    },
-                    point=self.point.values.tolist(),
+                    arrays="uncertainty.h5",
+                    support=list(support),
                     units=self.units,
+                    provenance=self.provenance,
                     meshes=meshes,
                     basis={
                         k: self.space.block(k).basis_identity for k in self.space.blocks
@@ -540,7 +667,17 @@ class UncertaintyResult:
     ) -> UncertaintyResult:
         directory = Path(path)
         record = json.loads((directory / "uncertainty.json").read_text())
-        if record.get("schema") != "fs-uncertainty-1":
+        schema = record.get("schema")
+        if schema == "fs-uncertainty-2":
+            # Version 1 inlined the point and support masks as JSON lists.
+            with h5py.File(directory / record["arrays"], "r") as h5:
+                record["point"] = h5["point"][()]
+                group = h5["support"]
+                record["support"] = {
+                    name: group[str(position)][()]
+                    for position, name in enumerate(record["support"])
+                }
+        elif schema != "fs-uncertainty-1":
             raise ValueError("Unsupported uncertainty result schema")
         from frequensolve.model.parameterization import (
             BSplineControl,
@@ -618,6 +755,7 @@ class UncertaintyResult:
         with h5py.File(artifact) as h5:
             if json.loads(h5["metadata"][()]) != record["metadata"]:
                 raise ValueError("Saved uncertainty artifact identity changed")
+        # Every factor dataset is checked against the recorded output digests when read.
         factors = CurvatureResult(artifact, record["metadata"])
         return cls(
             factors,
@@ -625,4 +763,5 @@ class UncertaintyResult:
             native=native,
             units=record["units"],
             meshes=meshes,
+            provenance=record.get("provenance", {}),
         )
