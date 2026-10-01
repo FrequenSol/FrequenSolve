@@ -8,9 +8,7 @@ from itertools import product
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
-from scipy.interpolate import BSpline
-from scipy.sparse import csr_matrix, diags
-from scipy.sparse.linalg import lsqr
+import scipy as _scipy
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.parameterization import BSplineControl, HatControl
@@ -316,7 +314,7 @@ class FieldRepresentation(ABC):
     @abstractmethod
     def sampling_operator(
         self, context: EvaluationContext, *, derivative_order: int = 0
-    ) -> csr_matrix:
+    ) -> _scipy.sparse.csr_matrix:
         """Return the sparse coefficient-to-sample operator."""
 
     def evaluate(
@@ -360,6 +358,9 @@ class FieldRepresentation(ABC):
         tolerance: float = 1.0e-6,
     ) -> np.ndarray:
         """Least-squares project point samples into this representation."""
+
+        from scipy.sparse import diags
+        from scipy.sparse.linalg import lsqr
 
         values = np.asarray(samples, dtype=np.float64).reshape(-1)
         if values.size != context.size or not np.all(np.isfinite(values)):
@@ -446,8 +447,11 @@ class ControlRepresentation(FieldRepresentation):
 
     def sampling_operator(
         self, context: EvaluationContext, *, derivative_order: int = 0
-    ) -> csr_matrix:
+    ) -> _scipy.sparse.csr_matrix:
         """Build the sparse local B-spline evaluation operator."""
+
+        from scipy.interpolate import BSpline
+        from scipy.sparse import csr_matrix
 
         derivative_order = int(derivative_order)
         if derivative_order < 0 or derivative_order > 2:
@@ -510,8 +514,10 @@ class CartesianGridRepresentation(FieldRepresentation):
 
     def sampling_operator(
         self, context: EvaluationContext, *, derivative_order: int = 0
-    ) -> csr_matrix:
+    ) -> _scipy.sparse.csr_matrix:
         """Build the multilinear grid sampling operator and its transpose pair."""
+
+        from scipy.sparse import csr_matrix
 
         if derivative_order != 0:
             raise ValueError(

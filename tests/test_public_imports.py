@@ -88,7 +88,7 @@ with TemporaryDirectory() as directory:
     report = validate_simulation_draft(draft, directory)
     assert report['valid'], report
     assert report['error_count'] == 0, report
-for prefix in ('frequensolve.orchestrator', 'scipy.signal', 'scipy.stats'):
+for prefix in ('frequensolve.orchestrator', 'scipy.signal', 'scipy.stats', 'scipy.interpolate'):
     loaded = sorted(name for name in sys.modules if name == prefix or name.startswith(prefix + '.'))
     assert not loaded, loaded
 """
