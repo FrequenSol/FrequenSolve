@@ -1,0 +1,352 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fs-objective-linearization-5",
+  "description": "Frozen FWI objective state for one frequency task: one manifest and one canonical-row HDF5 cache identified by per-dataset block digests.",
+  "type": "object",
+  "required": [
+    "schema",
+    "task",
+    "frequency_hz",
+    "laplace_damping_hz",
+    "resolved_context",
+    "partition",
+    "fingerprints",
+    "runtime",
+    "terms",
+    "state_fingerprint",
+    "manifest_fingerprint"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-objective-linearization-5"
+    },
+    "task": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "frequency_hz": {
+      "type": "number"
+    },
+    "laplace_damping_hz": {
+      "type": "number"
+    },
+    "resolved_context": {
+      "type": "string"
+    },
+    "partition": {
+      "type": "object",
+      "required": [
+        "n_ranks",
+        "compatibility"
+      ],
+      "properties": {
+        "n_ranks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "compatibility": {
+          "const": "same_mesh_partition"
+        }
+      },
+      "additionalProperties": false
+    },
+    "fingerprints": {
+      "type": "object",
+      "required": [
+        "resolved_context",
+        "model",
+        "observations",
+        "acquisition",
+        "source_signature",
+        "preprocessing",
+        "objective_terms"
+      ],
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": [
+        "n_terms"
+      ],
+      "properties": {
+        "n_terms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "terms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/term"
+      }
+    },
+    "state_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "manifest_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^fs-block-sha256-1:[0-9a-f]{64}$"
+    },
+    "strings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "numbers": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      }
+    },
+    "term": {
+      "type": "object",
+      "required": [
+        "id",
+        "receiver_group",
+        "weight",
+        "reduction",
+        "effective_weight_mass",
+        "scale",
+        "objective",
+        "comparison",
+        "receiver_layout",
+        "data_metric",
+        "layout_fingerprint",
+        "cache",
+        "runtime"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "receiver_group": {
+          "type": "string"
+        },
+        "weight": {
+          "type": "number"
+        },
+        "reduction": {
+          "type": "string"
+        },
+        "effective_weight_mass": {
+          "type": "number"
+        },
+        "scale": {
+          "type": "object",
+          "required": [
+            "policy",
+            "components",
+            "dimensions",
+            "units",
+            "values"
+          ],
+          "properties": {
+            "policy": {
+              "type": "string"
+            },
+            "components": {
+              "$ref": "#/$defs/strings"
+            },
+            "dimensions": {
+              "$ref": "#/$defs/strings"
+            },
+            "units": {
+              "$ref": "#/$defs/strings"
+            },
+            "values": {
+              "$ref": "#/$defs/numbers"
+            }
+          },
+          "additionalProperties": false
+        },
+        "objective": {
+          "type": "object",
+          "required": [
+            "kind",
+            "delta",
+            "c2",
+            "nu"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "delta": {
+              "type": "number"
+            },
+            "c2": {
+              "type": "number"
+            },
+            "nu": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "comparison": {
+          "type": "object",
+          "required": [
+            "kind",
+            "derivative_axis",
+            "source_derivative",
+            "relative_amplitude_floor"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "derivative_axis": {
+              "type": "string"
+            },
+            "source_derivative": {
+              "type": "string"
+            },
+            "relative_amplitude_floor": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "receiver_layout": {
+          "enum": [
+            "dense",
+            "sparse"
+          ]
+        },
+        "data_metric": {
+          "type": "object",
+          "required": [
+            "pairing",
+            "components",
+            "weights"
+          ],
+          "properties": {
+            "pairing": {
+              "type": "string"
+            },
+            "components": {
+              "$ref": "#/$defs/strings"
+            },
+            "weights": {
+              "$ref": "#/$defs/numbers"
+            }
+          },
+          "additionalProperties": false
+        },
+        "layout_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "cache": {
+          "type": "object",
+          "required": [
+            "file",
+            "group",
+            "digests"
+          ],
+          "properties": {
+            "file": {
+              "type": "string",
+              "minLength": 1,
+              "description": "HDF5 cache, relative to the manifest directory or absolute; terms share it."
+            },
+            "group": {
+              "type": "string",
+              "pattern": "^/terms/[0-9]+$"
+            },
+            "digests": {
+              "type": "object",
+              "description": "fs-block-sha256-1 digest of every dataset in the term group, flattened to one axis.",
+              "required": [
+                "metadata",
+                "n_global_rows",
+                "metric_weight",
+                "objective_factor",
+                "phase_floor",
+                "active_mask",
+                "rhs_required",
+                "coordinate_keys",
+                "simulated",
+                "simulated_df",
+                "static_weight",
+                "robust_weight"
+              ],
+              "propertyNames": {
+                "enum": [
+                  "metadata",
+                  "n_global_rows",
+                  "metric_weight",
+                  "objective_factor",
+                  "phase_floor",
+                  "active_mask",
+                  "rhs_required",
+                  "weighting_factor_fingerprint",
+                  "coordinate_keys",
+                  "simulated",
+                  "simulated_df",
+                  "objective_residual",
+                  "weighting_residual",
+                  "weighting_residual_df",
+                  "static_weight",
+                  "robust_weight"
+                ]
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/digest"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "runtime": {
+          "type": "object",
+          "required": [
+            "n_rhs",
+            "n_components",
+            "n_inactive",
+            "n_global_rows",
+            "cache_fingerprint"
+          ],
+          "properties": {
+            "n_rhs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "n_components": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "n_inactive": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "n_global_rows": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cache_fingerprint": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

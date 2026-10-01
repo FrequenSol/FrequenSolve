@@ -5,6 +5,22 @@ prepared.
 
 ## Unreleased
 
+- Imaging reads Sauce's `fs-objective-linearization-5` states and reads and
+  writes `fs-objective-vector-5` vectors: one manifest and one canonical HDF5
+  file per task, with every dataset identified by its `fs-block-sha256-1`
+  digest flattened to one axis (`f4` now supported) instead of whole-file
+  SHA-256. Versions 3 and 4 are still read. Operator duals of a version-5
+  state carry no partition and store values in the state's precision;
+  `ObjectiveState.vector_options()` supplies a state's dual format, and
+  `write_task_objective_vectors` gains `schema` and `dtype`. Version-5 states
+  still pin consumer tasks to their rank count; version-5 vectors do not.
+  Manifest fingerprints hash floats exactly as Sauce's nlohmann/json prints
+  them. Remote staging no longer re-uploads a state or vector (manifest and
+  cache/data file) that a completed run on the same site wrote, and SLURM
+  submissions upload operator inputs once instead of twice
+  (`BaseSite.stages_job_inputs`). Control-registry manifests without per-rank
+  descriptor `file` entries are accepted. `objective_layout_fingerprint` is
+  O(N log N) instead of quadratic in the row count.
 - `NativeCurvature` deletes each operation's staged `input.h5` once its
   result is verified, unless the result has an HDF5 external link into it
   (warm-start factors link their unchanged `/modes`); a failed operation

@@ -360,7 +360,43 @@ def test_control_registry_manifest_reads_pinned_example():
     np.testing.assert_array_equal(
         manifest.unpack_state()["source.1.position"], [513.7, 34.1]
     )
-    assert manifest.rank_descriptors[0]["file"] == "controls.json.rank_0.json"
+    # Sauce publishes only the index: rank fingerprints, no descriptor files.
+    assert manifest.n_ranks == 1 and manifest.descriptor_rank == 0
+    assert manifest.rank_descriptors == ({"fingerprint": "sha256:" + "1" * 64},)
+
+
+def test_control_registry_rank_index_validates_and_keeps_legacy_file_entries():
+    from jsonschema import Draft202012Validator
+
+    root = CONTRACT_ROOT / "outputs" / "fs-control-registry-1"
+    example = json.loads((root / "examples" / "source-position.json").read_text())
+    schema = json.loads((root / "schema.json").read_text())
+    two_ranks = dict(
+        example,
+        n_ranks=2,
+        rank_descriptors=[{"fingerprint": "sha256:" + d * 64} for d in "12"],
+    )
+    Draft202012Validator(schema).validate(two_ranks)
+    assert [
+        entry["fingerprint"][-1]
+        for entry in ControlRegistryManifest.from_dict(two_ranks).rank_descriptors
+    ] == ["1", "2"]
+    # Registries from earlier solver builds also name per-rank files.
+    legacy = dict(
+        two_ranks,
+        rank_descriptors=[
+            {"file": f"controls.json.rank_{rank}.json", "fingerprint": entry}
+            for rank, entry in enumerate(
+                item["fingerprint"] for item in two_ranks["rank_descriptors"]
+            )
+        ],
+    )
+    manifest = ControlRegistryManifest.from_dict(legacy)
+    assert manifest.rank_descriptors[1] == {
+        "file": "controls.json.rank_1.json",
+        "fingerprint": "sha256:" + "2" * 64,
+    }
+    assert manifest.names == ("source.1.position",)
 
 
 def test_control_registry_manifest_orders_active_blocks_and_offsets():

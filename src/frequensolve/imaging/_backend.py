@@ -397,12 +397,17 @@ def write_task_objective_vectors(
     space: DataSpace,
     state_fingerprint: str,
     *,
-    n_ranks: int = 1,
+    n_ranks: Optional[int] = None,
+    schema: str = "fs-objective-vector-3",
+    dtype: Any = None,
 ) -> List[Path]:
-    """Write one ``fs-objective-vector-3`` per frequency task of ``job``.
+    """Write one objective vector per frequency task of ``job``.
 
     Task ``t`` receives the rows of ``space`` at ``job.f_list[t - 1]``; the
-    files are written at ``job.objective_vector_file(t)``.
+    files are written at ``job.objective_vector_file(t)``. ``schema``,
+    ``n_ranks`` (version 3) and ``dtype`` (version 5) select the format as in
+    :meth:`DataVector.write_objective_vector`; pass
+    ``**ObjectiveState(...).vector_options()`` for a saved state's duals.
     """
 
     vector = (
@@ -421,6 +426,8 @@ def write_task_objective_vectors(
                 state_fingerprint=state_fingerprint,
                 term_layout=layouts,
                 n_ranks=n_ranks,
+                schema=schema,
+                dtype=dtype,
             )
         )
     return paths
@@ -521,7 +528,7 @@ def _operator_input_files(job: BaseJob) -> List[Path]:
 
 
 def _manifest_payload(path: Path) -> List[Path]:
-    """Return the data file an objective-vector manifest names beside itself."""
+    """Return the data file a canonical (version 4 or 5) objective-vector manifest names."""
 
     if path.suffix != ".json":
         return []
@@ -736,8 +743,11 @@ class Backend:
         """
 
         # Local sites read inputs in place; only remote sites expose a work_dir.
-        if getattr(self.site, "work_dir", None) is None or not callable(
-            getattr(self.site, "put", None)
+        # Sites that upload them while submitting need no second copy.
+        if (
+            getattr(self.site, "work_dir", None) is None
+            or not callable(getattr(self.site, "put", None))
+            or getattr(self.site, "stages_job_inputs", False)
         ):
             return
         try:

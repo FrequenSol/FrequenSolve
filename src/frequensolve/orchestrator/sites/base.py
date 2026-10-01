@@ -1076,6 +1076,13 @@ class BaseSite:
 
     supports_curvature = False
 
+    stages_job_inputs: ClassVar[bool] = False
+    """Whether ``submit`` uploads the job's ``remote_input_files`` itself.
+
+    ``True`` on SLURM sites, which transfer them with the job and simulation
+    JSON; callers such as the imaging ``Backend`` then upload nothing.
+    """
+
     supports_background_reuse: ClassVar[bool] = False
     """Whether later jobs can reuse ``fwi_operator/background`` checkpoints.
 

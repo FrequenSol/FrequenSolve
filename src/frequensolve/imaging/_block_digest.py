@@ -27,9 +27,11 @@ import numpy as np
 SCHEME = "fs-block-sha256-1"
 BLOCK_ROWS = 65536
 # ``u1`` only identifies SDK-side byte views (boolean support masks in
-# fingerprints); Sauce stages and reports f8/i8/i4 datasets.
+# fingerprints); Sauce stages and reports f8/f4/i8/i4 datasets (``f4`` in
+# single-precision builds).
 _TAGS = {
     np.dtype(np.float64): "f8",
+    np.dtype(np.float32): "f4",
     np.dtype(np.int64): "i8",
     np.dtype(np.int32): "i4",
     np.dtype(np.uint8): "u1",
@@ -86,6 +88,29 @@ def block_digest(values: Any, dtype: Any = np.float64) -> str:
         + struct.pack(f"<{len(shape) + 2}Q", len(shape), *shape, BLOCK_ROWS)
     )
     return f"{SCHEME}:{hashlib.sha256(header + leaves).hexdigest()}"
+
+
+def stored_element_type(dtype: Any) -> np.dtype:
+    """Return the digest element type of data stored as ``dtype`` (native byte order)."""
+    element = np.dtype(dtype).newbyteorder("=")
+    if element not in _TAGS:
+        raise ValueError(f"Unsupported block digest element type {element}")
+    return element
+
+
+def flat_block_digest(values: Any, dtype: Any = None) -> str:
+    """Return the digest of ``values`` flattened to one axis.
+
+    Objective states and vectors (``fs-objective-*-5``) and background
+    checkpoints identify each dataset this way: the elements in numpy (C)
+    order, which is the order Sauce holds its Fortran arrays, form a single
+    row axis, so one 65536-element leaf follows another whatever the
+    dataset's shape and a scalar hashes as one element. ``dtype`` is the
+    stored element type (default: that of ``values``).
+    """
+    array = np.asarray(values)
+    element = stored_element_type(array.dtype if dtype is None else dtype)
+    return block_digest(array.reshape(-1), element)
 
 
 def stacked_block_digest(

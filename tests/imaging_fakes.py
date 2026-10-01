@@ -16,8 +16,11 @@ Per action (``task`` is one-based; ``f`` its frequency; ``R`` the rows of
 ``f``; ``m`` the active slice of ``controls.state`` or zeros):
 
 ``linearize``
-    writes ``state_<task>.json`` (a stub holding the invented fingerprints,
-    active blocks, sizes, ``m`` and ``f``), ``<report stem>_<task>.json``
+    writes ``state_<task>.json`` (an ``fs-objective-linearization-5`` manifest
+    with one canonical ``state_<task>_cache.h5`` and per-dataset digests, or a
+    ``-3`` manifest with per-rank shards; either also holds the invented
+    fingerprints, active blocks, sizes, ``m`` and ``f``, under ``fake`` in
+    version 5), ``<report stem>_<task>.json``
     (``fs-objective-report-1`` with ``total = 0.5*||J[R] m - d[R]||^2`` and one
     term per receiver group), the covector ``Re(J[R]^H (J[R] m - d[R]))`` as
     ``<covector stem>_<task>.h5`` (``fs-control-vector-1`` with all-ones
@@ -41,10 +44,12 @@ coordinates (``J[R] (c_t dv)`` and ``c_t Re(J[R]^H r)``), exactly like Sauce.
 the normalized physical coordinate.
 ``jvp``
     reads ``direction`` and writes ``<objective_vector stem>_<task>.json`` with
-    ``J[R] dv`` (``fs-objective-vector-3``).
+    ``J[R] dv`` (``fs-objective-vector-5`` in the state's precision, or ``-3``
+    for a ``-3`` state).
 ``vjp``
-    reads the ``objective_vector`` input and writes ``Re(J[R]^H r[R])`` as the
-    task covector.
+    reads the ``objective_vector`` input (rejecting another format than its
+    state's dual, like Sauce) and writes ``Re(J[R]^H r[R])`` as the task
+    covector.
 
 Operator inputs (``state``, ``direction``, ``objective_vector`` of vjp,
 ``extension.direction``) resolve like Sauce's: a multi-task job reads the
@@ -116,7 +121,13 @@ from frequensolve.imaging._artifacts import (
     qualified_block_name,
     unqualified_block_name,
 )
-from frequensolve.imaging.data import DataSpace, DataVector
+from frequensolve.imaging._block_digest import flat_block_digest
+from frequensolve.imaging.data import (
+    DataSpace,
+    DataVector,
+    canonical_json_sha256,
+    file_sha256,
+)
 from frequensolve.imaging.jobs import (
     ControlGradientJob,
     FWIOperatorJob,
@@ -138,7 +149,13 @@ from frequensolve.simulation.artifact_contract import (
     task_result_path,
 )
 
-FAKE_STATE_SCHEMA = "fs-objective-linearization-3"
+FAKE_STATE_SCHEMA = "fs-objective-linearization-5"
+LEGACY_STATE_SCHEMA = "fs-objective-linearization-3"
+# The objective-vector schema Sauce writes and reads for each state.
+_VECTOR_SCHEMAS = {
+    FAKE_STATE_SCHEMA: "fs-objective-vector-5",
+    LEGACY_STATE_SCHEMA: "fs-objective-vector-3",
+}
 FAKE_IMAGE_SCHEMA = "fs-image-hdf5-1"
 _ZERO_DIGEST = "sha256:" + "0" * 64
 _FAKE_JOBS = (FWIOperatorJob, ControlGradientJob, ImageKernelJob, SmoothJob)
@@ -184,6 +201,45 @@ class FakeLinearization:
         """Return ``Re(J^H (J m - d))`` summed over every frequency."""
 
         return np.real(self.J.conj().T @ self.residual)
+
+
+def seal_state_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """Set an ``fs-objective-linearization-5`` manifest's ``manifest_fingerprint``.
+
+    The fingerprint hashes the canonical JSON of every other key except
+    ``state_fingerprint`` (Sauce's rule).
+    """
+
+    manifest.pop("manifest_fingerprint", None)
+    manifest["manifest_fingerprint"] = canonical_json_sha256(
+        {k: v for k, v in manifest.items() if k != "state_fingerprint"}
+    )
+    return manifest
+
+
+def reseal_state(path: Union[str, Path]) -> Dict[str, Any]:
+    """Recompute the digests and fingerprints of an edited version-5 state.
+
+    Tests that change a cache or the manifest call this so the state stays
+    self-consistent: every dataset of each term group is digested again.
+    """
+
+    path = Path(path)
+    manifest = json.loads(path.read_text())
+    for term in manifest["terms"]:
+        cache = path.parent / term["cache"]["file"]
+        with h5py.File(cache, "r") as h5:
+            group = h5[term["cache"]["group"]]
+            digests = {
+                name: flat_block_digest(group[name][()])
+                for name in group
+                if isinstance(group[name], h5py.Dataset)
+            }
+        term["cache"]["digests"] = digests
+        term["runtime"]["cache_fingerprint"] = canonical_json_sha256(digests)
+    seal_state_manifest(manifest)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
 
 
 def _rows(space: DataSpace, frequency: Any) -> np.ndarray:
@@ -362,7 +418,11 @@ class FakeImagingSite(BaseSite):
             Required when a job has no ``controls.state``; when it has one the
             file's sizes are used and checked against this table.
         seed: Seed of the surrogate.
-        n_ranks: Rank count recorded in objective-vector manifests.
+        n_ranks: Rank count recorded in objective states (and version-3
+            objective vectors).
+        state_schema: ``fs-objective-linearization-5`` (default) or ``-3``.
+        state_dtype: Stored value type of version-5 caches and vectors
+            (``float32`` emulates a single-precision build).
         support_masks: Optional ``qualified block -> bool mask`` written to
             ``/support/<block>`` of every state output and covector (blocks
             not listed are fully supported).  Emulates Sauce freezing DOFs.
@@ -397,6 +457,8 @@ class FakeImagingSite(BaseSite):
         *,
         seed: int = 0,
         n_ranks: int = 1,
+        state_schema: str = FAKE_STATE_SCHEMA,
+        state_dtype: Any = np.float64,
         support_masks: Optional[Mapping[str, Any]] = None,
         mechanism_baseline: float = 0.75,
         mechanism_scaling: float = 2.0e9,
@@ -417,6 +479,10 @@ class FakeImagingSite(BaseSite):
         }
         self.seed = int(seed)
         self.n_ranks = int(n_ranks)
+        if state_schema not in _VECTOR_SCHEMAS:
+            raise ValueError(f"unsupported fake state schema {state_schema!r}")
+        self.state_schema = state_schema
+        self.state_dtype = np.dtype(state_dtype)
         self.support_masks: Dict[str, Any] = {
             qualified_block_name(name): (
                 mask if callable(mask) else np.asarray(mask, dtype=bool).reshape(-1)
@@ -799,7 +865,7 @@ class FakeImagingSite(BaseSite):
                     job.objective_vector_file(task),
                     state_fingerprint=lin.state_fingerprint,
                     term_layout=lin.space.term_layouts(frequency=frequency),
-                    n_ranks=self.n_ranks,
+                    **self._vector_options(),
                 )
             elif job.action == "vjp":
                 r = self._objective_vector(job, task, lin, frequency)
@@ -1063,7 +1129,7 @@ class FakeImagingSite(BaseSite):
                     job.objective_vector_file(task),
                     state_fingerprint=lin.state_fingerprint,
                     term_layout=lin.space.term_layouts(frequency=frequency),
-                    n_ranks=self.n_ranks,
+                    **self._vector_options(),
                 )
             elif job.action == "vjp":
                 r = self._objective_vector(job, task, lin, frequency)
@@ -1624,6 +1690,14 @@ class FakeImagingSite(BaseSite):
             raise ValueError("direction size does not match the active subspace")
         return dv
 
+    def _vector_options(self) -> Dict[str, Any]:
+        """Return the ``write_objective_vector`` format Sauce uses for its state."""
+
+        schema = _VECTOR_SCHEMAS[self.state_schema]
+        if schema == "fs-objective-vector-3":
+            return {"schema": schema, "n_ranks": self.n_ranks}
+        return {"schema": schema, "dtype": self.state_dtype}
+
     def _objective_vector(
         self,
         job: FWIOperatorJob,
@@ -1634,6 +1708,13 @@ class FakeImagingSite(BaseSite):
         if job.objective_vector is None:
             raise ValueError("vjp requires an objective_vector input")
         path = job.task_input(job.objective_vector, task)
+        state = self._load_state_payload(job, task)
+        expected = _VECTOR_SCHEMAS[state["schema"]]
+        schema = json.loads(path.read_text()).get("schema")
+        if schema != expected:
+            raise ValueError(
+                f"objective vector {path} is {schema!r}; the state reads {expected!r}"
+            )
         return DataVector.read_objective_vector(
             path,
             lin.space,
@@ -1663,7 +1744,7 @@ class FakeImagingSite(BaseSite):
         path.parent.mkdir(parents=True, exist_ok=True)
         f = complex(frequency)
         payload = {
-            "schema": FAKE_STATE_SCHEMA,
+            "schema": self.state_schema,
             "state_fingerprint": lin.state_fingerprint,
             "control_registry_fingerprint": lin.control_registry_fingerprint,
             "task": task,
@@ -1675,15 +1756,16 @@ class FakeImagingSite(BaseSite):
             "sizes": dict(lin.sizes),
             "m": lin.m.tolist(),
         }
-        from frequensolve.imaging.data import file_sha256
-
         payload["partition"] = {
             "n_ranks": self.n_ranks,
             "compatibility": "same_mesh_partition",
         }
-        payload["shards"] = []
+        if self.state_schema == FAKE_STATE_SCHEMA:
+            self._write_canonical_state(path, payload, lin, frequency, task)
+            return
         simulated = lin.J @ lin.m
         residual = simulated - lin.d
+        payload["shards"] = []
         for rank in range(self.n_ranks):
             shard = path.with_name(f"{path.stem}_rank_{rank}.json")
             cache = shard.with_suffix(".h5")
@@ -1722,23 +1804,167 @@ class FakeImagingSite(BaseSite):
             payload["shards"].append({"file": str(shard), "sha256": file_sha256(shard)})
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
-    def _load_state(
-        self, job: FWIOperatorJob, task: int
-    ) -> Tuple[FakeLinearization, complex]:
+    def _write_canonical_state(
+        self,
+        path: Path,
+        payload: Dict[str, Any],
+        lin: FakeLinearization,
+        frequency: Any,
+        task: int,
+    ) -> None:
+        """Write an ``fs-objective-linearization-5`` manifest and its one cache.
+
+        The manifest has every field of the contract; the fake's own surrogate
+        data (fingerprints, active blocks, sizes, ``m`` and the frequencies)
+        sits under one ``fake`` key. Rows are stored in canonical row-id
+        order; every dataset of a term group is identified by its flattened
+        ``fs-block-sha256-1`` digest and the term's ``cache_fingerprint``
+        hashes those digests, like Sauce. Row values use ``state_dtype``.
+        """
+
+        simulated = lin.J @ lin.m
+        residual = simulated - lin.d
+        cache = path.with_name(f"{path.stem}_cache.h5")
+        rows = self.state_dtype
+        terms = []
+        with h5py.File(cache, "w") as h5:
+            for index, layout in enumerate(lin.space.term_layouts(frequency=frequency)):
+                n_rhs, n_components, _ = lin.space.segment(layout.id).shape
+                count = layout.n_global_rows
+                position = layout.row_ids - 1
+                keys = np.empty((count, 3), dtype=np.int32)
+                keys[position] = layout.coordinate_keys
+                datasets: Dict[str, np.ndarray] = {
+                    "metadata": np.array(
+                        [5, 0, n_rhs, n_components, 1, 0, 0], dtype=np.int32
+                    ),
+                    "n_global_rows": np.array([count], dtype=np.int64),
+                    "metric_weight": np.ones(n_components),
+                    "objective_factor": np.ones(n_components, dtype=np.float32),
+                    "phase_floor": np.zeros((n_components, n_rhs), dtype=np.float32),
+                    "active_mask": np.ones((n_components, n_rhs), dtype=np.int32),
+                    "rhs_required": np.ones(n_rhs, dtype=np.int32),
+                    "coordinate_keys": keys,
+                    "simulated_df": np.zeros((count, 2), dtype=rows),
+                    "static_weight": np.ones(count, dtype=rows),
+                    "robust_weight": np.ones(count, dtype=rows),
+                }
+                for name, values in (
+                    ("objective_residual", residual),
+                    ("simulated", simulated),
+                ):
+                    packed = np.empty((count, 2), dtype=rows)
+                    packed[position, 0] = values[layout.indices].real
+                    packed[position, 1] = values[layout.indices].imag
+                    datasets[name] = packed
+                group = h5.create_group(f"terms/{index}")
+                for name, data in datasets.items():
+                    group[name] = data
+                # The surrogate's residual is simulated - observed (Sauce's
+                # contract is the opposite); record it so readers adapt.
+                group["objective_residual"].attrs[
+                    "convention"
+                ] = "simulated_minus_observed"
+                digests = {
+                    name: flat_block_digest(data) for name, data in datasets.items()
+                }
+                terms.append(
+                    {
+                        "id": layout.id,
+                        "receiver_group": layout.id,
+                        "weight": 1.0,
+                        "reduction": "sum",
+                        "effective_weight_mass": 1.0,
+                        "scale": {
+                            "policy": "none",
+                            "components": list(lin.space.segment(layout.id).components),
+                            "dimensions": ["none"] * n_components,
+                            "units": ["1"] * n_components,
+                            "values": [1.0] * n_components,
+                        },
+                        "objective": {"kind": "l2", "delta": 1.0, "c2": 1.0, "nu": 1.0},
+                        "comparison": {
+                            "kind": "waveform",
+                            "derivative_axis": "frequency",
+                            "source_derivative": "frozen",
+                            "relative_amplitude_floor": 0.0,
+                        },
+                        "receiver_layout": "dense",
+                        "data_metric": {
+                            "pairing": "real_hermitian",
+                            "components": list(lin.space.segment(layout.id).components),
+                            "weights": [1.0] * n_components,
+                        },
+                        "layout_fingerprint": layout.layout_fingerprint,
+                        "cache": {
+                            "file": cache.name,
+                            "group": f"/terms/{index}",
+                            "digests": digests,
+                        },
+                        "runtime": {
+                            "n_rhs": n_rhs,
+                            "n_components": n_components,
+                            "n_inactive": 0,
+                            "n_global_rows": count,
+                            "cache_fingerprint": canonical_json_sha256(digests),
+                        },
+                    }
+                )
+        f = complex(frequency)
+        context = _sha256({"kind": "context", "state": lin.state_fingerprint})
+        manifest = {
+            "schema": FAKE_STATE_SCHEMA,
+            "task": task,
+            "frequency_hz": f.real,
+            "laplace_damping_hz": f.imag,
+            "resolved_context": context,
+            "partition": payload["partition"],
+            "fingerprints": {
+                "resolved_context": context,
+                "model": lin.state_fingerprint,
+                "observations": _ZERO_DIGEST,
+                "acquisition": _ZERO_DIGEST,
+                "source_signature": "none",
+                "preprocessing": _ZERO_DIGEST,
+                "objective_terms": _ZERO_DIGEST,
+            },
+            "runtime": {"n_terms": len(terms)},
+            "terms": terms,
+            "state_fingerprint": lin.state_fingerprint,
+            # Surrogate data Sauce does not write (validators drop this key).
+            "fake": {
+                key: value
+                for key, value in payload.items()
+                if key not in {"schema", "state_fingerprint", "task", "partition"}
+            },
+        }
+        seal_state_manifest(manifest)
+        path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _state_path(job: FWIOperatorJob, task: int) -> Path:
         # ``linearize`` writes ``<stem>_<task>``; a derivative action resolves
         # its ``state`` input like Sauce (task sibling first in a multi-task
         # job, the exact path otherwise).
         if job.action == "linearize":
-            path = job.state_file(task)
-        else:
-            if job.state is None:
-                raise ValueError(f"action {job.action!r} requires a state")
-            path = job.task_input(job.state, task)
+            return job.state_file(task)
+        if job.state is None:
+            raise ValueError(f"action {job.action!r} requires a state")
+        return job.task_input(job.state, task)
+
+    def _load_state_payload(self, job: FWIOperatorJob, task: int) -> Dict[str, Any]:
+        path = self._state_path(job, task)
         if not path.is_file():
             raise FileNotFoundError(f"missing objective state {path}")
         data = json.loads(path.read_text())
-        if data.get("schema") != FAKE_STATE_SCHEMA:
+        if data.get("schema") not in _VECTOR_SCHEMAS:
             raise ValueError(f"{path} is not a fake imaging state")
+        return {**data, **data.get("fake", {})}
+
+    def _load_state(
+        self, job: FWIOperatorJob, task: int
+    ) -> Tuple[FakeLinearization, complex]:
+        data = self._load_state_payload(job, task)
         frequency = complex(*data["frequency"])
         expected = complex(job.f_list[task - 1])
         if not np.isclose(frequency, expected):
@@ -1877,7 +2103,10 @@ class FakeImagingSite(BaseSite):
             "blocks": blocks,
             "descriptor_rank": 0,
             "n_ranks": self.n_ranks,
-            "rank_descriptors": [],
+            "rank_descriptors": [
+                {"fingerprint": _sha256({"rank": rank, "registry": lin.active})}
+                for rank in range(self.n_ranks)
+            ],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

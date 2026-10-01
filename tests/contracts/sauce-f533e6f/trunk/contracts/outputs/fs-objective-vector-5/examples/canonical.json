@@ -1,0 +1,17 @@
+{
+  "file": "dual_1.h5",
+  "manifest_fingerprint": "sha256:ae6e55765d2ccc0d50c8b4c47043947da8eafd8f5288532a03cb77ec59b45578",
+  "schema": "fs-objective-vector-5",
+  "state_fingerprint": "sha256:c4fb014b306407584e4304f09e658b42081153f853240934919ca15be2f640a8",
+  "terms": [
+    {
+      "digests": {
+        "coordinate_keys": "fs-block-sha256-1:14124ba7c8767fd18df6f86eaf882374f322b5c30c5147f2650d04cc76dab6ca",
+        "values": "fs-block-sha256-1:c4ed1e036294d82ec09efa532736629bffad18bd8625d911c2a6593393f25900"
+      },
+      "id": "surface",
+      "layout_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "n_global_rows": 6
+    }
+  ]
+}

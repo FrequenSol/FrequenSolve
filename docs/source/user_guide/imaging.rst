@@ -1814,13 +1814,21 @@ by role (``image``, ``gradient``, ``objective``, ``state``,
 :mod:`frequensolve.imaging` (``ControlVectorFile``, ``ControlStateFile``,
 ``ObjectiveReport``, ``ImageSet`` ...) open them.
 
-Saved objective states and vectors are read in both formats: solver 0.4.1's
-canonical version 4 and the development solver's distributed version 3.
-Operator calls select the vector format from each task's saved state. Keep
-states with the solver build that created them and regenerate the linearization
-when changing builds. Low-level ``DataVector.write_objective_vector`` callers
-can specify ``schema="fs-objective-vector-4"`` for a canonical saved state;
-the default preserves the distributed version-3 convention.
+Saved objective states and vectors are read in three formats: the current
+solver's version 5 (one manifest and one canonical HDF5 file per task, each
+dataset checked against its ``fs-block-sha256-1`` digest), solver 0.4.1's
+canonical version 4 and the earlier distributed version 3. Operator calls write
+each task's duals in the format of its saved state: version-5 duals carry no
+rank partition and use the state's precision (single), while derivative
+actions on a version-5 state still run on the rank count that linearized it.
+Keep states with the solver build that created them and regenerate the
+linearization when changing builds. Low-level
+``DataVector.write_objective_vector`` callers pass
+``schema="fs-objective-vector-5"`` (and optionally ``dtype``) or ``-4`` for a
+canonical saved state; the default preserves the distributed version-3
+convention. Remote staging does not upload a saved state or objective vector
+again when a completed run on the same SLURM site wrote it there; jobs read
+that copy in place.
 
 Sauce contract mapping
 ----------------------

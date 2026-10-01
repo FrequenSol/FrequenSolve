@@ -912,8 +912,13 @@ class ControlRegistryManifest:
             pairing=str(data.get("pairing", "real_euclidean")),
             descriptor_rank=int(data.get("descriptor_rank", 0)),
             n_ranks=int(data.get("n_ranks", 1)),
+            # Current Sauce writes no per-rank descriptor files; earlier
+            # builds name one per rank.
             rank_descriptors=tuple(
-                {"file": str(item["file"]), "fingerprint": str(item["fingerprint"])}
+                {
+                    "fingerprint": str(item["fingerprint"]),
+                    **({"file": str(item["file"])} if "file" in item else {}),
+                }
                 for item in data.get("rank_descriptors", ())
             ),
             raw=dict(data),

@@ -22,6 +22,7 @@ from frequensolve.imaging._backend import (
     total_value,
     write_task_objective_vectors,
 )
+from frequensolve.imaging._objective import ObjectiveState
 from frequensolve.imaging.data import DataSpace, DataVector
 from frequensolve.imaging.jobs import FWIOperatorJob
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
@@ -362,7 +363,10 @@ def test_jvp_vjp_normal_are_adjoint_consistent_through_files(setup):
         objective_vector=backend.staging_dir("duals") / "r.json",
         covector="vjp.h5",
     )
-    write_task_objective_vectors(vjp, r, space, lin.state_fingerprint)
+    # Duals take the saved state's format (canonical version 5 here).
+    options = ObjectiveState(linearize.state_file(1)).vector_options()
+    assert options == {"schema": "fs-objective-vector-5", "dtype": np.float64}
+    write_task_objective_vectors(vjp, r, space, lin.state_fingerprint, **options)
     backend.run(vjp)
     jh_r = reduce_covectors(vjp)
     np.testing.assert_allclose(

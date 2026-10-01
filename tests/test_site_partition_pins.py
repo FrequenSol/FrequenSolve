@@ -25,6 +25,7 @@ from frequensolve.orchestrator.sites.partition import (
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
 _STATE = "fs-objective-linearization-3"
+_STATE_V5 = "fs-objective-linearization-5"
 
 
 def _manifest(path, ranks=None, *, schema=_STATE, **extra):
@@ -105,6 +106,37 @@ def test_writers_canonical_artifacts_and_other_jobs_impose_nothing(tmp_path):
     assert partitioned_inputs(linearize) == [] and task_partitions(linearize) == {}
     assert task_partitions(canonical) == {}
     assert partitioned_inputs(other) == []
+
+
+def test_version5_states_pin_and_version5_vectors_do_not(tmp_path):
+    """A -5 state keeps its partition binding; -5 vectors any rank count reads."""
+    from frequensolve.imaging.data import DataSpace, _DataSegment
+
+    _task_files(tmp_path, "lin/state", {1: 4, 2: 2}, schema=_STATE_V5)
+    space = DataSpace([4.0, 6.0], [_DataSegment("g", ("p",), (1, 2), (1, 2, 3))])
+    for task, frequency in ((1, 4.0), (2, 6.0)):
+        space.ones().write_objective_vector(
+            tmp_path / "ops" / f"dual_{task}.json",
+            state_fingerprint="sha256:" + "a" * 64,
+            term_layout=space.term_layouts(frequency=frequency),
+            schema="fs-objective-vector-5",
+        )
+    vjp = _Consumer(
+        tmp_path,
+        action="vjp",
+        n_tasks=2,
+        state="lin/state.json",
+        objective_vector="ops/dual.json",
+    )
+    dual_only = _Consumer(
+        tmp_path, action="vjp", n_tasks=2, objective_vector="ops/dual.json"
+    )
+
+    assert task_partitions(vjp) == {
+        1: TaskPartition(4, True, ("state",)),
+        2: TaskPartition(2, True, ("state",)),
+    }
+    assert task_partitions(dual_only) == {}
 
 
 def test_tasks_fall_back_to_the_named_file_like_sauce(tmp_path):

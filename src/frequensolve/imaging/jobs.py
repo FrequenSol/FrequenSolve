@@ -1174,7 +1174,7 @@ class FWIOperatorJob(_ImagingJobBase):
             ``source.<i>.<quantity>``, ``reflectivity.<name>``; bare material
             IDs are qualified as ``model.<id>``). Required (may be empty) for
             state actions; must be ``None`` for ``calibrate`` and ``wri``.
-        state: ``fs-objective-linearization-4`` stem: an output for
+        state: ``fs-objective-linearization-5`` stem: an output for
             ``linearize`` (result-relative), an input otherwise.
         background: Optional native background checkpoint manifest; output
             for linearize, input for ordinary material JVP/VJP/normal.
@@ -1190,7 +1190,7 @@ class FWIOperatorJob(_ImagingJobBase):
         regularization: Native ``control_sensitivities.Regularization``
             request with ``inputs``/``outputs`` lists that a ``normal`` job's
             postprocess applies after its tasks (requires ``control_active``).
-        objective_vector: ``fs-objective-vector-4`` output (``jvp``) or input
+        objective_vector: ``fs-objective-vector-5`` output (``jvp``) or input
             (``vjp``, optional ``solve`` target).
         objective: Optional scalar objective report output.
         control_state: ``fs-control-state-1`` baseline input.

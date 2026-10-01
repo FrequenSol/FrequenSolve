@@ -703,6 +703,8 @@ class SlurmSite(BaseSite):
     # Remote result directories persist below work_dir, and the adaptive
     # scheduler launches each consuming task on its producer's ranks.
     supports_background_reuse = True
+    # _transfer_remote_simulation_inputs uploads remote_input_files per submit.
+    stages_job_inputs = True
 
     credentials: SlurmLoginCredentials
     config: Any

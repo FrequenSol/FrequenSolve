@@ -46,6 +46,18 @@ _PROJECT_FILE_REFERENCE_KEYS = frozenset(
 
 _STAGED_PROVENANCE_SCHEMA = "fs-staged-provenance-1"
 
+# Saved objective states and vectors: Sauce writes them with their payloads
+# (caches, vector data) into a job result directory.
+_OBJECTIVE_MANIFESTS = ("fs-objective-linearization-", "fs-objective-vector-")
+# Vector manifests whose payload references staging rewrites.
+_OBJECTIVE_VECTORS = frozenset(
+    {"fs-objective-vector-3", "fs-objective-vector-4", "fs-objective-vector-5"}
+)
+# Run-record states after which a site's result directory may no longer hold
+# the outputs fetched from an earlier run (SLURM finalizes successful batch
+# runs as "complete"; attached runs keep "running").
+_FAILED_RUNS = frozenset({"failed", "cancelled", "timeout"})
+
 # Jobs sharing an unchanged saved simulation stage one remote copy of it.
 # (simulation file, mapping roots) -> (its status, staged copy, copy status, digest)
 _STAGED_SIMULATIONS: Dict[Tuple[str, ...], Tuple[Any, Path, Any, str]] = {}
@@ -84,6 +96,90 @@ def _simulation_skeleton(path: Path) -> Any:
     if status is not None:
         _SIMULATION_SKELETONS[str(path)] = (status, skeleton)
     return skeleton
+
+
+def _recorded_outputs(result_dir: Path) -> Dict[str, int]:
+    """Return ``{relative path: bytes}`` of the outputs a result's task catalog records."""
+
+    from frequensolve.simulation.artifact_contract import (
+        ArtifactCatalog,
+        ArtifactContractError,
+    )
+    from frequensolve.simulation.task_index import TaskIndex, task_index_path
+
+    try:
+        if task_index_path(result_dir).is_file():
+            records = TaskIndex.read(result_dir).query()
+        else:
+            tasks = sorted(
+                int(path.parent.name[len("task_") :])
+                for path in (result_dir / "_fs_run" / "tasks").glob(
+                    "task_*/result.json"
+                )
+                if path.parent.name[len("task_") :].isdigit()
+            )
+            records = ArtifactCatalog.read_task_results(result_dir, tasks=tasks).query()
+    except (ArtifactContractError, OSError, ValueError, KeyError, TypeError):
+        return {}
+    return {record.relative_path: int(record.bytes) for record in records}
+
+
+def _resident_output(
+    local: Path, remote: Path, remote_project: Path, cache: Dict[Path, Any]
+) -> bool:
+    """Return whether ``local`` is a fetched copy of a solver output at ``remote``.
+
+    True when the nearest job result directory holding ``local`` was run on
+    this site's project (its latest run record there has ``work_dir`` equal
+    to ``remote_project``, did not fail, and places the result directory so
+    that ``local`` maps to ``remote``), and its committed task catalog, which
+    records outputs of successful tasks, lists ``local`` with its current
+    size. Client-written inputs beside the outputs (operator inputs under a
+    linearization's directory) are not recorded and are uploaded.
+    """
+
+    result_dir = next(
+        (parent for parent in local.parents if (parent / "_fs_run").is_dir()), None
+    )
+    if result_dir is None:
+        return False
+    if result_dir not in cache:
+        remote_dir = None
+        try:
+            payload = json.loads((result_dir / "_fs_run" / "runs.json").read_text())
+            records = payload.get("runs") if isinstance(payload, Mapping) else payload
+            runs = sorted(
+                (
+                    record
+                    for record in records or ()
+                    if isinstance(record, Mapping)
+                    and Path(str(record.get("work_dir"))) == remote_project
+                ),
+                key=lambda record: str(
+                    record.get("updated_at") or record.get("submitted_at") or ""
+                ),
+            )
+            if runs and runs[-1].get("status") not in _FAILED_RUNS:
+                remote_dir = Path(str(runs[-1]["result_dir"]))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            remote_dir = None
+        cache[result_dir] = (
+            remote_dir,
+            _recorded_outputs(result_dir) if remote_dir is not None else {},
+        )
+    remote_dir, recorded = cache[result_dir]
+    if remote_dir is None:
+        return False
+    relative = local.relative_to(result_dir)
+    size = recorded.get(relative.as_posix())
+    try:
+        return (
+            remote_dir / relative == remote
+            and size is not None
+            and local.stat().st_size == size
+        )
+    except OSError:
+        return False
 
 
 class JobRemoteMixin:
@@ -449,6 +545,11 @@ class JobRemoteMixin:
     def remote_input_files(self, remote_project: Union[Path, str]) -> List[tuple]:
         """Return local input files that must accompany remote job inputs.
 
+        An objective state or vector that a job already wrote on this site
+        (see :func:`_resident_output`) is read there in place: neither its
+        manifest nor its cache or data file is uploaded again, so the
+        producer's remote copies stay byte-identical and self-consistent.
+
         Args:
             remote_project: Project root visible on the remote site.
 
@@ -497,6 +598,7 @@ class JobRemoteMixin:
             )
 
         visited = set()
+        residency: Dict[Path, Any] = {}
 
         def add_reference(
             file_ref: Union[str, Path], *, parent: Optional[Path] = None
@@ -516,12 +618,20 @@ class JobRemoteMixin:
             if local in visited:
                 return
             visited.add(local)
+            payload = (
+                json.loads(local.read_text())
+                if local.suffix.lower() == ".json"
+                else None
+            )
+            if (
+                isinstance(payload, Mapping)
+                and str(payload.get("schema", "")).startswith(_OBJECTIVE_MANIFESTS)
+                and _resident_output(local, remote, remote_project, residency)
+            ):
+                return
             add_pair(pair)
             for sidecar in self._rsf_sidecar_references(pair):
                 add_reference(sidecar)
-            if local.suffix.lower() != ".json":
-                return
-            payload = json.loads(local.read_text())
             if not isinstance(payload, Mapping):
                 return
             schema = payload.get("schema", "")
@@ -534,7 +644,7 @@ class JobRemoteMixin:
             for ref in self._iter_file_references(payload):
                 add_reference(ref, parent=local.parent)
             # Shards are files too; generic file traversal includes them.
-            if schema in {"fs-objective-vector-3", "fs-objective-vector-4"}:
+            if schema in _OBJECTIVE_VECTORS:
                 from frequensolve.imaging.data import DataVector, canonical_json_sha256
 
                 validated = DataVector.read_objective_manifest(local)
@@ -542,7 +652,7 @@ class JobRemoteMixin:
                     add_reference(ref, parent=local.parent)
 
                 def staged_reference(reference: str) -> str:
-                    if schema == "fs-objective-vector-4":
+                    if schema != "fs-objective-vector-3":
                         return self._relative_artifact_reference(reference, local)
                     # Distributed version-3 solvers read shard paths verbatim.
                     mapped = self._remote_project_file_pair(

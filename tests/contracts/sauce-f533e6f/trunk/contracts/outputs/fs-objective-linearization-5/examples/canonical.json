@@ -1,0 +1,98 @@
+{
+  "fingerprints": {
+    "acquisition": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "model": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "objective_terms": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "observations": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "preprocessing": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "resolved_context": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "source_signature": "none"
+  },
+  "frequency_hz": 4.0,
+  "laplace_damping_hz": 0.0,
+  "manifest_fingerprint": "sha256:e5a741dd7e2fb220024e0b5e59a358ff7efdb267d9466471ec4601e0fdea96cb",
+  "partition": {
+    "compatibility": "same_mesh_partition",
+    "n_ranks": 2
+  },
+  "resolved_context": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "runtime": {
+    "n_terms": 1
+  },
+  "schema": "fs-objective-linearization-5",
+  "state_fingerprint": "sha256:c4fb014b306407584e4304f09e658b42081153f853240934919ca15be2f640a8",
+  "task": 1,
+  "terms": [
+    {
+      "cache": {
+        "digests": {
+          "active_mask": "fs-block-sha256-1:b3caa3a1f583f2f623fd1b88aaa2541afd4cab5d80b373980da0a655243fb5a7",
+          "coordinate_keys": "fs-block-sha256-1:14124ba7c8767fd18df6f86eaf882374f322b5c30c5147f2650d04cc76dab6ca",
+          "metadata": "fs-block-sha256-1:5e8b43b8f2f282a0c34fa6c86e85be25a73dc4c6c3ac288c840d56d7fef004b5",
+          "metric_weight": "fs-block-sha256-1:1dfa7d3cf0228b55bdad04777efdd20feebc7213e1b98ba37917ccfa27f7c0a9",
+          "n_global_rows": "fs-block-sha256-1:fa2692a69e6a94fbff9cf251e8c1bc491885bdb7fff2166c9b4001e0c0935e5f",
+          "objective_factor": "fs-block-sha256-1:de524ee08e1b26b02bb4fd38b7d7c9b3f603868015c753f737713baf18de7ea7",
+          "objective_residual": "fs-block-sha256-1:805377b9ae3f1611c5516eed6428cf09fc353c0b9ab9bfc71097b59e84d01276",
+          "phase_floor": "fs-block-sha256-1:06dbf62977bbb7b08c8b71e7ef6f8c82ddb547fa28980a61fed72a1bddf470b2",
+          "rhs_required": "fs-block-sha256-1:b3caa3a1f583f2f623fd1b88aaa2541afd4cab5d80b373980da0a655243fb5a7",
+          "robust_weight": "fs-block-sha256-1:dc0351db2349a1b73f2480dbfc06e8ebd3325c6e7a991e6f2eeb709792150cba",
+          "simulated": "fs-block-sha256-1:487641b0f37b8484c58614666ebaf109acf2708d19ea63b74409a9817023e9c9",
+          "simulated_df": "fs-block-sha256-1:18f508b6906bc27c008b91d5020c016e5e2f30751589e6a01d78f8da45b5f7a8",
+          "static_weight": "fs-block-sha256-1:dc0351db2349a1b73f2480dbfc06e8ebd3325c6e7a991e6f2eeb709792150cba"
+        },
+        "file": "state_1_cache.h5",
+        "group": "/terms/0"
+      },
+      "comparison": {
+        "derivative_axis": "frequency",
+        "kind": "waveform",
+        "relative_amplitude_floor": 0.0,
+        "source_derivative": "frozen"
+      },
+      "data_metric": {
+        "components": [
+          "p"
+        ],
+        "pairing": "real_hermitian",
+        "weights": [
+          1.0
+        ]
+      },
+      "effective_weight_mass": 6.0,
+      "id": "surface",
+      "layout_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "objective": {
+        "c2": 1.0,
+        "delta": 1.5,
+        "kind": "l2",
+        "nu": 2.0
+      },
+      "receiver_group": "surface",
+      "receiver_layout": "dense",
+      "reduction": "weighted_mean",
+      "runtime": {
+        "cache_fingerprint": "sha256:3f8b3a40728c52530f3a05d77eed9e4040594a4793b0b9abc317e2b2e21a96d6",
+        "n_components": 1,
+        "n_global_rows": 6,
+        "n_inactive": 0,
+        "n_rhs": 2
+      },
+      "scale": {
+        "components": [
+          "p"
+        ],
+        "dimensions": [
+          "pressure"
+        ],
+        "policy": "observed_rms",
+        "units": [
+          "Pa"
+        ],
+        "values": [
+          2.5
+        ]
+      },
+      "weight": 1.0
+    }
+  ]
+}

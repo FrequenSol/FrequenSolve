@@ -156,13 +156,9 @@
       "items": {
         "type": "object",
         "required": [
-          "file",
           "fingerprint"
         ],
         "properties": {
-          "file": {
-            "type": "string"
-          },
           "fingerprint": {
             "type": "string",
             "pattern": "^sha256:[0-9a-f]{64}$"
