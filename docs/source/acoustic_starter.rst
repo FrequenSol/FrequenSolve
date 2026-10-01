@@ -16,21 +16,17 @@ choose a folder under your Linux home directory (for example,
 ``~/frequensolve-starter``), not under ``/mnt/c``. Native Windows is
 unsupported; run both these commands and your notebook kernel inside WSL2.
 
-Create and activate a virtual environment, then install the exact package
-version used to build this guide:
+Create and activate a virtual environment:
 
-.. parsed-literal::
+.. code-block:: console
 
    python3 -m venv .venv
    source .venv/bin/activate
-   python -m pip install "frequensolve[cloud,visual]==\ |release|\ "
 
-If that exact version is not available from your configured package index,
-obtain the matching approved project wheel from your project administrator.
-Install that wheel with the ``cloud,visual`` extras in this environment, or
-use the documentation supplied with a different approved package version.
-Do not replace the version above with an unpinned install or silently use a
-different release.
+.. frequensolve-starter-installation
+
+Keep the installed package matched to this guide. Do not replace its version
+with an unpinned install or silently use a different release.
 
 Before preparing the starter, verify the installed version and required
 Cloud configuration support:

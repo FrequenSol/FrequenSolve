@@ -98,7 +98,11 @@ def _strip_private_signature_params(
 
 
 def setup(app):
+    sys.path.insert(0, str(REPO_ROOT / "docs"))
+    from starter_install import render_starter_installation
+
     app.connect("autodoc-process-signature", _strip_private_signature_params)
+    app.connect("source-read", render_starter_installation)
 
 
 # Intersphinx configuration
