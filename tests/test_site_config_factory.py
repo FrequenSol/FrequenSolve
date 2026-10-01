@@ -312,7 +312,7 @@ wall_time_seconds = 1800
 @pytest.mark.parametrize(
     "profile_body,message",
     [
-        ('execution_site_id = "managed-batch"', "must be managed-slurm"),
+        ('execution_site_id = "managed-batch"', "Invalid execution_site_id"),
         ('execution_backend = "batch"', "Unsupported managed Cloud profile settings"),
         ('compute_mode = "auto"', "Unsupported managed Cloud profile settings"),
         (

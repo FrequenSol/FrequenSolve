@@ -1,6 +1,7 @@
 """FrequenSol cloud execution site backed by Cognito, AppSync, S3, and managed Slurm."""
 
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -103,7 +104,8 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
-    execution_site_id: str = "managed-slurm"
+    execution_site_id: Optional[str] = None
+    compute_profile: Optional[str] = None
     execution_resources: Optional[dict[str, int]] = None
 
     @classmethod
@@ -268,6 +270,7 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
+        compute_profile: Optional[str] = None,
         execution_site_id: Optional[str] = None,
         execution_resources: Optional[dict[str, int]] = None,
     ):
@@ -300,6 +303,7 @@ class AWSSite(BaseSite):
         profile_values = {
             name: value
             for name, value in {
+                "compute_profile": compute_profile,
                 "execution_site_id": execution_site_id,
                 "execution_resources": execution_resources,
             }.items()
@@ -317,6 +321,7 @@ class AWSSite(BaseSite):
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
+        config.compute_profile = self.execution_profile.compute_profile
         config.execution_site_id = self.execution_profile.execution_site_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
 
@@ -490,6 +495,7 @@ class AWSSite(BaseSite):
 
         # A domain-config refresh replaces the dataclass instance, so reapply
         # the immutable named-profile selection before exposing it.
+        config.compute_profile = self.execution_profile.compute_profile
         config.execution_site_id = self.execution_profile.execution_site_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
         self.config = config
@@ -691,6 +697,21 @@ class AWSSite(BaseSite):
             requests=(
                 ArtifactRequest(role="visualization"),
                 ArtifactRequest(role="visualization_data"),
+                # Native solver v2 catalogs use format-specific roles.
+                *(
+                    ArtifactRequest(role=role)
+                    for role in (
+                        "vtk",
+                        "vtu",
+                        "vtr",
+                        "vtp",
+                        "vts",
+                        "xmf",
+                        "xdmf",
+                        "acquisition_sources",
+                        "acquisition_receivers",
+                    )
+                ),
             ),
             include_defaults=False,
             project_path=path,
@@ -984,7 +1005,7 @@ class AWSSite(BaseSite):
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
-        Uses the registered managed Slurm execution site.
+        Resolves the selected Cloud compute profile before preparing or reusing work.
 
         Submits through the authenticated GraphQL API.
 
@@ -1010,6 +1031,7 @@ class AWSSite(BaseSite):
             RuntimeError: If job submission fails.
         """
         unsupported = kwargs.keys() - {
+            "compute_profile",
             "name",
             "send_simulation_status_email",
             "allow_cpu_sharing",
@@ -1033,6 +1055,12 @@ class AWSSite(BaseSite):
         if type(allow_cpu_sharing) is not bool:
             raise ValueError("allow_cpu_sharing must be a boolean")
         execution_arguments = self.execution_profile.graphql_arguments()
+        if "compute_profile" in kwargs:
+            from .execution_profile import validate_compute_profile_name
+
+            override = validate_compute_profile_name(kwargs.pop("compute_profile"))
+            execution_arguments.pop("execution_site_id", None)
+            execution_arguments["compute_profile"] = override
         resources = execution_arguments["execution_resources"]
         if allow_cpu_sharing and (
             resources["nodes"] != 1 or resources["mpiRanks"] != 1
@@ -1059,8 +1087,27 @@ class AWSSite(BaseSite):
                 "FrequenSolve Cloud requires Cognito authentication and the "
                 "GraphQL API. Recreate this Site with a current Cloud profile."
             )
+        # Resolve before any local reuse decision. The server revalidates at submit.
+        resolved_compute = self.graphql_client.resolve_compute_profile(
+            compute_profile=execution_arguments.get("compute_profile"),
+            execution_site_id=execution_arguments.get("execution_site_id"),
+        )
+        execution_arguments["expected_compute_identity"] = resolved_compute[
+            "executionIdentity"
+        ]
         self.prepare_job(job, validate=validate)
-        if not fresh_run and not retry and job.is_run_current():
+        reusable_execution = False
+        if not fresh_run and not retry and job._job_id and job.is_run_current():
+            previous = self.graphql_client.get_simulation_status_details(
+                str(job._job_id)
+            )
+            reusable_execution = (
+                previous.get("executionSiteId") == resolved_compute["executionSiteId"]
+                and previous.get("executionRegistrationFingerprint")
+                == resolved_compute["executionIdentity"]
+                and previous.get("status") in {"SUCCEEDED", "COMPLETED"}
+            )
+        if reusable_execution:
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             result_job = (
@@ -1109,7 +1156,7 @@ class AWSSite(BaseSite):
                 simulation_job_name=job.name,
                 send_simulation_status_email=kwargs.get("send_simulation_status_email"),
                 fresh=fresh_run,
-                **({"retry": True} if retry else {}),
+                retry=retry,
                 **execution_arguments,
             )
 
@@ -1128,7 +1175,11 @@ class AWSSite(BaseSite):
                 backend={
                     key: value
                     for key, value in {
-                        "executionSiteId": self.execution_profile.execution_site_id,
+                        "executionSiteId": result.get("executionSiteId")
+                        or resolved_compute["executionSiteId"],
+                        "executionRegistrationFingerprint": result.get(
+                            "executionRegistrationFingerprint"
+                        ),
                         "logicalAttemptId": result.get("logicalAttemptId")
                         or f"{simulation_id}:1",
                         "providerJobId": result.get("providerJobId"),
@@ -1145,6 +1196,21 @@ class AWSSite(BaseSite):
 
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {e}")
+
+    def handle(
+        self, job: BaseJob, job_id: Optional[str] = None, mode: str = "attached"
+    ) -> RunHandle:
+        """Attach to an existing Cloud run with its own frozen result location."""
+        selected_id = job_id or getattr(job, "_job_id", None)
+        if selected_id is None:
+            raise ValueError("Cannot create a run handle without a job id")
+        run = self._make_run_handle(
+            job,
+            str(selected_id),
+            poll_interval=getattr(getattr(self, "config", None), "poll_interval", 5),
+        )
+        run.mode = mode
+        return run
 
     def _make_run_handle(
         self,
@@ -1163,8 +1229,7 @@ class AWSSite(BaseSite):
             mode="aws",
             poll_interval=poll_interval,
             check=check,
-            backend=backend
-            or {"executionSiteId": "managed-slurm", "logicalAttemptId": f"{job_id}:1"},
+            backend=backend or {"logicalAttemptId": f"{job_id}:1"},
             _logs_fn=lambda run, **options: self.fetch_logs(
                 run.job, simulation_id=str(run.id), **options
             ),
@@ -1221,6 +1286,17 @@ class AWSSite(BaseSite):
             snapshot._frozen_staged_provenance = {
                 "AWSSite": deepcopy(job._read_staged_provenance("AWSSite"))
             }
+            staged = authored / "_fs_run" / "remote" / "AWSSite" / f"{job.name}.json"
+            if staged.is_file():
+                descriptor = staged.read_bytes()
+                digest = "sha256:" + hashlib.sha256(descriptor).hexdigest()
+                provenance = snapshot._frozen_staged_provenance["AWSSite"]
+                if provenance.get("job", {}).get("digest") != digest:
+                    raise RuntimeError(
+                        "Cloud staged descriptor does not match its provenance; "
+                        "prepare the job again before submitting"
+                    )
+                snapshot._cloud_staged_job_payload = json.loads(descriptor)
         return snapshot
 
     @staticmethod
@@ -1231,9 +1307,53 @@ class AWSSite(BaseSite):
                 "Cloud results require a valid simulation id from submission"
             )
         authored = Path(result._result_path).resolve()
+        payload = getattr(result, "_cloud_staged_job_payload", None)
+        if payload is not None:
+            # Managed Slurm verifies the uploaded descriptor, then privately
+            # scopes its output paths to the accepted run before invoking the
+            # solver. Match those exact bytes, never a fingerprint supplied by
+            # the remote result itself. Other staged fingerprints stay intact.
+            project = Path(result.project_path).resolve()
+            authored_relative = authored.relative_to(project).as_posix()
+
+            def project_relative(value: str) -> str:
+                return value.strip("/").removeprefix(project.name + "/")
+
+            if (
+                project_relative(payload.get("result_path", "results"))
+                != authored_relative
+            ):
+                raise ValueError(
+                    "Cloud staged result path differs from the authored job"
+                )
+            scoped = deepcopy(payload)
+            scoped["result_path"] = f"{authored_relative}/runs/{simulation_id}"
+            image = scoped.get("Image")
+            if isinstance(image, dict) and image.get("save_path"):
+                image_path = project_relative(image["save_path"])
+                if not image_path.startswith(authored_relative + "/"):
+                    raise ValueError(
+                        "Cloud staged imaging path escapes the job results"
+                    )
+                image["save_path"] = (
+                    scoped["result_path"]
+                    + "/"
+                    + image_path.removeprefix(authored_relative + "/")
+                )
+            descriptor = (json.dumps(scoped, sort_keys=True) + "\n").encode()
+            result._frozen_staged_provenance["AWSSite"]["job"] = {
+                "digest": "sha256:" + hashlib.sha256(descriptor).hexdigest()
+            }
         result._result_path_override = authored / "runs" / simulation_id
         result._job_id = simulation_id
         result._cloud_result_run_id = simulation_id
+        if hasattr(result, "staged_artifact_fingerprints"):
+            result._frozen_artifact_fingerprints = result.staged_artifact_fingerprints(
+                "AWSSite"
+            )
+            result._frozen_task_fingerprints = getattr(
+                result, "staged_task_fingerprints", result.staged_artifact_fingerprints
+            )("AWSSite")
         if isinstance(result, ImagingJob):
             relative = Path(result.save_path).resolve().relative_to(authored)
             result.save_path = result._result_path / relative
@@ -1280,6 +1400,7 @@ class AWSSite(BaseSite):
             "requestedResources",
             "allocatedResources",
             "executionSiteId",
+            "executionRegistrationFingerprint",
             "logicalAttemptId",
             "providerJobId",
             "executionState",
@@ -1354,6 +1475,7 @@ class AWSSite(BaseSite):
                             ),
                             retention="durable",
                         ),
+                        ArtifactRequest(role="traces_metadata", retention="durable"),
                     ),
                     include_defaults=False,
                     project_path=path,

@@ -86,6 +86,7 @@ def test_simulation_status_details_include_customer_safe_failure_message():
         "failureCode": "SCU_BALANCE_INSUFFICIENT",
         "failureMessage": "This simulation needs more SCUs.",
         "executionSiteId": None,
+        "executionRegistrationFingerprint": None,
         "logicalAttemptId": None,
         "providerJobId": None,
         "executionState": "failed",
@@ -142,7 +143,6 @@ def test_submit_job_can_send_status_email_override_and_fresh_run():
         "jobFileS3Key": "project/jobs/job.json",
         "sendSimulationStatusEmail": True,
         "forceRun": True,
-        "executionSiteId": "managed-slurm",
     }
 
 
@@ -173,7 +173,6 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
         "forceRun": False,
-        "executionSiteId": "managed-slurm",
         "projectName": "project",
         "projectDisplayName": "Project Alpha",
         "simulationName": "model",
@@ -329,3 +328,65 @@ def test_status_rejects_incompatible_schema_without_retry(options):
     with pytest.raises(RuntimeError, match="Cannot query field"):
         client.get_simulation_status_details("simulation-1")
     assert len(client.queries) == 1
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_compute_resolution_accepts_awsjson_and_preserves_selection(encoded):
+    import json
+
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    calls = []
+    value = {"executionSiteId": "research-cluster", "executionIdentity": "a" * 64}
+
+    def execute(query, variables):
+        calls.append(variables)
+        return {"resolveMyComputeProfile": json.dumps(value) if encoded else value}
+
+    client.execute = execute
+    assert client.resolve_compute_profile(compute_profile="research") == value
+    assert calls == [{"computeProfileName": "research"}]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        {},
+        "invalid-json",
+        {"executionSiteId": "managed-batch", "executionIdentity": "a" * 64},
+        {"executionSiteId": "research", "executionIdentity": "not-a-fingerprint"},
+    ],
+)
+def test_compute_resolution_never_falls_back_on_invalid_response(value):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    calls = []
+
+    def execute(*args):
+        calls.append(args)
+        return {"resolveMyComputeProfile": value}
+
+    client.execute = execute
+    with pytest.raises(RuntimeError, match="compute profile resolution"):
+        client.resolve_compute_profile(compute_profile="research")
+    assert len(calls) == 1
+
+
+def test_compute_resolution_rejects_selector_conflict_before_network():
+    client = CapturingGraphQLClient()
+    with pytest.raises(ValueError, match="not both"):
+        client.resolve_compute_profile(
+            compute_profile="research", execution_site_id="managed-slurm"
+        )
+    assert not client.last_query
+
+
+def test_submit_sends_profile_and_resolved_identity_without_implicit_legacy_site():
+    client = CapturingGraphQLClient()
+    client.submit_job(
+        "project/job.json",
+        compute_profile="research",
+        expected_compute_identity="a" * 64,
+    )
+    assert client.last_variables["computeProfileName"] == "research"
+    assert client.last_variables["expectedComputeIdentity"] == "a" * 64
+    assert "executionSiteId" not in client.last_variables

@@ -14,6 +14,11 @@ from frequensolve.orchestrator.sites.aws.execution_profile import (
 class FakeGraphQLClient:
     def __init__(self):
         self.submit_calls = []
+        self.resolve_calls = []
+
+    def resolve_compute_profile(self, **kwargs):
+        self.resolve_calls.append(kwargs)
+        return {"executionSiteId": "managed-slurm", "executionIdentity": "a" * 64}
 
     def execute(self, query, variables=None):
         assert query == "query CloudConnectivity { __typename }"
@@ -110,11 +115,15 @@ def test_aws_cli_environment_replaces_credentials_and_removes_profiles(
     assert "HPC_PASSWORD" not in environment
 
 
-def test_graphql_submit_defaults_to_the_managed_site():
+def test_graphql_submit_defers_implicit_default_to_cloud():
     site = make_graphql_site()
     site.submit(FakeJob())
     submitted = site.graphql_client.submit_calls[0]
-    assert submitted["execution_site_id"] == "managed-slurm"
+    assert "execution_site_id" not in submitted
+    assert submitted["expected_compute_identity"] == "a" * 64
+    assert site.graphql_client.resolve_calls == [
+        {"compute_profile": None, "execution_site_id": None}
+    ]
     assert submitted["execution_resources"] == {
         "nodes": 1,
         "mpiRanks": 1,
@@ -188,6 +197,13 @@ def test_graphql_submit_current_job_fetches_once_when_waited():
     site.fetch_outputs = lambda job: fetch_calls.append(job)
     job = FakeJob()
     job.is_run_current = lambda: True
+    job._job_id = "previous-run"
+    job._cloud_result_run_id = "previous-run"
+    site.graphql_client.get_simulation_status_details = lambda _: {
+        "status": "SUCCEEDED",
+        "executionSiteId": "managed-slurm",
+        "executionRegistrationFingerprint": "a" * 64,
+    }
     job.write_run_state = lambda **kwargs: None
 
     run = site.submit(job, fetch=True)
@@ -576,3 +592,65 @@ def test_invalid_retry_options_fail_before_staging(options):
     with pytest.raises(ValueError):
         site.submit(FakeJob(), **options)
     assert not site.graphql_client.submit_calls
+
+
+def test_submit_profile_override_wins_over_configured_selection():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {"compute_profile": "configured"}
+    )
+    site.submit(FakeJob(), compute_profile="override")
+    assert site.graphql_client.resolve_calls[0]["compute_profile"] == "override"
+    assert site.graphql_client.submit_calls[0]["compute_profile"] == "override"
+    assert "execution_site_id" not in site.graphql_client.submit_calls[0]
+
+
+def test_cloud_resolution_failure_happens_before_staging_or_cache_reuse():
+    site = make_graphql_site()
+
+    def denied(**kwargs):
+        raise RuntimeError("Access removed")
+
+    site.graphql_client.resolve_compute_profile = denied
+    job = FakeJob()
+    job.is_run_current = lambda: True
+    with pytest.raises(RuntimeError, match="Access removed"):
+        site.submit(job, compute_profile="research")
+    assert site.graphql_client.submit_calls == []
+
+
+def test_matching_local_outputs_cannot_reuse_a_different_registered_site():
+    site = make_graphql_site()
+    site.graphql_client.get_simulation_status_details = lambda _: {
+        "executionSiteId": "other-site",
+        "executionRegistrationFingerprint": "b" * 64,
+        "status": "SUCCEEDED",
+    }
+    job = FakeJob()
+    job._job_id = "previous-run"
+    job.is_run_current = lambda: True
+    site.submit(job)
+    assert len(site.graphql_client.submit_calls) == 1
+
+
+def test_profile_selector_validation_and_explicit_legacy_compatibility():
+    assert ManagedExecutionProfile.from_mapping({}).execution_site_id is None
+    assert (
+        ManagedExecutionProfile.from_mapping(
+            {"compute_profile": "research"}
+        ).graphql_arguments()["compute_profile"]
+        == "research"
+    )
+    assert (
+        ManagedExecutionProfile.from_mapping(
+            {"execution_site_id": "managed-slurm"}
+        ).graphql_arguments()["execution_site_id"]
+        == "managed-slurm"
+    )
+    for value in ["", "Upper", "a--b", "-a", "a-", "a" * 65]:
+        with pytest.raises(ValueError, match="compute_profile"):
+            ManagedExecutionProfile.from_mapping({"compute_profile": value})
+    with pytest.raises(ValueError, match="not both"):
+        ManagedExecutionProfile.from_mapping(
+            {"compute_profile": "research", "execution_site_id": "managed-slurm"}
+        )

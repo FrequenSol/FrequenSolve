@@ -129,7 +129,7 @@ def plot_eikonal(
                 s=12 if dimension == 3 else 20,
             )
 
-    segments = []
+    segments: list[np.ndarray] = []
     if characteristics:
         for path in results.iter_characteristics(source_id=source_id):
             if len(path.position) < 2:

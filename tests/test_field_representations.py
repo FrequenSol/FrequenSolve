@@ -7,8 +7,23 @@ from frequensolve.model.representation import (
     CartesianGridRepresentation,
     ControlRepresentation,
     EvaluationContext,
+    FieldRepresentation,
     VariationalSmoothing,
 )
+
+
+def test_sampling_operator_reflection_preserves_sparse_matrix_type():
+    from typing import get_type_hints
+
+    from scipy.sparse import csr_matrix
+
+    for representation in (
+        FieldRepresentation,
+        ControlRepresentation,
+        CartesianGridRepresentation,
+    ):
+        hints = get_type_hints(representation.sampling_operator)
+        assert hints["return"] is csr_matrix
 
 
 def test_hat_representation_has_local_partition_and_exact_pullback():

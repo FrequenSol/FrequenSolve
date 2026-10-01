@@ -7,6 +7,10 @@ outputs. For deeper runnable examples with plots and output inspection, see the
 :doc:`tutorial collection
 <tutorials/index>`.
 
+For your first Cloud run, use :doc:`acoustic_starter` before this broader
+authoring reference. Its prepared inputs, explicit submission and interpretation
+checkpoints use the same small model as the MCP assistant.
+
 Core Workflow
 -------------
 
@@ -221,7 +225,8 @@ feature set.
    pv_result.output_files(base="pv", suffix=".vtu", existing=True)
 
 Expected output: ``output_files(...)`` returns the generated ``.vtu`` files for
-the ``pv`` :term:`output request`. Open those files in ParaView for interactive
+the ``pv`` :term:`output request`. Here ``base="pv"`` filters the output name,
+such as ``pv_00000.vtu``; it is not a directory. Open those files in ParaView for interactive
 inspection, or use the ``visual`` extra for lightweight PyVista checks in
 Python.
 

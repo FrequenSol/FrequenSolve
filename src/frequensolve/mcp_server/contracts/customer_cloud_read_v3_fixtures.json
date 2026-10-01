@@ -1,0 +1,123 @@
+[
+  {
+    "operation": "getCloudReadiness",
+    "input": {},
+    "output": {
+      "membership": {
+        "hasSeat": true,
+        "role": "user",
+        "seatLimit": 3,
+        "subscriptionActive": true,
+        "subscriptionStatus": "active"
+      },
+      "infrastructure": {
+        "storage": "READY",
+        "compute": "READY"
+      },
+      "credits": {
+        "available": true,
+        "status": "AVAILABLE",
+        "availableCredits": "9007199254740993.123456789012345678",
+        "heldCredits": "12.5",
+        "totalCredits": "9007199254741005.623456789012345678",
+        "rolloverCredits": "0",
+        "overdraftUsedCredits": "0",
+        "refreshedAt": "2026-07-24T12:00:00.000Z"
+      }
+    }
+  },
+  {
+    "operation": "listMySimulations",
+    "input": {
+      "status": "RUNNING",
+      "projectName": "Acoustic Demo",
+      "limit": 10
+    },
+    "output": {
+      "items": [
+        {
+          "simulationId": "sim-example-001",
+          "projectName": "Acoustic Demo",
+          "simulationName": "Layered Model",
+          "jobName": "Forward",
+          "status": "RUNNING",
+          "startTime": "2026-07-24T12:00:00.000Z",
+          "totalFrequencies": 4,
+          "completedFrequencies": 2,
+          "failedFrequencies": 0,
+          "abortedFrequencies": 0,
+          "executionBackend": "SLURM",
+          "executionSiteId": "managed-slurm",
+          "slurmPartition": "cpu-single",
+          "slurmNodes": 1,
+          "slurmRanksPerNode": 1,
+          "slurmWallTimeSeconds": 600
+        }
+      ]
+    }
+  },
+  {
+    "operation": "getMySimulation",
+    "input": {
+      "simulationId": "sim-example-001"
+    },
+    "output": {
+      "simulationId": "sim-example-001",
+      "projectName": "Acoustic Demo",
+      "simulationName": "Layered Model",
+      "jobName": "Forward",
+      "status": "RUNNING",
+      "startTime": "2026-07-24T12:00:00.000Z",
+      "progress": {
+        "total": 4,
+        "completed": 2,
+        "failed": 0,
+        "aborted": 0
+      },
+      "executionBackend": "SLURM",
+      "executionSiteId": "managed-slurm",
+      "slurmPartition": "cpu-single",
+      "slurmNodes": 1,
+      "slurmRanksPerNode": 1,
+      "slurmWallTimeSeconds": 600
+    }
+  },
+  {
+    "operation": "listMySimulationDiagnostics",
+    "input": {
+      "simulationId": "sim-example-001",
+      "limit": 25
+    },
+    "output": {
+      "simulationId": "sim-example-001",
+      "simulationStatus": "FAILED",
+      "items": [
+        {
+          "frequencyIndex": 2,
+          "frequencyHz": 8,
+          "status": "FAILED",
+          "reasonCategory": "APPLICATION_FAILURE",
+          "message": "The frequency job did not complete (APPLICATION_FAILURE).",
+          "attemptNumber": 1
+        }
+      ]
+    }
+  },
+  {
+    "operation": "listMySimulationResultArtifacts",
+    "input": {
+      "simulationId": "sim-example-001",
+      "limit": 25
+    },
+    "output": {
+      "items": [
+        {
+          "relativePath": "frequency-0000/receiver-data.json",
+          "sizeBytes": 2048,
+          "lastModified": "2026-07-24T12:05:00.000Z",
+          "storageClass": "STANDARD"
+        }
+      ]
+    }
+  }
+]

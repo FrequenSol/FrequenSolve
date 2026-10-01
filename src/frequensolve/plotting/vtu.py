@@ -451,11 +451,18 @@ def _vtu_scalar_label(
     units: Any,
 ) -> str:
     base = label or _default_vtu_label(field)
+    unit_label = _vtu_units(field, units)
+    if unit_label:
+        # Native headers may include the unit in both display_name and units.
+        # Normalize only an exact trailing copy; preserve meaningful label text.
+        for suffix in (f"[{unit_label}]", f"({unit_label})"):
+            if base.rstrip().endswith(suffix):
+                base = base.rstrip()[: -len(suffix)].rstrip()
+                break
     if component is not None:
         base = f"{base} {str(component).upper()}"
     if include_part:
         base = f"{base} ({_vtu_part_label(part)})"
-    unit_label = _vtu_units(field, units)
     if unit_label:
         base = f"{base} [{unit_label}]"
     return base
