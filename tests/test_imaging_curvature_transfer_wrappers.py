@@ -193,8 +193,15 @@ def test_seed_history_rejects_invalid_coordinates(kwargs):
 def test_seed_is_staged_once_and_default_rank_is_left_to_generalized_native_method(
     tmp_path,
 ):
-    calls = []
-    native = im.NativeCurvature(workdir=tmp_path, runner=_runner(calls))
+    calls, links = [], []
+
+    def runner(path):
+        # Verified inputs are deleted: record the link while Sauce reads it.
+        with h5py.File(json.loads(path.read_text())["input"], "r") as h5:
+            links.append(h5.get("seed_modes", getlink=True))
+        _runner(calls)(path)
+
+    native = im.NativeCurvature(workdir=tmp_path, runner=runner)
     history = im.BFGSHistory(
         [2, 3],
         state="s",
@@ -209,11 +216,10 @@ def test_seed_is_staged_once_and_default_rank_is_left_to_generalized_native_meth
         assert len(list((tmp_path / "histories").glob("*.h5"))) == 1
     assert not list((tmp_path / "histories").glob("*.h5"))
     assert "rank" not in calls[0][0]
-    for request, arrays, metadata in calls:
+    for (request, arrays, metadata), link in zip(calls, links):
         assert request["seed_rank"] == metadata["seed_rank"] == 1
         np.testing.assert_equal(arrays["seed_modes"], [[1, 0]])
-        with h5py.File(request["input"]) as h5:
-            assert isinstance(h5.get("seed_modes", getlink=True), h5py.ExternalLink)
+        assert isinstance(link, h5py.ExternalLink)
     missing = im.NativeCurvature(
         workdir=tmp_path / "old-solver", runner=_runner([], omit_seed_rank=True)
     )
@@ -258,6 +264,80 @@ def test_native_transfer_methods_preserve_batches_identities_and_factor_digests(
     assert request["dimension"] == 2  # FS_seismic routes mesh requests by it
     np.testing.assert_equal(arrays["directions"], [[1, 2, 3, 4]])
     np.testing.assert_equal(calls[1][1]["images"], [[4, 0], [0, 5]])
+
+
+def _linking_runner(calls, *, absolute=False):
+    """Emulate Sauce's warm start, whose unchanged ``/modes`` link into its input."""
+    plain = _runner(calls)
+
+    def run(path):
+        request = json.loads(path.read_text())
+        if request["method"] != "curvature_warm_start":
+            return plain(path)
+        arrays, metadata = solver_output(request)
+        base = arrays["base_inverse_diagonal"]
+        outputs = dict(
+            base_inverse_diagonal=base,
+            prior_std=np.ones(len(base)),
+            eigenvalues=arrays["eigenvalues"],
+            variance=base,
+            standard_deviation=np.sqrt(base),
+        )
+        metadata.update(
+            controls=len(base),
+            transfer_damping=1,
+            rank=len(arrays["eigenvalues"]),
+            output_digests=spec_digests(dict(outputs, modes=arrays["modes"])),
+        )
+        calls.append((request, arrays, metadata))
+        with h5py.File(request["output"], "w") as h5:
+            h5["metadata"] = np.bytes_(json.dumps(metadata))
+            for name, value in outputs.items():
+                h5[name] = value
+            # By file name beside the input, otherwise by absolute path.
+            target = request["input"] if absolute else "input.h5"
+            h5["modes"] = h5py.ExternalLink(target, "/modes")
+
+    return run
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_verified_inputs_are_deleted_unless_the_result_links_them(tmp_path, absolute):
+    calls = []
+    native = im.NativeCurvature(
+        workdir=tmp_path, runner=_linking_runner(calls, absolute=absolute)
+    )
+    base, modes, identities = [2, 3], [[1, 0], [0, 1]], dict(state="s", coordinates="c")
+    refreshed = native.refresh_curvature(base, modes, [[4, 0], [0, 5]], **identities)
+    warm = native.warm_start_curvature(base, modes, [0.5, 0.25], **identities)
+
+    def inputs():
+        return sorted(path.parent for path in tmp_path.rglob("input.h5"))
+
+    # Only the warm start keeps its input: its factors link the input's modes.
+    assert inputs() == [warm.path.parent] != [refreshed.path.parent]
+    np.testing.assert_equal(warm.read_verified("modes")["modes"], modes)
+    assert warm.verify() == warm.output_digests
+    # Covariance reads the modes through the link and drops its own input.
+    applied = native.covariance(warm, vectors=[1, 2])
+    request, arrays, reported = calls[-1]
+    assert request["factors"] == str(warm.path)
+    assert reported["factors_digests"]["/modes"] == warm.output_digests["/modes"]
+    assert applied.metadata["factors_digests"] == reported["factors_digests"]
+    np.testing.assert_equal(arrays["vectors"], [[1, 2]])
+    assert inputs() == [warm.path.parent]
+    native.covariance(warm, projection=np.eye(2)[:1])
+    assert inputs() == [warm.path.parent]
+
+    # A failed operation keeps its staged input for diagnosis.
+    def failing(path):
+        raise RuntimeError("solver crashed")
+
+    with pytest.raises(RuntimeError, match="crashed"):
+        im.NativeCurvature(workdir=tmp_path / "failed", runner=failing).transfer_basis(
+            base, modes, **identities
+        )
+    assert len(list((tmp_path / "failed").rglob("input.h5"))) == 1
 
 
 def test_transfer_validation_precedes_native_run(tmp_path):

@@ -312,8 +312,15 @@ def test_solver_must_report_what_it_read(tmp_path, mismatch, missing, message):
 
 
 def test_history_is_staged_once_per_digest_and_linked(tmp_path):
-    calls = []
-    backend = NativeCurvature(workdir=tmp_path, runner=fake_runner(calls))
+    calls, links = [], []
+
+    def runner(path):
+        # Verified inputs are deleted: record the link while Sauce reads it.
+        with h5py.File(json.loads(path.read_text())["input"], "r") as h5:
+            links.append(h5.get("steps", getlink=True))
+        fake_runner(calls)(path)
+
+    backend = NativeCurvature(workdir=tmp_path, runner=runner)
     history = BFGSHistory([0.2, 0.5], state="s", coordinates="c")
     history(checkpoint([dict(step=[1.0, 0.0], difference=[3.0, 0.0])], 1))
     with pytest.raises(ValueError, match="read-only"):
@@ -326,11 +333,12 @@ def test_history_is_staged_once_per_digest_and_linked(tmp_path):
         backend.bfgs_uncertainty(history)
         assert list(staged.parent.iterdir()) == [staged]
         assert staged.stat().st_mtime_ns == written
-    # The block's end deletes the staged history; the results never link it.
+    # The block's end deletes the staged history; the results never link it,
+    # nor their inputs, which are deleted once each result is verified.
     assert not list(staged.parent.iterdir())
-    for request, arrays, _ in calls:
-        with h5py.File(request["input"], "r") as h5:
-            link = h5.get("steps", getlink=True)
+    assert not list(tmp_path.rglob("input.h5"))
+    assert len(list(tmp_path.rglob("result.h5"))) == len(calls) == 3
+    for (request, arrays, _), link in zip(calls, links):
         assert isinstance(link, h5py.ExternalLink)
         # Relative links keep the request and histories relocatable together.
         assert link.filename == f"../histories/{staged.name}"
@@ -354,9 +362,7 @@ def test_history_is_staged_once_per_digest_and_linked(tmp_path):
     assert history.digest != digest
     backend.inverse_action(history, [1.0, 2.0])
     assert calls[-1][2]["history_pairs"] == 2
-    with h5py.File(calls[-1][0]["input"], "r") as h5:
-        link = h5.get("steps", getlink=True)
-    assert link.filename == f"../histories/{history.digest}.h5" != staged.name
+    assert links[-1].filename == f"../histories/{history.digest}.h5" != staged.name
     # Outside a retain block every operation deletes the history it staged.
     assert not list(staged.parent.iterdir())
     restored = BFGSHistory.load(history.save(tmp_path / "archive.h5"))

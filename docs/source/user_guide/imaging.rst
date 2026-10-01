@@ -2329,7 +2329,11 @@ request) and deletes the file as soon as the operation finishes, whether or
 not it succeeds; no result references it. To run several operations on one
 history without rewriting it, wrap them in ``with native.retain(history):``.
 Remote SLURM mirrors keep their copy until ``site.remove_curvature_files()``, so
-restaging a history there uploads nothing.
+restaging a history there uploads nothing. Each operation directory keeps its
+``result.h5``; the staged ``input.h5`` (directions or images, up to
+rank-by-controls) is deleted once the result is verified, unless the result has
+an HDF5 external link into it: warm-start factors link their unchanged
+``/modes``, so that input stays with them. A failed operation keeps its input.
 
 The archive's fixed baseline and prior scaling must describe the actual fitted
 objective and coefficient chart. Ordinary L-BFGS may update its baseline by a

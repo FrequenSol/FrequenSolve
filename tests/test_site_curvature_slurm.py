@@ -355,6 +355,33 @@ def test_history_operations_stage_once_and_reuse_remote_factors(cluster, tmp_pat
     ]
 
 
+def test_remote_covariance_reads_linked_warm_start_modes(cluster, tmp_path):
+    from tests.test_imaging_curvature_transfer_wrappers import _linking_runner
+
+    site, fake = cluster(oracle=_linking_runner([]))
+    local = tmp_path / "local"
+    native = NativeCurvature(workdir=local / "curvature", runner=site.run_curvature)
+    identities = dict(state="s", coordinates="c")
+    base, modes = [2.0, 3.0], [[1.0, 0.0], [0.0, 1.0]]
+    refreshed = native.refresh_curvature(
+        base, modes, [[4.0, 0.0], [0.0, 5.0]], **identities
+    )
+    warm = native.warm_start_curvature(base, modes, [0.5, 0.25], **identities)
+    # Sauce linked the warm start's modes into its input, which stays local.
+    assert sorted(p.parent for p in local.rglob("input.h5")) == [warm.path.parent]
+    assert not (refreshed.path.parent / "input.h5").exists()
+
+    uploads = len(fake.puts)
+    applied = native.covariance(warm, vectors=[1.0, 2.0])
+    # The factors and their linked input are reused remotely, not uploaded again.
+    later = [remote for _, remote, _ in fake.puts[uploads:]]
+    assert not any(path.parent.name == warm.path.parent.name for path in later)
+    assert (
+        applied.metadata["factors_digests"]["/modes"] == warm.output_digests["/modes"]
+    )
+    assert sorted(p.parent for p in local.rglob("input.h5")) == [warm.path.parent]
+
+
 @pytest.mark.parametrize(
     ("launcher", "flags", "allocates", "placed"),
     [

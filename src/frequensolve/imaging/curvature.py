@@ -83,6 +83,24 @@ def _history_lease(path: Path) -> Iterator[threading.Lock]:
                 path.unlink(missing_ok=True)
 
 
+def _links_into(path: Path, target: Path) -> bool:
+    """Return whether an HDF5 external link of ``path`` resolves to ``target``.
+
+    Relative link names resolve against the linking file's directory, as in
+    HDF5. Sauce links a warm start's unchanged ``/modes`` into its input file.
+    """
+    from frequensolve.orchestrator.sites.curvature import external_link_targets
+
+    for name in external_link_targets(path):
+        linked = Path(os.path.normpath(path.parent / name))
+        if linked == target:
+            return True
+        with contextlib.suppress(OSError):
+            if os.path.samefile(linked, target):
+                return True
+    return False
+
+
 def _staged(name: str, value: Any) -> np.ndarray:
     """Return ``value`` in Sauce's element type for ``name``; integer narrowing must be exact."""
     element = np.dtype(_ELEMENT_TYPES.get(name, np.float64))
@@ -606,7 +624,10 @@ class NativeCurvature:
     run on remote compute nodes, and returns only after the request's output
     is available locally; an ``executable`` runs one local rank.
     Each operation has an independent directory and publishes only verified
-    completed output. Existing results are never reused implicitly. A BFGS
+    completed output. Existing results are never reused implicitly. Once a
+    result is verified its staged ``input.h5`` is deleted, unless the result
+    has an HDF5 external link into it (warm-start factors link their
+    unchanged ``/modes``); a failed operation keeps its directory. A BFGS
     history operation stages the history as ``workdir/histories/<digest>.h5``;
     request inputs reference it through relative HDF5 external links, so a
     staging runner must carry the ``histories`` directory beside the request.
@@ -757,6 +778,10 @@ class NativeCurvature:
                 raise ValueError("Sauce curvature result has invalid output_digests")
         path = directory / "result.h5"
         pending.replace(path)
+        # The staged input (directions or images: up to rank x controls) is
+        # dead once the result is verified, unless the result links into it.
+        if not _links_into(path, input_path):
+            input_path.unlink(missing_ok=True)
         return CurvatureResult(path, result)
 
     def _execute_history(
