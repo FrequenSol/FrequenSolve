@@ -1,3 +1,4 @@
+import hashlib
 import json
 import traceback
 from pathlib import Path
@@ -658,6 +659,15 @@ def test_fetch_vtk_downloads_only_configured_output_paths(tmp_path):
     assert {request.role for request in calls[0]["requests"]} == {
         "visualization",
         "visualization_data",
+        "vtk",
+        "vtu",
+        "vtr",
+        "vtp",
+        "vts",
+        "xmf",
+        "xdmf",
+        "acquisition_sources",
+        "acquisition_receivers",
     }
     assert not site.s3_client.paginate_calls
 
@@ -1110,7 +1120,10 @@ def test_run_and_result_logs_remain_bound_when_the_job_is_resubmitted(tmp_path):
         assert selected.read_text() == "original"
 
 
-def test_rerun_handles_and_results_keep_their_own_downloads(tmp_path, monkeypatch):
+@pytest.mark.parametrize("attach", [False, True])
+def test_rerun_handles_and_results_keep_their_own_downloads(
+    tmp_path, monkeypatch, attach
+):
     prefix = "project-a/jobs/simulation-a/job-a/results/runs/"
     client = FakeS3Client(
         {
@@ -1127,9 +1140,10 @@ def test_rerun_handles_and_results_keep_their_own_downloads(tmp_path, monkeypatc
     job.outputs.paraview = [SimpleNamespace(path="paraview")]
     job.outputs.traces.path = "nested/traces"
     result_api(site, job)
-    first = site._make_run_handle(job, "simulation-1")
+    handle = site.handle if attach else site._make_run_handle
+    first = handle(job, "simulation-1")
     job._job_id = "simulation-2"
-    second = site._make_run_handle(job, "simulation-2")
+    second = handle(job, "simulation-2")
     results = [
         run._make_result(JobStatus(state="completed", return_code=0))
         for run in (first, second)
@@ -1349,6 +1363,165 @@ def test_snapshot_copies_real_simulation_without_copying_its_project(tmp_path):
     assert snapshot.simulation.mesh is not job.simulation.mesh
     assert snapshot.simulation._project is project
     assert snapshot.simulation.extra["geometry"]["origin"] == [1.0, 2.0, 3.0]
+
+
+def staged_cloud_job(tmp_path, *, image=False):
+    job = result_job(tmp_path / "project-a")
+    payload = {
+        "name": "job-a",
+        "f_list": [10.0],
+        "result_path": "project-a/jobs/simulation-a/job-a/results",
+        "simulation": "project-a/simulations/simulation-a/simulation-a.json",
+    }
+    if image:
+        payload["Image"] = {
+            "save_path": "project-a/jobs/simulation-a/job-a/results/image.h5"
+        }
+    staged = job._result_path / "_fs_run/remote/AWSSite/job-a.json"
+    staged.parent.mkdir(parents=True)
+    raw = json.dumps(payload, indent=3).encode()
+    staged.write_bytes(raw)
+    job._frozen_staged_provenance = {
+        "AWSSite": {
+            "job": {"digest": "sha256:" + hashlib.sha256(raw).hexdigest()},
+            "simulation": {"digest": "sha256:" + "b" * 64},
+        }
+    }
+    job._output_request_fingerprint_cache = {"digest": "sha256:" + "c" * 64}
+    return job, payload, staged
+
+
+@pytest.mark.parametrize("image", [False, True])
+def test_cloud_catalog_checks_exact_run_scoped_descriptor(tmp_path, image):
+    from frequensolve.simulation.artifact_contract import (
+        ArtifactCatalog,
+        TaskPartition,
+        TaskResult,
+    )
+
+    job, payload, staged = staged_cloud_job(tmp_path, image=image)
+    prepared = AWSSite._prepare_run_snapshot(job)
+    other_prepared = AWSSite._prepare_run_snapshot(job)
+    # Later authoring/staging changes must not replace the accepted snapshot.
+    staged.write_text('{"f_list": [99]}')
+    run = AWSSite._bind_run_snapshot(prepared, "simulation-1")
+    payload["result_path"] = "jobs/simulation-a/job-a/results/runs/simulation-1"
+    if image:
+        payload["Image"]["save_path"] = payload["result_path"] + "/image.h5"
+    # Exact installed runtime serialization, independent of the SDK hash helper.
+    remote_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            (json.dumps(payload, sort_keys=True) + "\n").encode()
+        ).hexdigest()
+    )
+    fingerprints = {
+        "job": remote_digest,
+        "simulation": "sha256:" + "b" * 64,
+        "outputs": "sha256:" + "c" * 64,
+    }
+    assert run.staged_artifact_fingerprints("AWSSite") == fingerprints
+    assert job.staged_artifact_fingerprints("AWSSite")["job"] != remote_digest
+    result = TaskResult(
+        path=Path("result.json"),
+        result_path=tmp_path,
+        partition=TaskPartition(task=1, task_count=1, frequency=complex(10)),
+        fingerprints=fingerprints,
+        state="success",
+        code=0,
+        artifacts=(),
+    )
+    catalog = ArtifactCatalog(result_path=tmp_path, results={1: result})
+    site = make_site(FakeS3Client({}))
+    site._validate_remote_catalog(run, catalog, (1,))
+    for key in fingerprints:
+        saved = fingerprints[key]
+        fingerprints[key] = "sha256:" + "d" * 64
+        with pytest.raises(RuntimeError, match="does not match"):
+            site._validate_remote_catalog(run, catalog, (1,))
+        fingerprints[key] = saved
+    other_run = AWSSite._bind_run_snapshot(other_prepared, "simulation-2")
+    with pytest.raises(RuntimeError, match="does not match"):
+        site._validate_remote_catalog(other_run, catalog, (1,))
+
+
+def test_cloud_snapshot_rejects_changed_staged_descriptor(tmp_path):
+    job, _, staged = staged_cloud_job(tmp_path)
+    staged.write_text('{"f_list": [99]}')
+    with pytest.raises(RuntimeError, match="does not match its provenance"):
+        AWSSite._prepare_run_snapshot(job)
+
+
+def test_native_cloud_result_reads_traces_and_fetches_declared_metadata_and_vtk(
+    tmp_path,
+):
+    job, _, _ = staged_cloud_job(tmp_path)
+    job.outputs.paraview = [SimpleNamespace(path="ParaView")]
+    run = AWSSite._snapshot_run_job(job, "simulation-1")
+    fingerprints = run.staged_artifact_fingerprints("AWSSite")
+    assert run._artifact_contract_fingerprints() == fingerprints
+    assert run._task_reuse_fingerprints() == fingerprints
+    prefix = "project-a/jobs/simulation-a/job-a/results/runs/simulation-1/"
+    files = {
+        "traces/shards/f_10.00000_hz.h5": (
+            "traces",
+            "simulated_traces",
+            "hdf5_shard",
+            "trace",
+        ),
+        "traces/trace_metadata.h5": ("metadata", "traces_metadata", "file", "metadata"),
+        "ParaView/pressure_00000.vtu": ("vtu:pressure", "vtu", "file", "vtk"),
+        "ParaView/Acquisition/receivers.vtp": (
+            "receivers",
+            "acquisition_receivers",
+            "file",
+            "receivers",
+        ),
+    }
+    catalog = {
+        "schema": "fs-task-result-2",
+        "partition": {"task": 1, "task_count": 1, "frequency": {"real": 10, "imag": 0}},
+        "fingerprints": fingerprints,
+        "status": {"state": "success", "code": 0},
+        "artifacts": [
+            {
+                "id": identity,
+                "role": role,
+                "representation": representation,
+                "schema": "synthetic-native-1",
+                "retention": "durable",
+                "path": path,
+                "bytes": len(content),
+            }
+            for path, (identity, role, representation, content) in files.items()
+        ],
+    }
+    client = FakeS3Client(
+        {
+            **{prefix + path: spec[3] for path, spec in files.items()},
+            prefix + "_fs_run/tasks/task_000001/result.json": json.dumps(catalog),
+            prefix + "unrelated.vtu": "never download by scanning",
+        }
+    )
+    site = make_site(client)
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status_details=lambda run_id: {
+            "id": run_id,
+            "outputIdentity": "s3://bucket/" + prefix,
+        }
+    )
+    dataset = site.fetch_traces(run)
+    assert dataset.manifest.files == [
+        run._result_path / "traces/shards/f_10.00000_hz.h5"
+    ]
+    assert (run._result_path / "traces/trace_metadata.h5").read_text() == "metadata"
+    site.fetch_vtk(run)
+    assert (run._result_path / "ParaView/pressure_00000.vtu").read_text() == "vtk"
+    assert (
+        run._result_path / "ParaView/Acquisition/receivers.vtp"
+    ).read_text() == "receivers"
+    assert not (run._result_path / "unrelated.vtu").exists()
+    assert client.paginate_calls == []
 
 
 def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):

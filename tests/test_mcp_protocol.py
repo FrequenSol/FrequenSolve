@@ -333,6 +333,11 @@ def test_authenticated_cloud_profile_requires_and_validates_host_execution(
         return {
             "membership": {"hasSeat": True, "subscriptionActive": True},
             "infrastructure": {"storage": "READY", "compute": "READY"},
+            "credits": {
+                "available": False,
+                "status": "NOT_AVAILABLE",
+                "refreshedAt": "2026-07-25T00:00:00Z",
+            },
         }
 
     monkeypatch.setattr(
@@ -402,6 +407,11 @@ def test_authenticated_host_executor_respects_the_declared_concurrency_limit():
                 return {
                     "membership": {"hasSeat": True, "subscriptionActive": True},
                     "infrastructure": {"storage": "READY", "compute": "READY"},
+                    "credits": {
+                        "available": False,
+                        "status": "NOT_AVAILABLE",
+                        "refreshedAt": "2026-07-25T00:00:00Z",
+                    },
                 }
             finally:
                 active -= 1
@@ -448,6 +458,11 @@ def test_hosted_executor_output_must_match_the_packaged_cloud_contract():
                 "accountId": "must-not-cross-boundary",
             },
             "infrastructure": {"storage": "READY", "compute": "READY"},
+            "credits": {
+                "available": False,
+                "status": "NOT_AVAILABLE",
+                "refreshedAt": "2026-07-25T00:00:00Z",
+            },
         }
 
     async def check() -> None:
@@ -698,6 +713,11 @@ def test_cloud_tools_map_to_only_the_five_fixed_read_operations(monkeypatch):
         "getCloudReadiness": {
             "membership": {"hasSeat": True, "subscriptionActive": True},
             "infrastructure": {"storage": "READY", "compute": "READY"},
+            "credits": {
+                "available": False,
+                "status": "NOT_AVAILABLE",
+                "refreshedAt": "2026-07-25T00:00:00Z",
+            },
         },
         "listMySimulations": {
             "items": [

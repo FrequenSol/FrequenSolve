@@ -5,8 +5,6 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Literal, Optional, Tuple, Union
 
 import numpy as np
-from scipy.signal import chirp, correlate, hilbert
-from scipy.stats import norm
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.util.fft import get_fft_backend
@@ -63,6 +61,8 @@ class GaussianWindow(WindowFunction):
         Returns:
             np.ndarray: Taper array in [0,1].
         """
+        from scipy.stats import norm
+
         n = len(times)
         vals = norm.pdf(np.linspace(0, 1, n), 0.5, self.sigma)
         mx = np.max(vals)
@@ -391,6 +391,8 @@ class Wavelet:
         Returns:
             Causal (minimum phase) version of input signal
         """
+        from scipy.signal import hilbert
+
         n = len(signal)
         fft = get_fft_backend()
 
@@ -684,6 +686,8 @@ class KlauderWavelet(Wavelet):
 
     def _generate(self, times: np.ndarray, taper: Callable[[int], np.ndarray]) -> None:
         """Generate the wavelet signal."""
+
+        from scipy.signal import chirp, correlate
 
         if len(times) < 2:
             self.signal = np.zeros_like(times, dtype=float)

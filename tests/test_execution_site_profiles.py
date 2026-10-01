@@ -7,12 +7,11 @@ from frequensolve.orchestrator.sites.aws.execution_profile import (
 from frequensolve.orchestrator.sites.execution import ExecutionDetails
 
 
-def test_named_site_uses_portable_submission_arguments():
-    profile = ManagedExecutionProfile.from_mapping(
-        {"execution_site_id": "managed-slurm"}
-    )
+@pytest.mark.parametrize("site_id", ["managed-slurm", "research-slurm"])
+def test_named_site_uses_portable_submission_arguments(site_id):
+    profile = ManagedExecutionProfile.from_mapping({"execution_site_id": site_id})
     assert profile.graphql_arguments() == {
-        "execution_site_id": "managed-slurm",
+        "execution_site_id": site_id,
         "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
     }
 
@@ -23,7 +22,7 @@ def test_named_site_uses_portable_submission_arguments():
         None,
         [],
         {"execution_site_id": []},
-        {"execution_site_id": "other"},
+        {"execution_site_id": "invalid site"},
         {"execution_site_id": "managed-slurm", "execution_resources": []},
         {"execution_site_id": "managed-slurm", "slurm_partition": "cpu-single"},
         {"execution_resources": {"nodes": 1}},
@@ -34,9 +33,8 @@ def test_invalid_profiles_have_actionable_errors(value):
         ManagedExecutionProfile.from_mapping(value)
 
 
-def test_default_profile_is_managed_slurm():
+def test_default_profile_leaves_site_selection_to_the_server():
     assert ManagedExecutionProfile.from_mapping({}).graphql_arguments() == {
-        "execution_site_id": "managed-slurm",
         "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
     }
     with pytest.raises(ManagedExecutionProfileError):

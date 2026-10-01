@@ -6,7 +6,18 @@ import copy
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Type, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Type,
+    Union,
+    overload,
+)
 
 import numpy as np
 import xarray as xr
@@ -100,6 +111,14 @@ def _as_list(value: Any) -> List[Any]:
 
 def _drop_none(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None}
+
+
+@overload
+def _choice(value: str, choices: set[str], field: str) -> str: ...
+
+
+@overload
+def _choice(value: None, choices: set[str], field: str) -> None: ...
 
 
 def _choice(value: Optional[str], choices: set[str], field: str) -> Optional[str]:
