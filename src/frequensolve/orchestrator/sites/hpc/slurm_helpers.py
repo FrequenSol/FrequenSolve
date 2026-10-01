@@ -160,3 +160,25 @@ def temporary_text_file(
             path.unlink()
         except FileNotFoundError:
             pass
+
+
+def shell_word_batches(words: List[str], limit: int) -> List[str]:
+    """Join quoted shell words into batches of at most ``limit`` bytes.
+
+    Remote commands reach the login shell as one ``-c`` argument, which Linux
+    caps at 128 KiB; a word longer than ``limit`` forms its own batch.
+    """
+
+    batches: List[str] = []
+    current: List[str] = []
+    size = 0
+    for word in words:
+        length = len(word.encode()) + 1
+        if current and size + length > limit:
+            batches.append(" ".join(current))
+            current, size = [], 0
+        current.append(word)
+        size += length
+    if current:
+        batches.append(" ".join(current))
+    return batches

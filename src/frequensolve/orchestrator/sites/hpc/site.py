@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -22,17 +23,19 @@ from asyncio import Future
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib.resources import as_file, files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from select import select
 from typing import (
     Any,
     Dict,
+    Iterable,
     List,
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     Type,
     Union,
@@ -63,6 +66,7 @@ from frequensolve.orchestrator.sites.base import (
     RunResult,
     _check_if_notebook,
     _merge_task_status_with_plan,
+    _result_relative_paths,
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
@@ -77,6 +81,7 @@ from frequensolve.orchestrator.sites.hpc.enterprise import (
     _BundleSnapshot,
     _EnterpriseHPCProfile,
     _EnterpriseLimits,
+    _installed_file_digest,
     _RuntimeObservation,
     _validate_bundle_snapshot,
     installed_frequensolve_artifact_sha256,
@@ -98,6 +103,9 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     seconds_to_hms as _seconds_to_hms,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    shell_word_batches as _shell_word_batches,
+)
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     ssh_exit_status as _ssh_exit_status,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
@@ -106,7 +114,11 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     validate_slurm_job_id as _validate_slurm_job_id,
 )
-from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
+from frequensolve.orchestrator.sites.hpc.transfer import (
+    SlurmTransferManager,
+    _remote_command_failed,
+)
+from frequensolve.orchestrator.sites.partition import TaskPartition, task_partitions
 from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
 from frequensolve.orchestrator.utils.environment import (
@@ -159,6 +171,26 @@ _HPC_RUNTIME_DEFAULTS = {
 }
 
 _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 60.0
+
+# Quoted paths per removal command; well below Linux's 128 KiB argument cap.
+_REMOVE_COMMAND_BYTES = 64 * 1024
+
+# Digests of the backends FS_seismic routes to: FS_SOLVER_PATH, as the job
+# environment sets it, or the dispatcher's own directory.
+_BACKEND_DIGEST_READER = """\
+import hashlib, os, sys
+directory = os.environ.get("FS_SOLVER_PATH") or os.path.dirname(sys.argv[1])
+print("FS_SOLVER_DIRECTORY " + directory)
+for name in ("fs2d", "fs2d_s", "fs3d", "fs3d_s"):
+    path = os.path.join(directory, name)
+    if not os.path.exists(path):
+        continue
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            digest.update(chunk)
+    print("FS_SOLVER_BACKEND " + name + " " + digest.hexdigest())
+"""
 
 _SHELL_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
@@ -660,14 +692,22 @@ class SlurmSite(BaseSite):
         solver_policy: Compatibility behavior: ``"warn"`` (default),
             ``"strict"``, or ``"off"``.
         run_config: Default SLURM resource request.
+        curvature_run_config: Optional resource request for Sauce curvature
+            batch jobs; ``run_config`` is used when omitted.
         config.tmp_dir: Optional remote directory for transient transfer
             tarballs and provisioning scripts. Defaults to ``/tmp``.
         verbose: Whether to print site status messages in addition to logging.
     """
 
+    supports_curvature = True
+    # Remote result directories persist below work_dir, and the adaptive
+    # scheduler launches each consuming task on its producer's ranks.
+    supports_background_reuse = True
+
     credentials: SlurmLoginCredentials
     config: Any
     run_config: SlurmRunConfig
+    curvature_run_config: Optional[SlurmRunConfig] = None
     pool: PoolInfo
     transfer_method: Literal["rsync", "sftp"] = "rsync"
     _executable: str
@@ -720,6 +760,7 @@ class SlurmSite(BaseSite):
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
         solver_policy: Optional[str] = None,
+        curvature_run_config: Optional[Union[SlurmRunConfig, Mapping[str, Any]]] = None,
     ):
         if (
             default_partition is not None
@@ -809,6 +850,9 @@ class SlurmSite(BaseSite):
         self._enterprise_hpc_limits = None
         self.transfer_method = transfer_method
         self.run_config = run_config or SlurmRunConfig(queue=partition)
+        if isinstance(curvature_run_config, Mapping):
+            curvature_run_config = SlurmRunConfig(**curvature_run_config)
+        self.curvature_run_config = curvature_run_config
         self._authenticator = SlurmAuthenticator(self)
         self._transfer = SlurmTransferManager(self)
 
@@ -1241,6 +1285,116 @@ class SlurmSite(BaseSite):
             handle.backend["task_plan"] = task_plan
         return handle
 
+    def run_curvature(
+        self,
+        request: Path,
+        *,
+        mode: Literal["auto", "attached", "batch"] = "auto",
+        **overrides: Any,
+    ) -> None:
+        """Run one Sauce curvature request on compute nodes and fetch its output.
+
+        Inputs are mirrored below ``<scratch_dir or work_dir>/curvature/``,
+        uploading only files without a same-size remote copy; factors computed
+        remotely are reused in place. ``mode="auto"`` runs inside an attached
+        running allocation when there is one and otherwise submits a batch job
+        sized by ``curvature_run_config`` (or ``run_config``) and ``overrides``
+        such as ``nodes``, ``ranks_per_node``, ``queue`` or ``duration``.
+        Row-distributed methods use every rank with ``cores_per_node //
+        ranks_per_node`` threads (default: one rank per socket); mesh transfer
+        and sampling use one rank and a whole node. The launcher gives each
+        rank its own cores (``srun --cpus-per-task``, ``ibrun task_affinity``
+        or Open MPI ``slot:PE`` mapping) and threads stay on them. The output
+        and ``solver.log`` are fetched beside the local request. Failures raise
+        :class:`RuntimeError` with the remote log tails.
+        """
+
+        from frequensolve.orchestrator.sites.hpc.curvature import (
+            SlurmCurvatureRunner,
+        )
+
+        SlurmCurvatureRunner(self).run(Path(request), mode=mode, **overrides)
+
+    def remove_curvature_files(
+        self,
+        workdir: Optional[Union[str, Path]] = None,
+        *,
+        older_than: Optional[Union[float, timedelta]] = None,
+        max_bytes: Optional[int] = None,
+    ) -> List[str]:
+        """Delete files :meth:`run_curvature` staged on this site.
+
+        Each local curvature directory (``NativeCurvature.workdir``; the
+        imaging backend uses ``<backend workdir>/curvature``) has one remote
+        mirror below ``<scratch_dir or work_dir>/curvature/`` holding its
+        histories, inputs and results, kept for reuse by later operations.
+
+        Args:
+            workdir: Remove only this directory's mirror. By default every
+                mirror on the site is considered.
+            older_than: Remove only mirrors with no file modified within this
+                many seconds (or :class:`~datetime.timedelta`), measured with
+                the login node's clock.
+            max_bytes: Then remove the least recently modified remaining
+                mirrors until those left total at most this many bytes.
+
+        Without ``older_than`` and ``max_bytes`` every considered mirror is
+        removed. Listing mirrors runs ``python3`` on the login node. Running
+        operations are not detected; ``older_than`` keeps recently used
+        mirrors. A later operation re-uploads what it needs.
+
+        Returns:
+            Remote mirror directories that were removed.
+        """
+
+        from frequensolve.orchestrator.sites.hpc.curvature import (
+            SlurmCurvatureRunner,
+        )
+
+        removed = SlurmCurvatureRunner(self).remove(
+            None if workdir is None else Path(workdir),
+            older_than=older_than,
+            max_bytes=max_bytes,
+        )
+        return [str(path) for path in removed]
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Remove files below ``job``'s remote result directory on the login node.
+
+        Paths follow :meth:`BaseSite.remove_result_files` and are validated
+        before any command runs. One ``rm -f`` login command removes them,
+        split only when the quoted list would exceed a safe command length.
+        Missing files (or a missing result directory) are not errors; a
+        directory fails the command before its batch removes anything.
+
+        Raises:
+            RuntimeError: If the remote command fails.
+        """
+
+        relative = _result_relative_paths(relative_paths)
+        if not relative:
+            return
+        root = self._remote_result_dir(job)
+        for batch in _shell_word_batches(
+            [shlex.quote(str(path)) for path in relative],
+            _REMOVE_COMMAND_BYTES,
+        ):
+            command = (
+                f"cd -- {shlex.quote(str(root))} 2>/dev/null || exit 0; "
+                f"set -- {batch}; "
+                'for f in "$@"; do if [ -d "$f" ] && [ ! -L "$f" ]; then '
+                'printf "%s is a directory\\n" "$f" >&2; exit 1; fi; done; '
+                'rm -f -- "$@"'
+            )
+            _, stdout, stderr = self.run_login_cmd(command)
+            _read_stream(stdout)
+            error = _read_stream(stderr)
+            if _remote_command_failed(error, _ssh_exit_status(stdout, stderr)):
+                raise RuntimeError(
+                    f"Could not remove result files of {getattr(job, 'name', job)} "
+                    f"in {root} on {self.site_name}: {error or 'remote command failed'}"
+                )
+
     def check_solver_compatibility(
         self,
         *,
@@ -1518,9 +1672,56 @@ class SlurmSite(BaseSite):
             raise EnterpriseHPCPreflightError(
                 "Enterprise HPC solver executable digest does not match the bundle"
             )
+        if PurePosixPath(solver_path).name == "FS_seismic":
+            self._verify_enterprise_backends(bundle, profile.bundle_root, solver_path)
         self._enterprise_hpc_limits = validated.limits
         self._enterprise_hpc_preflight_result = result
         return result
+
+    def _verify_enterprise_backends(
+        self, bundle: Mapping[str, Any], bundle_root: str, solver_path: str
+    ) -> None:
+        """Verify every backend the ``FS_seismic`` dispatcher can route to.
+
+        The dispatcher runs ``fs{2,3}d[_s]`` from ``FS_SOLVER_PATH`` (as the
+        job environment sets it) or its own directory. Each backend present
+        there must lie inside the bundle root and match its installed digest.
+        """
+
+        output = self._run_login_checked(
+            self._runtime_probe_command(
+                f"python3 -c {shlex.quote(_BACKEND_DIGEST_READER)} "
+                f"{shlex.quote(solver_path)}"
+            ),
+            purpose="the solver backend digests",
+        )
+        directory: Optional[str] = None
+        backends: Dict[str, str] = {}
+        for line in output.splitlines():
+            if line.startswith("FS_SOLVER_DIRECTORY "):
+                directory = line.split(" ", 1)[1]
+            elif line.startswith("FS_SOLVER_BACKEND "):
+                _, name, digest = line.split(" ", 2)
+                backends[name] = digest.strip()
+        if directory is None or not backends:
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC solver dispatcher has no backend to verify"
+            )
+        root = PurePosixPath(bundle_root)
+        for name, digest in sorted(backends.items()):
+            path = PurePosixPath(posixpath.normpath(posixpath.join(directory, name)))
+            try:
+                relative = str(path.relative_to(root))
+            except ValueError:
+                raise EnterpriseHPCPreflightError(
+                    "Enterprise HPC solver backends are outside the immutable "
+                    "bundle root"
+                ) from None
+            if _installed_file_digest(bundle, relative) != digest:
+                raise EnterpriseHPCPreflightError(
+                    f"Enterprise HPC solver backend {name} digest does not match "
+                    "the bundle"
+                )
 
     def handle(
         self, job, job_id: Optional[str] = None, mode: str = "attached"
@@ -1769,10 +1970,19 @@ class SlurmSite(BaseSite):
             self.pool._status.status = status
         return status
 
-    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """Transfer files from a local path to a remote path."""
+    def put(
+        self,
+        local_path: Union[str, Path],
+        remote_path: Union[str, Path],
+        *,
+        compress: bool = True,
+    ):
+        """Transfer files from a local path to a remote path.
 
-        return self._transfer.put(local_path, remote_path)
+        ``compress=False`` skips rsync compression for numerical payloads.
+        """
+
+        return self._transfer.put(local_path, remote_path, compress=compress)
 
     def fetch_traces(
         self,
@@ -2333,10 +2543,14 @@ class SlurmSite(BaseSite):
         remote_path: Union[str, Path],
         local_path: Union[str, Path],
         overwrite: bool = False,
+        *,
+        compress: bool = True,
     ):
         """Transfer files from a remote path to a local path."""
 
-        return self._transfer.get(remote_path, local_path, overwrite=overwrite)
+        return self._transfer.get(
+            remote_path, local_path, overwrite=overwrite, compress=compress
+        )
 
     def cancel_job(self, job_id: Optional[str] = None) -> bool:
         """Cancel a job."""
@@ -2935,6 +3149,9 @@ class SlurmSite(BaseSite):
             )
         task_indices = [int(index) + 1 for index in task_plan["pending_indices"]]
         kwargs.setdefault("skip_sizing", len(task_indices) == 1)
+        task_ranks = self._task_partitions(job, task_indices)
+        if task_ranks:
+            kwargs["task_ranks"] = task_ranks
         job_rank_limit = getattr(job, "max_ranks_per_task", None)
         if job_rank_limit is not None:
             kwargs["max_ranks_per_task"] = min(
@@ -3006,6 +3223,137 @@ class SlurmSite(BaseSite):
         job._job_id = job_id
         self._record_site_run(job, scheduler_id=job_id, status="submitted")
         return job_id
+
+    def _task_partitions(
+        self, job: BaseJob, tasks: Iterable[int]
+    ) -> Dict[int, TaskPartition]:
+        """Return the rank count each task of ``job`` must run on.
+
+        Partitioned inputs (saved objective states and vectors, receiver
+        states, background checkpoints) fetched with their producing job are
+        read locally; the rest from the remote project in one login command
+        (two for receiver bundles).
+        """
+
+        return task_partitions(
+            job,
+            tasks,
+            read_remote=lambda requests: self._read_remote_manifests(job, requests),
+        )
+
+    def _remote_manifest_path(self, root: Path, path: Path) -> Optional[Path]:
+        """Map a local project path, or a path Sauce wrote remotely, to the site."""
+
+        for local in (Path(os.path.abspath(path)), Path(os.path.realpath(path))):
+            try:
+                return self.work_dir / local.relative_to(root)
+            except ValueError:
+                continue
+        for base in (self.work_dir, self.scratch_dir):
+            if base is not None and Path(path).is_absolute():
+                try:
+                    Path(path).relative_to(base)
+                    return Path(path)
+                except ValueError:
+                    continue
+        return None
+
+    def _read_remote_manifests(
+        self, job: BaseJob, requests: Mapping[Any, Sequence[Path]]
+    ) -> Dict[Any, Any]:
+        """Read JSON manifests where this site keeps project files.
+
+        Each request lists local candidate paths in lookup order; the first
+        remote copy found is parsed.
+        """
+
+        try:
+            root = Path(job._project_path())
+        except (AttributeError, ValueError):
+            return {}
+        keys: List[Any] = []
+        commands: List[str] = []
+        for key, candidates in requests.items():
+            remote = [
+                path
+                for path in (
+                    self._remote_manifest_path(root, Path(item)) for item in candidates
+                )
+                if path is not None
+            ]
+            if not remote:
+                continue
+            tests = "; el".join(
+                f"if [ -f {shlex.quote(str(path))} ]; then "
+                f"cat -- {shlex.quote(str(path))}"
+                for path in remote
+            )
+            commands.append(
+                f"printf 'FS_MANIFEST {len(keys)}\\n'; {tests}; fi; printf '\\n';"
+            )
+            keys.append(key)
+        payloads: Dict[Any, Any] = {}
+        for batch in _shell_word_batches(commands, _REMOVE_COMMAND_BYTES):
+            try:
+                text = self.run_login(batch)
+            except Exception as exc:
+                logger.debug("Could not read remote manifests: %s", exc)
+                continue
+            current: Optional[int] = None
+            lines: List[str] = []
+            for line in [*text.splitlines(), "FS_MANIFEST -"]:
+                if not line.startswith("FS_MANIFEST "):
+                    lines.append(line)
+                    continue
+                if current is not None:
+                    try:
+                        payloads[keys[current]] = json.loads("\n".join(lines))
+                    except json.JSONDecodeError:
+                        pass
+                marker = line.split()[1]
+                current, lines = (int(marker) if marker.isdigit() else None), []
+        return payloads
+
+    def _fitting_task_ranks(
+        self,
+        task_ranks: Optional[Mapping[int, Union[int, TaskPartition]]],
+        task_indices: Iterable[int],
+        *,
+        limit: int,
+    ) -> Dict[int, int]:
+        """Keep pins of submitted tasks that fit ``limit`` ranks.
+
+        Raises:
+            ValueError: If a task must run on more ranks than the job has,
+                because Sauce rejects its saved inputs on any other count. A
+                pin that only preserves background reuse is dropped instead.
+        """
+
+        submitted = set(task_indices)
+        fitting: Dict[int, int] = {}
+        for task, pin in sorted(dict(task_ranks or {}).items()):
+            if int(task) not in submitted:
+                continue
+            if isinstance(pin, TaskPartition):
+                ranks, required, inputs = pin.ranks, pin.required, pin.inputs
+            else:
+                ranks, required, inputs = int(pin), False, ("background",)
+            if 1 <= ranks <= limit:
+                fitting[int(task)] = ranks
+                continue
+            message = (
+                f"Task {task} reads {', '.join(inputs)} written on {ranks} MPI "
+                f"ranks, but this job runs tasks on at most {limit}; request at "
+                "least as many ranks per task as the producing job"
+            )
+            if required:
+                raise ValueError(message)
+            self._emit(
+                f"{message} to reuse its background checkpoint.",
+                level=logging.WARNING,
+                force=True,
+            )
+        return fitting
 
     def _poll_attached_run(self, run: RunHandle) -> JobStatus:
         future = run.backend.get("future")
@@ -3109,10 +3457,7 @@ class SlurmSite(BaseSite):
             fresh=fresh,
             mpi_async_progress=mpi_async_progress,
         )
-        ntasks_per_item = max(ranks_per_task, self.pool.nproc // job.n_tasks)
-        max_ranks = getattr(job, "max_ranks_per_task", None)
-        if max_ranks is not None:
-            ntasks_per_item = min(ntasks_per_item, max_ranks)
+        ntasks_per_item = self._attached_task_ranks(job, ranks_per_task)
 
         if self._compute_client.is_proxy():
             interactive = self.compute_client.invoke_shell()
@@ -3138,6 +3483,46 @@ class SlurmSite(BaseSite):
 
         loop.create_task(monitor)
         return future
+
+    def _attached_task_ranks(self, job: BaseJob, ranks_per_task: int) -> int:
+        """Return the rank count an attached sweep gives every task of ``job``.
+
+        A job reading partitioned inputs (a saved linearization, objective
+        vectors, receiver states or backgrounds) gets the producer's count,
+        which is uniform when the producer also ran attached.
+
+        Raises:
+            ValueError: If required counts differ between tasks or exceed the
+                allocation; a batch sweep pins each task separately.
+        """
+
+        nproc = int(self.pool.nproc)
+        ranks = max(ranks_per_task, nproc // job.n_tasks)
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        if max_ranks is not None:
+            ranks = min(ranks, max_ranks)
+        tasks = range(1, job.n_tasks + 1)
+        partitions = self._task_partitions(job, tasks)
+        pinned = self._fitting_task_ranks(
+            partitions, tasks, limit=min(nproc, max_ranks or nproc)
+        )
+        counts = sorted(set(pinned.values()))
+        if len(counts) == 1:
+            return counts[0]
+        if counts:
+            message = (
+                f"{job.name} reads inputs written on different MPI rank counts "
+                f"({', '.join(map(str, counts))}); an attached sweep runs every "
+                "task on one count, so submit it with mode='batch'"
+            )
+            if any(pin.required for pin in partitions.values()):
+                raise ValueError(message)
+            self._emit(
+                f"{message} to keep background reuse.",
+                level=logging.WARNING,
+                force=True,
+            )
+        return ranks
 
     @staticmethod
     def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
@@ -3597,7 +3982,15 @@ class SlurmSite(BaseSite):
             task_indices = list(range(1, n_job_tasks + 1))
         else:
             task_indices = [int(index) for index in task_indices]
-        skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1))
+        task_ranks = self._fitting_task_ranks(
+            kwargs.pop("task_ranks", None),
+            task_indices,
+            limit=min(n_nodes * ranks_per_node, max_ranks_per_task),
+        )
+        # Pinned tasks need no memory estimates; initialize without sizing.
+        skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1)) or (
+            bool(task_indices) and set(task_indices) <= set(task_ranks)
+        )
         proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
         n_threads = config.cores_per_node // ranks_per_node
@@ -3629,12 +4022,22 @@ class SlurmSite(BaseSite):
             "sizing_json": str(sizing_json),
             "launch_delay_seconds": launch_delay_seconds,
         }
+        if task_ranks:
+            scheduler_config["task_ranks"] = {
+                str(task): ranks for task, ranks in sorted(task_ranks.items())
+            }
 
         return self._render_template(
             "sweep/adaptive_sweep.sh",
             batch_job=True,
             name=name,
             dir_out=stdout,
+            ranks_per_node=ranks_per_node,
+            # Every rank needs its threads' CPUs in the allocation; TACC's
+            # ibrun allocates whole nodes and places ranks itself.
+            cpus_per_task=(
+                None if Path(str(self.mpi_cmd)).name == "ibrun" else n_threads
+            ),
             proc_memory=proc_memory,
             mem_cushion=mem_cushion,
             min_ranks=min_ranks,

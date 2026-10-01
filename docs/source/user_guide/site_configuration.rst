@@ -332,8 +332,21 @@ extra.
      - Hostname for the Dask dashboard. Defaults to ``localhost``.
    * - ``dashboard_port``
      - Dashboard port. ``0`` lets Dask choose an available port.
+   * - ``curvature_ranks``
+     - MPI ranks for row-distributed Sauce curvature operations; they share
+       the worker thread budget. Defaults to ``1``. Mesh transfer and sampling
+       always run on one rank.
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
+
+A task submitted with ``procs_per_job`` greater than one runs under
+``mpirun`` with ``-nthreads`` set to its share of the worker thread budget.
+Open MPI would bind each rank, and all of its threads, to a single core, and
+concurrent tasks to the same cores, so local multi-rank launches set
+``PRTE_MCA_hwloc_default_binding_policy`` and
+``OMPI_MCA_hwloc_base_binding_policy`` to ``none`` unless the environment
+already sets them. Tasks that read a linearization's saved inputs run on the
+rank count that wrote them (see `Partitioned Solver Inputs`_).
 
 Local Host Settings
 ~~~~~~~~~~~~~~~~~~~
@@ -464,7 +477,8 @@ The generated profile is equivalent to this minimal configuration:
    * - ``solver``
      - Absolute path to the remote ``FS_seismic`` router executable.
        FrequenSolve launches this configured executable for initialization,
-       frequency tasks, imaging postprocessing, and packing.
+       frequency tasks, imaging postprocessing, packing, and curvature
+       postprocessing.
    * - ``work_dir``
      - Absolute remote base directory for relative project, simulation, and job
        paths. It may be on any writable remote filesystem. Absolute paths in
@@ -472,8 +486,9 @@ The generated profile is equivalent to this minimal configuration:
        ``$WORK/frequensolve``.
    * - ``scratch_dir``
      - Optional absolute remote scratch directory reserved for future model and
-       high-I/O storage. FrequenSolve records this setting but does not use it
-       for job data yet.
+       high-I/O storage. Sauce curvature postprocessing stages its HDF5 inputs
+       and results below ``curvature/`` here, or below ``work_dir`` when unset,
+       until ``site.remove_curvature_files()`` deletes them.
    * - ``tmp_dir``
      - Optional remote directory for transient transfer tarballs and
        provisioning scripts. Use a concrete absolute path on the login
@@ -488,7 +503,15 @@ The generated profile is equivalent to this minimal configuration:
        Simple ``${NAME}`` references expand after every configured module has
        loaded; other shell expressions remain escaped.
    * - ``mpi_wrapper``
-     - MPI launcher such as ``srun`` or ``ibrun``.
+     - MPI launcher such as ``srun`` or ``ibrun``. Batch jobs give every rank
+       its own ``cores_per_node // ranks_per_node`` cores for its threads:
+       ``srun --cpus-per-task``, TACC ``ibrun ... task_affinity``, or, for Open
+       MPI ``mpirun``/``mpiexec`` on Linux, ``--map-by slot:PE=<threads>
+       --bind-to core`` with ``OMP_PLACES=cores`` and ``OMP_PROC_BIND=close``
+       unless the environment sets them. Other ``mpirun``/``mpiexec`` ranks
+       stay unbound. Binding or mapping options in ``launcher_args`` or Open
+       MPI binding variables in the environment take precedence. Batch scripts
+       request ``--cpus-per-task`` except with ``ibrun``.
    * - ``launcher_args``
      - Arguments passed to every MPI launcher invocation, such as SLURM's
        ``--kill-on-bad-exit=1`` and ``--wait=30``.
@@ -523,13 +546,22 @@ The generated profile is equivalent to this minimal configuration:
      - Requested wall time, such as ``"00:30:00"``.
    * - ``ranks_per_node`` / ``ranks_per_task``
      - MPI rank layout for solver runs. ``procs_per_node`` and
-       ``procs_per_task`` remain compatibility aliases.
+       ``procs_per_task`` remain compatibility aliases. Batch jobs size each
+       task's ranks from its memory estimate; ``ranks_per_task`` applies to
+       attached allocations. Tasks that read a linearization's saved inputs
+       run on the rank count that wrote them; a job whose tasks all do so
+       skips sizing (see `Partitioned Solver Inputs`_).
    * - ``notify_on`` / ``notify_email``
      - Scheduler notification settings when supported.
    * - ``run_path``
      - Optional remote run directory override.
    * - ``slurm_args``
      - Extra scheduler arguments as a TOML array of strings.
+   * - ``curvature_run_config``
+     - Optional table of run fields (``nodes``, ``ranks_per_node``,
+       ``duration``, ``queue``, ...) for Sauce curvature batch jobs. The run
+       fields above apply when it is omitted. Without ``ranks_per_node``,
+       curvature uses one rank per socket.
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
 
@@ -537,6 +569,29 @@ For generic ``slurm`` profiles, config fields and run fields may be written
 flat as shown above, or grouped under nested ``config`` and ``run_config``
 tables. Preset values are loaded first, nested profile tables are merged over
 them, and explicit construction-time overrides are applied last.
+
+Partitioned Solver Inputs
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sauce partitions the objective state a ``linearize`` task saves, objective
+vectors, receiver states and background checkpoints by MPI rank, records the
+rank count of the task that wrote them, and rejects a later JVP, VJP, normal
+or receiver action that reads them on another count (a background is
+recomputed instead). Local and SLURM sites therefore run each such task on
+the rank count recorded in its producer's manifest, read from the fetched
+copy or, when absent, from the remote project in one login command; all other
+tasks keep their adaptive sizing. A batch job whose tasks all have recorded
+counts skips the sizing pass. A required count larger than the job's ranks per
+task fails before submission; an attached allocation needs one count for
+every task, so jobs with differing counts use ``mode="batch"``.
+
+``site.supports_background_reuse`` is ``True`` for local and SLURM sites,
+which keep result directories in place for later actions. FrequenSol Cloud
+does not keep results for later workers, so it reports ``False`` and
+workflows recompute the background there. Source batching follows the job's
+acquisition and is unchanged by the site.
+``site.remove_result_files(job, ["background_1.json", ...])`` deletes files by
+path relative to a job's result directory once they are no longer needed.
 
 Module And Library Setup
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -675,7 +730,9 @@ identify each remote command and transfer backend without logging passwords,
 private keys, key passphrases, or two-factor codes. OpenSSH commands that reuse
 a verified control socket are non-interactive and bounded by connection and
 command timeouts, so an expired socket produces an exception instead of an
-invisible credential prompt.
+invisible credential prompt. SFTP file transfers over the socket have no total
+time limit, so multi-gigabyte files can finish, but fail once the transferred
+size stops changing for the command timeout (120 seconds).
 
 The site CLI uses a bounded remote probe rather than relying only on the local
 OpenSSH master process when deciding that a shared connection is alive. Inspect

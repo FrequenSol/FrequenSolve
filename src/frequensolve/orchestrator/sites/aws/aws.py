@@ -39,6 +39,7 @@ from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
     RunHandle,
+    _result_relative_paths,
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
@@ -262,7 +263,28 @@ class AWSSite(BaseSite):
         2. Authenticates with cached credentials (or prompts for login)
         3. Fetches your infrastructure details (S3 bucket, etc.)
         4. Ready to submit simulations and upload files!
+
+    Background checkpoints (``supports_background_reuse``) are not supported:
+    each batch worker stages inputs only from local files and uploads its
+    results under a fresh prefix, and checkpoint HDF5 files are never
+    transferred by default, so a later worker cannot read a producer's
+    checkpoints.
     """
+
+    supports_background_reuse = False
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Validate ``relative_paths``; AWS keeps no reusable result files.
+
+        Uploaded results are immutable per run, so there is nothing to
+        remove; see :meth:`BaseSite.remove_result_files` for path rules.
+        """
+
+        if _result_relative_paths(relative_paths):
+            logger.debug(
+                "AWSSite keeps no reusable result files; nothing removed for %s",
+                getattr(job, "name", job),
+            )
 
     def __init__(
         self,

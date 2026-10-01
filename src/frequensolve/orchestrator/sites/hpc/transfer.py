@@ -59,12 +59,20 @@ class SlurmTransferManager:
     def __init__(self, site: Any) -> None:
         self.site = site
 
-    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]) -> None:
+    def put(
+        self,
+        local_path: Union[str, Path],
+        remote_path: Union[str, Path],
+        *,
+        compress: bool = True,
+    ) -> None:
         """Transfer a local file or directory to a remote path.
 
         Args:
             local_path: Local source file or directory.
             remote_path: Remote destination path.
+            compress: Compress rsync transfers. Disable for incompressible
+                numerical payloads, where compression only costs CPU time.
 
         Raises:
             FileNotFoundError: If ``local_path`` does not exist.
@@ -96,7 +104,11 @@ class SlurmTransferManager:
                     sftp.close()
             else:
                 source = f"{local_path}/" if local_path.is_dir() else str(local_path)
-                self._run_rsync(source, self._remote_spec(validated_remote_path))
+                self._run_rsync(
+                    source,
+                    self._remote_spec(validated_remote_path),
+                    compress=compress,
+                )
 
             logger.debug("Transfer completed successfully")
 
@@ -111,6 +123,8 @@ class SlurmTransferManager:
         remote_path: Union[str, Path],
         local_path: Union[str, Path],
         overwrite: bool = False,
+        *,
+        compress: bool = True,
     ) -> None:
         """Transfer a remote file or directory to a local path.
 
@@ -119,6 +133,7 @@ class SlurmTransferManager:
             local_path: Local destination path.
             overwrite: Accepted for API compatibility; transfer backends decide
                 replacement behavior.
+            compress: Compress rsync transfers.
 
         Raises:
             RuntimeError: If rsync fails.
@@ -153,7 +168,9 @@ class SlurmTransferManager:
                     else str(validated_remote_path)
                 )
                 local_str = f"{local_path}/" if local_path.is_dir() else str(local_path)
-                self._run_rsync(self._remote_spec(remote_str), local_str)
+                self._run_rsync(
+                    self._remote_spec(remote_str), local_str, compress=compress
+                )
 
             logger.debug("Transfer completed successfully")
 
@@ -231,9 +248,15 @@ class SlurmTransferManager:
         target: str,
         *,
         options: Sequence[str] = (),
+        compress: bool = True,
     ) -> None:
         debug_output = logger.isEnabledFor(logging.DEBUG)
-        rsync_flags = "-avzP" if debug_output else "-az"
+        rsync_flags = (
+            "-a"
+            + ("v" if debug_output else "")
+            + ("z" if compress else "")
+            + ("P" if debug_output else "")
+        )
         rsync_cmd = ["rsync", rsync_flags]
         if not debug_output:
             rsync_cmd.append("--partial")

@@ -1095,8 +1095,29 @@ def test_cancel_preserves_existing_repeat_call_and_error_behavior():
     assert calls == ["scancel 123", "scancel 123"]
 
 
+class _FinishedSFTP:
+    """A ``Popen`` stand-in for an SFTP transfer that has already exited."""
+
+    def __init__(self, argv, *, returncode=0, error="", stderr, **_):
+        self.argv = argv
+        self.returncode = returncode
+        self.sent = b""
+        stderr.write(error.encode())
+        self.stdin = SimpleNamespace(write=self._write, close=lambda: None)
+
+    def _write(self, data):
+        self.sent += data
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        raise AssertionError("a finished transfer is never killed")
+
+
 def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
     calls = []
+    transfers = []
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -1104,7 +1125,12 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
             return SimpleNamespace(returncode=0, stdout="81a4 3\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    def popen(argv, **kwargs):
+        transfers.append(_FinishedSFTP(argv, **kwargs))
+        return transfers[-1]
+
     monkeypatch.setattr(ssh_module.subprocess, "run", run)
+    monkeypatch.setattr(ssh_module.subprocess, "Popen", popen)
     proxy = SSHProxy("/tmp/verified-control", "scientist", "login.example.edu")
     sftp = proxy.open_sftp()
     local = tmp_path / "input.bin"
@@ -1121,18 +1147,18 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
 
     assert attributes.st_mode == 0o100644
     assert attributes.st_size == 3
-    assert [call[0][0] for call in calls] == [
-        "ssh",
-        "sftp",
-        "sftp",
-        "sftp",
-        "sftp",
-        "sftp",
+    # Metadata commands keep the fixed limit; quick transfers need no size probe.
+    assert [(argv[0], kwargs["timeout"]) for argv, kwargs in calls] == [
+        ("ssh", 120),
+        ("sftp", 120),
+        ("sftp", 120),
+        ("sftp", 120),
     ]
-    for argv, kwargs in calls:
+    # Data transfers have no total limit; they fail when they stop progressing.
+    assert [transfer.sent.split()[0] for transfer in transfers] == [b"put", b"get"]
+    for argv in [argv for argv, _ in calls] + [t.argv for t in transfers]:
         assert "ControlPath=/tmp/verified-control" in argv
-        assert kwargs["timeout"] == 120
-        assert "private-token" not in str(kwargs)
+    assert "private-token" not in str(calls)
 
 
 @pytest.mark.parametrize(
@@ -1148,8 +1174,10 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
 def test_ssh_proxy_sftp_preserves_transfer_errors(monkeypatch, tmp_path, stderr, error):
     monkeypatch.setattr(
         ssh_module.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr=stderr),
+        "Popen",
+        lambda argv, **kwargs: _FinishedSFTP(
+            argv, returncode=1, error=stderr, **kwargs
+        ),
     )
     proxy = SSHProxy("/tmp/verified-control", "scientist", "login.example.edu")
     with pytest.raises(error) as caught:
