@@ -93,6 +93,86 @@ def _saved_simulation(tmp_path, name="controlled"):
     return simulation
 
 
+def test_background_checkpoint_roundtrip_and_recursive_staging(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "capture",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["vp"],
+        state="state.json",
+        background="background.json",
+    )
+    loaded = BaseJob.load(linearize.save())
+    assert loaded.background == linearize.background
+    _assert_valid(loaded.to_fs())
+    manifest = linearize.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    shard = manifest.with_name("rank_0.json")
+    field = manifest.with_name("field.h5")
+    field.write_bytes(b"native-checkpoint-fixture")
+    shard.write_text(
+        json.dumps(
+            {"schema": "fs-background-shard-1", "shards": {"0": {"file": field.name}}}
+        )
+    )
+    manifest.write_text(
+        json.dumps(
+            {"schema": "fs-background-state-1", "shards": {"0": {"file": shard.name}}}
+        )
+    )
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction-fixture")
+    action = FWIOperatorJob(
+        "reuse",
+        sim,
+        [3.0],
+        action="normal",
+        active=["vp"],
+        state=state,
+        direction=direction,
+        covector="normal.h5",
+        background=manifest,
+    )
+    loaded = BaseJob.load(action.save())
+    assert loaded.background == manifest
+    pairs = loaded.remote_input_files("/remote/project")
+    local = {Path(pair[0]) for pair in pairs}
+    assert {manifest, shard, field} <= local
+    # A cache already resident on the execution site need not be downloaded.
+    field.unlink()
+    pairs = loaded.remote_input_files("/remote/project")
+    assert {manifest, shard} <= {Path(pair[0]) for pair in pairs}
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {
+            "kernel_derivative": {
+                "axis": "fourier",
+                "order": 1,
+                "residual": "derivative",
+            }
+        },
+        {"source_controls": {"location_method": "analytic"}},
+    ],
+)
+def test_background_rejects_unsupported_actions(tmp_path, extra):
+    with pytest.raises(ValueError, match="background reuse"):
+        FWIOperatorJob(
+            "bad",
+            _saved_simulation(tmp_path),
+            [3.0],
+            action="linearize",
+            background="background.json",
+            **extra,
+        )
+
+
 def _elastic_simulation(tmp_path):
     sim = SeismicSimulation(
         name="smooth", physics="elastic", dimension=2, project_path=tmp_path
@@ -2361,6 +2441,89 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(
         assert ControlVectorFile.read(path, native=True).control_spaces == {
             "vp": "mesh-basis"
         }
+
+
+def test_staged_regularization_inputs_are_hashed_once_and_used_in_place(
+    tmp_path, monkeypatch
+):
+    from frequensolve.imaging.jobs import RegularizationJob
+
+    sim = _saved_simulation(tmp_path)
+    source = FWIOperatorJob(
+        "native",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="g.h5",
+    )
+    vector = ControlVectorFile(
+        {"model.vp": [1.0, 2.0]}, control_spaces={"model.vp": "mesh-basis"}
+    )
+    context = tmp_path / "context.json"
+    context.write_text("{}")
+    staged = {
+        label: RegularizationJob.stage_input(vector, tmp_path / "stage" / f"{label}.h5")
+        for label in ("metric", "lower", "upper")
+    }
+    # Published in Sauce's native layout; nothing but the final file remains.
+    assert sorted(p.name for p in (tmp_path / "stage").iterdir()) == [
+        "lower.h5",
+        "metric.h5",
+        "upper.h5",
+    ]
+    for path in staged.values():
+        assert ControlVectorFile.read(path, native=True).control_spaces == {
+            "vp": "mesh-basis"
+        }
+        assert RegularizationJob._is_staged(path)
+    hashed = []
+    fingerprint = RegularizationJob._path_content_fingerprint.__func__
+    monkeypatch.setattr(
+        RegularizationJob,
+        "_path_content_fingerprint",
+        classmethod(
+            lambda cls, path: hashed.append(Path(path)) or fingerprint(cls, path)
+        ),
+    )
+
+    def prox(index):
+        return RegularizationJob(
+            source,
+            smoothing=SmoothingConfig(kind="tv"),
+            input_vector=vector,
+            operation="proximal",
+            context=context,
+            name=f"prox{index}",
+            **staged,
+        )
+
+    jobs = [prox(index) for index in range(3)]
+    payloads = [job._input_fingerprint_payload() for job in jobs]
+    for job, payload in zip(jobs, payloads):
+        # Every job references the same files in place: one stable path each.
+        assert job.regularization_inputs == staged
+        request = job.to_fs()["control_sensitivities"]["Regularization"]
+        assert {label: request[label] for label in staged} == {
+            label: str(path) for label, path in staged.items()
+        }
+        assert {label: payload[label] for label in staged} == {
+            label: payloads[0][label] for label in staged
+        }
+    # The fingerprints recorded at staging serve every job: no staged file is
+    # hashed again, only each job's own input vector and context.
+    assert not set(hashed) & set(staged.values())
+    assert len(hashed) == 2 * len(jobs)
+    # A file changed after staging is no longer trusted and is hashed again.
+    ControlVectorFile(
+        {"vp": [3.0, 4.0]}, native=True, control_spaces={"vp": "mesh-basis"}
+    ).write(staged["lower"])
+    assert not RegularizationJob._is_staged(staged["lower"])
+    changed = prox(3)._input_fingerprint_payload()
+    assert changed["lower"] != payloads[0]["lower"]
+    assert changed["metric"] == payloads[0]["metric"]
+    assert staged["lower"] in hashed
 
 
 @pytest.mark.parametrize(

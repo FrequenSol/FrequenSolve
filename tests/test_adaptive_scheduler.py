@@ -363,3 +363,128 @@ def test_record_failure_names_operation_step_and_keeps_existing_reason(tmp_path)
         not_before=0.0,
     )
     assert json.loads(status.read_text())["abort_reason"] == "MPI health check failed"
+
+
+def _pinned_scheduler(tmp_path, *, mpi="srun", task_ranks, tasks, **extra):
+    scheduler = _load_scheduler_module()
+    return scheduler.AdaptiveScheduler(
+        {
+            "executable": "/remote/bin/solver",
+            "mpi": mpi,
+            "total_ranks": 8,
+            "omp_threads": 2,
+            "mem_per_rank_gib": 1,
+            "job_task_count": len(tasks),
+            "task_indices": tasks,
+            "task_ranks": {str(task): ranks for task, ranks in task_ranks.items()},
+            **extra,
+        },
+        job_file="job.json",
+        output=str(tmp_path),
+        status=str(tmp_path / "status.json"),
+    )
+
+
+def _launched_ranks(monkeypatch, instance, memory):
+    """Run the scheduler with tasks that finish as soon as they launch."""
+
+    scheduler = _load_scheduler_module()
+    monkeypatch.setattr(instance, "_load_task_memory", lambda: memory)
+    launches = {}
+
+    def launch(task, offset, ranks, task_memory):
+        launches[task] = ranks
+        instance.successful_tasks.append(task)
+        instance.free_intervals = scheduler._free_interval(
+            instance.free_intervals, offset, ranks
+        )
+
+    monkeypatch.setattr(instance, "_launch", launch)
+    instance.run()
+    return launches
+
+
+@pytest.mark.parametrize("skip_sizing", [False, True])
+def test_pinned_tasks_run_on_their_ranks_without_boosts(
+    monkeypatch, tmp_path, skip_sizing
+):
+    """A background checkpoint restores only on the rank count that wrote it."""
+
+    instance = _pinned_scheduler(
+        tmp_path,
+        task_ranks={1: 3, 2: 2, 3: 5},
+        tasks=[1, 2, 3],
+        skip_sizing=skip_sizing,
+    )
+
+    # Memory-based sizing and boosts would give task 1 far more ranks.
+    launches = _launched_ranks(monkeypatch, instance, [100.0, 0.1, 0.1])
+
+    assert launches == {1: 3, 2: 2, 3: 5}
+
+
+def test_pins_leave_other_tasks_adaptive_and_single_pins_unboosted(
+    monkeypatch, tmp_path
+):
+    mixed = _pinned_scheduler(tmp_path, task_ranks={2: 3}, tasks=[1, 2])
+    assert _launched_ranks(monkeypatch, mixed, [2.0, 2.0])[2] == 3
+
+    single = _pinned_scheduler(tmp_path, task_ranks={1: 3}, tasks=[1])
+    assert _launched_ranks(monkeypatch, single, [0.0]) == {1: 3}
+
+    with pytest.raises(SystemExit, match="pinned ranks for every task"):
+        _pinned_scheduler(
+            tmp_path, task_ranks={1: 3}, tasks=[1, 2], skip_sizing=True
+        ).run()
+
+
+@pytest.mark.parametrize("ranks", [0, 9])
+def test_pins_outside_the_allocation_are_rejected(tmp_path, ranks):
+    with pytest.raises(ValueError, match="pinned to"):
+        _pinned_scheduler(tmp_path, task_ranks={1: ranks}, tasks=[1])
+
+
+@pytest.mark.parametrize("binding", ["cores", "none"])
+def test_mpirun_pinned_task_holds_the_allocation_and_maps_cores(tmp_path, binding):
+    scheduler = _load_scheduler_module()
+    instance = scheduler.AdaptiveScheduler(
+        {
+            "executable": "/remote/bin/solver",
+            "mpi": "/usr/bin/mpirun",
+            "total_ranks": 4,
+            "omp_threads": 3,
+            "mem_per_rank_gib": 1,
+            "job_task_count": 2,
+            "task_indices": [1, 2],
+            "task_ranks": {"1": 2},
+        },
+        job_file="job.json",
+        output=str(tmp_path),
+        status=str(tmp_path / "status.json"),
+        rank_binding=binding,
+    )
+
+    assert instance._choose_base_ranks(1.0, 1) == 4  # Exclusive allocation.
+    pinned = instance._launch_command(task_id=1, offset=0, ranks=4)
+    sized = instance._launch_command(task_id=2, offset=0, ranks=4)
+
+    placement = ["--map-by", "slot:PE=3", "--bind-to", "core"]
+    expected = placement if binding == "cores" else []
+    assert pinned[: 3 + len(expected)] == ["/usr/bin/mpirun", "-n", "2", *expected]
+    assert sized[: 3 + len(expected)] == ["/usr/bin/mpirun", "-n", "4", *expected]
+
+
+def test_status_records_the_ranks_every_task_ran_on(monkeypatch, tmp_path):
+    scheduler = _load_scheduler_module()
+    instance = _pinned_scheduler(tmp_path, task_ranks={1: 3}, tasks=[1])
+
+    class Process:
+        pass
+
+    monkeypatch.setattr(scheduler.subprocess, "Popen", lambda *a, **k: Process())
+    monkeypatch.setattr(instance, "launch_delay", 0)
+    instance._launch(task_id=1, offset=0, ranks=3, memory=1.0)
+    instance.running[-1][-1].close()
+
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["task_ranks"] == {"1": 3}

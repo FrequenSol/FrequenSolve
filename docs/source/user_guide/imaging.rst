@@ -8,6 +8,77 @@ space, observed data, a misfit, the frequencies and a site; gradients,
 Jacobians, normal operators, the :term:`FWI`, :term:`LSRTM` and :term:`RTM`
 workflows and the coherent focusing objectives all derive from it.
 
+FWI in one persistent allocation
+--------------------------------
+
+On Stampede3 or another SLURM site, use an inversion-owned execution policy to
+avoid a new batch submission for every objective, gradient and normal action::
+
+   from frequensolve.orchestrator.sites import (
+       AdaptiveWorkers,
+       PersistentAllocation,
+   )
+
+   result = fwi.run(
+       execution=PersistentAllocation(
+           nodes=1,
+           ranks_per_node=8,
+           duration="02:00:00",
+           workers=AdaptiveWorkers(max_ranks_per_task=2),
+       )
+   )
+
+``fwi`` is an existing ``FWI`` object whose problem uses a SLURM site. These
+resource values are examples; choose a walltime and worker limit appropriate
+for the problem. ``FWI.run`` owns the allocation through preparation, all
+stages, backtracking, normal actions, smoothing, curvature and final output
+writing. It releases the allocation on completion, error or interruption.
+The caller's site and problem views return to their original executor when the
+run exits.
+
+To reuse a session across workflows, enter ``problem.site.session(...)`` and
+pass that open session as ``fwi.run(execution=session)``. FWI borrows it and
+leaves teardown to the outer context. Alternatively, construct an
+``ImagingProblem(..., site=session)`` inside the context and use its operators
+and workflows normally. See :ref:`site-configuration` for cancellation,
+reconnection, leases and finite-walltime behavior.
+
+Mesh-gradient field outputs
+---------------------------
+
+For mesh controls, gradients returned by ``problem.linearize()`` keep raw
+coefficient derivatives for optimizer algebra, but their ``to_grid``,
+``to_mesh`` and ``to_property`` methods use Sauce's physical constrained lumped
+mass before interpolation. The original vector is unchanged::
+
+   lin = problem.linearize()
+   image = lin.gradient.to_grid(display_grid, "vp")
+   property_image = lin.gradient.to_property(display_grid, "vp")
+
+These are gradient densities, not Hessian-preconditioned model updates.
+To sample an independently loaded covector, use
+``lin.field(g, input_role="dual")``. To sample a model or an already-preconditioned
+update without another mass division, use
+``lin.field(update, input_role="primal").to_grid(display_grid, "vp")``.
+Copies, negation and scalar scaling retain the gradient field interpretation;
+array-valued algebra returns ordinary vectors and should use an explicit field
+role when exporting. Frozen property artifacts store one constrained mass vector
+in km**D; mesh rendering and mass division are local array operations. Older
+artifacts without this vector must be regenerated explicitly.
+
+Grid conversion builds an exact curved-geometry sampling map with a direct local
+Sauce invocation, never an HPC submission. It reuses the disk-backed map across
+fields and linearizations with the same frozen basis and grid, applying it in
+bounded packets. No wave solves are performed. For an HPC-backed problem, make
+the simulation geometry and property artifacts available locally and set
+``FS_LOCAL_SOLVER`` or use ``lin.field(local_solver="/path/to/fs3d_s")``.
+``to_property`` returns a gridded ``Property`` suitable for attaching as a
+diagnostic model field. Optimizer state updates continue to use raw coefficient
+algebra; a gradient density is not automatically a model increment.
+
+Basic authoring
+---------------
+
 .. code-block:: python
 
    import frequensolve as fs
@@ -415,9 +486,17 @@ misfit pairs observed and simulated groups by name.
 The misfit maps one to one onto Sauce's objective terms: a loss (``l2``,
 ``huber``, ``student_t``), a comparison (``waveform``, ``phase_derivative``,
 ``spectral_derivative``),
-a normalization (``observed_rms`` by default, ``explicit``, or
+a normalization (``explicit`` with scale ``1.0`` by default, ``observed_rms``, or
 ``Normalization.balance_artifact(file)`` written by a ``calibrate`` job),
 per-group weights, preprocessing hooks and a receiver projection.
+
+The default reduction is ``sum``: ``Misfit.l2()`` uses half the summed squared
+residual after weighting and preprocessing, with no automatic amplitude
+normalization. Explicit RMS scaling and weighted-mean reduction remain available.
+To reproduce the previous defaults, use
+``normalization=im.Normalization.observed_rms(reduction="weighted_mean")``.
+Changing these settings affects objective and gradient magnitudes and the
+relative strength of regularization and other objective terms.
 
 .. code-block:: python
 
@@ -433,7 +512,8 @@ per-group weights, preprocessing hooks and a receiver projection.
    misfit = im.Misfit.l2(projection=im.ReceiverProjection.up_down(impedance=1.5e6))
 
 For joint waveform and full-complex frequency-derivative FWI, use independent
-terms. Each term's default normalization uses its own observed RMS; the
+terms. Each term defaults to unit scale and sum reduction; choose explicit scales
+or observed-RMS normalization to balance terms with different units. The
 derivative is with respect to Hz at fixed Laplace damping, not a phase quotient.
 Supply matching ``df`` observations and the same source-derivative policy.
 
@@ -689,7 +769,11 @@ frequency of the view (one Sauce task per frequency, distributed by the site
 like any multi-frequency job). Derivative actions (``jvp``, ``vjp``,
 ``normal``) reuse the saved state and are memoized per input vector; their
 per-task inputs are written as ``<stem>_<task><ext>`` beside the stem the job
-names, which Sauce resolves in each task.
+names, which Sauce resolves in each task. Several normal products share one
+job: ``H @ V`` for a ``(n, k)`` array, or ``lin.apply_normal_batch(directions)``,
+solves (or restores) each source batch's background and factors the operator
+once for all ``k`` material directions. ``regularization=`` adds a bound native
+Tikhonov Hessian, applied by the same job when that is exact.
 
 Operators are :class:`scipy.sparse.linalg.LinearOperator` subclasses that
 know their control and data spaces, accept typed vectors or plain arrays, and
@@ -846,7 +930,7 @@ Sauce evaluates the energy at every line-search trial and solves the constrained
 proximal update in the optimizer's metric. In FWI, Tikhonov uses native exact
 coefficient gradient and Hessian callbacks and preserves the requested L-BFGS
 or Newton-CG optimizer. This requires a solver supporting the native
-``gradient`` regularization operation. TV/TGV (and native LSRTM terms) select
+``gradient`` regularization operation. TV/TGV select
 proximal-gradient backtracking; history
 records the effective optimizer. Newton/L-BFGS preconditioners do not apply to
 this path; use coordinate ``scaling`` to set its diagonal metric. Bounds and
@@ -875,11 +959,10 @@ remain data-objective operations. ``gradient`` is its actual derivative; there
 is no separate ``smoothed_gradient`` API. The explicit ``im.smooth(vector,
 configuration, problem)`` operation remains available for vector processing.
 
-LSRTM uses the same composite solver for native regularization of its image
-(update), with zero fixed image coefficients and a frozen data Jacobian. Its
-ordinary CG/LSQR paths remain available without native regularization or with
-quadratic custom terms. TV is no longer approximated by a single Hessian frozen
-at zero.
+LSRTM regularizes the image (update), with zero fixed image coefficients and a
+frozen data Jacobian. Native Tikhonov supplies its quadratic Hessian to CG and
+its diagonal to the preconditioner. TV/TGV use the composite proximal solver;
+they are not approximated by a Hessian frozen at zero.
 
 Extension solves already include their auxiliary tap regularization in the
 reduced objective and Schur normal. Outer model regularization is added once;
@@ -1148,8 +1231,19 @@ variables estimated with one JVP per block at every stage start. A checkpoint
 written after every accepted iteration; ``run(resume=True)`` skips completed
 stages and continues an interrupted one with its remaining budget, and
 rejects a checkpoint of a different problem, block layout, stage active set or
-frequencies. The history distinguishes objective evaluations from optimizer
-iterations and atomically replaces its JSON file after every record.
+frequencies. Optimizer restart arrays (L-BFGS secant pairs, a scaled iterate,
+coordinate scaling and curvature seeds) are float64 HDF5 files in the sibling
+``<stem>.restart`` directory: each pair is written once when accepted, the
+checkpoint only references the files it needs, and superseded files are
+deleted once the new checkpoint is in place. The directory therefore holds at
+most the optimizer memory plus one generation (the whole stage history with
+``BFGSUncertainty``) and is emptied when a stage completes. A resumed stage
+continues with bitwise-identical L-BFGS iterates. A stage interrupted while
+computing its end-of-stage curvature or uncertainty factors resumes by
+computing only those factors, without optimizing again. Checkpoints written
+by earlier versions (``fs-imaging-fwi-checkpoint-1``) cannot be resumed; rerun
+with ``resume=False``. The history distinguishes objective evaluations from
+optimizer iterations and atomically replaces its JSON file after every record.
 ``fwi.solve_stage(stage, state)`` runs one stage for custom loops, and
 ``callback`` receives an :class:`~frequensolve.imaging.FWIIteration` after
 every accepted iteration.
@@ -1432,6 +1526,11 @@ LSRTM, RTM and kernels
    image = im.rtm(problem)                                      # gradient at the current state
    dm = im.LSRTM(problem, iterations=15, regularization=None).run()   # LSQR on lin.jacobian
    dm = im.LSRTM(problem, iterations=15, method="cg", damping=1e-3).run()
+   dm = im.LSRTM(
+       problem, method="cg", iterations=15,
+       preconditioner=im.Diagonal(probes="receiver", probe_count=16),
+       regularization=im.Tikhonov(alpha=0.01, order=1),
+   ).run()
    kernels = im.sensitivity_kernel(problem, grid, properties=["vp"], condition="fwi")
    kernels.raw["vp"].plot.imshow(x="x", y="z", yincrease=False)
 
@@ -1448,6 +1547,68 @@ typically run over :class:`~frequensolve.imaging.GridParameters` or
 reflectivity blocks. Older saved states without an objective residual must
 be regenerated before LSQR; CG can still use them. Quadratic regularization terms keep
 their reference model in both solvers.
+
+Every solver iteration costs one Sauce ``normal`` job (or a JVP/VJP pair for
+LSQR), so LSRTM avoids products that do not advance the solve:
+
+- Native ``Tikhonov`` always runs CG, whatever ``method`` says, because LSQR
+  needs explicit regularization rows. Each Hessian product costs one native
+  regularization job unless the normal job applies it
+  (``info["fused_regularization"]``). Without a ``reference`` its gradient at
+  the zero image vanishes and costs no job.
+- Nonsmooth ``TV``/``TGV`` use proximal-gradient iterations. Two power
+  iterations (two normal jobs) estimate the largest curvature for the first
+  step, each trial costs one normal and one proximal job, and stopping is
+  relative to the initial proximal-gradient mapping, so rescaling the data or
+  image units leaves the iterations unchanged.
+- ``tolerance`` (default ``1e-4``) is relative for every method. CG reports its
+  recurrence residual instead of spending a normal job on the final residual,
+  counts a solve that converges on its last allowed iteration as converged,
+  raises when the preconditioner is not SPD and stops with
+  ``info["status"] == -1`` on nonpositive curvature ``p^T A p``: FP32 normals at
+  the default solver tolerance are only approximately symmetric.
+
+``info["jobs"]`` counts the jobs a run submitted by action (native callbacks as
+``regularization_<operation>``) and ``info["background"]`` reports checkpoint
+reuse.
+
+``reuse_background=True`` (default) checkpoints each forward source batch for
+ordinary material actions, including encoded shots. JVP/VJP need one propagation
+stage each; a normal action needs two. Eligible frozen-Gram acoustic/elastic DPG
+actions store only native L2 fields; trace-dependent boundaries, receiver terms,
+or field outputs retain full checkpoints. Checkpoints stay on disk, not all
+source fields in RAM. They require the same solver build, resolved mesh
+partition and source batching. Matrix assembly/factors are still rebuilt by each
+action job. ``reuse_background=False`` replays the background solve. LSRTM
+automatically falls back to uncached actions for unsupported controls, spectral
+objectives or sites without ``supports_background_reuse`` (``LocalSite`` and
+SLURM sites support it, AWS does not); explicit checkpoint requests remain
+validated. Extension actions cannot use this cache. Remote checkpoints remain
+on the execution site by default; relocating them requires explicit checkpoint
+transfer as well as the manifests.
+
+Full checkpoints hold ``n_dof * n_src`` complex values per frequency, often
+terabytes in production, so LSRTM deletes the checkpoint it created when it
+finishes, on this machine and in the site's result directory
+(``site.remove_result_files``). ``keep_background=True`` keeps it for later
+actions on the same linearization. Kept checkpoints are deleted when their
+linearization leaves ``problem.cache`` (eviction or ``problem.cache.clear()``)
+or, least recently used first, once ``problem.cache.background_budget``
+(bytes) is exceeded; ``problem.backend.release_background(lin.job)`` deletes
+one immediately. Later actions on a released linearization run uncached. When
+Sauce cannot use a checkpoint for environmental reasons (rank count, batching,
+missing or corrupt shards), it recomputes those forward fields and counts them
+in ``background_reuse_misses``; LSRTM reports the total as
+``info["background"]["misses"]`` and issues a :class:`RuntimeWarning`.
+
+Receiver-probe preconditioning requests the diagonal with the initial gradient,
+adds the regularization/damping diagonal, and freezes the resulting positive
+inverse metric for CG. FWI requests the probes with each stage's first
+linearization and at every ``preconditioner_refresh`` point (one extra
+linearize there); patch FWI rejects ``probes="receiver"``. Block-wise floors affect only the metric, not the objective
+or converged solution. Regularization changes the objective; choose its weight
+for the problem's units and desired spatial penalty. Neither preconditioning nor
+regularization fixes an inaccurate background model.
 
 :func:`~frequensolve.imaging.sensitivity_kernel` images on a Cartesian grid
 (``Imaging.grid``) and returns an :class:`~frequensolve.imaging.ImageSet` with
@@ -1860,17 +2021,358 @@ transpose during reverse propagation:
 .. code-block:: python
 
    acoustic = fs.physics.acoustic()
+   elastic = fs.physics.elastic()
+   rho_water = acoustic.materials.rho.on(domain="water")
+   Sp_solid = 1 / elastic.materials.vp.on(domain="solid")
    weight = Preprocess.material_weighting(
-       {1: 1 / acoustic.materials.rho}, units={1: "m^2/s^2"}
+       {1: 1 / rho_water, (2, 3): Sp_solid},
+       units={1: "m^2/s^2", (2, 3): "1"},
    )
    misfit = Misfit(preprocess=[weight])
 
+This example assumes pressure followed by two velocity components. Material
+selectors choose the coefficient's side independently of the measured fields,
+allowing fluid pressure and solid velocity in one interface device.
+The example assumes ``Vp`` is an active authored property. If pressure slowness
+``Sp`` is authored directly, use ``elastic.materials.Sp.on(domain="solid")``
+instead; references do not implicitly convert material parameterizations.
 Component IDs are one-based; a tuple selects a coupled tensor block. Explicit
 ``units`` describe the transformed traces, including the original field units.
 Tensor blocks act on physical symmetric-tensor components in solver tensor
-order. Blocks cannot overlap. The factor is frozen within an initialized
-objective, while receiver material expressions retain their direct material
-derivatives. Frequency-independent factors apply to both traces and their
+order. Blocks cannot overlap. The default ``mode="frozen"`` fixes W within a
+job, including its trial evaluations, without differentiating the weights.
+New jobs resample W. Use ``mode="pinned", state_file="weights.h5"`` to retain
+one reference factor across jobs. ``mode="live"`` differentiates unselected
+material weights; independently selected coefficients currently reject this
+mode. Frequency-independent factors apply to both traces and their
 spectral derivatives. Dispersive constitutive weights are rejected. Passing
 compliance as W produces the metric W^H W, rather than a compliance energy
 metric; those are different objectives.
+
+Gaussian priors and posterior uncertainty
+-----------------------------------------
+
+Declare the noise and prior in the fitted objective, then request uncertainty
+on the workflow:
+
+.. code-block:: python
+
+   problem = im.ImagingProblem(
+       simulation, controls=controls, observed=observed,
+       frequencies=frequencies, site=site,
+       misfit=im.Misfit.l2(noise_std=data_noise),
+   )
+   prior = im.GaussianPrior(
+       reference=problem.state,
+       std={"vp": 150 * u.m / u.s, "vs": 80 * u.m / u.s},
+   )
+   result = im.FWI(
+       problem, stages,
+       optimizer=im.LBFGS(),
+       regularization=prior,
+       uncertainty=im.BFGSUncertainty(stages="all"),
+   ).run()
+
+   result.uncertainty.std("vp", grid=grid).plot()
+   stage_uncertainty = result.stages[0].uncertainty
+   covariance_direction = result.uncertainty.covariance @ direction
+   result.save("inversion")
+   restored = im.FWIResult.load("inversion", problem=result.problem)
+
+``noise_std`` supplies explicit waveform L2 noise scales, with summed residual
+energy. It cannot be combined with separate normalization or weighting options.
+The prior contributes its value, gradient and curvature to inversion. Quantities
+in ``std`` are converted to each material property's units; a scalar, array or
+mapping by block name is accepted.
+
+``BFGSUncertainty()`` saves the final stage by default; ``stages="all"`` also
+saves earlier stages in their own control bases. FrequenSolve automatically
+whitens by the prior, freezes the starting inverse diagonal and retains the
+complete accepted BFGS history for each selected stage. The prior participates
+in every objective evaluation. Sauce constructs the inverse-curvature
+approximation using an exact compact factorization of the signed correction
+to that diagonal. Its
+rank is at most twice the number of accepted curvature pairs, plus any retained
+stage seed directions. ``rank=20``, for example, retains at most twenty modes
+with the largest absolute eigenvalues.
+This is an approximation to posterior covariance inferred from the fitted
+objective and its optimization history.
+
+``std`` and ``variance`` return labelled xarray fields with physical units and
+support masks. Passing ``grid`` computes the variance of the interpolated field
+as ``diag(T C T.T)`` in Sauce, preserving correlations between coefficients.
+Interpolating coefficient standard deviations would give a different result.
+Cells outside the material and cells depending on frozen coefficients are
+masked. Without ``grid``, meshed fields are indexed by coefficient. The
+``covariance`` operator acts on the active coefficient space; saved results
+retain its factors, support, units and mesh basis. Saving hard-links the
+immutable factor and mesh files instead of copying them (it copies only where
+the filesystem cannot link) and writes the point and support masks to
+``uncertainty.h5``; ``uncertainty.json`` holds only the layout. Loading with a matching
+``problem`` enables native grid projection and mesh sampling. Loading with
+``space=...`` alone supports coefficient marginals and covariance actions from
+the saved factors in memory.
+
+Priors across mesh refinement
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Meshed controls commonly refine at frequency-stage transitions. The default
+``GaussianPrior(mesh_measure="volume")`` uses positive lumped material-volume
+weights, normalized by the complete material volume. For coefficient values
+``m_i``, transferred reference values ``mu_i``, physical scales ``sigma_i`` and
+normalized weights ``w_i``, its penalty is:
+
+.. math::
+
+   R(m) = \frac{1}{2}\sum_i w_i
+          \left(\frac{m_i-\mu_i}{\sigma_i}\right)^2,
+   \qquad \sum_i w_i = 1.
+
+Here ``std`` specifies the scale of a physical field perturbation. The
+corresponding independent nodal prior standard deviation is
+``sigma_i / sqrt(w_i)``. A constant perturbation with constant physical scale
+has the same penalty after refinement; simply assigning the same independent
+nodal variance to every refined coefficient would increase the prior strength.
+``mesh_measure="coefficients"`` explicitly selects that resolution-dependent
+independent nodal convention instead.
+
+At every stage Sauce lifts both the reference mean and the physical scale field
+from the original reference mesh through the native constrained material basis,
+then recomputes the target mesh's volume weights. Keep ``reference=problem.state``
+from the original problem when refining with ``Stage(controls=...)``. Each stage
+has a newly discretized prior and a fresh BFGS history. Earlier posterior factors
+remain tied to their original mesh; they are not propagated as the next stage's
+prior. This defines refinement of a regularization model, rather than a
+mesh-independent stochastic field process.
+
+These statistical operations currently require real material controls with the
+identity transform and linear root geometry. Curved roots and mesh extensions
+are rejected until their bound physical geometry can be integrated. Uncertainty
+requires waveform L2 with declared noise, L-BFGS and a Gaussian prior; custom
+workflow scaling, patch workflows and active bounds at the returned point are
+rejected.
+
+Native postprocessing runs Sauce's ``--curvature`` operations on CPUs. BFGS,
+prior, covariance, transfer and Rickett operations are distributed over
+contiguous coefficient rows; mesh transfer and sampling always run on one rank
+with the whole thread budget. ``LocalSite`` launches ``curvature_ranks`` MPI
+ranks (default one) that share its worker thread budget, disables Open MPI's
+default one-core rank binding and honors explicit thread environment overrides.
+SLURM sites run each operation on compute nodes: inside an attached running
+allocation, or as a batch job sized by ``curvature_run_config`` (default
+``run_config``; one rank per socket unless ``ranks_per_node`` is set, one node
+for mesh operations). Every rank gets its own cores (``srun --cpus-per-task``,
+TACC ``task_affinity`` or Open MPI ``slot:PE`` mapping) with
+``OMP_PLACES=cores`` and ``OMP_PROC_BIND=close`` unless the site environment
+sets them; ranks from other ``mpirun`` launchers stay unbound. They mirror the
+local curvature directory under ``<scratch_dir or work_dir>/curvature/``,
+upload a history, mesh or factor file only when no same-size remote copy
+exists, read remotely computed factors in place and fetch only each result and
+solver log. Staged remote files are kept for reuse and count against the
+remote quota until ``site.remove_curvature_files(workdir)`` deletes the mirror
+of one local curvature directory (``<backend workdir>/curvature`` for
+``problem.backend.curvature()``). Without ``workdir`` it considers every
+mirror: ``older_than=timedelta(days=7)`` removes mirrors unused for a week and
+``max_bytes=...`` then removes the least recently used ones until the rest fit
+the budget; with neither, all are removed. A later operation re-uploads what it
+needs.
+``problem.backend.curvature(nodes=2, ranks_per_node=4)`` (or ``ranks=4``
+locally) overrides resources for explicitly requested operations. The
+configured solver runs as is; ``FS_seismic`` routes each request to its
+backend, using the property-space ``dimension`` sent with mesh operations.
+Cloud sites reject curvature before any wave solve. Each rank reads only its
+own rows, but the SDK still writes complete coefficient arrays to the staged
+HDF5 files, and every new BFGS history is transferred in full.
+
+Curvature across frequency stages
+---------------------------------
+
+The default ``CurvatureTransfer.reset()`` starts each stage with its freshly
+estimated diagonal metric. To reuse directions learned at lower frequencies
+while measuring their curvature against the new stage's objective, request:
+
+.. code-block:: python
+
+   result = im.FWI(
+       problem, stages,
+       regularization=prior,
+       curvature=im.CurvatureTransfer.refresh(rank=20),
+       uncertainty=im.BFGSUncertainty(stages="all"),
+   ).run()
+
+``Stage(curvature=...)`` overrides the workflow policy for that stage. For
+example, ``im.CurvatureTransfer.reset()`` deliberately discards inherited
+directions at a selected transition. The first stage has no preceding curvature
+and starts from its own diagonal baseline.
+
+At a transition, Sauce compresses the previous stage's inverse-curvature
+correction and FrequenSolve selects at most ``rank`` directions. Meshed material
+directions are transferred through the native constrained basis in physical
+coefficient units. Target basis and metric identities are checked; source
+properties, geometry controls and nonlinear coefficient transforms are rejected.
+Gradient differences are never interpolated across objectives. New accepted
+secants belong exclusively to the new stage.
+
+With ``refresh``, Sauce orthonormalizes the transferred directions in the target
+baseline metric and removes dependent or small directions according to
+``basis_tolerance`` (default ``1e-4``). FrequenSolve evaluates the target data
+normal plus prior curvature on each retained direction at the accepted stage
+starting model. Sauce forms and inverts the resulting small reduced Hessian to
+construct the seed. Images of the iteratively solved normal are symmetric only
+to the solver tolerance, so Sauce symmetrizes that Hessian and rejects a
+relative asymmetry above ``symmetry_tolerance`` (default ``1e-2``; set it with
+``CurvatureTransfer.refresh(symmetry_tolerance=...)``), as from an
+inconsistent JVP/VJP pair. The stage's ``metrics["curvature_transfer"]`` and
+uncertainty provenance record the measured ``hessian_asymmetry``.
+This adds one target normal action per retained direction;
+it does not assemble a full Hessian. New fine-scale directions absent from the
+transferred subspace use the freshly estimated target diagonal baseline.
+The inverse approximation retains that baseline in the metric-orthogonal
+complement, where curvature has not been measured by the refresh.
+Coupling between the retained subspace and its complement is omitted from the
+seed; subsequent stage-local BFGS updates can learn it.
+
+``im.CurvatureTransfer.warm_start(rank=20)`` transfers the old correction
+relative to its own diagonal baseline, without new normal actions. For a source
+inverse ``B_s^(1/2) (I + W diag(e) W^T) B_s^(1/2)``, the whitened modes ``W`` are
+lifted and re-colored with the target baseline ``B_t``, so a baseline that
+``scaling="curvature"``, a probed ``Diagonal`` or the stage scale below
+re-estimates carries the correction with it instead of mis-scaling it. Where a
+block's basis changes, its lifted whitened modes keep their source norm, so
+interpolation onto more coefficients does not amplify the correction. Sauce
+damps the result only if it is not positive, with one factor that keeps the
+initial inverse at least one percent of its baseline in every direction.
+This can accelerate optimization,
+but its inherited curvature belongs to the old objective. When inherited
+directions exist, warm-start stages cannot publish posterior uncertainty; use
+``refresh`` before requesting uncertainty on such a stage. Saved refreshed
+uncertainty records its seed provenance and target objective. Rank truncation
+and the retained baseline complement remain approximations even after refresh;
+refinement alone supplies no new fine-scale measurements.
+
+Transfer currently supports full-domain L-BFGS on real material controls with
+the identity transform and a fixed positive diagonal baseline. General operator
+metrics and patch workflows are rejected. Meshed transfer has the same linear
+root and shared initial-geometry requirements as Gaussian-prior lifting.
+Directions use constrained nodal interpolation, even when model-state transfer
+uses a smoothed L2 projection. These are distinct transfer operators.
+Optimization bounds are supported; publishing uncertainty still requires an
+interior final point. Transfer-only runs retain the optimizer's
+configured limited-memory secants; uncertainty runs retain the complete stage
+history. Neither policy carries old secant pairs into the new objective.
+The objective must be smooth: ``FWI`` rejects TV and TGV terms, including native
+smoothing configurations of those kinds, before any solve. Native Tikhonov, the
+default ``problem.smoothing`` kind, is identified by its configuration, weight,
+reference and frozen stage context; a custom term needs an ``identity`` on its
+declaration or on its bound term.
+
+Every stage of a transfer run, including the first and ``reset`` stages, freezes
+its initial inverse so that its history remains an exact compact operator for
+the next transition. Plain L-BFGS instead rescales its initial inverse at every
+iteration by the scalar gamma ``s^T y / y^T y``. A frozen, unscaled baseline is
+off by the ratio of the actual curvature to one: with a Gaussian prior standard
+deviation of 0.01, two five-iteration stages took 112 objective evaluations
+instead of 38. Without an explicit ``preconditioner``, each stage therefore
+measures ``gamma0 = g^T B g / (B g)^T H (B g)`` at its starting model, using one
+Hessian action (data normal plus regularization curvature) on the
+bound-projected, baseline-preconditioned gradient, and freezes ``gamma0 B``
+before forming a seed. The first step is then exact on the local quadratic
+model; the run above takes 12 evaluations. This costs one normal action per
+stage and is recorded as ``initial_scale`` in
+``StageResult.metrics["curvature_transfer"]``. An explicit ``Identity`` or
+fixed ``Diagonal`` preconditioner is used unscaled, as in runs without
+transfer, and uncertainty stages keep the prior covariance as their baseline.
+
+Each stage ends with at most one Sauce factorization of its history, run only
+when the next stage transfers curvature from it or the stage publishes
+uncertainty; both then share the factors, computed at the larger of the
+uncertainty rank and the transfer rank. Nothing is factorized after the final
+stage unless it publishes uncertainty.
+
+Checkpoints retain the seed factors, identities, provenance, scaling and current
+stage's optimizer pairs. Resuming in the middle of a stage restores the same
+initial operator; resuming at a completed stage boundary preserves the compressed
+directions needed by the next stage. A stage interrupted during its
+factorization is finished before the next stage starts, so the next stage
+never seeds from older factors. Changing a saved seed or its configured
+policy is rejected rather than silently rebuilding a different trajectory.
+Checkpoint admission also verifies the penalty, scaling and diagonal-metric
+declarations before skipping a completed stage. Older curvature or uncertainty
+checkpoints without these declarations require a fresh run.
+
+Reference illumination
+----------------------
+
+For Rickett reference illumination, declare a reference image on the same
+regular lattice as the linearization and use physical smoothing distances:
+
+.. code-block:: python
+
+   illumination = im.ReferenceIllumination(
+       reference=reference_image,
+       smoothing={"x": 200 * u.m, "z": 100 * u.m},
+       relative_damping=0.01,
+   )
+   image = im.rtm(problem, illumination=illumination)
+
+   calibration = problem.linearize().illumination(illumination)
+   weights = calibration.weights
+   corrected = calibration.apply(raw_image)
+
+Calibration applies the frozen data normal to the joint reference vector once,
+including coupling between material blocks. Sauce computes depth envelopes,
+smooths the remigrated envelope and forms the reference-to-remigration envelope
+ratio. ``calibration.apply`` reuses the reference modeling and remigration for
+subsequent raw images. It returns the same typed control-vector representation
+as ordinary RTM.
+
+``relative_damping=0.01`` adds one percent of each block's maximum smoothed
+remigrated envelope to its denominator. The default ``padding="reflect"``
+reflects one full depth extent at each end before the analytic-signal FFT,
+reducing periodic boundary contamination; an integer selects the number of
+reflected depth samples and zero selects the unpadded periodic transform.
+Smoothing uses box half-widths and normalized truncated windows at grid edges.
+The high-level illumination API currently requires complete regular lattice
+material blocks with a depth axis named ``z``, ``depth`` or ``s``. Meshed-control
+illumination needs an explicit regular sampling grid and is not yet supported.
+
+Low-level backend operations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``BFGSHistory`` and ``NativeCurvature`` remain available for explicit history
+archives and backend actions. ``BFGSHistory`` rejects truncated histories,
+optimizer resets and mixed stages. ``NativeCurvature`` invokes Sauce's
+``--curvature`` operation for inverse actions, covariance factors and
+projections, Gaussian penalties, mesh transfer and Rickett weighting.
+``problem.backend.curvature(**resources)`` returns one bound to the problem's
+site; any other ``runner(request_path)`` may stage and execute requests itself,
+returning once the request's output is available locally. Factor construction,
+mesh transfer and grid projection remain in Sauce; coefficient covariance
+actions reuse its cached factors in memory.
+
+A result is published only when Sauce reports, for every dataset it read, the
+``fs-block-sha256-1`` digest that FrequenSolve computed from the staged arrays;
+each history's digests are computed once, in parallel. Reusable factors record
+the digest of every dataset Sauce wrote. Later covariance requests must report
+matching digests for the factors they read, and FrequenSolve checks factor
+arrays in memory as it loads them, so no file is rehashed.
+``CurvatureResult.verify()`` rechecks a factor file explicitly.
+
+An operation on a ``BFGSHistory`` stages it as
+``<workdir>/histories/<digest>.h5`` (one controls-by-pairs block, linked from the
+request) and deletes the file as soon as the operation finishes, whether or
+not it succeeds; no result references it. To run several operations on one
+history without rewriting it, wrap them in ``with native.retain(history):``.
+Remote SLURM mirrors keep their copy until ``site.remove_curvature_files()``, so
+restaging a history there uploads nothing. Each operation directory keeps its
+``result.h5``; the staged ``input.h5`` (directions or images, up to
+rank-by-controls) is deleted once the result is verified, unless the result has
+an HDF5 external link into it: warm-start factors link their unchanged
+``/modes``, so that input stays with them. A failed operation keeps its input.
+
+The archive's fixed baseline and prior scaling must describe the actual fitted
+objective and coefficient chart. Ordinary L-BFGS may update its baseline by a
+scalar gamma; an independently constructed fixed-baseline history does not
+reproduce that changing optimizer operator. The high-level uncertainty workflow
+freezes its baseline to keep this contract consistent. Existing solver builds
+without these operations must be updated before using the API.

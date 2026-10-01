@@ -4,17 +4,20 @@ import asyncio
 import builtins
 import html
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import (
     Any,
     Awaitable,
     Callable,
+    ClassVar,
     Dict,
     Generator,
     Iterable,
+    List,
     Mapping,
     Optional,
     Protocol,
@@ -186,6 +189,32 @@ def _wait_for_path(
         time.sleep(poll_interval)
         waited += poll_interval
     return path.exists()
+
+
+def _result_relative_paths(relative_paths: Iterable[Any]) -> List[PurePosixPath]:
+    """Validate file paths that must stay inside a job result directory."""
+
+    if isinstance(relative_paths, (str, bytes, os.PathLike)):
+        raise TypeError("relative_paths must be an iterable of paths, not one path")
+    validated = []
+    for value in relative_paths:
+        text = os.fspath(value)
+        if not isinstance(text, str):
+            raise TypeError("result file paths must be text")
+        path = PurePosixPath(text)
+        if (
+            any(character in text for character in ("\0", "\n", "\r", "\\"))
+            or path.is_absolute()
+            or ".." in path.parts
+            or not path.parts
+            or (len(text) > 1 and text[1] == ":" and text[0].isalpha())
+        ):
+            raise ValueError(
+                f"Result file path {text!r} must be a relative '/'-separated "
+                "path inside the job result directory"
+            )
+        validated.append(path)
+    return validated
 
 
 def _check_if_notebook() -> bool:
@@ -1044,6 +1073,61 @@ class BaseSite:
         verbose: Whether site methods should print status messages in addition
             to logging them.
     """
+
+    supports_curvature = False
+
+    supports_background_reuse: ClassVar[bool] = False
+    """Whether later jobs can reuse ``fwi_operator/background`` checkpoints.
+
+    A ``linearize`` job with a ``background`` output leaves per-task
+    manifests, per-rank shards and HDF5 field snapshots in its result
+    directory. A later ``jvp``/``vjp``/``normal`` job naming that background
+    reads them in place, so the site must keep the producer's result
+    directory where the consumer runs, and run each consumer task on the same
+    MPI rank count as the producing task (otherwise Sauce recomputes the
+    fields). ``True`` on ``LocalSite`` and SLURM sites, whose result
+    directories persist and which run every task reading a partitioned input
+    (saved state, objective vector, receiver state or background) on the rank
+    count its producer recorded. ``False`` here and on ``AWSSite``, whose
+    workers start from fresh storage; workflows must not request backgrounds
+    on such sites.
+    """
+
+    def run_curvature(self, request: Path) -> None:
+        """Execute one Sauce ``--curvature`` request on this site's compute resources.
+
+        Return only after the request's declared ``output`` and a
+        ``solver.log`` beside the request are available locally. Sites may
+        accept keyword resource overrides; the caller verifies the output.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not run Sauce curvature operations; "
+            "use LocalSite or a SLURM site"
+        )
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Delete files below ``job``'s result directory where this site keeps it.
+
+        Args:
+            job: Job whose result directory holds the files.
+            relative_paths: File paths relative to that directory, with ``/``
+                separators. Every path is validated before anything is
+                removed: absolute paths, ``..`` components, backslashes,
+                control characters and paths naming the directory itself
+                raise :class:`ValueError`.
+
+        Missing files are not errors and directories are never removed.
+        ``LocalSite`` unlinks the files and SLURM sites remove them on the
+        login node; this base implementation (and ``AWSSite``) only validates
+        the paths, because those sites keep no reusable result files.
+        """
+
+        if _result_relative_paths(relative_paths):
+            logging.getLogger(self.__class__.__module__).debug(
+                "%s keeps no reusable result files; nothing removed for %s",
+                type(self).__name__,
+                getattr(job, "name", job),
+            )
 
     _is_notebook: bool = field(default_factory=_check_if_notebook)
     verbose: bool = False

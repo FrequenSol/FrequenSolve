@@ -384,7 +384,7 @@
         },
         "params": {
           "type": "object",
-          "description": "Hook-specific deterministic parameters. trace_weight accepts finite nonnegative weights and an explicit receiver, component_receiver, source_component_receiver, or sparse_trace layout; production arrays use an HDF5Dense reference while compact inline arrays remain supported. receiver_ar1_whiten accepts a finite correlation with absolute value below one and applies the exact stationary AR(1) inverse covariance factor along an ordered dense receiver axis. source_scalar_fit accepts norm (default inherit), max_iterations, relative_tolerance, and matching robust-loss parameters; n_irls is a deprecated max_iterations alias. source_spectrum_correction requires simulated stage plus complex scale and frequency_derivative arrays, each containing one broadcast value or global per-RHS values; complex entries are [real, imaginary] pairs and the derivative is with respect to physical Hz. scholte_notch accepts exactly one of phase_velocity or angular wavenumber plus relative_half_width, relative_taper_width, spacing_tolerance, and total or frozen spectral_derivative. slow_velocity_mute accepts stop_velocity, pass_velocity, reject_slow or keep_slow mode, spacing_tolerance, and the same spectral_derivative policy. Receiver-wavenumber hooks require a regularly sampled dense cable and use trace_pair stage. For taper hooks, absolute d0/d1 values may carry physical units via a shared units field or per-value {value, units} objects; domain_fraction d0/d1 values are dimensionless fractions of the largest domain extent. Acquisition-spacing scales are unsupported. material_weighting defines disjoint one-based component blocks, a material coefficient and output units. It freezes receiver-local factors on first application, applies W to both traces and W^H to covectors, and requires frequency-independent coefficients. Unspecified components keep their input coordinates; live model-dependent weighting is unavailable.",
+          "description": "Hook-specific deterministic parameters. trace_weight accepts finite nonnegative weights and an explicit receiver, component_receiver, source_component_receiver, or sparse_trace layout; production arrays use an HDF5Dense reference while compact inline arrays remain supported. receiver_ar1_whiten accepts a finite correlation with absolute value below one and applies the exact stationary AR(1) inverse covariance factor along an ordered dense receiver axis. source_scalar_fit accepts norm (default inherit), max_iterations, relative_tolerance, and matching robust-loss parameters; n_irls is a deprecated max_iterations alias. source_spectrum_correction requires simulated stage plus complex scale and frequency_derivative arrays, each containing one broadcast value or global per-RHS values; complex entries are [real, imaginary] pairs and the derivative is with respect to physical Hz. scholte_notch accepts exactly one of phase_velocity or angular wavenumber plus relative_half_width, relative_taper_width, spacing_tolerance, and total or frozen spectral_derivative. slow_velocity_mute accepts stop_velocity, pass_velocity, reject_slow or keep_slow mode, spacing_tolerance, and the same spectral_derivative policy. Receiver-wavenumber hooks require a regularly sampled dense cable and use trace_pair stage. For taper hooks, absolute d0/d1 values may carry physical units via a shared units field or per-value {value, units} objects; domain_fraction d0/d1 values are dimensionless fractions of the largest domain extent. Acquisition-spacing scales are unsupported. material_weighting defines disjoint one-based component blocks, a material coefficient and output units, applies W to both traces and W^H to covectors, and requires frequency-independent coefficients. mode frozen (default) holds W fixed within the objective instance and adds no material derivative; mode live evaluates W from the current model in each job and adds its model derivative to gradients and to separate fwi_operator jvp, vjp and normal actions; Explicit material domains select coefficients independently of receiver field domains; selected coefficients require frozen or pinned mode. mode pinned reuses a reference factor persisted in state_file. Unspecified components keep their input coordinates.",
           "additionalProperties": true
         }
       },
@@ -414,10 +414,42 @@
                 "required": [
                   "blocks"
                 ],
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "pinned"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "state_file"
+                  ]
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "state_file"
+                    ]
+                  }
+                },
                 "properties": {
-                  "model_policy": {
-                    "const": "frozen",
-                    "default": "frozen"
+                  "mode": {
+                    "enum": [
+                      "frozen",
+                      "live",
+                      "pinned"
+                    ],
+                    "default": "frozen",
+                    "description": "frozen samples W once per objective instance and omits material derivatives; live reevaluates W and differentiates it; pinned persists one fixed reference factor in state_file across jobs. Independently selected material coefficients require frozen or pinned mode."
+                  },
+                  "state_file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Pinned reference-factor file, absolute or relative to the project path. The first job writes it; later jobs refuse it for different receiver points, hook configuration, or material model structure."
                   },
                   "blocks": {
                     "type": "array",

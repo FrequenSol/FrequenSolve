@@ -583,7 +583,12 @@ class BaseJob(
                 frequency layout.
         """
 
-        if self.outputs.vtk and len(self.f_list) != 1:
+        ordinary_vtk = [
+            output
+            for output in self.outputs.vtk
+            if (output.source or {}).get("kind") != "control_gradient"
+        ]
+        if ordinary_vtk and len(self.f_list) != 1:
             raise ValueError(
                 "VTK outputs currently require a single-frequency job. "
                 "Create one FrequencyDomainJob per plotted frequency."

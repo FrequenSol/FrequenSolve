@@ -20,16 +20,21 @@ not repeat:
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import inspect
 import itertools
 import json
 import shutil
+import warnings
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
 from typing import (
     Any,
+    Callable,
     Dict,
     Iterable,
     Iterator,
@@ -49,9 +54,11 @@ from frequensolve.imaging._artifacts import (
     ControlVectorFile,
     ObjectiveReport,
 )
+from frequensolve.imaging._block_digest import block_digest
 from frequensolve.imaging.data import DataSpace, DataVector
 from frequensolve.imaging.jobs import FWIOperatorJob, _task_path
 from frequensolve.orchestrator.sites.base import BaseSite, RunHandle, RunResult
+from frequensolve.orchestrator.sites.execution import resolve_execution
 from frequensolve.project import Project
 from frequensolve.simulation.jobs.base import BaseJob
 
@@ -59,6 +66,7 @@ __all__ = [
     "Backend",
     "LinearizationCache",
     "LinearizationEntry",
+    "background_checkpoint_files",
     "content_fingerprint",
     "fingerprint",
     "frequency_weights",
@@ -79,6 +87,42 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+# Arrays with at least this many elements are identified by their canonical
+# bytes instead of JSON lists (see :func:`fingerprint`); smaller ones keep the
+# JSON form, so their fingerprints are unchanged.
+_ARRAY_DIGEST_SIZE = 4096
+# Canonical element type of each array kind on the byte path.
+_ARRAY_KINDS = {"b": "bool", "f": "float", "i": "int", "u": "int", "c": "complex"}
+
+
+def _array_identity(value: np.ndarray) -> Optional[Dict[str, Any]]:
+    """Identify a large array by kind, shape and an ``fs-block-sha256-1`` digest.
+
+    Contiguous float64 arrays (and boolean masks, viewed as uint8 0/1 bytes)
+    are hashed in place on the shared digest thread pool; other real floats are
+    widened to float64, integers to int64, and complex values become float64
+    (real, imaginary) pairs. Returns ``None`` for small or other arrays.
+    """
+
+    kind = value.dtype.kind
+    if (
+        value.size < _ARRAY_DIGEST_SIZE
+        or isinstance(value, np.ma.MaskedArray)
+        or kind not in _ARRAY_KINDS
+        or value.dtype.itemsize > (16 if kind == "c" else 8)
+        or value.dtype == np.uint64
+    ):
+        return None
+    if kind == "b":
+        digest = block_digest(np.ascontiguousarray(value).view(np.uint8), np.uint8)
+    elif kind == "c":
+        pairs = np.ascontiguousarray(value, dtype=np.complex128).view(np.float64)
+        digest = block_digest(pairs, np.float64)
+    else:
+        digest = block_digest(value, np.float64 if kind == "f" else np.int64)
+    return {"fs_array": digest, "kind": _ARRAY_KINDS[kind], "shape": list(value.shape)}
+
+
 def _jsonable(value: Any) -> Any:
     """Convert fingerprint parts to canonical JSON-compatible values."""
 
@@ -88,6 +132,11 @@ def _jsonable(value: Any) -> Any:
         items = [_jsonable(item) for item in value]
         return sorted(items, key=repr) if isinstance(value, (set, frozenset)) else items
     if isinstance(value, np.ndarray):
+        identity = _array_identity(value)
+        if identity is not None:
+            return identity
+        if value.dtype.kind == "b":
+            value = value.astype(np.uint8)  # masks fingerprint as 0/1 on both paths
         return _jsonable(value.tolist())
     if isinstance(value, Path):
         return str(value)
@@ -112,7 +161,12 @@ def fingerprint(**parts: Any) -> str:
     active blocks, the frequencies, the misfit payload, and the content
     fingerprints of the observed data (see :func:`content_fingerprint`).
     NumPy arrays, paths, complex numbers, and objects exposing ``to_fs`` are
-    normalized before hashing.
+    normalized before hashing. Arrays with at least 4096 elements enter as
+    their kind (bool, float, int or complex), shape and ``fs-block-sha256-1``
+    digest of canonical bytes: booleans as uint8 0/1, real floats as float64,
+    integers as int64 and complex values as float64 pairs. Contiguous float64
+    data and masks are hashed in place, in parallel, without JSON lists.
+    Smaller arrays enter as JSON values (booleans as 0/1).
     """
 
     if not parts:
@@ -199,6 +253,8 @@ def reduce_covectors(
     job: FWIOperatorJob,
     weights: Optional[Sequence[float]] = None,
     factors: Optional[Sequence[Mapping[str, float]]] = None,
+    *,
+    output: Optional[int] = None,
 ) -> ControlVectorFile:
     """Reduce the per-task covector parts of ``job`` with frequency weights.
 
@@ -211,6 +267,7 @@ def reduce_covectors(
     task's saved state on its own (per-frequency mesh adaptation makes them
     differ), so the block layout and material-basis identities must agree;
     the reduced file preserves those identities and carries task 1's fingerprints.
+    ``output`` selects the covector of one entry of a multi-direction normal.
     """
 
     weight = frequency_weights(job, weights)
@@ -230,7 +287,9 @@ def reduce_covectors(
     blocks: Dict[str, np.ndarray] = {}
     support: Dict[str, np.ndarray] = {}
     for task in _tasks(job):
-        path = _require_file(job.covector_file(task), f"task {task} covector")
+        path = _require_file(
+            job.covector_file(task, output=output), f"task {task} covector"
+        )
         part = ControlVectorFile.read(path, native=False)
         if first is None:
             first = part
@@ -500,7 +559,7 @@ class Backend:
         submit_options: Optional[Mapping[str, Any]] = None,
         prefix: str = "imaging",
     ) -> None:
-        self.site = site
+        self._site = site
         self.workdir = Path(workdir).expanduser().resolve()
         self.submit_options: Dict[str, Any] = dict(submit_options or {})
         for key in ("check", "postprocess_only"):
@@ -513,11 +572,73 @@ class Backend:
         self._timing_lock = RLock()
         self._worker_seconds = 0.0
         self._unmeasured_runs = 0
+        self._recorders: Dict[int, List[BaseJob]] = {}
+
+    @property
+    def site(self) -> BaseSite:
+        """The executor currently bound to this backend's caller-owned site."""
+        return resolve_execution(self._site)
+
+    @site.setter
+    def site(self, value: BaseSite) -> None:
+        self._site = value
 
     def timing_snapshot(self) -> Tuple[float, int]:
         """Return counters for measuring a complete stage through this backend."""
         with self._timing_lock:
             return self._worker_seconds, self._unmeasured_runs
+
+    @contextmanager
+    def recording(self) -> Iterator[List[BaseJob]]:
+        """Collect every job this backend submits inside the ``with`` block.
+
+        Workflows use the list for per-run job counts and native diagnostics;
+        nested and concurrent recordings each receive every job.
+        """
+        jobs: List[BaseJob] = []
+        token = object()
+        with self._timing_lock:
+            self._recorders[id(token)] = jobs
+        try:
+            yield jobs
+        finally:
+            with self._timing_lock:
+                self._recorders.pop(id(token), None)
+
+    def _record(self, job: BaseJob) -> None:
+        with self._timing_lock:
+            for jobs in self._recorders.values():
+                jobs.append(job)
+
+    def curvature(self, **options: Any) -> Any:
+        """Return Sauce curvature postprocessing on this site and workdir.
+
+        Operations run through ``site.run_curvature``. ``options`` override
+        that site's resources for every operation of the returned object, for
+        example ``ranks``/``threads_per_rank`` on ``LocalSite`` or ``nodes``,
+        ``ranks_per_node``, ``queue`` and ``duration`` on SLURM sites. Without
+        options the site's defaults apply (``LocalSite.curvature_ranks``,
+        ``SlurmSite.curvature_run_config``). Mesh transfer and sampling always
+        run on one rank.
+        """
+        from .curvature import NativeCurvature
+
+        if not getattr(self.site, "supports_curvature", False):
+            raise NotImplementedError(
+                f"{type(self.site).__name__} does not run Sauce curvature "
+                "operations; use LocalSite or a SLURM site."
+            )
+        runner: Callable[[Path], None] = self.site.run_curvature
+        if options:
+            try:
+                inspect.signature(runner).bind(Path("request.json"), **options)
+            except TypeError as error:
+                raise TypeError(
+                    f"Unsupported curvature options for {type(self.site).__name__}: "
+                    f"{error}"
+                ) from None
+            runner = functools.partial(runner, **options)
+        return NativeCurvature(workdir=self.workdir / "curvature", runner=runner)
 
     def cost_since(self, snapshot: Tuple[float, int]) -> Dict[str, Any]:
         seconds, missing = self.timing_snapshot()
@@ -608,7 +729,11 @@ class Backend:
                 "This site does not yet launch shared-frequency workers; use LocalSite or the native --frequency-groups launcher"
             )
         self._stage_remote_inputs(job)
-        return self.site.submit(job, **self._options(postprocess_only=postprocess_only))
+        handle = self.site.submit(
+            job, **self._options(postprocess_only=postprocess_only)
+        )
+        self._record(job)
+        return handle
 
     def _stage_remote_inputs(self, job: BaseJob) -> None:
         """Upload operator inputs written on this machine to a remote site.
@@ -689,6 +814,8 @@ class Backend:
                 site.submit(job, **self._options(postprocess_only=False), **extra)
                 for job in jobs
             ]
+            for job in jobs:
+                self._record(job)
             results = site.wait_all(handles, check=check)
             for result, handle in zip(results, handles):
                 self._record_timing(result, handle)
@@ -700,9 +827,34 @@ class Backend:
     def run_preparation(self, job: BaseJob, *, check: bool = True) -> RunResult:
         """Account geometry-only preparation with the site's default rank profile."""
         handle = self.site.submit(job)
+        self._record(job)
         result = handle.wait(check=check)
         self._record_timing(result, handle)
         return result
+
+    def release_background(self, job: FWIOperatorJob) -> int:
+        """Delete a linearize job's native background checkpoint everywhere.
+
+        Removes the files :func:`background_checkpoint_files` lists from this
+        machine and from the site's copy of the job result directory
+        (``site.remove_result_files``), and clears ``job.background``: later
+        actions on that linearization run uncached and a new
+        ``background=True`` request linearizes again. Returns the released
+        size in bytes (estimated for payloads kept only on the site).
+        """
+        if getattr(job, "background", None) is None:
+            return 0
+        files, size = background_checkpoint_files(job)
+        root = Path(job._result_path)
+        # Never reference a checkpoint that may be partially deleted.
+        job.background = None
+        for name in files:
+            path = root / name
+            if path.is_file() or path.is_symlink():
+                path.unlink(missing_ok=True)
+        if files:
+            self.site.remove_result_files(job, files)
+        return size
 
     def dry_run(self, job: BaseJob) -> Dict[str, Any]:
         """Describe what :meth:`run` would submit without touching the site.
@@ -837,23 +989,136 @@ class LinearizationEntry:
         )
 
 
+_BACKGROUND_ROLES = ("checkpoint", "background_shard", "background_state")
+
+
+def background_checkpoint_files(job: FWIOperatorJob) -> Tuple[List[str], int]:
+    """Return a linearize job's background checkpoint files and their size.
+
+    Paths are relative to the job result directory: each task's
+    ``fs-background-state-1`` manifest, the per-rank shards it lists (HDF5
+    shards holding every source batch, or, from earlier solver builds, JSON
+    shard manifests naming ``<shard>_batch_<b>.h5`` payloads) and every
+    task-catalog record with a checkpoint role. The manifests are
+    authoritative because earlier builds recorded only rank 0's files in the
+    task catalog. Files present on this machine count their size, payloads
+    kept only on the site their catalog size, and unrecorded payloads are
+    estimated from the recorded ones.
+    """
+    if getattr(job, "background", None) is None:
+        return [], 0
+    root = Path(job._result_path).expanduser().resolve(strict=False)
+    sizes: Dict[str, Optional[int]] = {}
+
+    def add(path: Path, size: Optional[int] = None) -> Optional[Path]:
+        path = Path(path).expanduser().resolve(strict=False)
+        try:
+            name = path.relative_to(root).as_posix()
+        except ValueError:
+            return None
+        if name in ("", "."):
+            return None
+        if path.is_file():
+            size = path.stat().st_size
+        sizes[name] = size if size is not None else sizes.get(name)
+        return path
+
+    for task in range(1, int(getattr(job, "n_tasks", 1) or 1) + 1):
+        manifest = add(job.background_file(task))
+        if manifest is None:
+            continue
+        try:
+            state = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            continue
+        shards = state.get("shards") if isinstance(state, Mapping) else None
+        if isinstance(shards, Mapping):
+            shards = list(shards.values())
+        batches = state.get("batches", 0) if isinstance(state, Mapping) else 0
+        for shard in shards if isinstance(shards, list) else []:
+            name = shard.get("file") if isinstance(shard, Mapping) else None
+            if not isinstance(name, str) or not name:
+                continue
+            path = add(manifest.parent / name)
+            if path is None or path.suffix != ".json":
+                continue
+            # Earlier builds: one payload per batch beside a JSON shard manifest.
+            for batch in range(batches if isinstance(batches, int) else 0):
+                add(path.parent / f"{path.stem}_batch_{batch}.h5")
+            try:
+                records = json.loads(path.read_text()).get("shards") or []
+            except (OSError, ValueError, AttributeError):
+                records = []
+            for record in records if isinstance(records, list) else []:
+                payload = record.get("file") if isinstance(record, Mapping) else None
+                if isinstance(payload, str) and payload:
+                    add(path.parent / payload)
+    try:
+        from frequensolve.simulation.task_index import load_task_catalog
+
+        catalog = load_task_catalog(
+            root, tasks=range(1, int(getattr(job, "n_tasks", 1) or 1) + 1)
+        )
+        for role in _BACKGROUND_ROLES:
+            for record in catalog.query(role=role):
+                add(record.path, record.bytes)
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass  # no committed task results on this machine (e.g. test sites)
+    payloads = [size for name, size in sizes.items() if name.endswith(".h5")]
+    known = [size for size in payloads if size is not None]
+    estimate = int(sum(known) / len(known)) if known else 0
+    total = sum(size for size in sizes.values() if size is not None)
+    total += estimate * sum(size is None for size in payloads)
+    return sorted(sizes), int(total)
+
+
 class LinearizationCache:
     """Least-recently-used cache of :class:`LinearizationEntry` objects.
+
+    Evicted entries release their native background checkpoints through
+    ``release`` (wired by the problem to ``Backend.release_background``), as
+    do the least recently used entries once the retained checkpoints exceed
+    ``background_budget`` bytes; the newest checkpoint is never released by
+    the budget, because the workflow that requested it is still using it.
 
     Args:
         workdir: Directory the cache is allowed to delete inside.  Evicted
             entries whose ``directory`` lies elsewhere are forgotten but kept
             on disk.
         capacity: Maximum number of live entries.
+        release: Callback deleting one entry's background checkpoint.
+        background_budget: Optional limit on retained checkpoint bytes.
     """
 
-    def __init__(self, workdir: Union[str, Path], capacity: int = 2) -> None:
+    def __init__(
+        self,
+        workdir: Union[str, Path],
+        capacity: int = 2,
+        *,
+        release: Optional[Callable[[LinearizationEntry], Any]] = None,
+        background_budget: Optional[float] = None,
+    ) -> None:
         self.workdir = Path(workdir).expanduser().resolve()
         self.capacity = int(capacity)
         if self.capacity < 1:
             raise ValueError("LinearizationCache capacity must be at least 1")
         self._entries: "OrderedDict[str, LinearizationEntry]" = OrderedDict()
         self.evicted: List[str] = []
+        self.release = release
+        self.background_budget = background_budget
+
+    @property
+    def background_budget(self) -> Optional[float]:
+        """Retained background checkpoint bytes before LRU release (``None``: no limit)."""
+        return self._background_budget
+
+    @background_budget.setter
+    def background_budget(self, value: Optional[float]) -> None:
+        if value is not None:
+            value = float(value)
+            if not np.isfinite(value) or value < 0:
+                raise ValueError("background_budget must be finite and nonnegative")
+        self._background_budget = value
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -880,13 +1145,16 @@ class LinearizationCache:
     def put(self, entry: LinearizationEntry) -> List[LinearizationEntry]:
         """Insert ``entry`` as most recently used and return evicted entries."""
 
-        self._entries.pop(entry.fingerprint, None)
+        replaced = self._entries.pop(entry.fingerprint, None)
+        if replaced is not None and replaced.job is not entry.job:
+            self._release(replaced)
         self._entries[entry.fingerprint] = entry
         evicted = []
         while len(self._entries) > self.capacity:
             _, old = self._entries.popitem(last=False)
             self._remove(old)
             evicted.append(old)
+        self._enforce_background_budget(entry)
         return evicted
 
     def evict(self, key: str) -> Optional[LinearizationEntry]:
@@ -915,8 +1183,49 @@ class LinearizationCache:
             return False
         return True
 
+    def _release(self, entry: LinearizationEntry) -> None:
+        if self.release is None or getattr(entry.job, "background", None) is None:
+            return
+        try:
+            self.release(entry)
+        except Exception as exc:  # cleanup must never fail an inversion
+            warnings.warn(
+                f"Could not delete the background checkpoint of "
+                f"{getattr(entry.job, 'name', entry.fingerprint)!r}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+    def background_bytes(self) -> Dict[str, int]:
+        """Return retained background checkpoint bytes per cache key (LRU first)."""
+
+        sizes = {}
+        for key, entry in self._entries.items():
+            if getattr(entry.job, "background", None) is None:
+                continue
+            size = entry.extra.get("background_bytes")
+            if size is None:
+                size = background_checkpoint_files(entry.job)[1]
+                entry.extra["background_bytes"] = size
+            sizes[key] = int(size)
+        return sizes
+
+    def _enforce_background_budget(self, newest: LinearizationEntry) -> None:
+        if self.background_budget is None or self.release is None:
+            return
+        sizes = self.background_bytes()
+        total = sum(sizes.values())
+        for key, size in sizes.items():
+            if total <= self.background_budget:
+                break
+            if key == newest.fingerprint:
+                continue
+            self._release(self._entries[key])
+            total -= size
+
     def _remove(self, entry: LinearizationEntry) -> None:
         self.evicted.append(entry.fingerprint)
+        self._release(entry)
         directory = entry.directory
         if directory is None:
             return

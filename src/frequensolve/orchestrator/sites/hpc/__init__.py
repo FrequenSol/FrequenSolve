@@ -1,6 +1,10 @@
 """SLURM/HPC site backends."""
 
 from frequensolve.orchestrator.sites.hpc.config import Stampede3Config
+from frequensolve.orchestrator.sites.hpc.session import (
+    AdaptiveWorkers,
+    AllocationSession,
+)
 from frequensolve.orchestrator.sites.hpc.site import (
     SlurmLoginCredentials,
     SlurmPartitionConfig,
@@ -20,6 +24,8 @@ from frequensolve.orchestrator.sites.hpc.stampede3 import (
 )
 
 __all__ = [
+    "AdaptiveWorkers",
+    "AllocationSession",
     "SlurmLoginCredentials",
     "SlurmPartitionConfig",
     "SlurmRunConfig",

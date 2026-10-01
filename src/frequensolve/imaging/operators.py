@@ -400,6 +400,20 @@ class Normal(ModelOperator):
 
     _rmatvec = _matvec
 
+    def _matmat(self, x: np.ndarray) -> np.ndarray:
+        """Apply every column through one batched ``normal`` job."""
+
+        columns = np.asarray(x)
+        products = self.linearization.apply_normal_batch(
+            [_real_direction(columns[:, j]) for j in range(columns.shape[1])]
+        )
+        result = np.zeros((self.shape[0], columns.shape[1]))
+        for j, product in enumerate(products):
+            result[:, j] = product.values
+        return result
+
+    _rmatmat = _matmat
+
     def _adjoint(self) -> ModelOperator:
         return self
 

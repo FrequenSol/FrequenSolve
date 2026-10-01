@@ -1196,7 +1196,6 @@ def test_adaptive_slurm_script_skips_sizing_for_single_task(monkeypatch):
     assert '"skip_sizing": true' in script
     assert "--init-no-size" in script
     assert '--init-no-size > "$dir_out/init.log" 2>&1' in script
-    assert "--map" not in script
     assert '"total_ranks": 8' in script
     assert '"task_indices": [' in script
     assert "    4" in script
@@ -1326,7 +1325,7 @@ def _run_adaptive_sweep(
         hostname="login.example.edu",
         queue="debug",
         mpi_wrapper=str(launcher),
-        # Non-empty so macOS bash 3.2 accepts "${mpi_args[@]}" under set -u.
+        # Configured launcher arguments reach every launch.
         launcher_args=("--wait=30",),
         max_nodes=1,
         cores_per_node=2,
@@ -1469,7 +1468,8 @@ def test_adaptive_slurm_script_can_run_imaging_smooth_only(monkeypatch):
 
     assert "Skipping frequency sweep; running solver postprocess only." in script
     assert (
-        '"$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" '
+        '"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$n_procs" '
+        '${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" '
         '--job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1'
     ) in script
     assert "--init" not in script
@@ -2174,7 +2174,8 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     assert "-nthreads $n_threads" in batch_script
     assert "-nthreads $n_threads" in attached_script
     assert (
-        '"$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" '
+        '"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$n_procs" '
+        '${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" '
         '--job "$job_file" $fresh_flag --smooth'
     ) in batch_script
     assert (
@@ -2183,7 +2184,6 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     ) in attached_script
     assert '--init --sizing "$sizing_json" > "$dir_out/init.log" 2>&1' in batch_script
     assert "--init > $dir_out/init.log 2>&1" in attached_script
-    assert "--map" not in batch_script
     assert "--map" not in attached_script
     assert "--pack" not in attached_disabled_script
     assert "--pack" not in disabled_script

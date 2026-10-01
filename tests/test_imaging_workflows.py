@@ -1,5 +1,6 @@
 """Workflow tests on the solver-free fake site (linear surrogate)."""
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -36,9 +37,11 @@ from frequensolve.imaging.workflows import (
 from frequensolve.inversion import (
     ContinuationSchedule,
     ContinuationStage,
+    InexactNewtonIteration,
     OptimizationCheckpoint,
     OptimizationHistory,
 )
+from frequensolve.inversion.optimization import _shares_arrays
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 from tests.test_imaging_jobs import _assert_valid
 
@@ -356,6 +359,134 @@ def test_optimizer_configs_wrap_the_generic_minimizers_with_scaling_and_step_lim
     first_order = SimpleNamespace(value=quadratic.value, gradient=quadratic.gradient)
     with pytest.raises(ValueError, match="hessian_action"):
         NewtonCG().solve(first_order, np.zeros(6))
+
+
+class _Recording(_Quadratic):
+    """A user objective recording every array it receives."""
+
+    def __init__(self, A, b):
+        super().__init__(A, b)
+        self.arguments = []
+
+    def value(self, x):
+        self.arguments.append(x)
+        return super().value(x)
+
+    def gradient(self, x):
+        self.arguments.append(x)
+        return super().gradient(x)
+
+    def hessian_action(self, x, dx):
+        self.arguments += [x, dx]
+        return super().hessian_action(x, dx)
+
+
+class _SharedRecording(_Recording):
+    """The same objective declaring the SDK array contract."""
+
+    @_shares_arrays
+    def value(self, x):
+        return super().value(x)
+
+    @_shares_arrays
+    def gradient(self, x):
+        return super().gradient(x)
+
+    @_shares_arrays
+    def hessian_action(self, x, dx):
+        return super().hessian_action(x, dx)
+
+
+@pytest.mark.parametrize("config", [LBFGS, NewtonCG])
+@pytest.mark.parametrize("scaled", [False, True])
+def test_optimizer_configs_share_vectors_only_with_sdk_objectives(config, scaled):
+    rng = np.random.default_rng(5)
+    root = rng.standard_normal((6, 6))
+    A, b = root @ root.T + np.eye(6), rng.standard_normal(6)
+    scaling = np.linspace(0.5, 2.0, 6) if scaled else None
+    optimizer = config(**TIGHT)
+    user, sdk = _Recording(A, b), _SharedRecording(A, b)
+    expected = optimizer.solve(user, np.zeros(6), scaling=scaling, max_iterations=6)
+    result = optimizer.solve(sdk, np.zeros(6), scaling=scaling, max_iterations=6)
+    # Identical runs; only the copies differ.
+    assert result.iterations == expected.iterations > 1
+    np.testing.assert_array_equal(result.model, expected.model)
+    np.testing.assert_array_equal(result.gradient, expected.gradient)
+    # A user objective owns writable arrays; unscaled, an SDK objective is
+    # handed the optimizer's vectors read-only (scaled, new physical arrays).
+    assert all(x.flags.writeable for x in user.arguments)
+    assert all(x.flags.writeable == scaled for x in sdk.arguments)
+
+
+def test_stage_objective_reads_the_optimizer_vectors_in_place(tmp_path, monkeypatch):
+    from frequensolve.imaging.workflows import _StageObjective
+
+    problem = _problem(tmp_path, FakeImagingSite(seed=7))
+    objective = _StageObjective(problem, problem.space, None, None, {})
+    seen = []
+    evaluate = _StageObjective._evaluate
+    monkeypatch.setattr(
+        _StageObjective,
+        "_evaluate",
+        lambda self, x: seen.append(x) or evaluate(self, x),
+    )
+    LBFGS(max_iterations=3, **TIGHT).solve(objective, problem.space.zeros().values)
+    assert len(seen) > 3 and all(not x.flags.writeable for x in seen)
+    # Its gradients are new arrays: the caller may modify them.
+    gradient = objective.gradient(seen[-1])
+    gradient[:] = 0.0
+    assert np.any(objective.gradient(seen[-1]))
+
+
+def test_scaled_iteration_records_rescale_each_vector_on_first_read(monkeypatch):
+    import frequensolve.imaging.workflows as workflows
+
+    rng = np.random.default_rng(3)
+    root = rng.standard_normal((6, 6))
+    A, b = root @ root.T + np.eye(6), rng.standard_normal(6)
+    scale = np.linspace(0.5, 2.0, 6)
+    scaled, physical = [], []
+    minimize = workflows.minimize_lbfgs
+
+    def recording(*args, callback, **kwargs):
+        def both(it):
+            scaled.append(it)
+            callback(it)
+
+        return minimize(*args, callback=both, **kwargs)
+
+    monkeypatch.setattr(workflows, "minimize_lbfgs", recording)
+    LBFGS(**TIGHT).solve(
+        _Quadratic(A, b),
+        np.zeros(6),
+        scaling=scale,
+        max_iterations=4,
+        callback=physical.append,
+    )
+    assert len(physical) == len(scaled) == 5
+    vectors = ("model", "gradient", "linearization_gradient", "step", "raw_step")
+    # Reading one vector rescales only that one.
+    assert physical[0].model is not None
+    assert set(vectors) & set(vars(physical[0])) == {"model"}
+    for index, (record, source) in enumerate(zip(physical, scaled)):
+        assert isinstance(record, InexactNewtonIteration)
+        assert record.objective == source.objective
+        assert record.optimizer_state is source.optimizer_state
+        # Nothing is rescaled before a consumer reads it.
+        assert set(vectors) & set(vars(record)) == ({"model"} if index == 0 else set())
+        for name in vectors:
+            value = getattr(record, name)
+            assert getattr(record, name) is value and not value.flags.writeable
+            # The same values the eager physical record had.
+            factor = getattr(source, name)
+            np.testing.assert_array_equal(
+                value, factor / scale if "gradient" in name else scale * factor
+            )
+        with pytest.raises(ValueError, match="read-only"):
+            record.model[0] = 1.0
+    replaced = dataclasses.replace(physical[-1], step_length=2.0)
+    assert replaced.step_length == 2.0
+    np.testing.assert_array_equal(replaced.raw_step, physical[-1].raw_step)
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +1061,7 @@ def test_lsrtm_with_tikhonov_matches_the_dense_regularized_solve(problem, fake):
     image = cg.run()
     np.testing.assert_allclose(image.values, expected, atol=1e-6)
     assert cg.info["converged"]
+    assert cg.info["method"] == "cg"
     lsqr = LSRTM(
         problem,
         iterations=250,
@@ -950,6 +1082,409 @@ def test_lsrtm_with_tikhonov_matches_the_dense_regularized_solve(problem, fake):
     np.testing.assert_allclose(g[active] + 0.1 * np.sign(x[active]), 0, atol=2e-6)
     assert np.all(np.abs(g[~active]) <= 0.1 + 2e-6)
     assert tv_image.info["method"] == "proximal_gradient"
+
+
+def test_lsrtm_receiver_pcg_includes_regularization_and_reuses_linearization(
+    problem, fake
+):
+    J, d = _surrogate(fake, problem)
+    lin = problem.linearize(
+        background=True, receiver_diagonal={"probes": 16, "seed": 7}
+    )
+    before = len(fake.submissions)
+    workflow = LSRTM(
+        problem,
+        method="cg",
+        iterations=30,
+        tolerance=1e-10,
+        preconditioner=im.Diagonal(probes="receiver", probe_count=16, seed=7),
+        regularization=im.Tikhonov(0.3),
+        damping=0.2,
+    )
+    image = workflow.run()
+    np.testing.assert_allclose(image.values, _least_squares(J, d, 0.5), atol=1e-6)
+    assert workflow.linearization is lin
+    assert workflow.info["converged"] and workflow.info["preconditioned"]
+    estimate = workflow.bound_preconditioner.estimate
+    np.testing.assert_allclose(estimate.data, np.sum(np.abs(J) ** 2, axis=0))
+    np.testing.assert_allclose(estimate.regularization, 0.5)
+    actions = [job for job in fake.jobs[before:] if isinstance(job, im.FWIOperatorJob)]
+    assert all(job.action != "linearize" for job in actions)
+    assert all(job.background is not None for job in actions)
+
+    replay = LSRTM(
+        problem, method="cg", iterations=30, tolerance=1e-10, reuse_background=False
+    )
+    before = len(fake.submissions)
+    replay.run()
+    actions = [job for job in fake.jobs[before:] if isinstance(job, im.FWIOperatorJob)]
+    assert actions and all(job.background is None for job in actions)
+    assert lin._reuse_background  # Replay does not mutate the shared cached view.
+
+
+def test_lsrtm_preconditioner_validation(problem):
+    with pytest.raises(ValueError, match="method='cg'"):
+        LSRTM(problem, preconditioner=im.Diagonal())
+    with pytest.raises(ValueError, match="positive"):
+        LSRTM(problem, tolerance=0)
+    with pytest.raises(ValueError, match="quadratic regularization"):
+        LSRTM(
+            problem,
+            method="cg",
+            preconditioner=im.Identity(),
+            regularization=im.TV(0.1),
+        ).run()
+
+
+def test_lsrtm_pcg_accelerates_without_changing_solution(problem):
+    from types import SimpleNamespace
+
+    from scipy.sparse.linalg import aslinearoperator
+
+    space = problem.linearize().space
+    diagonal = np.geomspace(1, 1e8, space.size)
+    lin = SimpleNamespace(
+        space=space,
+        normal=aslinearoperator(np.diag(diagonal)),
+        gradient=ControlVector(-diagonal, space),
+        receiver_diagonal=ControlVector(diagonal, space),
+    )
+    cg = LSRTM(problem, method="cg", iterations=100, tolerance=1e-12)
+    pcg = LSRTM(
+        problem,
+        method="cg",
+        iterations=100,
+        tolerance=1e-12,
+        preconditioner=im.Diagonal(
+            probes="receiver", relative_damping=0, maximum_inverse_ratio=1e12
+        ),
+    )
+    unconditioned = cg._run_cg(lin, space, None)
+    conditioned = pcg._run_cg(lin, space, None)
+    np.testing.assert_allclose(conditioned.values, np.ones(space.size), atol=1e-10)
+    np.testing.assert_allclose(conditioned.values, unconditioned.values, atol=1e-5)
+    assert pcg.info["iterations"] == 1 < cg.info["iterations"]
+
+
+class _CountingNormal:
+    """Matrix normal operator counting its products (one Sauce job each)."""
+
+    def __init__(self, matrix):
+        self.matrix = np.asarray(matrix, dtype=float)
+        self.products = 0
+
+    def __matmul__(self, x):
+        self.products += 1
+        return self.matrix @ np.asarray(x, dtype=float)
+
+
+def _stub_linearization(space, normal, gradient):
+    return SimpleNamespace(
+        space=space, normal=normal, gradient=ControlVector(gradient, space), value=0.0
+    )
+
+
+def _soft_threshold(v, t):
+    return np.sign(v) * np.maximum(np.abs(v) - t, 0.0)
+
+
+@pytest.mark.parametrize("method", ["lsqr", "cg"])
+def test_lsrtm_native_tikhonov_runs_cg_with_one_regularization_job_per_iteration(
+    problem, fake, method, monkeypatch
+):
+    from frequensolve.imaging import workflows
+
+    # Exercise the separate-job path, which remains the fallback when a bound
+    # regularization cannot be folded into the normal job.
+    monkeypatch.setattr(workflows, "_FUSE_NATIVE_REGULARIZATION", False)
+    J, d = _surrogate(fake, problem)
+    before = len(fake.jobs)
+    workflow = LSRTM(
+        problem, iterations=50, method=method, regularization=im.Tikhonov(0.1, order=2)
+    )
+    image = workflow.run()
+    np.testing.assert_allclose(
+        image.values, _least_squares(J, d, R=np.sqrt(0.1) * np.eye(8)), atol=1e-6
+    )
+    info = workflow.info
+    assert info["method"] == "cg" and info["requested_method"] == method
+    assert info["converged"] and info["status"] == 0
+    assert not info["fused_regularization"]
+    # Unfused: one normal and one native Hessian job per CG iteration, no final
+    # residual product, no gradient job at the zero image and no prox jobs (the
+    # former proximal route for lsqr took 105 normal + 105 gradient + 105 prox jobs).
+    iterations = info["iterations"]
+    assert info["jobs"] == {
+        "linearize": 1,
+        "regularization_prepare": 1,
+        "normal": iterations,
+        "regularization_gradient": iterations,
+    }
+    assert len(fake.jobs) - before == sum(info["jobs"].values())
+
+
+def test_lsrtm_native_tikhonov_rides_in_the_normal_job_when_supported(
+    problem, fake, monkeypatch
+):
+    from frequensolve.imaging import workflows
+
+    monkeypatch.setattr(workflows, "_FUSE_NATIVE_REGULARIZATION", True)
+    J, d = _surrogate(fake, problem)
+    lin = problem.linearize(background=True)
+    original = lin.apply_normal
+    seen = []
+
+    def apply_normal(dv, *, regularization=None):
+        seen.append(regularization)
+        out = original(dv)
+        # The fake's native Tikhonov Hessian is 0.1 * I (see imaging_fakes).
+        return ControlVector(out.values + 0.1 * dv.values, out.space)
+
+    lin.apply_normal = apply_normal
+    workflow = LSRTM(problem, iterations=50, regularization=im.Tikhonov(0.1, order=2))
+    image = workflow.run()
+    np.testing.assert_allclose(
+        image.values, _least_squares(J, d, R=np.sqrt(0.1) * np.eye(8)), atol=1e-6
+    )
+    assert workflow.linearization is lin and workflow.info["fused_regularization"]
+    assert workflow.info["jobs"] == {
+        "regularization_prepare": 1,
+        "normal": workflow.info["iterations"],
+    }
+    assert seen and all(term is not None and term.is_smooth for term in seen)
+
+
+def test_lsrtm_cg_converges_on_its_last_iteration_without_extra_products(problem):
+    space = problem.linearize().space
+    diagonal = np.repeat([1.0, 4.0, 9.0], [3, 3, space.size - 6])
+    normal = _CountingNormal(np.diag(diagonal))
+    workflow = LSRTM(problem, method="cg", iterations=3, tolerance=1e-10)
+    image = workflow._run_cg(_stub_linearization(space, normal, -diagonal), space, None)
+    # Three distinct eigenvalues: exact after the third and last allowed product.
+    np.testing.assert_allclose(image.values, 1.0, atol=1e-10)
+    assert workflow.info["converged"] and workflow.info["status"] == 0
+    assert workflow.info["iterations"] == normal.products == 3
+    assert workflow.info["residual_norm"] <= 1e-10 * workflow.info["rhs_norm"]
+
+
+def test_lsrtm_cg_stops_on_nonpositive_curvature_and_rejects_non_spd_metrics(problem):
+    space = problem.linearize().space
+    n = space.size
+    diagonal = np.linspace(1.0, 2.0, n)
+    diagonal[0] = -1.0
+    gradient = np.zeros(n)
+    gradient[0] = 1.0
+    normal = _CountingNormal(np.diag(diagonal))
+    workflow = LSRTM(problem, method="cg", iterations=10)
+    image = workflow._run_cg(_stub_linearization(space, normal, gradient), space, None)
+    assert workflow.info["status"] == -1 and not workflow.info["converged"]
+    assert "nonpositive curvature" in workflow.info["message"]
+    assert normal.products == 1 and not np.any(image.values)
+
+    for operator in (-np.eye(n), np.zeros((n, n))):
+        metric = LSRTM(problem, method="cg", preconditioner=im.FromOperator(operator))
+        lin = _stub_linearization(space, _CountingNormal(np.eye(n)), np.ones(n))
+        with pytest.raises(ValueError, match="not SPD"):
+            metric._run_cg(lin, space, None)
+
+
+def test_lsrtm_total_variation_is_independent_of_the_problem_scale(problem, fake):
+    J, d = _surrogate(fake, problem)
+    space = problem.linearize().space
+    H = np.real(J.conj().T @ J)
+    g0 = -np.real(J.conj().T @ d)
+    alpha = 0.1
+    exact = np.zeros(space.size)
+    step = 1.0 / np.linalg.eigvalsh(H).max()
+    for _ in range(20000):
+        exact = _soft_threshold(exact - step * (g0 + H @ exact), step * alpha)
+
+    class Native:
+        def __init__(self, scale):
+            self.scale = scale
+            self.proxes = 0
+
+        def value(self, v):
+            return self.scale * alpha * float(np.abs(v).sum())
+
+        def prox(self, v, tau, metric, box):
+            self.proxes += 1
+            return np.clip(_soft_threshold(v, tau * self.scale * alpha), *box)
+
+    runs = []
+    for scale in (1.0, 1e-3, 1e-5):
+        normal, native = _CountingNormal(scale * H), Native(scale)
+        workflow = LSRTM(problem, iterations=500)  # default relative tolerance 1e-4
+        image = workflow._run_proximal(
+            _stub_linearization(space, normal, scale * g0), space, None, native
+        )
+        error = np.linalg.norm(image.values - exact) / np.linalg.norm(exact)
+        runs.append((workflow.info, normal.products, native.proxes, error))
+    infos, products, proxes, errors = zip(*runs)
+    assert all(info["converged"] for info in infos)
+    assert len({info["iterations"] for info in infos}) == 1
+    assert len(set(products)) == 1 and len(set(proxes)) == 1
+    np.testing.assert_allclose(errors, errors[0], rtol=1e-3)
+    assert errors[0] < 2e-3
+    np.testing.assert_allclose(
+        [info["initial_step"] * scale for info, scale in zip(infos, (1, 1e-3, 1e-5))],
+        infos[0]["initial_step"],
+        rtol=1e-6,
+    )
+    # Two power iterations, then one normal product per trial (none at x = 0).
+    assert products[0] == 2 + infos[0]["objective_evaluations"] - 1
+    assert products[0] <= 2 + 1.6 * infos[0]["iterations"]
+
+
+def test_lsrtm_deletes_the_background_checkpoint_it_created(problem, fake):
+    workflow = LSRTM(problem, method="cg", iterations=10)
+    workflow.run()
+    job = workflow.linearization.job
+    assert job.background is None and workflow.info["background"]["enabled"]
+    names = {
+        name
+        for task in (1, 2)
+        for name in (
+            f"background_{task}.json",
+            f"background_{task}/generations/fake/rank_00000.h5",
+        )
+    }
+    assert fake.removed == [(job.name, tuple(sorted(names)))]
+    assert not any((job._result_path / name).exists() for name in names)
+    assert workflow.info["background"]["released_bytes"] >= 2 * 4096
+    # The cached linearization stays usable, now without the checkpoint.
+    before = len(fake.jobs)
+    workflow.linearization.normal @ problem.space.random(3)
+    assert [job.background for job in fake.jobs[before:]] == [None]
+
+    # A checkpoint the run reused but did not create is left alone.
+    lin = problem.linearize(problem.space.random(5), background=True)
+    LSRTM(problem, method="cg", iterations=5).run(problem.space.random(5))
+    assert lin.job.background is not None and len(fake.removed) == 1
+
+
+def test_lsrtm_keeps_background_on_request_until_cache_eviction(tmp_path, fake):
+    problem = _problem(tmp_path, fake, cache_capacity=1)
+    kept = LSRTM(problem, method="cg", iterations=5, keep_background=True)
+    kept.run()
+    job = kept.linearization.job
+    manifest = job.background_file(1)
+    assert manifest.is_file() and kept.info["background"]["released_bytes"] is None
+    problem.linearize(problem.space.random(2))  # evicts the kept linearization
+    assert job.background is None and not manifest.exists()
+    assert [name for name, _ in fake.removed] == [job.name]
+
+
+def test_lsrtm_background_requires_a_supporting_site(problem, fake, monkeypatch):
+    monkeypatch.setattr(fake, "supports_background_reuse", False)
+    workflow = LSRTM(problem, method="cg", iterations=5)
+    workflow.run()
+    background = workflow.info["background"]
+    assert background["requested"] and not background["enabled"]
+    assert "FakeImagingSite does not support background reuse" == background["reason"]
+    assert workflow.linearization.job.background is None
+    assert not fake.removed and background["released_bytes"] is None
+
+
+def test_lsrtm_reports_background_reuse_counters_and_misses(problem, monkeypatch):
+    from frequensolve.imaging import workflows
+
+    def counters(job):
+        if job.action == "linearize":
+            return None
+        return {"background_solves_reused": 2, "background_reuse_misses": 1}
+
+    monkeypatch.setattr(workflows, "_task_counters", counters)
+    workflow = LSRTM(problem, method="cg", iterations=3)
+    with pytest.warns(RuntimeWarning, match="missed 3 source batch"):
+        workflow.run()
+    background = workflow.info["background"]
+    assert workflow.info["jobs"]["normal"] == 3
+    assert background["reused_solves"] == 6 and background["misses"] == 3
+
+
+def test_task_counters_sum_the_committed_sauce_misc_counters(tmp_path):
+    from frequensolve.imaging.workflows import _task_counters
+    from frequensolve.simulation.artifact_contract import task_result_path
+
+    for task, (reused, missed) in enumerate([(3, 0), (1, 2)], start=1):
+        path = task_result_path(tmp_path, task)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-task-result-2",
+                    "partition": {
+                        "task": task,
+                        "task_count": 3,
+                        "frequency": {"real": 4.0 + task, "imag": 0.0},
+                    },
+                    "fingerprints": {
+                        key: "sha256:" + digit * 64
+                        for key, digit in (
+                            ("job", "1"),
+                            ("simulation", "2"),
+                            ("outputs", "3"),
+                        )
+                    },
+                    "status": {"state": "success", "code": 0},
+                    "artifacts": [],
+                    "misc": {
+                        "background_solves_reused": reused,
+                        "background_reuse_misses": missed,
+                        "other_counter": 7,
+                    },
+                }
+            )
+        )
+    job = SimpleNamespace(_result_path=tmp_path, n_tasks=3)  # task 3 not committed
+    assert _task_counters(job) == {
+        "background_solves_reused": 4,
+        "background_reuse_misses": 2,
+    }
+    missing = SimpleNamespace(_result_path=tmp_path / "x", n_tasks=1)
+    assert _task_counters(missing) is None
+
+
+def test_fwi_receiver_diagonal_preconditioner_requests_probes(problem, fake):
+    J, _ = _surrogate(fake, problem)
+    before = len(fake.jobs)
+    tracked = _TrackedDiagonal(probes="receiver", probe_count=4, seed=3)
+    tracked.bound.clear()
+    result = FWI(
+        problem,
+        Stage(FREQUENCIES, 4),
+        optimizer=LBFGS(preconditioner_refresh=2, **TIGHT),
+        preconditioner=tracked,
+    ).run()
+    assert result.history.iterations
+    linearizations = [
+        job for job in fake.jobs[before:] if getattr(job, "action", None) == "linearize"
+    ]
+    probed = [job for job in linearizations if job.receiver_diagonal is not None]
+    (bound,) = tracked.bound
+    # The stage start reuses its probed first linearization; each refresh adds one.
+    assert len(probed) == len(bound.updates) >= 2
+    assert all(lin.job.receiver_diagonal is not None for lin in bound.updates)
+    np.testing.assert_allclose(
+        bound.updates[0].receiver_diagonal.values,
+        np.sum(np.abs(J) ** 2, axis=0),
+        rtol=1e-10,
+    )
+
+
+def test_fwi_rejects_receiver_probes_for_patch_stages(problem):
+    import frequensolve as fs
+
+    patches = fs.PatchSet.around_sources(
+        shots_per_patch=1, max_offset=200 * fs.ureg.m, padding=300 * fs.ureg.m
+    )
+    with pytest.raises(ValueError, match="receiver probes"):
+        FWI(
+            problem,
+            Stage(FREQUENCIES, 2, patches=patches),
+            preconditioner=im.Diagonal(probes="receiver"),
+        )
 
 
 def test_rtm_returns_the_misfit_gradient(problem):

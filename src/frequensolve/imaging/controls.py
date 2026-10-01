@@ -3618,6 +3618,7 @@ class ControlVector:
             )
         self._values = array
         self.space = space
+        self._field_factory = None
 
     # -- ndarray protocol -----------------------------------------------------
 
@@ -3647,7 +3648,9 @@ class ControlVector:
     def copy(self) -> "ControlVector":
         """Return a deep copy of the values on the same space."""
 
-        return ControlVector(np.array(self._values, copy=True), self.space)
+        result = ControlVector(np.array(self._values, copy=True), self.space)
+        result._field_factory = self._field_factory
+        return result
 
     def _other(self, other: Any) -> Any:
         if isinstance(other, ControlVector):
@@ -3662,26 +3665,44 @@ class ControlVector:
         return array
 
     def __add__(self, other: Any) -> "ControlVector":
-        return ControlVector(self._values + self._other(other), self.space)
+        result = ControlVector(self._values + self._other(other), self.space)
+        if (
+            isinstance(other, ControlVector)
+            and self._field_factory == other._field_factory
+        ):
+            result._field_factory = self._field_factory
+        return result
 
     __radd__ = __add__
 
     def __sub__(self, other: Any) -> "ControlVector":
-        return ControlVector(self._values - self._other(other), self.space)
+        result = ControlVector(self._values - self._other(other), self.space)
+        if (
+            isinstance(other, ControlVector)
+            and self._field_factory == other._field_factory
+        ):
+            result._field_factory = self._field_factory
+        return result
 
     def __rsub__(self, other: Any) -> "ControlVector":
         return ControlVector(self._other(other) - self._values, self.space)
 
     def __mul__(self, other: Any) -> "ControlVector":
-        return ControlVector(self._values * self._other(other), self.space)
+        result = ControlVector(self._values * self._other(other), self.space)
+        if np.ndim(other) == 0:
+            result._field_factory = self._field_factory
+        return result
 
     __rmul__ = __mul__
 
     def __truediv__(self, other: Any) -> "ControlVector":
-        return ControlVector(self._values / self._other(other), self.space)
+        result = ControlVector(self._values / self._other(other), self.space)
+        if np.ndim(other) == 0:
+            result._field_factory = self._field_factory
+        return result
 
     def __neg__(self) -> "ControlVector":
-        return ControlVector(-self._values, self.space)
+        return self * -1.0
 
     def __pos__(self) -> "ControlVector":
         return self.copy()
@@ -3946,13 +3967,22 @@ class ControlVector:
         context: Optional[EvaluationContext] = None,
         frozen: Any = np.nan,
     ) -> xr.DataArray:
-        """Evaluate control coefficients, not a covector density, on a grid.
+        """Evaluate a field on a grid.
+
+        Mesh gradients returned by a native linearization are converted by
+        Sauce with constrained lumped mass before sampling. Other vectors are
+        treated as primal coefficients. Use ``lin.field(v, input_role='dual')``
+        to convert an independently loaded mesh covector explicitly.
 
         Coordinates, units and material masks follow the bound simulation.
         Values precede the material reference/transform. Samples outside the
         block or influenced by frozen coefficients receive ``frozen``.
         """
 
+        if self._field_factory is not None and self.space.block(key).kind == "mesh":
+            return self._field_factory(self).to_grid(
+                grid, key, context=context, frozen=frozen
+            )
         result, operator, valid = self._grid_sampling(grid, key, context=context)
         block = self.space.block(key)
         mask = self.space._mask_of(block)
@@ -3980,6 +4010,10 @@ class ControlVector:
     ) -> Any:
         """Render mesh blocks as point data on a PyVista dataset.
 
+        Bound native gradients first use Sauce's lumped-mass field conversion;
+        ordinary vectors and already-preconditioned updates are interpolated as
+        primal coefficients. Numeric vector values are never changed.
+
         Pass a :class:`~frequensolve.imaging.PropertyMesh` or its ``.h5``
         artifact to reconstruct adapted leaf cells and apply hanging-node
         constraints. ``material`` is a one-based material group; when omitted
@@ -4006,6 +4040,10 @@ class ControlVector:
             DOFs are ``NaN``.
         """
 
+        if self._field_factory is not None:
+            return self._field_factory(self).to_mesh(
+                mesh, key, material=material, units=units
+            )
         blocks = [
             b
             for b in (
@@ -4066,6 +4104,12 @@ class ControlVector:
             name = (block.prop or block.address) if unique else block.address
             grid.point_data[name] = self._block_values(block)
         return grid
+
+    def to_property(self, grid: Any, key: str, *, frozen: Any = np.nan) -> Any:
+        """Sample a field for model-property use; bound mesh gradients use native lumped mass."""
+        from frequensolve.model.property import Property
+
+        return Property(self.to_grid(grid, key, frozen=frozen))
 
     def plot(self, key: Optional[str] = None, ax: Any = None, **kwargs: Any) -> Any:
         """Plot blocks with matplotlib (PyVista for mesh blocks).

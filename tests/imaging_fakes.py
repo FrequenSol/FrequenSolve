@@ -102,7 +102,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import h5py
 import numpy as np
@@ -383,8 +383,13 @@ class FakeImagingSite(BaseSite):
         verbose: Print status messages like other sites.
 
     ``submissions`` records one summary per submit and ``jobs`` the submitted
-    job objects in the same order.
+    job objects in the same order. Background checkpoints are written like
+    Sauce's (task manifest and one HDF5 shard per rank) and ``removed``
+    records ``remove_result_files`` calls, which unlink files like
+    ``LocalSite``.
     """
+
+    supports_background_reuse = True
 
     def __init__(
         self,
@@ -420,6 +425,7 @@ class FakeImagingSite(BaseSite):
         }
         self.submissions: List[Dict[str, Any]] = []
         self.jobs: List[Any] = []
+        self.removed: List[Tuple[str, Tuple[str, ...]]] = []
         self.linearizations: Dict[str, FakeLinearization] = {}
 
     def support_mask(self, name: str, size: int, frequency: Any = None) -> np.ndarray:
@@ -646,6 +652,37 @@ class FakeImagingSite(BaseSite):
 
     def cancel_job(self, job_id: str) -> bool:
         return False
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        paths = tuple(relative_paths)
+        super().remove_result_files(job, paths)
+        self.removed.append((job.name, paths))
+        for name in paths:
+            (Path(job._result_path) / name).unlink(missing_ok=True)
+
+    @staticmethod
+    def _write_background(job: FWIOperatorJob, task: int, state_fp: str) -> None:
+        """Write a one-rank, one-batch checkpoint laid out like Sauce's."""
+
+        manifest = job.background_file(task)
+        shard = Path(f"{manifest.stem}/generations/fake/rank_00000.h5")
+        payload = manifest.parent / shard
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(b"\0" * 4096)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-background-state-1",
+                    "storage": "full",
+                    "context": "fake",
+                    "state": state_fp,
+                    "build": "fake",
+                    "ranks": 1,
+                    "batches": [{"source_first": 1, "n_sources": 2}],
+                    "shards": [{"file": shard.as_posix(), "digest": _sha256(state_fp)}],
+                }
+            )
+        )
 
     # -- execution ------------------------------------------------------------
 
@@ -974,6 +1011,14 @@ class FakeImagingSite(BaseSite):
             rows = lin.rows(frequency)
             residual = J[rows] @ m - d[rows]
             self._write_state(job, task, lin, frequency)
+            if job.background is not None:
+                self._write_background(job, task, state_fp)
+            if job.receiver_diagonal is not None:
+                ControlVectorFile.from_packed(
+                    np.sum(np.abs(J[rows]) ** 2, axis=0),
+                    lin.sizes,
+                    native=True,
+                ).write(job.diagonal_file(task))
             if job.objective is not None:
                 self._write_report(job, task, lin, frequency, residual)
             if job.covector is not None:
@@ -1028,6 +1073,15 @@ class FakeImagingSite(BaseSite):
                     c * np.real(J.conj().T @ r[rows]),
                     frequency=frequency,
                 )
+            elif job.directions is not None:  # one normal job, several directions
+                for output, direction in enumerate(job.directions):
+                    dv = self._direction(job, lin, task, direction)
+                    self._write_covector(
+                        job.covector_file(task, output=output),
+                        lin,
+                        c * np.real(J.conj().T @ (J @ (c * dv))),
+                        frequency=frequency,
+                    )
             else:  # normal
                 dv = self._direction(job, lin, task)
                 self._write_covector(
@@ -1055,6 +1109,9 @@ class FakeImagingSite(BaseSite):
             )
         if isinstance(job, ImageKernelJob):
             self._aggregate_images(job)
+            return
+        if getattr(job, "regularization", None) is not None:
+            self._postprocess_job_regularization(job)
             return
         if not job.requires_postprocess():
             raise ValueError("postprocess requires a smoothing configuration")
@@ -1317,6 +1374,32 @@ class FakeImagingSite(BaseSite):
             )
         )
 
+    def _postprocess_job_regularization(self, job: FWIOperatorJob) -> None:
+        """Emulate a normal job's batched Tikhonov ``gradient`` postprocess.
+
+        Uses the same diagonal energy as :meth:`_postprocess_regularization`.
+        """
+
+        request = job.regularization
+        assert request is not None and request["operation"] == "gradient"
+        json.loads(Path(request["context"]).read_text())  # a prepared context
+        alpha = request.get("alpha", 0.1)
+        value = 0.0
+        for source, output in zip(request["inputs"], request["outputs"]):
+            vector = ControlVectorFile.read(source, native=True)
+            blocks = {name: alpha * v for name, v in vector.blocks.items()}
+            value += sum(0.5 * alpha * float(v @ v) for v in vector.blocks.values())
+            ControlVectorFile(blocks, native=True).write(output)
+        Path(request["result"]).write_text(
+            json.dumps(
+                {
+                    "schema": "fs-control-regularization-result-1",
+                    "value": value,
+                    "converged": True,
+                }
+            )
+        )
+
     def _postprocess_smooth(self, job: SmoothJob) -> None:
         """Copy ``control_sensitivities.input`` to ``gradient`` (identity)."""
 
@@ -1524,11 +1607,16 @@ class FakeImagingSite(BaseSite):
         return baselines
 
     def _direction(
-        self, job: FWIOperatorJob, lin: FakeLinearization, task: int
+        self,
+        job: FWIOperatorJob,
+        lin: FakeLinearization,
+        task: int,
+        stem: Optional[Path] = None,
     ) -> np.ndarray:
-        if job.direction is None:
+        stem = job.direction if stem is None else stem
+        if stem is None:
             raise ValueError(f"action {job.action!r} requires a direction")
-        path = job.task_input(job.direction, task)
+        path = job.task_input(stem, task)
         vector = ControlVectorFile.read(path, native=False)
         self._check_binding(vector, lin, path)
         dv = vector.pack(lin.active)

@@ -29,11 +29,15 @@ its negative.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
+import glob
 import hashlib
+import inspect
 import json
 import math
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
@@ -53,7 +57,6 @@ from typing import (
 
 import numpy as np
 from scipy.sparse.linalg import LinearOperator
-from scipy.sparse.linalg import cg as scipy_cg
 from scipy.sparse.linalg import lsqr as scipy_lsqr
 
 from frequensolve.geometry.grids import CartesianGrid
@@ -62,6 +65,27 @@ from frequensolve.imaging._artifacts import (
     control_smoothing,
 )
 from frequensolve.imaging._backend import fingerprint
+from frequensolve.imaging._block_digest import block_digest
+from frequensolve.imaging._curvature_continuation import (
+    _checkpoint_operator_configuration,
+    _checkpoint_regularization_identity,
+    _configuration_value,
+    _CurvatureSource,
+    _initial_scale,
+    _prepare_seed,
+    _regularization_identity,
+    _require_smooth_regularization,
+)
+from frequensolve.imaging._curvature_transfer import (
+    CurvatureTransfer,
+    _history_inverse,
+)
+from frequensolve.imaging._restart_store import (
+    RESTART_SCHEMA,
+    RestartStore,
+    StageFiles,
+    state_files,
+)
 from frequensolve.imaging.controls import (
     ControlSpace,
     ControlState,
@@ -90,10 +114,15 @@ from frequensolve.inversion.optimization import (
     InexactNewtonOptions,
     InexactNewtonResult,
     LBFGSOptions,
+    LBFGSRestart,
+    _read_only,
+    _shares,
+    _shares_arrays,
     minimize_inexact_newton,
     minimize_lbfgs,
     minimize_proximal_gradient,
 )
+from frequensolve.util.atomic import atomic_output_path
 
 __all__ = [
     "FWI",
@@ -113,7 +142,9 @@ __all__ = [
 
 from ._patch_updates import PatchUpdates
 
-CHECKPOINT_SCHEMA = "fs-imaging-fwi-checkpoint-1"
+CHECKPOINT_SCHEMA = "fs-imaging-fwi-checkpoint-2"
+# Earlier checkpoints kept optimizer restart state as JSON metadata.
+_LEGACY_CHECKPOINT_SCHEMAS = ("fs-imaging-fwi-checkpoint-1",)
 
 
 # ---------------------------------------------------------------------------
@@ -151,19 +182,22 @@ def _frequency_pairs(values: Sequence[Any]) -> List[List[float]]:
     return [[complex(v).real, complex(v).imag] for v in values]
 
 
-def _digest(values: Any) -> str:
-    array = np.ascontiguousarray(np.asarray(values, dtype=np.float64))
-    return hashlib.sha256(array.tobytes()).hexdigest()
-
-
 def _state_epoch(state: ControlState) -> str:
-    """Identify complete coefficients together with their basis and reference scales."""
-    saved = state.to_file()
+    """Identify complete coefficients together with their basis and reference scales.
+
+    The state's own coefficient blocks are hashed in place (``fingerprint``
+    digests large arrays by their bytes), without a file representation copy.
+    """
+    space = state.space
     return fingerprint(
-        blocks=saved.blocks,
-        control_spaces=saved.control_spaces,
-        scaling=saved.scaling,
-        scaling_units=saved.scaling_units,
+        blocks={name: state.values[sl] for name, sl in space.full_slices.items()},
+        control_spaces={
+            block.name: block.basis_identity
+            for block in space.resolved_blocks
+            if block.basis_identity
+        },
+        scaling=dict(state.scaling),
+        scaling_units=dict(state.scaling_units),
     ).removeprefix("sha256:")
 
 
@@ -338,8 +372,13 @@ class Stage:
     kernel_derivative: Optional[Mapping[str, Any]] = None
     transfer: Optional[Transfer] = None
     patches: Any = None
+    curvature: Optional[CurvatureTransfer] = None
 
     def __post_init__(self) -> None:
+        if self.curvature is not None and not isinstance(
+            self.curvature, CurvatureTransfer
+        ):
+            raise TypeError("stage curvature must be a CurvatureTransfer policy")
         if self.patches is not None:
             from frequensolve.mesh.patches import PatchSet
 
@@ -642,10 +681,59 @@ def _preconditioner_callable(
             vector = g if space is None else ControlVector(g, space)
             return np.asarray(apply(vector), dtype=np.float64).reshape(-1)
 
-        return bound
+        # An SDK preconditioner's new vector needs no copy in the optimizer.
+        return _shares_arrays(bound) if _shares(apply) else bound
     if callable(preconditioner):
         return preconditioner
     raise TypeError("preconditioner must be callable or provide apply()")
+
+
+# Record vectors in physical coordinates x = s * y: whether each multiplies by s
+# (iterates and steps) or divides by it (gradients).
+_PHYSICAL_VECTORS = {
+    "model": True,
+    "gradient": False,
+    "linearization_gradient": False,
+    "step": True,
+    "raw_step": True,
+}
+
+
+class _PhysicalIteration(InexactNewtonIteration):
+    """A scaled optimizer record presented in physical coordinates.
+
+    Scalar fields are the record's. Each vector is rescaled on first access
+    and cached, read-only like the optimizer's own, so a consumer pays only
+    for the vectors it reads; the scaled source is released once rescaled.
+    """
+
+    @classmethod
+    def of(
+        cls, record: InexactNewtonIteration, scale: np.ndarray
+    ) -> InexactNewtonIteration:
+        physical = object.__new__(cls)
+        state = physical.__dict__
+        for item in dataclasses.fields(record):
+            name = item.name
+            key = name if name not in _PHYSICAL_VECTORS else f"_scaled_{name}"
+            state[key] = getattr(record, name)
+        state["_scale"] = scale
+        return physical
+
+    def __getattr__(self, name: str) -> Any:
+        state = self.__dict__
+        source = state.get(f"_scaled_{name}")
+        if source is None or name not in _PHYSICAL_VECTORS:
+            if name in state:  # Rescaled by another thread meanwhile.
+                return state[name]
+            raise AttributeError(name)
+        scale = state["_scale"]
+        value = _read_only(
+            scale * source if _PHYSICAL_VECTORS[name] else source / scale
+        )
+        state[name] = value
+        state.pop(f"_scaled_{name}", None)
+        return value
 
 
 @dataclass(frozen=True)
@@ -749,7 +837,7 @@ class _OptimizerConfig:
         scaling: Optional[Any] = None,
         block_slices: Optional[Sequence[slice]] = None,
         space: Optional[ControlSpace] = None,
-        restart: Optional[Dict[str, Any]] = None,
+        restart: Optional[LBFGSRestart] = None,
     ) -> InexactNewtonResult:
         """Minimize ``objective`` from ``x0``.
 
@@ -854,17 +942,26 @@ class _OptimizerConfig:
             )
             return to_scaled(transformed)
 
+        def share(wrapper: Callable[..., Any], wrapped: Any) -> None:
+            # Only SDK callables skip the optimizer's defensive copies. Scaled
+            # wrappers pass and return new arrays; unscaled ones hand over the
+            # optimizer's vectors and their callable's results.
+            if wrapped is not None and (scale is not None or _shares(wrapped)):
+                _shares_arrays(wrapper)
+
+        share(f, value_fn)
+        share(g, gradient_fn)
+        share(h, curvature_fn)
+        share(p, precondition)
+        share(transform, step_transform)
+        _shares_arrays(step_limit_fn)
+
         def unscale_iteration(it: InexactNewtonIteration) -> InexactNewtonIteration:
             if scale is None:
                 return it
-            return dataclasses.replace(
-                it,
-                model=to_physical(it.model),
-                gradient=it.gradient / scale,
-                linearization_gradient=it.linearization_gradient / scale,
-                step=to_physical(it.step),
-                raw_step=to_physical(it.raw_step),
-            )
+            # Read-only like the optimizer's own records; each vector is
+            # rescaled only when a consumer first reads it.
+            return _PhysicalIteration.of(it, scale)
 
         def on_iteration(it: InexactNewtonIteration) -> None:
             physical = unscale_iteration(it)
@@ -903,24 +1000,51 @@ class _OptimizerConfig:
             "callback": on_iteration,
         }
         y0 = cast(Sequence[float], to_scaled(x0))
+        if restart is not None:
+            # Preserve the exact saved iterate: dividing S*y by S can round
+            # differently even after its physical checkpoint was validated.
+            restarted = _real_vector(restart.model, size=size, name="restart model")
+            if not np.array_equal(to_physical(restarted), x0):
+                raise ValueError(
+                    "L-BFGS restart belongs to a different model or scaling"
+                )
+            y0 = cast(Sequence[float], restarted)
         native = getattr(objective, "native_regularization", None)
         if native is not None:
             if step_transform is not None:
                 raise ValueError(
                     "native proximal optimization does not accept an extra step transform"
                 )
-            metric = np.ones(size) if scale is None else 1.0 / scale**2
+            # Read-only and built once: the native term stages its metric and
+            # bound files once for the whole solve instead of once per prox.
+            metric = _read_only(np.ones(size) if scale is None else 1.0 / scale**2)
+            boxes: Dict[str, Any] = {}
 
             def prox(
                 y: np.ndarray, tau: float, box: Tuple[np.ndarray, np.ndarray]
             ) -> np.ndarray:
-                physical_box = (to_physical(box[0]), to_physical(box[1]))
-                return to_scaled(native.prox(to_physical(y), tau, metric, physical_box))
+                if boxes.get("box") is not box:
+                    boxes.update(
+                        box=box,
+                        physical=tuple(_read_only(to_physical(b)) for b in box),
+                    )
+                return to_scaled(
+                    native.prox(to_physical(y), tau, metric, boxes["physical"])
+                )
 
+            def smooth(y: np.ndarray) -> float:
+                return objective.smooth_value(to_physical(y))
+
+            def regularizer(y: np.ndarray) -> float:
+                return native.value(to_physical(y))
+
+            share(smooth, objective.smooth_value)
+            share(regularizer, native.value)
+            share(prox, native.prox)
             result = minimize_proximal_gradient(
-                lambda y: objective.smooth_value(to_physical(y)),
+                smooth,
                 g,
-                lambda y: native.value(to_physical(y)),
+                regularizer,
                 prox,
                 y0,
                 bounds=scaled_bounds,
@@ -1008,7 +1132,9 @@ class _StageObjective:
     One ``linearize`` (value and covector) per distinct point; the value,
     gradient, curvature action (Gauss-Newton normal plus regularization curvature) and
     loss terms of the last point are reused.  Every new evaluation is
-    appended to the history with the stage metrics.
+    appended to the history with the stage metrics. The optimizer callables
+    below never write or keep their array arguments and return new arrays,
+    so the optimizers pass them read-only views without copying.
     """
 
     def __init__(
@@ -1074,9 +1200,11 @@ class _StageObjective:
         assert self._linearization is not None
         return self._linearization
 
+    @_shares_arrays
     def value(self, x: Any) -> float:
         return self.loss(x).total
 
+    @_shares_arrays
     def smooth_value(self, x: Any) -> float:
         loss = self.loss(x)
         return (
@@ -1085,6 +1213,7 @@ class _StageObjective:
             else loss.total - self.native_regularization.value(self.vector(x))
         )
 
+    @_shares_arrays
     def gradient(self, x: Any) -> np.ndarray:
         self._evaluate(x)
         assert self._gradient is not None
@@ -1095,6 +1224,7 @@ class _StageObjective:
         assert self._loss is not None
         return self._loss
 
+    @_shares_arrays
     def hessian_action(self, x: Any, dx: Any) -> np.ndarray:
         lin = self.linearization(x)
         direction = self.vector(dx)
@@ -1108,6 +1238,40 @@ class _StageObjective:
                 size=out.size,
                 name="regularization curvature product",
             )
+        return out
+
+    def hessian_actions(self, x: Any, directions: Any) -> np.ndarray:
+        """Return :meth:`hessian_action` for every row of ``directions``.
+
+        One ``normal`` job serves all rows; a native Tikhonov term is applied
+        in that job when it can be, other smooth terms row by row.
+        """
+        from ._native_regularization import BoundNativeRegularization
+        from .regularization import _BoundSum
+
+        rows = np.asarray(directions, dtype=np.float64).reshape(-1, self.space.size)
+        if not len(rows):
+            return np.zeros((0, self.space.size))
+        lin = self.linearization(x)
+        terms = [] if self.regularization is None else [self.regularization]
+        if isinstance(self.regularization, _BoundSum):
+            terms = list(self.regularization.terms)
+        natives = [t for t in terms if isinstance(t, BoundNativeRegularization)]
+        native = natives[0] if len(natives) == 1 else None
+        vectors = [self.vector(row) for row in rows]
+        out = np.array(
+            [p.values for p in lin.apply_normal_batch(vectors, regularization=native)]
+        )
+        for term in terms:
+            if term is native:
+                continue
+            operator = term.hessian_operator(self.vector(x))
+            for i, direction in enumerate(vectors):
+                out[i] += _real_vector(
+                    operator @ direction,
+                    size=out.shape[1],
+                    name="regularization curvature product",
+                )
         return out
 
 
@@ -1140,6 +1304,9 @@ class _ResumePlan:
     start_iteration: int
     checkpoint: OptimizationCheckpoint
     stage_index: int
+    # The stage's optimization finished; only end-of-stage work remains.
+    finalize: bool = False
+    summary: Optional[Dict[str, Any]] = None
 
 
 class _ContinuationResult:
@@ -1148,6 +1315,28 @@ class _ContinuationResult:
     def __init__(self, model: np.ndarray, stage_result: StageResult) -> None:
         self.model = model
         self.stage_result = stage_result
+
+
+def _gaussian_declaration(prior: Any) -> str:
+    """Fingerprint authored prior fields independently of stage mesh refinement."""
+
+    def scale(value: Any) -> Any:
+        # Arrays stay arrays: ``fingerprint`` digests large ones by their bytes.
+        if isinstance(value, Mapping):
+            return {str(k): scale(v) for k, v in value.items()}
+        if hasattr(value, "magnitude"):
+            return dict(value=np.asarray(value.magnitude), units=str(value.units))
+        return np.asarray(value)
+
+    return fingerprint(
+        reference=prior.reference.values,
+        basis=[
+            (k, prior.reference.space.block(k).basis_identity)
+            for k in prior.reference.space.blocks
+        ],
+        std=scale(prior.std),
+        mesh_measure=prior.mesh_measure,
+    )
 
 
 class FWI:
@@ -1202,9 +1391,27 @@ class FWI:
         history: Any = None,
         callback: Optional[Callable[[FWIIteration], None]] = None,
         patch_updates: Optional[PatchUpdates] = None,
+        uncertainty: Any = None,
+        curvature: Optional[CurvatureTransfer] = None,
     ) -> None:
         if patch_updates is not None and not isinstance(patch_updates, PatchUpdates):
             raise TypeError("patch_updates must be a PatchUpdates configuration")
+        from .curvature import BFGSHistory
+        from .statistics import BFGSUncertainty, GaussianPrior
+
+        if uncertainty is not None and not isinstance(uncertainty, BFGSUncertainty):
+            raise TypeError("uncertainty must be a BFGSUncertainty configuration")
+        if curvature is not None and not isinstance(curvature, CurvatureTransfer):
+            raise TypeError("curvature must be a CurvatureTransfer policy")
+        self.curvature = CurvatureTransfer.reset() if curvature is None else curvature
+        self._curvature_archive: Optional[BFGSHistory] = None
+        self._curvature_source: Optional[_CurvatureSource] = None
+        self._curvature_output: Optional[str] = None
+        self.uncertainty = uncertainty
+        self._uncertainty_archive: Optional[BFGSHistory] = None
+        self._uncertainty_outputs: dict[str, str] = {}
+        # Restart arrays of the stage being solved (see ``_write_checkpoint``).
+        self._stage_files: Optional[Tuple[int, StageFiles]] = None
         self.patch_updates = patch_updates
         self.problem = problem
         self.stages: List[Stage] = _stage_list(stages)
@@ -1213,14 +1420,95 @@ class FWI:
             for stage in self.stages
         ):
             raise ValueError("Local patch updates require patches in every stage")
+        self._transfer_enabled = any(
+            self._curvature_policy(s).method != "reset" for s in self.stages
+        )
         self.optimizer = LBFGS() if optimizer is None else optimizer
+        if self._transfer_enabled:
+            if (
+                patch_updates is not None
+                or getattr(problem, "patches", None) is not None
+                or any(s.patches is not None for s in self.stages)
+            ):
+                raise ValueError(
+                    "Curvature transfer currently requires full-domain FWI"
+                )
+            if any(
+                not isinstance(
+                    self.optimizer if s.optimizer is None else s.optimizer, LBFGS
+                )
+                for s in self.stages
+            ):
+                raise ValueError("Curvature transfer requires LBFGS in every stage")
+            problem.backend.curvature()
         if not callable(getattr(self.optimizer, "solve", None)):
             raise TypeError("optimizer must provide solve()")
+        if uncertainty is not None:
+            if (
+                patch_updates is not None
+                or getattr(problem, "patches", None) is not None
+            ):
+                raise ValueError("BFGS uncertainty currently requires full-domain FWI")
+            if scaling is not None:
+                raise ValueError(
+                    "BFGS uncertainty automatically uses Gaussian prior scaling"
+                )
+            problem.backend.curvature()  # fail before any propagation on unsupported sites
+            for i, stage in enumerate(self.stages):
+                if uncertainty.stages == "final" and i != len(self.stages) - 1:
+                    continue
+                selected = (
+                    self.optimizer if stage.optimizer is None else stage.optimizer
+                )
+                prior = (
+                    regularization
+                    if stage.regularization is None
+                    else stage.regularization
+                )
+                if not isinstance(selected, LBFGS) or not isinstance(
+                    prior, GaussianPrior
+                ):
+                    raise ValueError(
+                        "BFGS uncertainty requires LBFGS and GaussianPrior"
+                    )
+                misfit = problem.misfit if stage.misfit is None else stage.misfit
+                if getattr(misfit, "noise_std", None) is None:
+                    raise ValueError(
+                        "BFGS uncertainty requires Misfit.l2(noise_std=...)"
+                    )
+                if stage.loss is not None:
+                    raise ValueError(
+                        "BFGS uncertainty cannot override the Gaussian data loss"
+                    )
         self.regularization = regularization
         self.preconditioner = preconditioner
+        if _receiver_probe_request(preconditioner) is not None and (
+            patch_updates is not None
+            or getattr(problem, "patches", None) is not None
+            or any(stage.patches is not None for stage in self.stages)
+        ):
+            raise ValueError(
+                "Diagonal(probes='receiver') needs full-domain receiver probes; "
+                "patch FWI supports probes='rademacher' or 'unit'"
+            )
         if smoothing is not None and smoothing is not False:
             smoothing = control_smoothing(smoothing)
         self.smoothing = smoothing
+        if self._transfer_enabled:
+            # Reject proximal penalties before any solve; an explicit penalty
+            # replaces the stage, workflow and problem smoothing in that order.
+            for stage in self.stages:
+                declared = (
+                    regularization
+                    if stage.regularization is None
+                    else stage.regularization
+                )
+                if declared is None:
+                    declared = next(
+                        (s for s in (stage.smoothing, smoothing) if s is not None),
+                        getattr(problem, "smoothing", None),
+                    )
+                _require_smooth_regularization(declared)
         if step_limit is not None:
             limit = float(step_limit)
             if not math.isfinite(limit) or limit <= 0.0:
@@ -1251,6 +1539,33 @@ class FWI:
         self._views: Dict[str, ImagingProblem] = {}
         self._problems: Dict[int, ImagingProblem] = {}
         self._stage_inputs: Dict[str, str] = {}
+
+    def _preconditioner_linearization(
+        self, view: Any, objective: "_StageObjective", model: Any
+    ) -> Linearization:
+        """Return the linearization a bound preconditioner is updated at.
+
+        ``Diagonal(probes="receiver")`` reads the receiver-probe diagonal of
+        the linearize job, so that point is linearized with the probes. The
+        stage's first linearization requests them already; a refresh point
+        costs one more linearize.
+        """
+        lin = objective.linearization(model)
+        probes = _receiver_probe_request(self.preconditioner)
+        if probes is None:
+            return lin
+        return view.linearize(
+            objective.vector(model), gradient=True, receiver_diagonal=probes
+        )
+
+    def _curvature_policy(self, stage: Stage) -> CurvatureTransfer:
+        """Resolve a stage override without changing the run's default policy."""
+        return self.curvature if stage.curvature is None else stage.curvature
+
+    def _curvature_configuration(self) -> list:
+        return [
+            dataclasses.asdict(self._curvature_policy(stage)) for stage in self.stages
+        ]
 
     # -- stage problems
 
@@ -1290,7 +1605,7 @@ class FWI:
                 )
             elif self.checkpoint_path is not None:
                 accepted = previous._require_state()
-                digest = hashlib.sha256(accepted.values.tobytes()).hexdigest()[:20]
+                digest = block_digest(accepted.values).rsplit(":", 1)[-1][:20]
                 path = (
                     self.checkpoint_path.parent
                     / f"{self.checkpoint_path.stem}.stage_{index}.{digest}.h5"
@@ -1415,15 +1730,7 @@ class FWI:
     ) -> Dict[str, Any]:
         problem = self._problem_for(index)
         assert self.state_path is not None
-        masks = space.support_masks()
-        support = hashlib.sha256(
-            json.dumps(
-                {
-                    name: mask.astype(int).tolist()
-                    for name, mask in sorted(masks.items())
-                }
-            ).encode("utf-8")
-        ).hexdigest()
+        support = fingerprint(support=space.support_masks()).removeprefix("sha256:")
         return {
             "schema": CHECKPOINT_SCHEMA,
             "stage_inputs": json.dumps(self._stage_inputs, sort_keys=True),
@@ -1467,21 +1774,35 @@ class FWI:
         stage_iteration: int,
         completed: bool,
         history: OptimizationHistory,
+        finished: Optional[Mapping[str, Any]] = None,
     ) -> None:
+        """Publish one checkpoint generation.
+
+        Control-sized restart arrays (curvature pairs, the optimizer iterate,
+        coordinate scaling and the archive seed) go to the bounded
+        ``<stem>.restart`` store, each written once; the checkpoint metadata
+        only references them. Once the checkpoint has atomically replaced its
+        predecessor, restart files and patch model epochs it no longer
+        references are deleted. ``finished`` marks an optimized stage whose
+        end-of-stage factorizations are still pending.
+        """
         if self.checkpoint_path is None:
             return
         state = view.state_from(ControlVector(model, space))
         assert self.state_path is not None
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         state_path = self.state_path
-        if getattr(view, "patches", None) is not None:
+        patched = getattr(view, "patches", None) is not None
+        if patched:
             # Publish a new immutable state before changing the checkpoint
             # pointer, so an interrupted write cannot change an older epoch.
             epoch = _state_epoch(state)[:20]
             state_path = state_path.with_name(
                 f"{state_path.stem}_{epoch}{state_path.suffix}"
             )
-        state.save(state_path)
+        # Replace atomically: the published checkpoint may reference this file.
+        with atomic_output_path(state_path) as temporary:
+            state.save(temporary)
         metadata = self._checkpoint_metadata(
             index,
             stage,
@@ -1491,26 +1812,38 @@ class FWI:
             history=history,
         )
         metadata["state_path"] = str(state_path)
-        if getattr(view, "patches", None) is not None:
+        metadata.update(self._stage_declarations(index, stage, view, space))
+        metadata["uncertainty_config"] = json.dumps(
+            None if self.uncertainty is None else dataclasses.asdict(self.uncertainty)
+        )
+        metadata["uncertainty_outputs"] = json.dumps(self._uncertainty_outputs)
+        metadata["curvature_config"] = json.dumps(self._curvature_configuration())
+        metadata["curvature_output"] = self._curvature_output
+        metadata["curvature_source_stage"] = (
+            None if self._curvature_source is None else self._curvature_source.index
+        )
+        restart, local = self._restart_record(index, completed)
+        metadata["restart"] = json.dumps(restart)
+        if restart is not None or patched:
+            metadata["optimizer_config"] = getattr(self, "_optimizer_config", None)
+        if self._uncertainty_archive is not None:
+            metadata["uncertainty_prior"] = self._uncertainty_prior
+        if finished is not None:
+            metadata["stage_finished"] = True
+            metadata["stage_status"] = int(finished["status"])
+            metadata["stage_message"] = str(finished["message"])
+            metadata["stage_success"] = bool(finished["success"])
+        if patched:
             metadata["stage_identity"] = self._identity(view)
             assert view._patch_runtime is not None
             metadata["patch_runtime"] = json.dumps(
                 view._patch_runtime.checkpoint(), sort_keys=True
             )
             metadata["model_epoch"] = epoch
-            metadata["optimizer_restart"] = json.dumps(
-                getattr(self, "_optimizer_checkpoint", None)
-            )
-            metadata["optimizer_config"] = getattr(self, "_optimizer_config", None)
-            metadata["optimizer_scaling"] = json.dumps(
-                getattr(self, "_optimizer_scaling", None)
-            )
             metadata["patch_updates"] = json.dumps(
                 None if self.patch_updates is None else self.patch_updates.to_dict()
             )
-            metadata["local_updates"] = json.dumps(
-                getattr(self, "_local_checkpoint", None)
-            )
+            metadata["local_updates"] = json.dumps(local)
         OptimizationCheckpoint(
             model=model,
             iteration=history.iteration_count,
@@ -1518,6 +1851,227 @@ class FWI:
             loss=loss,
             metadata=metadata,
         ).save(self.checkpoint_path)
+        # The new generation is published: drop everything it superseded.
+        self._restart_store().commit(restart)
+        if patched:
+            pattern = f"{glob.escape(self.state_path.stem)}_*{self.state_path.suffix}"
+            for stale in state_path.parent.glob(pattern):
+                if stale != state_path:
+                    stale.unlink(missing_ok=True)
+
+    # -- restart arrays ---------------------------------------------------------
+
+    def _restart_store(self) -> RestartStore:
+        assert self.checkpoint_path is not None
+        store = getattr(self, "_restarts", None)
+        if store is None or store.root != self.checkpoint_path.with_name(
+            f"{self.checkpoint_path.stem}.restart"
+        ):
+            store = RestartStore(self.checkpoint_path)
+            self._restarts = store
+        return store
+
+    def _stage_files_for(self, index: int) -> StageFiles:
+        """Return the restart directory of this run of stage ``index``."""
+        current = getattr(self, "_stage_files", None)
+        if current is None or current[0] != index:
+            current = (index, self._restart_store().new_stage(index))
+            self._stage_files = current
+        return current[1]
+
+    def _stage_declarations(
+        self, index: int, stage: Stage, view: ImagingProblem, space: ControlSpace
+    ) -> Dict[str, Any]:
+        """Return penalty and operator declarations a resume must match.
+
+        Computed once per stage space: fingerprinting a Gaussian prior or
+        binding a custom penalty per checkpoint would repeat control-sized work.
+        """
+        cached = getattr(self, "_declarations", None)
+        if cached is not None and cached[0] == index and cached[1] is space:
+            return dict(cached[2])
+        from .statistics import GaussianPrior
+
+        prior_spec = (
+            self.regularization
+            if stage.regularization is None
+            else stage.regularization
+        )
+        declarations: Dict[str, Any] = {
+            "gaussian_prior": (
+                None
+                if not isinstance(prior_spec, GaussianPrior)
+                else _gaussian_declaration(prior_spec)
+            )
+        }
+        if self._transfer_enabled or self.uncertainty is not None:
+            effective_regularization = (
+                view.smoothing if prior_spec is None else prior_spec
+            )
+            declarations["curvature_regularization_declaration"] = (
+                _checkpoint_regularization_identity(effective_regularization, space)
+            )
+            declarations["curvature_operator_configuration"] = (
+                _checkpoint_operator_configuration(self.scaling, self.preconditioner)
+            )
+        self._declarations = (index, space, declarations)
+        return dict(declarations)
+
+    def _restart_record(
+        self, index: int, completed: bool
+    ) -> Tuple[Optional[Dict[str, Any]], Any]:
+        """Persist this generation's new restart arrays; return its references.
+
+        Returns the JSON restart record (``None`` when the checkpoint needs no
+        arrays) and the local patch progress with its optimizer states and
+        scalings replaced by file references. Pairs shared by the optimizer
+        restart and the curvature archive are stored once.
+        """
+        local = getattr(self, "_local_checkpoint", None)
+        live = local is not None and any(
+            isinstance(entry.get("optimizer_state"), LBFGSRestart)
+            or isinstance(entry.get("scaling"), np.ndarray)
+            for entry in local.get("proposals", {}).values()
+        )
+        # A completed stage resumes at the next one: it keeps no restart arrays.
+        state = None if completed else getattr(self, "_optimizer_checkpoint", None)
+        archive = None if completed else self._curvature_archive
+        if archive is None and not completed:
+            archive = self._uncertainty_archive
+        scaling = None if completed else getattr(self, "_optimizer_scaling", None)
+        if state is None and archive is None and scaling is None and not live:
+            return None, local
+        files = self._stage_files_for(index)
+        names = set()
+        if archive is not None or scaling is not None:
+            arrays: Dict[str, Optional[np.ndarray]] = dict(scaling=scaling)
+            if archive is not None:
+                arrays["base_inverse_diagonal"] = archive.base_inverse_diagonal
+                if archive.seed_rank:
+                    arrays["seed_modes"] = archive.seed_modes
+                    arrays["seed_eigenvalues"] = archive.seed_eigenvalues
+            names.add(
+                files.put(
+                    "stage.h5",
+                    arrays,
+                    attrs=dict(
+                        archive=(
+                            None
+                            if archive is None
+                            else dict(
+                                state=archive.state,
+                                coordinates=archive.coordinates,
+                                provenance=archive.provenance,
+                            )
+                        ),
+                        units=getattr(self, "_uncertainty_units", None),
+                    ),
+                )
+            )
+        optimizer = None
+        if state is not None:
+            # An unscaled optimizer iterate is the checkpoint model itself.
+            optimizer = files.save_state(state, model=scaling is not None)
+            names |= state_files(optimizer)
+        archived = None
+        if archive is not None:
+            steps = () if state is None else state.steps
+            if len(archive.pairs[0]) != len(steps) or any(
+                a is not b for a, b in zip(archive.pairs[0], steps)
+            ):
+                raise RuntimeError(
+                    "The curvature archive and the optimizer restart diverged"
+                )
+            archived = dict(
+                accepted_iterations=archive.accepted_iterations, stage=archive._stage
+            )
+        if live:
+            assert local is not None
+            proposals = {}
+            for key, entry in local["proposals"].items():
+                entry = dict(entry)
+                prefix = f"patch_{key}_"
+                if isinstance(entry.get("optimizer_state"), LBFGSRestart):
+                    entry["optimizer_state"] = files.save_state(
+                        entry["optimizer_state"], prefix
+                    )
+                    names |= state_files(entry["optimizer_state"])
+                if isinstance(entry.get("scaling"), np.ndarray):
+                    name = files.put(
+                        f"{prefix}scaling_{int(entry['iteration'])}.h5",
+                        dict(scaling=entry["scaling"]),
+                    )
+                    entry["scaling"] = {"file": name}
+                    names.add(name)
+                proposals[key] = entry
+            local = {**local, "proposals": proposals}
+        record = dict(
+            schema=RESTART_SCHEMA,
+            directory=files.name,
+            files=sorted(names),
+            optimizer=optimizer,
+            archive=archived,
+        )
+        return record, local
+
+    def _restore_restart(
+        self,
+        index: int,
+        record: Optional[Mapping[str, Any]],
+        checkpoint: OptimizationCheckpoint,
+        meta: Mapping[str, Any],
+    ) -> None:
+        """Load the restart arrays a checkpoint references for stage ``index``."""
+        from .curvature import BFGSHistory
+
+        state = None
+        scaling = None
+        files = None
+        if record is not None:
+            files = self._restart_store().open_stage(record)
+            self._resume_files = (index, files)
+            arrays: Dict[str, np.ndarray] = {}
+            attrs: Dict[str, Any] = {}
+            if "stage.h5" in record["files"]:
+                arrays, attrs = files.get("stage.h5")
+            scaling = arrays.get("scaling")
+            if record["optimizer"] is not None:
+                state = files.load_state(record["optimizer"], checkpoint.model)
+            if record["archive"] is not None:
+                identities = attrs["archive"]
+                archive = BFGSHistory(
+                    arrays["base_inverse_diagonal"],
+                    state=identities["state"],
+                    coordinates=identities["coordinates"],
+                    seed_modes=arrays.get("seed_modes"),
+                    seed_eigenvalues=arrays.get("seed_eigenvalues"),
+                    provenance=identities["provenance"],
+                )
+                if state is not None:
+                    # The archive and the optimizer share the loaded pairs.
+                    archive._set_pairs(
+                        state.steps, state.gradient_differences, state.pair_ids
+                    )
+                archive._accepted_iterations = int(
+                    record["archive"]["accepted_iterations"]
+                )
+                archive._stage = record["archive"]["stage"]
+                self._resume_curvature = (index, archive)
+            self._resume_units = attrs.get("units")
+        self._resume_optimizer = (index, state, meta.get("optimizer_config"), scaling)
+        local = getattr(self, "_resume_local", None)
+        if local is not None and local[0] == index and local[1] is not None:
+            for entry in local[1]["proposals"].values():
+                if isinstance(entry.get("optimizer_state"), Mapping):
+                    if files is None:
+                        raise ValueError("Checkpoint local updates lack restart files")
+                    entry["optimizer_state"] = files.load_state(
+                        entry["optimizer_state"]
+                    )
+                if isinstance(entry.get("scaling"), Mapping):
+                    if files is None:
+                        raise ValueError("Checkpoint local updates lack restart files")
+                    entry["scaling"] = files.get(entry["scaling"]["file"])[0]["scaling"]
 
     # -- resume ---------------------------------------------------------------
 
@@ -1527,7 +2081,14 @@ class FWI:
             return None
         checkpoint = OptimizationCheckpoint.load(path)
         meta = checkpoint.metadata
-        if meta.get("schema") != CHECKPOINT_SCHEMA:
+        schema = meta.get("schema")
+        if schema in _LEGACY_CHECKPOINT_SCHEMAS:
+            raise ValueError(
+                f"{path} is an {schema} checkpoint, which kept optimizer restart "
+                "state as JSON lists; this FrequenSolve version cannot resume it. "
+                "Rerun with run(resume=False) or remove the checkpoint."
+            )
+        if schema != CHECKPOINT_SCHEMA:
             raise ValueError(f"{path} is not an FWI checkpoint")
         if meta.get("problem") != self.problem.name:
             raise ValueError(
@@ -1535,6 +2096,37 @@ class FWI:
                 f"not {self.problem.name!r}"
             )
         index = int(meta["stage_index"])
+        if not 0 <= index < len(self.stages):
+            raise ValueError("Checkpoint stage index is outside the configured stages")
+        from .statistics import GaussianPrior
+
+        prior_spec = (
+            self.regularization
+            if self.stages[index].regularization is None
+            else self.stages[index].regularization
+        )
+        declaration = (
+            None
+            if not isinstance(prior_spec, GaussianPrior)
+            else _gaussian_declaration(prior_spec)
+        )
+        if meta.get("gaussian_prior") != declaration:
+            raise ValueError("Checkpoint Gaussian prior declaration changed")
+        configured = (
+            None if self.uncertainty is None else dataclasses.asdict(self.uncertainty)
+        )
+        if json.loads(meta.get("uncertainty_config", "null")) != configured:
+            raise ValueError("Checkpoint uncertainty configuration changed")
+        self._uncertainty_outputs = json.loads(meta.get("uncertainty_outputs", "{}"))
+        configured_curvature = meta.get("curvature_config")
+        if configured_curvature is None:
+            if self._transfer_enabled:
+                raise ValueError("Checkpoint has no curvature-transfer configuration")
+        elif json.loads(configured_curvature) != self._curvature_configuration():
+            raise ValueError("Checkpoint curvature-transfer configuration changed")
+        self._curvature_output = meta.get("curvature_output")
+        if meta.get("uncertainty_prior") is not None:
+            self._resume_uncertainty = (index, meta["uncertainty_prior"])
         self._resume_initial_objective = (index, meta.get("initial_objective"))
         self._resume_regularization = (
             index,
@@ -1548,6 +2140,19 @@ class FWI:
         # ``controls`` of every stage up to it) before comparing layouts.
         self._stage_inputs = json.loads(meta.get("stage_inputs", "{}"))
         problem = self._problem_for(index)
+        if self._curvature_output:
+            from .statistics import UncertaintyResult
+
+            source_index = int(meta["curvature_source_stage"])
+            source_problem = self._problem_for(source_index)
+            self._curvature_source = _CurvatureSource(
+                source_index,
+                UncertaintyResult.load(
+                    self._curvature_output,
+                    source_problem.full_space,
+                    native=problem.backend.curvature(),
+                ),
+            )
         patch_record = meta.get("patch_runtime")
         if patch_record is not None:
             configured = (
@@ -1559,15 +2164,11 @@ class FWI:
         if patch_record is not None:
             from ._patch_problem import _PatchRuntime
 
-            self._resume_optimizer = (
-                index,
-                json.loads(meta.get("optimizer_restart", "null")),
-                meta.get("optimizer_config"),
-                json.loads(meta.get("optimizer_scaling", "null")),
-            )
             view = self.stages[index].view(problem)
             runtime = _PatchRuntime.restore(view, json.loads(patch_record))
-            if meta.get("stage_identity") != self._identity(view):
+            if meta.get("stage_identity") != self._identity(
+                self._smoothed_view(view, self.stages[index])
+            ):
                 raise ValueError("Checkpoint patch stage objective or settings changed")
             view._patch_runtime = runtime
             runtime.problem = view
@@ -1609,6 +2210,39 @@ class FWI:
                 f"checkpoint {path} references a missing control state {state_path}"
             )
         state = ControlState.load(state_path, problem.full_space.without_support())
+        if self._transfer_enabled or self.uncertainty is not None:
+            # Declarations were written from the stage view a solve uses,
+            # including the workflow-level smoothing override.
+            checkpoint_view = self._smoothed_view(stage.view(problem), stage)
+            declaration_space = checkpoint_view.space.without_support()
+            declaration_space = declaration_space.with_support(
+                {
+                    name: mask
+                    for name, mask in state.space.support_masks().items()
+                    if name in declaration_space.blocks
+                }
+            )
+            effective_regularization = (
+                checkpoint_view.smoothing if prior_spec is None else prior_spec
+            )
+            expected_declaration = _checkpoint_regularization_identity(
+                effective_regularization, declaration_space
+            )
+            if "curvature_regularization_declaration" not in meta:
+                raise ValueError(
+                    "Checkpoint lacks curvature regularization declaration; start a fresh run"
+                )
+            if meta["curvature_regularization_declaration"] != expected_declaration:
+                raise ValueError(
+                    "Checkpoint curvature regularization declaration changed"
+                )
+            expected_operator = _checkpoint_operator_configuration(
+                self.scaling, self.preconditioner
+            )
+            if meta.get("curvature_operator_configuration") != expected_operator:
+                raise ValueError(
+                    "Checkpoint scaling or fixed preconditioner configuration changed"
+                )
         if (
             patch_record is not None
             and meta.get("model_epoch") != _state_epoch(state)[:20]
@@ -1627,9 +2261,38 @@ class FWI:
                         f"reference scales: {exc}"
                     ) from exc
         stage_iteration = int(meta.get("stage_iteration", 0))
-        if bool(meta.get("stage_completed")) or stage_iteration >= stage.iterations:
+        completed = bool(meta.get("stage_completed"))
+        # A stage that still owes end-of-stage factorizations is complete only
+        # once its completed checkpoint exists: its last iteration checkpoint
+        # already reaches the budget, and an optimizer may also stop early.
+        finalize = (
+            not completed
+            and any(self._stage_factorizations(index))
+            and (
+                bool(meta.get("stage_finished")) or stage_iteration >= stage.iterations
+            )
+        )
+        if completed or (not finalize and stage_iteration >= stage.iterations):
             return _ResumePlan(state, index + 1, 0, checkpoint, index)
-        return _ResumePlan(state, index, stage_iteration, checkpoint, index)
+        self._restore_restart(
+            index, json.loads(meta.get("restart", "null")), checkpoint, meta
+        )
+        summary = None
+        if meta.get("stage_finished"):
+            summary = dict(
+                status=int(meta["stage_status"]),
+                message=str(meta["stage_message"]),
+                success=bool(meta["stage_success"]),
+            )
+        return _ResumePlan(
+            state,
+            index,
+            stage_iteration,
+            checkpoint,
+            index,
+            finalize=finalize,
+            summary=summary,
+        )
 
     def _skipped_result(
         self, index: int, stage: Stage, history: OptimizationHistory
@@ -1648,6 +2311,15 @@ class FWI:
             initial = final = LossTerms(data=0.0)
             stage_iteration = stage.iterations
         view = stage.view(self._problem_for(index))
+        uncertainty_result = None
+        if str(index) in self._uncertainty_outputs:
+            from .statistics import UncertaintyResult
+
+            uncertainty_result = UncertaintyResult.load(
+                self._uncertainty_outputs[str(index)],
+                view.full_space,
+                native=view.backend.curvature(),
+            )
         return StageResult(
             index=index,
             name=stage.label(index),
@@ -1662,6 +2334,7 @@ class FWI:
             final_loss=final,
             resumed=True,
             skipped=True,
+            uncertainty=uncertainty_result,
         )
 
     # -- stage solves ---------------------------------------------------------
@@ -1733,13 +2406,59 @@ class FWI:
                 f"{stage.iterations} done)"
             )
 
+        capture_uncertainty = self.uncertainty is not None and (
+            self.uncertainty.stages == "all" or index == len(self.stages) - 1
+        )
+        capture_curvature = capture_uncertainty or self._transfer_enabled
+        self._uncertainty_archive = None
+        self._curvature_archive = None
+        self._optimizer_checkpoint = None
+        self._optimizer_scaling = None
+        self._local_checkpoint = None
+        self._uncertainty_units = None
+        resumed_files = getattr(self, "_resume_files", None)
+        self._stage_files = (
+            resumed_files
+            if resumed_files is not None
+            and resumed_files[0] == index
+            and start_iteration > 0
+            else None
+        )
+        if self._transfer_enabled:
+            optimizer = dataclasses.replace(optimizer, preconditioner_refresh=None)
+        if capture_uncertainty:
+            assert self.uncertainty is not None
+            from .statistics import GaussianPrior
+
+            if not isinstance(optimizer, LBFGS) or not isinstance(
+                regularization, GaussianPrior
+            ):
+                raise ValueError("BFGS uncertainty requires LBFGS and GaussianPrior")
+            if getattr(view.misfit, "noise_std", None) is None:
+                raise ValueError(
+                    "BFGS uncertainty requires a Gaussian noise declaration"
+                )
+            optimizer = dataclasses.replace(
+                optimizer,
+                memory=max(optimizer.memory, stage.iterations),
+                curvature_tolerance=max(
+                    optimizer.curvature_tolerance, self.uncertainty.curvature_tolerance
+                ),
+                preconditioner_refresh=None,
+            )
+
         # First linearization of the stage: adopts the support masks that
         # define the stage space (held fixed until the next transition).
         timing_backend = getattr(view, "backend", None)
         timing_snapshot = (
             timing_backend.timing_snapshot() if timing_backend is not None else None
         )
-        first = view.linearize(gradient=True)
+        probes = _receiver_probe_request(self.preconditioner)
+        first = (
+            view.linearize(gradient=True)
+            if probes is None
+            else view.linearize(gradient=True, receiver_diagonal=probes)
+        )
         space = view.space
         x0 = np.array(first.point.values, dtype=np.float64, copy=True)
         if expected_model is not None:
@@ -1750,6 +2469,7 @@ class FWI:
                     f"checkpoint model for stage {label!r} does not match the "
                     "state it references (support masks or block layout changed)"
                 )
+            x0 = np.array(expected_model, copy=True)
         lower, upper = space.bounds
         x0 = np.clip(x0, lower, upper)
 
@@ -1851,13 +2571,172 @@ class FWI:
         ):
             bound_preconditioner = preconditioner.bind(space)
             bound_preconditioner.update(
-                objective.linearization(x0), regularization=bound_regularization
+                self._preconditioner_linearization(view, objective, x0),
+                regularization=bound_regularization,
             )
             preconditioner = bound_preconditioner
         refresh = getattr(optimizer, "preconditioner_refresh", None)
         scaling = self._scaling_for(objective.linearization(x0), space)
+        curvature_provenance = {
+            "mode": "reset",
+            "target_stage": index,
+            "hessian_actions": 0,
+        }
+        if capture_curvature:
+            from .curvature import BFGSHistory
+            from .regularization import Identity
+            from .statistics import BoundGaussianPrior, _linear_materials
+
+            if native_regularization is not None:
+                raise ValueError(
+                    "Curvature transfer requires a smooth objective without proximal regularization"
+                )
+            _linear_materials(space)
+            if capture_uncertainty:
+                assert isinstance(bound_regularization, BoundGaussianPrior)
+                scaling = bound_regularization.std.copy()
+            elif isinstance(scaling, Mapping):
+                scaling = curvature_scaling(
+                    scaling, space, max_ratio=optimizer.scaling_max_ratio
+                )
+            resumed_optimizer = getattr(self, "_resume_optimizer", None)
+            if (
+                resumed_optimizer is not None
+                and resumed_optimizer[0] == index
+                and start_iteration > 0
+            ):
+                if resumed_optimizer[2] != repr(optimizer):
+                    raise ValueError("Checkpoint optimizer configuration changed")
+                scaling = (
+                    None
+                    if resumed_optimizer[3] is None
+                    else np.asarray(resumed_optimizer[3])
+                )
+            scale = np.ones(space.size) if scaling is None else np.asarray(scaling)
+            if self.preconditioner is None:
+                physical_base = scale**2
+            elif isinstance(self.preconditioner, Identity):
+                physical_base = np.ones(space.size)
+            elif (
+                bound_preconditioner is not None
+                and getattr(bound_preconditioner, "inverse", None) is not None
+            ):
+                physical_base = bound_preconditioner.inverse.inverse_diagonal
+            else:
+                raise ValueError(
+                    "BFGS curvature requires a known fixed diagonal preconditioner"
+                )
+            prior_identity = _regularization_identity(bound_regularization)
+            # Array digests, not JSON lists: identities stay O(1) in memory.
+            coordinates = fingerprint(
+                prior=prior_identity,
+                scaling=_configuration_value(scale),
+                blocks=space.blocks,
+                support={
+                    k: _configuration_value(v) for k, v in space.support_masks().items()
+                },
+                basis=[space.block(k).basis_identity for k in space.blocks],
+            )
+            objective_id = fingerprint(stage=view.identity(), prior=prior_identity)
+            resumed_archive = None
+            resumed_curvature = getattr(self, "_resume_curvature", None)
+            if (
+                resumed_curvature is not None
+                and resumed_curvature[0] == index
+                and start_iteration > 0
+            ):
+                resumed_archive = resumed_curvature[1]
+                resumed_uq = getattr(self, "_resume_uncertainty", None)
+                if (
+                    capture_uncertainty
+                    and resumed_uq is not None
+                    and resumed_uq[0] == index
+                    and resumed_uq[1] != prior_identity
+                ):
+                    raise ValueError("Checkpoint Gaussian prior changed")
+            if resumed_archive is not None:
+                archive = resumed_archive
+                if archive.coordinates != coordinates or archive.state != objective_id:
+                    raise ValueError(
+                        "Checkpoint curvature objective or coordinates changed"
+                    )
+                curvature_provenance = archive.provenance
+            else:
+                initial_scale = None
+                seed = None
+                policy = self._curvature_policy(stage)
+                source = self._curvature_source
+                transfer = policy.method != "reset" and source is not None
+                # Plain L-BFGS rescales its initial inverse by a dynamic gamma
+                # that a frozen stage history cannot follow; measure the scale
+                # once instead (one Hessian action per stage, inside the
+                # refresh's normal job when the stage refreshes curvature).
+                measure = self.preconditioner is None and not capture_uncertainty
+                fold = measure and transfer and policy.method == "refresh"
+                if measure and not fold:
+                    initial_scale = _initial_scale(
+                        objective, x0, physical_base, (lower, upper)
+                    )
+                    physical_base *= initial_scale
+                if transfer:
+                    assert source is not None
+                    if source.index >= index:
+                        raise ValueError(
+                            "Curvature source must precede the target stage"
+                        )
+                    native = view.backend.curvature()
+                    seed = _prepare_seed(
+                        policy,
+                        source,
+                        space,
+                        native,
+                        physical_base,
+                        objective,
+                        x0,
+                        state=objective_id,
+                        coordinates=coordinates,
+                        index=index,
+                        scale_bounds=(lower, upper) if fold else None,
+                    )
+                    curvature_provenance = seed.provenance
+                    if fold:
+                        initial_scale = float(seed.provenance["initial_scale"])
+                        physical_base *= initial_scale
+                    if capture_uncertainty and curvature_provenance.get("inherited"):
+                        raise ValueError(
+                            "BFGS uncertainty requires refreshed curvature; warm-start inheritance is an optimizer metric"
+                        )
+                curvature_provenance["history_scope"] = (
+                    "full_stage" if capture_uncertainty else "limited_memory"
+                )
+                curvature_provenance["initial_scale"] = initial_scale
+                # The history adopts the seed modes in optimizer coordinates;
+                # the seed releases its block so one copy stays resident.
+                modes, eigenvalues = (None, None) if seed is None else seed.take(scale)
+                seed = None
+                archive = BFGSHistory(
+                    physical_base / scale**2,
+                    state=objective_id,
+                    coordinates=coordinates,
+                    seed_modes=modes,
+                    seed_eigenvalues=eigenvalues,
+                    provenance=curvature_provenance,
+                )
+                del modes
+            preconditioner = _history_inverse(archive, scale)
+            bound_preconditioner = None
+            refresh = None
+            if capture_uncertainty:
+                self._uncertainty_archive = archive
+                self._uncertainty_prior = prior_identity
+                self._uncertainty_units = dict(
+                    getattr(bound_regularization, "units", {})
+                )
+            if self._transfer_enabled:
+                self._curvature_archive = archive
+
         optimizer_restart = None
-        if getattr(view, "patches", None) is not None:
+        if getattr(view, "patches", None) is not None or capture_curvature:
             if isinstance(scaling, Mapping):
                 scaling = curvature_scaling(
                     scaling, space, max_ratio=optimizer.scaling_max_ratio
@@ -1879,7 +2758,7 @@ class FWI:
             self._optimizer_checkpoint = optimizer_restart
             self._optimizer_config = repr(optimizer)
             self._optimizer_scaling = (
-                None if scaling is None else np.asarray(scaling).tolist()
+                None if scaling is None else np.asarray(scaling, dtype=np.float64)
             )
         step_limit = self.step_limit
         if step_limit is None:
@@ -1898,7 +2777,16 @@ class FWI:
         )
 
         def on_iteration(it: InexactNewtonIteration) -> None:
-            if getattr(view, "patches", None) is not None:
+            if capture_uncertainty:
+                archive(it)
+            elif capture_curvature:
+                if it.optimizer_state is None:
+                    raise ValueError(
+                        "Curvature transfer requires an optimizer checkpoint"
+                    )
+                # Share the optimizer's limited-memory pairs (no copies).
+                archive._follow(it.optimizer_state)
+            if getattr(view, "patches", None) is not None or capture_curvature:
                 self._optimizer_checkpoint = it.optimizer_state
             loss = objective.loss(it.model)
             stage_iteration = start_iteration + it.iteration
@@ -1940,7 +2828,7 @@ class FWI:
                 and it.iteration % int(refresh) == 0
             ):
                 bound_preconditioner.update(
-                    objective.linearization(it.model),
+                    self._preconditioner_linearization(view, objective, it.model),
                     regularization=bound_regularization,
                 )
             if self.callback is not None:
@@ -1976,7 +2864,7 @@ class FWI:
             space=space,
             **(
                 {"restart": optimizer_restart}
-                if getattr(view, "patches", None) is not None
+                if (getattr(view, "patches", None) is not None or capture_curvature)
                 and getattr(optimizer, "kind", None) == "lbfgs"
                 else {}
             ),
@@ -1985,6 +2873,38 @@ class FWI:
         problem.state = view.state_from(final)
         final_loss = objective.loss(result.model)
         stage_iteration = start_iteration + int(result.iterations)
+        uncertainty_result = None
+        if capture_curvature:
+            if any(self._stage_factorizations(index)):
+                # A walltime kill during the factorizations below resumes in
+                # finalize-only mode instead of optimizing the stage again.
+                self._write_checkpoint(
+                    index,
+                    stage,
+                    view,
+                    space,
+                    result.model,
+                    final_loss,
+                    stage_iteration=stage_iteration,
+                    completed=False,
+                    history=history,
+                    finished=dict(
+                        status=int(result.status),
+                        message=str(result.message),
+                        success=bool(result.success) or int(result.status) >= 0,
+                    ),
+                )
+            uncertainty_result = self._factorize_stage(
+                index,
+                view,
+                space,
+                final,
+                archive,
+                scale,
+                optimizer,
+                curvature_provenance,
+                getattr(self, "_uncertainty_units", None),
+            )
         self._write_checkpoint(
             index,
             stage,
@@ -2016,8 +2936,10 @@ class FWI:
             resumed=start_iteration > 0,
             vector=final,
             space=space,
+            uncertainty=uncertainty_result,
             metrics={
                 "optimizer": metrics["optimizer"],
+                "curvature_transfer": curvature_provenance,
                 "elapsed_seconds": perf_counter() - stage_started,
                 "elapsed_scope": "stage preparation, evaluations, reductions and checkpoint writes",
                 "gradient_evaluations": int(result.gradient_evaluations),
@@ -2042,9 +2964,296 @@ class FWI:
         self.results.append(stage_result)
         return stage_result
 
+    def _smoothed_view(self, view: ImagingProblem, stage: Stage) -> ImagingProblem:
+        """Apply the workflow-level smoothing override exactly as a stage solve does."""
+        if self.smoothing is not None and stage.smoothing is None:
+            return view.restrict(
+                smoothing=None if self.smoothing is False else self.smoothing
+            )
+        return view
+
+    def _stage_factorizations(self, index: int) -> Tuple[bool, bool]:
+        """Return whether stage ``index`` ends with (uncertainty, transfer) factors.
+
+        Transfer factors exist only for a following stage that seeds from
+        them; nothing is factorized after a stage nobody reads.
+        """
+        uncertainty = self.uncertainty is not None and (
+            self.uncertainty.stages == "all" or index == len(self.stages) - 1
+        )
+        transfer = (
+            self._transfer_enabled
+            and index + 1 < len(self.stages)
+            and self._curvature_policy(self.stages[index + 1]).method != "reset"
+        )
+        return uncertainty, transfer
+
+    def _factorize_stage(
+        self,
+        index: int,
+        view: ImagingProblem,
+        space: ControlSpace,
+        final: ControlVector,
+        archive: Any,
+        scale: np.ndarray,
+        optimizer: Any,
+        provenance: Mapping[str, Any],
+        units: Optional[Mapping[str, Any]],
+    ) -> Any:
+        """Run the stage's single end-of-stage BFGS factorization, if anyone uses it.
+
+        Posterior uncertainty for this stage and the next stage's curvature
+        transfer share one ``bfgs_rsvd`` of the archive at the larger of their
+        ranks (an unlimited uncertainty rank covers both); its saved factors
+        serve both. Returns the uncertainty result, or ``None``.
+        """
+        uncertainty, transfer = self._stage_factorizations(index)
+        if self._transfer_enabled:
+            # A later stage must never seed from an older band's factors.
+            self._curvature_source = None
+            self._curvature_output = None
+        if not (uncertainty or transfer):
+            return None
+        from .statistics import UncertaintyResult
+
+        if uncertainty:
+            lower, upper = space.bounds
+            tolerance = optimizer.bound_tolerance
+            if np.any(
+                np.isclose(final.values, lower, rtol=0, atol=tolerance)
+            ) or np.any(np.isclose(final.values, upper, rtol=0, atol=tolerance)):
+                raise ValueError(
+                    "BFGS posterior approximation does not support active parameter bounds"
+                )
+        transfer_rank = (
+            min(space.size, max(self._curvature_policy(s).rank for s in self.stages))
+            if transfer
+            else None
+        )
+        if uncertainty:
+            assert self.uncertainty is not None
+            rank = self.uncertainty.rank
+            if rank is not None and transfer_rank is not None:
+                rank = max(rank, transfer_rank)
+            curvature_tolerance = max(
+                optimizer.curvature_tolerance, self.uncertainty.curvature_tolerance
+            )
+        else:
+            rank, curvature_tolerance = transfer_rank, optimizer.curvature_tolerance
+        native = view.backend.curvature()
+        factors = native.bfgs_uncertainty(
+            archive,
+            prior_std=scale,
+            rank=rank,
+            curvature_tolerance=curvature_tolerance,
+        )
+        result = UncertaintyResult(
+            factors,
+            final,
+            native=native,
+            units=units if uncertainty else None,
+            provenance=dict(provenance),
+        )
+        directory = (
+            Path(self._problem_for(index).workdir)
+            / ("uncertainty" if uncertainty else "curvature")
+            / f"stage_{index}_{factors.path.parent.name}"
+        )
+        saved = str(result.save(directory))
+        if uncertainty:
+            self._uncertainty_outputs[str(index)] = saved
+        if transfer:
+            self._curvature_output = saved
+            self._curvature_source = _CurvatureSource(index, result)
+        return result if uncertainty else None
+
+    def _stage_optimizer(self, index: int, stage: Stage) -> Any:
+        """Return the optimizer configuration a curvature-capturing stage ran with."""
+        optimizer = self.optimizer if stage.optimizer is None else stage.optimizer
+        if self._transfer_enabled:
+            optimizer = dataclasses.replace(optimizer, preconditioner_refresh=None)
+        if self._stage_factorizations(index)[0]:
+            assert self.uncertainty is not None
+            optimizer = dataclasses.replace(
+                optimizer,
+                memory=max(optimizer.memory, stage.iterations),
+                curvature_tolerance=max(
+                    optimizer.curvature_tolerance, self.uncertainty.curvature_tolerance
+                ),
+                preconditioner_refresh=None,
+            )
+        return optimizer
+
+    def _finalize_stage(
+        self, index: int, stage: Stage, plan: _ResumePlan
+    ) -> StageResult:
+        """Finish a stage whose optimization an earlier run completed.
+
+        The earlier run reached the stage's last accepted iterate (or its
+        optimizer stopped) but was interrupted before the end-of-stage
+        factorizations or the completed checkpoint. Restore the archived
+        curvature pairs, run only those factorizations and publish the
+        completed checkpoint; no objective is evaluated and the optimizer
+        does not run again.
+        """
+        started = perf_counter()
+        problem = self._problem_for(index)
+        history = self._history
+        assert history is not None and problem.state is not None
+        label = stage.label(index)
+        view = self._smoothed_view(stage.view(problem), stage)
+        view._adopt_masks(
+            {
+                name: mask
+                for name, mask in problem.state.space.support_masks().items()
+                if name in view.space.blocks
+            }
+        )
+        self._views[label] = view
+        space = view.space
+        restored = getattr(self, "_resume_curvature", None)
+        resumed_optimizer = getattr(self, "_resume_optimizer", None)
+        if (
+            restored is None
+            or restored[0] != index
+            or resumed_optimizer is None
+            or resumed_optimizer[0] != index
+        ):
+            raise ValueError(
+                f"checkpoint of stage {label!r} lacks the curvature archive its "
+                "end-of-stage factorization needs"
+            )
+        optimizer = self._stage_optimizer(index, stage)
+        if resumed_optimizer[2] != repr(optimizer):
+            raise ValueError("Checkpoint optimizer configuration changed")
+        archive = restored[1]
+        scaling = resumed_optimizer[3]
+        scale = np.ones(space.size) if scaling is None else np.asarray(scaling)
+        model = np.array(plan.checkpoint.model, copy=True)
+        final = ControlVector(model, space)
+        reference = getattr(self, "_resume_initial_objective", (index, None))
+        if reference[0] == index and reference[1] is not None:
+            self._stage_initial_objective = float(reference[1])
+        native_record = getattr(self, "_resume_regularization", (index, None))
+        self._native_checkpoint = (
+            native_record[1] if native_record[0] == index else None
+        )
+        self._optimizer_config = resumed_optimizer[2]
+        self._optimizer_checkpoint = resumed_optimizer[1]
+        self._optimizer_scaling = scaling
+        self._local_checkpoint = None
+        if self._transfer_enabled:
+            self._curvature_archive = archive
+        uncertainty = self._stage_factorizations(index)[0]
+        self._uncertainty_archive = archive if uncertainty else None
+        resumed_prior = getattr(self, "_resume_uncertainty", None)
+        self._uncertainty_prior = (
+            resumed_prior[1]
+            if resumed_prior is not None and resumed_prior[0] == index
+            else None
+        )
+        resumed_files = getattr(self, "_resume_files", None)
+        self._stage_files = (
+            resumed_files if resumed_files and resumed_files[0] == index else None
+        )
+        provenance = archive.provenance
+        uncertainty_result = self._factorize_stage(
+            index,
+            view,
+            space,
+            final,
+            archive,
+            scale,
+            optimizer,
+            provenance,
+            getattr(self, "_resume_units", None),
+        )
+        self._write_checkpoint(
+            index,
+            stage,
+            view,
+            space,
+            model,
+            plan.checkpoint.loss,
+            stage_iteration=plan.start_iteration,
+            completed=True,
+            history=history,
+        )
+        records = [
+            r
+            for r in history.iterations
+            if r.metrics.get("stage_index") == index and r.accepted is not False
+        ]
+        summary: Dict[str, Any] = dict(
+            status=0,
+            message="stage iteration budget reached by an earlier run",
+            success=True,
+        )
+        summary.update(plan.summary or {})
+        result = StageResult(
+            index=index,
+            name=label,
+            frequencies=stage.frequencies,
+            active=space.blocks,
+            iterations=0,
+            stage_iteration=plan.start_iteration,
+            success=bool(summary["success"]),
+            status=int(summary["status"]),
+            message=str(summary["message"]),
+            initial_loss=records[0].loss if records else plan.checkpoint.loss,
+            final_loss=plan.checkpoint.loss,
+            resumed=True,
+            vector=final,
+            space=space,
+            uncertainty=uncertainty_result,
+            metrics={
+                "optimizer": getattr(optimizer, "kind", type(optimizer).__name__),
+                "curvature_transfer": provenance,
+                "finalized_after_resume": True,
+                "elapsed_seconds": perf_counter() - started,
+                "elapsed_scope": "end-of-stage factorizations and checkpoint writes",
+            },
+        )
+        self.results.append(result)
+        return result
+
     # -- run ------------------------------------------------------------------
 
-    def run(self, resume: bool = True) -> FWIResult:
+    def run(self, resume: bool = True, *, execution: Any = None) -> FWIResult:
+        """Run staged inversion, optionally inside one persistent allocation.
+
+        ``execution=PersistentAllocation(...)`` owns an allocation for the
+        entire workflow and releases it on success, failure or interruption.
+        Passing an already-open ``AllocationSession`` borrows it without
+        closing it. Derived problems, preparation, solver postprocessing and
+        curvature all use that executor. Existing site behavior is unchanged
+        when ``execution`` is omitted.
+        """
+        from frequensolve.orchestrator.sites.execution import (
+            PersistentAllocation,
+            execution_scope,
+        )
+
+        if execution is None:
+            return self._run(resume=resume)
+        site = self.problem.site
+        with contextlib.ExitStack() as stack:
+            if isinstance(execution, PersistentAllocation):
+                executor = stack.enter_context(execution.open(site))
+            else:
+                executor = execution
+                if (
+                    executor is not site
+                    and getattr(executor, "base_site", None) is not site
+                ):
+                    raise ValueError(
+                        "execution must be an open session for the problem's site"
+                    )
+                executor._require_ready()
+            stack.enter_context(execution_scope(site, executor))
+            return self._run(resume=resume)
+
+    def _run(self, resume: bool = True) -> FWIResult:
         """Run every stage and return the :class:`FWIResult`.
 
         With ``resume=True`` (default) a checkpoint written by an earlier run
@@ -2064,6 +3273,23 @@ class FWI:
         self._views = {}
         self._problems = {}
         self._stage_inputs = {}
+        self._curvature_source = None
+        self._curvature_output = None
+        self._curvature_archive = None
+        self._uncertainty_archive = None
+        self._uncertainty_outputs = {}
+        for key in (
+            "_resume_curvature",
+            "_resume_uncertainty",
+            "_resume_optimizer",
+            "_resume_local",
+            "_resume_files",
+            "_resume_units",
+            "_stage_files",
+            "_declarations",
+            "_restarts",
+        ):
+            self.__dict__.pop(key, None)
         plan = self._resume_plan() if resume else None
         if plan is not None:
             # ``_resume_plan`` built the checkpointed stage's problem.
@@ -2126,12 +3352,15 @@ class FWI:
             index = index_of[cs.name]
             stage = self.stages[index]
             resumed = index == start
-            result = self._solve_stage(
-                index,
-                stage,
-                start_iteration if resumed else 0,
-                expected_model=expected if resumed else None,
-            )
+            if resumed and plan is not None and plan.finalize:
+                result = self._finalize_stage(index, stage, plan)
+            else:
+                result = self._solve_stage(
+                    index,
+                    stage,
+                    start_iteration if resumed else 0,
+                    expected_model=expected if resumed else None,
+                )
             view = self._views[cs.name]
             state = self._problem_for(index).state
             assert state is not None
@@ -2188,6 +3417,184 @@ class FWI:
 # ---------------------------------------------------------------------------
 # LSRTM
 # ---------------------------------------------------------------------------
+
+# Normal jobs spent on the 1/lambda_max step estimate of proximal LS-RTM.
+_POWER_ITERATIONS = 2
+# Rejected proximal trials per iteration (each costs a normal and a prox job).
+_LINE_SEARCH_TRIALS = 10
+# Fold native Tikhonov Hessian products into the Sauce normal job through
+# ``Linearization.apply_normal(..., regularization=...)``; requires a Sauce build
+# whose normal action carries the regularization request outside the linearization
+# fingerprint.
+_FUSE_NATIVE_REGULARIZATION = True
+# Sauce task-result ``misc`` counters reported in ``LSRTM.info["background"]``.
+_BACKGROUND_COUNTERS = {
+    "background_solves_reused": "reused_solves",
+    "background_reuse_misses": "misses",
+}
+
+
+def _receiver_probe_request(preconditioner: Any) -> Optional[Dict[str, Any]]:
+    """Return the linearize request behind ``Diagonal(probes="receiver")``."""
+
+    from .regularization import Diagonal
+
+    if isinstance(preconditioner, Diagonal) and preconditioner.probes == "receiver":
+        return {"probes": preconditioner.probe_count, "seed": preconditioner.seed or 0}
+    return None
+
+
+def _normal_with_regularization(
+    lin: Any, native: Any, space: ControlSpace
+) -> Optional[Callable[[np.ndarray], np.ndarray]]:
+    """Return ``x -> (Re(J^H W J) + R'') x`` from one normal job, if supported.
+
+    A linearization whose ``apply_normal`` accepts ``regularization=`` folds
+    the native Tikhonov Hessian into the Sauce normal action, instead of one
+    native regularization job per product (a new batch submission on SLURM
+    sites and a full control vector transferred each way).
+    """
+
+    apply = getattr(lin, "apply_normal", None)
+    if not _FUSE_NATIVE_REGULARIZATION or native is None or apply is None:
+        return None
+    try:
+        parameters = inspect.signature(apply).parameters
+    except (TypeError, ValueError):
+        return None
+    if "regularization" not in parameters:
+        return None
+
+    def action(x: np.ndarray) -> np.ndarray:
+        result = apply(ControlVector(x, space), regularization=native)
+        values = getattr(result, "values", result)
+        return _real_vector(values, size=space.size, name="normal product")
+
+    return action
+
+
+def _preconditioned_cg(
+    matvec: Callable[[np.ndarray], np.ndarray],
+    rhs: np.ndarray,
+    *,
+    iterations: int,
+    tolerance: float,
+    precondition: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    callback: Optional[Callable[[np.ndarray], None]] = None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Solve ``A x = b`` from ``x = 0`` by safeguarded preconditioned CG.
+
+    Each iteration applies ``A`` once and nothing else does: convergence is
+    tested on the recurrence residual after every update (a solve converging
+    on its last allowed iteration succeeds), and the final residual is
+    reported from the recurrence rather than recomputed. ``r^T M r <= 0``
+    raises because the preconditioner is not SPD. ``p^T A p <= 0`` (an
+    indefinite operator, or an FP32 normal that is only approximately
+    symmetric) stops with status ``-1`` and returns the previous iterate.
+    Status is ``0`` when converged and ``iterations`` at the limit.
+    """
+
+    b = _real_vector(rhs, name="right-hand side")
+    x = np.zeros_like(b)
+    b_norm = float(np.linalg.norm(b))
+    info: Dict[str, Any] = {
+        "iterations": 0,
+        "status": 0,
+        "converged": True,
+        "residual_norm": b_norm,
+        "rhs_norm": b_norm,
+        "message": "zero right-hand side",
+    }
+    if b_norm == 0.0:
+        return x, info
+    if not math.isfinite(b_norm):
+        raise ValueError("CG right-hand side must be finite")
+
+    def preconditioned(r: np.ndarray) -> Tuple[np.ndarray, float]:
+        z = (
+            r
+            if precondition is None
+            else _real_vector(precondition(r), size=r.size, name="preconditioner")
+        )
+        rho = float(r @ z)
+        if not math.isfinite(rho) or rho <= 0.0:
+            raise ValueError(
+                f"LSRTM preconditioner is not SPD: r^T M r = {rho:.6g} for a "
+                "nonzero residual"
+            )
+        return z, rho
+
+    r = b.copy()
+    z, rho = preconditioned(r)
+    p = np.array(z, copy=True)
+    residual_norm = b_norm
+    status, message, done = iterations, "iteration limit reached", 0
+    for k in range(1, iterations + 1):
+        q = _real_vector(matvec(p), size=b.size, name="operator product")
+        curvature = float(p @ q)
+        if not math.isfinite(curvature):
+            raise ValueError("CG operator product is not finite")
+        if curvature <= 0.0:
+            status = -1
+            message = (
+                f"nonpositive curvature p^T A p = {curvature:.6g} at iteration {k}; "
+                "the operator is indefinite or inaccurate along this direction"
+            )
+            break
+        alpha = rho / curvature
+        x += alpha * p
+        r -= alpha * q
+        del q
+        done = k
+        residual_norm = float(np.linalg.norm(r))
+        if callback is not None:
+            callback(x)
+        if residual_norm <= tolerance * b_norm:
+            status, message = 0, "relative residual tolerance reached"
+            break
+        if k == iterations:
+            break
+        z, rho_next = preconditioned(r)
+        p *= rho_next / rho
+        p += z
+        rho = rho_next
+    info.update(
+        iterations=done,
+        status=status,
+        converged=status == 0,
+        residual_norm=residual_norm,
+        message=message,
+    )
+    return x, info
+
+
+def _task_counters(job: Any) -> Optional[Dict[str, int]]:
+    """Sum the background ``misc`` counters of a job's local task results."""
+
+    from frequensolve.simulation.artifact_contract import (
+        ArtifactContractError,
+        TaskResult,
+        task_result_path,
+    )
+
+    root = getattr(job, "_result_path", None)
+    if root is None:
+        return None
+    totals: Optional[Dict[str, int]] = None
+    for task in range(1, int(getattr(job, "n_tasks", 1) or 1) + 1):
+        path = task_result_path(root, task)
+        if not path.is_file():
+            continue
+        try:
+            misc = TaskResult.read(path, result_path=root).metadata.get("misc", {})
+        except (ArtifactContractError, OSError, ValueError):
+            continue
+        totals = {} if totals is None else totals
+        for key in _BACKGROUND_COUNTERS:
+            value = misc.get(key, 0)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                totals[key] = totals.get(key, 0) + int(value)
+    return totals
 
 
 class _RealJacobian(LinearOperator):
@@ -2254,21 +3661,42 @@ class LSRTM:
     """Least-squares reverse-time migration around one linearization.
 
     Solves ``min_dm 0.5 ||J dm + r||_W^2 + 0.5 damping ||dm||^2 + P(dm)`` with
-    ``r = F(v0) - d`` (``J``, ``W`` and ``r`` frozen at ``v0``):
+    ``r = F(v0) - d`` (``J``, ``W`` and ``r`` frozen at ``v0``). Each solver
+    iteration costs one Sauce ``normal`` job (a Born forward plus adjoint
+    solve set over all frequencies) or one JVP/VJP pair:
 
-    Native regularization uses composite proximal-gradient iterations, with
-    Sauce evaluating the regularizer and solving each constrained proximal
-    problem. This also handles nonsmooth TV/TGV; ``info["method"]`` reports
-    ``"proximal_gradient"``. Without native regularization:
+    - ``method="cg"``, and any smooth native regularization (``Tikhonov``)
+      whatever ``method``: preconditioned conjugate gradients on
+      ``(H + damping I + P'') dm = -(g + P'(0))`` from ``lin.normal`` and
+      ``lin.gradient`` only. Each native Tikhonov Hessian product is one
+      native regularization job unless the normal job applies it
+      (``info["fused_regularization"]``). ``info["method"]`` is ``"cg"``.
+    - ``method="lsqr"`` otherwise: SciPy's LSQR on the real-stacked Jacobian
+      with the data-space residual from ``problem.residual(v0)``; a
+      regularization must expose ``operator()`` and is appended as extra rows
+      ``||R dm||^2``.
+    - Nonsmooth TV/TGV: composite proximal-gradient iterations with Sauce
+      solving each constrained proximal problem (``"proximal_gradient"``).
+      The first step is ``1/lambda_max`` of the frozen normal (two power
+      iterations: two normal jobs), every trial costs one normal and one
+      proximal job, and the stopping test is relative to the initial
+      proximal-gradient mapping, so rescaling the data or image units does
+      not change the iterates.
 
-    - ``method="lsqr"``: SciPy's LSQR on the real-stacked Jacobian with the
-      data-space residual from ``problem.residual(v0)`` (a site ``forward``
-      hook or a forward job); a regularization must expose ``operator()`` and is
-      appended as extra rows ``||R dm||^2``.
-    - ``method="cg"``: conjugate gradients on the Gauss-Newton normal
-      equations ``(H + damping I + P'') dm = -(g + P'(0))`` using
-      ``lin.normal`` and ``lin.gradient`` only (no data-space residual
-      needed; the gradient and normal are both unprocessed).
+    ``tolerance`` is relative for every method: the CG recurrence residual
+    against its right-hand side, LSQR's ``atol``/``btol`` and the
+    proximal-gradient mapping against its initial value.
+
+    CG stops on nonpositive curvature ``p^T A p <= 0`` with
+    ``info["status"] == -1`` (an FP32 normal at loose solver tolerance is
+    only approximately symmetric) and raises when the preconditioner is not
+    SPD. ``info["jobs"]`` counts the jobs this run submitted by action
+    (``regularization_<operation>`` for native regularization callbacks) and
+    ``info["background"]`` reports whether background reuse was used (it
+    needs ``reuse_background``, an eligible problem and a site with
+    ``supports_background_reuse``), the forward solves Sauce restored from
+    the checkpoint, the cache misses it recomputed (``misses``; a
+    :class:`RuntimeWarning` is issued) and the checkpoint bytes released.
 
     Args:
         problem: Problem (typically over ``GridParameters``/reflectivity).
@@ -2276,6 +3704,19 @@ class LSRTM:
         regularization: Optional regularization (``bind(space)`` protocol) on the image.
         method: ``"lsqr"`` or ``"cg"``.
         damping: Tikhonov damping ``||dm||^2`` weight.
+        preconditioner: Fixed SPD inverse metric (``bind(space)`` protocol),
+            applied inside CG. ``Diagonal(probes="receiver", probe_count=16)``
+            requests shared receiver probes with the initial gradient.
+        reuse_background: Retain native background fields for subsequent
+            ordinary material JVP/VJP/normal actions on the same partition;
+            unsupported controls/objectives and sites automatically use
+            uncached actions.
+        keep_background: Keep the background checkpoint this run created.
+            By default it is deleted when the run ends, locally and in the
+            site's result directory (full forward-field checkpoints hold
+            ``n_dof * n_src`` complex values per frequency). Kept checkpoints
+            are deleted when their linearization leaves ``problem.cache`` or
+            exceeds ``problem.cache.background_budget``.
         tolerance: Relative solver tolerance.
         callback: Called with the current image after every iteration.
     """
@@ -2288,7 +3729,10 @@ class LSRTM:
         regularization: Any = None,
         method: str = "lsqr",
         damping: float = 0.0,
-        tolerance: float = 1.0e-8,
+        tolerance: float = 1.0e-4,
+        preconditioner: Any = None,
+        reuse_background: bool = True,
+        keep_background: bool = False,
         callback: Optional[Callable[[ControlVector], None]] = None,
     ) -> None:
         self.problem = problem
@@ -2304,16 +3748,134 @@ class LSRTM:
         if not math.isfinite(self.damping) or self.damping < 0.0:
             raise ValueError("damping must be finite and nonnegative")
         self.tolerance = float(tolerance)
+        if not math.isfinite(self.tolerance) or self.tolerance <= 0:
+            raise ValueError("tolerance must be finite and positive")
+        if preconditioner is not None and method != "cg":
+            raise ValueError("LSRTM preconditioning currently requires method='cg'")
+        self.preconditioner = preconditioner
+        self.reuse_background = bool(reuse_background)
+        self.keep_background = bool(keep_background)
+        self.bound_preconditioner: Any = None
         self.callback = callback
         self.info: Dict[str, Any] = {}
         self.linearization: Optional[Linearization] = None
+        self._background: Dict[str, Any] = {}
 
     def run(self, v0: Any = None) -> ControlVector:
         """Return the image ``dm`` on the problem space, linearized at ``v0``."""
 
+        self.info = {}
+        self.linearization = None
+        recording = getattr(self.problem.backend, "recording", None)
+        empty: List[Any] = []
+        context = contextlib.nullcontext(empty) if recording is None else recording()
+        with context as jobs:
+            try:
+                image = self._solve(v0)
+            finally:
+                released = self._release_background(jobs)
+        self.info.update(self._job_diagnostics(jobs, released))
+        return image
+
+    def _background_decision(self) -> Tuple[bool, Optional[str]]:
+        """Use background checkpoints only where problem and site support them."""
+
+        if not self.reuse_background:
+            return False, "reuse_background=False"
+        site = getattr(self.problem.backend, "site", None)
+        if not getattr(site, "supports_background_reuse", False):
+            return False, f"{type(site).__name__} does not support background reuse"
+        if not self.problem._supports_background_reuse():
+            return False, "controls, objective or patches require uncached actions"
+        return True, None
+
+    def _release_background(self, jobs: Sequence[Any]) -> Optional[int]:
+        """Delete the background checkpoint this run created (unless kept)."""
+
+        lin = self.linearization
+        job = None if lin is None else lin.job
+        release = getattr(self.problem.backend, "release_background", None)
+        if (
+            self.keep_background
+            or job is None
+            or release is None
+            or getattr(job, "background", None) is None
+            or not any(item is job for item in jobs)
+        ):
+            return None
+        try:
+            return int(release(job))
+        except Exception as exc:  # cleanup must not discard a computed image
+            warnings.warn(
+                f"LS-RTM could not delete the background checkpoint of "
+                f"{job.name!r}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return None
+
+    def _job_diagnostics(
+        self, jobs: Sequence[Any], released: Optional[int]
+    ) -> Dict[str, Any]:
+        """Count this run's jobs and sum Sauce's background reuse counters."""
+
+        from .jobs import RegularizationJob
+
+        counts: Dict[str, int] = {}
+        totals: Optional[Dict[str, int]] = None
+        for job in jobs:
+            kind = (
+                f"regularization_{job.operation}"
+                if isinstance(job, RegularizationJob)
+                else str(
+                    getattr(job, "action", None)
+                    or getattr(job, "workflow", None)
+                    or type(job).__name__
+                )
+            )
+            counts[kind] = counts.get(kind, 0) + 1
+            if getattr(job, "background", None) is None:
+                continue
+            counters = _task_counters(job)
+            if counters is not None:
+                totals = {} if totals is None else totals
+                for key, value in counters.items():
+                    totals[key] = totals.get(key, 0) + value
+        background = dict(self._background)
+        for key, label in _BACKGROUND_COUNTERS.items():
+            background[label] = None if totals is None else totals.get(key, 0)
+        background["released_bytes"] = released
+        if background.get("misses"):
+            warnings.warn(
+                f"LS-RTM background reuse missed {background['misses']} source "
+                "batch(es); Sauce recomputed their forward fields (see the "
+                "FS_BACKGROUND_REUSE_MISS warnings in the task logs)",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        return {"jobs": counts, "background": background}
+
+    def _solve(self, v0: Any) -> ControlVector:
         # Operators need the covector parts (per-task registry fingerprints),
         # so the linearization always carries the gradient.
-        lin = self.problem.linearize(v0, gradient=True)
+        reuse_background, reason = self._background_decision()
+        self._background = {
+            "requested": self.reuse_background,
+            "enabled": reuse_background,
+            "reason": reason,
+        }
+        lin = self.problem.linearize(
+            v0,
+            gradient=True,
+            receiver_diagonal=_receiver_probe_request(self.preconditioner),
+            background=reuse_background,
+        )
+        if not reuse_background:
+            # A replay view must not reuse checkpoint-derived action memoization.
+            lin = copy.copy(lin)
+            lin._reuse_background = False
+            lin._ops = {}
+            lin._normal = lin._jacobian = None
         self.linearization = lin
         space = lin.space
         from types import SimpleNamespace
@@ -2338,109 +3900,252 @@ class LSRTM:
             self.problem,
             SimpleNamespace(job=lin.job, state=image_state),
         )
-        if native is not None:
+        if native is not None and not native.is_smooth:
+            if self.preconditioner is not None:
+                raise ValueError(
+                    "TV/TGV use proximal iterations; CG preconditioning requires quadratic regularization"
+                )
             return self._run_proximal(lin, space, bound, native)
-        if self.method == "cg":
-            return self._run_cg(lin, space, bound)
+        # Native Tikhonov has no explicit rows for LSQR; its exact Hessian
+        # makes the regularized normal equations a CG problem.
+        if native is not None or self.method == "cg":
+            return self._run_cg(lin, space, bound, native)
         return self._run_lsqr(lin, space, bound)
 
     def _run_proximal(
         self, lin: Linearization, space: ControlSpace, bound: Any, native: Any
     ) -> ControlVector:
-        """Solve the regularized image objective with its frozen data normal."""
-        assert lin.gradient is not None
-        g0 = lin.gradient.values.copy()
-        cached: Dict[bytes, Tuple[float, np.ndarray]] = {}
+        """Composite proximal gradient on the frozen quadratic data model.
 
-        def smooth(x: np.ndarray) -> Tuple[float, np.ndarray]:
-            key = x.tobytes()
-            if key not in cached:
-                hx = np.asarray(lin.normal @ x) + self.damping * x
-                value = lin.value + float(g0 @ x + 0.5 * (x @ hx))
-                gradient = g0 + hx
-                if bound is not None:
-                    vector = ControlVector(x, space)
-                    value += bound.value(vector)
-                    gradient += bound.gradient(vector).values
-                cached.clear()
-                cached[key] = value, gradient
-            return cached[key]
+        The data model ``q(x) = g0.x + x.Hx/2`` is evaluated from steps off
+        the current iterate, ``q(x + s) = q(x) + (g0 + Hx).s + s.Hs/2``: one
+        normal job per trial, with decreases and curvatures from ``s.Hs``
+        directly, so approximate (FP32) normal products never enter the
+        majorization test through the cancellation of ``O(q)`` values.
+        """
+
+        assert lin.gradient is not None
+        size = space.size
+        g0 = _real_vector(lin.gradient.values, size=size, name="gradient").copy()
+        damping = self.damping
+        zero = np.zeros(size)
+
+        def normal(direction: np.ndarray) -> np.ndarray:
+            product = lin.normal @ direction
+            return _real_vector(product, size=size, name="normal product")
+
+        def key(x: np.ndarray) -> bytes:
+            data = np.ascontiguousarray(x).data
+            return hashlib.blake2b(data, digest_size=20).digest()
+
+        # Start from the inverse of the largest curvature: power iterations
+        # from the steepest-descent direction, one normal job each.
+        curvature = None
+        start = g0.copy()
+        if bound is not None:
+            origin = ControlVector(zero, space)
+            start += _real_vector(
+                bound.gradient(origin), size=size, name="regularization gradient"
+            )
+            try:
+                curvature = bound.hessian_operator(origin)
+            except NotImplementedError:
+                curvature = None
+        if not np.any(start):
+            start = space.random(0).values
+        direction = start / float(np.linalg.norm(start))
+        largest = 0.0
+        for _ in range(_POWER_ITERATIONS):
+            product = normal(direction) + damping * direction
+            if curvature is not None:
+                product += _real_vector(
+                    curvature @ direction, size=size, name="regularization product"
+                )
+            norm = float(np.linalg.norm(product))
+            if not math.isfinite(norm) or norm == 0.0:
+                break
+            largest = norm
+            direction = product / norm
+        del start, direction
+        initial_step = 1.0 / largest if largest > 0.0 else 1.0
+
+        base: Dict[str, Any] = {"key": key(zero), "x": zero, "q": 0.0, "dq": g0}
+        trial: Dict[str, Any] = {}
+
+        def model(x: np.ndarray) -> Tuple[bytes, float, np.ndarray]:
+            name = key(x)
+            if name == base["key"]:
+                return name, base["q"], base["dq"]
+            if trial.get("key") != name:
+                step = x - base["x"]
+                hs = normal(step)
+                q = base["q"] + float(base["dq"] @ step) + 0.5 * float(step @ hs)
+                trial.update(key=name, q=q, dq=base["dq"] + hs)
+            return name, trial["q"], trial["dq"]
+
+        # The optimizer's callables below only read their arguments.
+        @_shares_arrays
+        def smooth_value(x: np.ndarray) -> float:
+            _, q, _ = model(x)
+            value = lin.value + q + 0.5 * damping * float(x @ x)
+            if bound is not None:
+                value += float(bound.value(ControlVector(x, space)))
+            return value
+
+        @_shares_arrays
+        def smooth_gradient(x: np.ndarray) -> np.ndarray:
+            name, q, dq = model(x)
+            if name != base["key"]:
+                # Gradients are requested at accepted iterates only; the next
+                # trials step from this point.
+                base.update(key=name, x=np.array(x, copy=True), q=q, dq=dq)
+                trial.clear()
+            gradient = dq + damping * x
+            if bound is not None:
+                gradient = gradient + _real_vector(
+                    bound.gradient(ControlVector(x, space)),
+                    size=size,
+                    name="regularization gradient",
+                )
+            return gradient
 
         def iteration(it: InexactNewtonIteration) -> None:
             if self.callback is not None:
                 self.callback(ControlVector(it.model, space))
 
+        # Read-only, like the optimizer's box: metric and bound files are staged once.
+        metric = _read_only(np.ones(size))
+
+        def prox(
+            x: np.ndarray, tau: float, box: Tuple[np.ndarray, np.ndarray]
+        ) -> np.ndarray:
+            return native.prox(x, tau, metric, box)
+
+        if _shares(native.prox):
+            _shares_arrays(prox)
         result = minimize_proximal_gradient(
-            lambda x: smooth(x)[0],
-            lambda x: smooth(x)[1],
+            smooth_value,
+            smooth_gradient,
             native.value,
-            lambda x, tau, box: native.prox(x, tau, np.ones(space.size), box),
-            np.zeros(space.size),
+            prox,
+            zero,
             options=InexactNewtonOptions(
                 max_iterations=self.iterations,
-                gradient_tolerance=self.tolerance,
+                max_line_search_trials=_LINE_SEARCH_TRIALS,
+                gradient_tolerance=0.0,
                 objective_tolerance=0.0,
                 step_tolerance=0.0,
             ),
             callback=iteration,
+            initial_step=initial_step,
+            relative_tolerance=self.tolerance,
+            curvature_steps=True,
         )
         self.info = {
             "method": "proximal_gradient",
             "iterations": result.iterations,
             "status": result.status,
             "converged": result.success,
+            "message": result.message,
             "objective": result.objective,
+            "initial_step": initial_step,
+            "objective_evaluations": result.objective_evaluations,
         }
         return ControlVector(result.model, space)
 
     def _run_cg(
-        self, lin: Linearization, space: ControlSpace, bound: Any
+        self,
+        lin: Linearization,
+        space: ControlSpace,
+        bound: Any,
+        native: Any = None,
     ) -> ControlVector:
         zero = space.zeros()
+        size = space.size
         assert lin.gradient is not None
-        rhs = -np.asarray(lin.gradient.values, dtype=np.float64)
+        rhs = -_real_vector(lin.gradient.values, size=size, name="gradient")
         curvature = None
         if bound is not None:
             rhs = rhs - _real_vector(
-                bound.gradient(zero), size=space.size, name="regularization"
+                bound.gradient(zero), size=size, name="regularization"
             )
             curvature = bound.hessian_operator(zero)
+        fused = _normal_with_regularization(lin, native, space)
+        native_curvature = None
+        if native is not None:
+            # Zero, without a native job, unless the Tikhonov term has a reference.
+            rhs = rhs - _real_vector(
+                native.gradient(zero), size=size, name="native regularization"
+            )
+            if fused is None:
+                native_curvature = native.hessian_operator(zero)
         normal = lin.normal
         damping = self.damping
 
         def matvec(x: np.ndarray) -> np.ndarray:
-            x = np.asarray(x, dtype=np.float64).reshape(-1)
-            out = np.asarray(normal @ x, dtype=np.float64).reshape(-1) + damping * x
-            if curvature is not None:
-                out = out + np.asarray(curvature @ x, dtype=np.float64).reshape(-1)
+            if fused is not None:
+                out = fused(x)
+            else:
+                out = _real_vector(normal @ x, size=size, name="normal product")
+            out = out + damping * x
+            for operator in (native_curvature, curvature):
+                if operator is not None:
+                    out = out + _real_vector(
+                        operator @ x, size=size, name="regularization product"
+                    )
             return out
 
-        operator = LinearOperator(
-            (space.size, space.size), matvec=matvec, dtype=np.float64
-        )
-        count = 0
+        precondition: Optional[Callable[[np.ndarray], np.ndarray]] = None
+        if self.preconditioner is not None:
+            from .regularization import Quadratic, _BoundSum
+
+            bound_metric = self.preconditioner.bind(space)
+            parts = [term for term in (bound, native) if term is not None]
+            if damping:
+                from scipy.sparse import eye
+
+                parts.append(Quadratic(eye(size), weight=damping).bind(space))
+            # The metric only reads the terms' curvature diagonals.
+            metric_regularization = (
+                None
+                if not parts
+                else (
+                    parts[0]
+                    if len(parts) == 1
+                    else _BoundSum(cast(Any, None), space, parts)
+                )
+            )
+            # Image regularization is evaluated at zero, not the background.
+            image_linearization = copy.copy(lin)
+            image_linearization.point = zero
+            bound_metric.update(
+                image_linearization, regularization=metric_regularization
+            )
+            self.bound_preconditioner = bound_metric
+
+            def apply_metric(r: np.ndarray) -> np.ndarray:
+                return np.asarray(bound_metric.apply(ControlVector(r, space)).values)
+
+            precondition = apply_metric
 
         def on_iteration(x: np.ndarray) -> None:
-            nonlocal count
-            count += 1
             if self.callback is not None:
                 self.callback(ControlVector(x, space))
 
-        solution, status = scipy_cg(
-            operator,
+        solution, info = _preconditioned_cg(
+            matvec,
             rhs,
-            maxiter=self.iterations,
-            rtol=self.tolerance,
+            iterations=self.iterations,
+            tolerance=self.tolerance,
+            precondition=precondition,
             callback=on_iteration,
         )
-        residual = rhs - matvec(solution)
         self.info = {
             "method": "cg",
-            "iterations": count,
-            "status": int(status),
-            "converged": int(status) == 0,
-            "residual_norm": float(np.linalg.norm(residual)),
-            "rhs_norm": float(np.linalg.norm(rhs)),
+            "requested_method": self.method,
+            "preconditioned": precondition is not None,
+            "fused_regularization": fused is not None,
+            **info,
         }
         return ControlVector(solution, space)
 
@@ -2506,7 +4211,9 @@ class LSRTM:
 # ---------------------------------------------------------------------------
 
 
-def rtm(problem: ImagingProblem, v: Any = None) -> ControlVector:
+def rtm(
+    problem: ImagingProblem, v: Any = None, *, illumination: Any = None
+) -> ControlVector:
     """Return the misfit gradient (RTM image on the control space) at ``v``.
 
     Equals ``problem.gradient(v)``: the objective's real control covector
@@ -2516,7 +4223,11 @@ def rtm(problem: ImagingProblem, v: Any = None) -> ControlVector:
 
     lin = problem.linearize(v, gradient=True)
     assert lin.gradient is not None
-    return lin.gradient
+    return (
+        lin.gradient
+        if illumination is None
+        else lin.illumination(illumination).apply(lin.gradient)
+    )
 
 
 def _simulation_for(problem: ImagingProblem, v: Any) -> Any:

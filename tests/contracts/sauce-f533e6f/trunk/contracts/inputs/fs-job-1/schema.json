@@ -287,6 +287,29 @@
       "type": "object",
       "description": "Native material-control JVP/VJP configuration for Born and RTM workflows.",
       "properties": {
+        "FieldExport": {
+          "type": "object",
+          "description": "Postprocess one explicit mesh-control vector into a field. Dual inputs are divided by physical constrained lumped mass before sampling; primal inputs are unchanged. No wave solves.",
+          "required": ["control"],
+          "properties": {
+            "control": {"type": "string", "minLength": 1},
+            "input_role": {"enum": ["dual", "primal"], "default": "dual"},
+            "sampling_map": {"type": "boolean", "default": false, "description": "One-rank local operation: emit zero-based constrained CSR offsets/indices/weights for reuse without further solver calls."},
+            "output": {"type": "string", "minLength": 1},
+            "grid": {
+              "type": "object",
+              "required": ["origin_km", "spacing_km", "counts"],
+              "properties": {
+                "origin_km": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "number"}},
+                "spacing_km": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "number", "minimum": 0}},
+                "counts": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "integer", "minimum": 1}}
+              },
+              "additionalProperties": false
+            }
+          },
+          "dependentRequired": {"grid": ["output"]},
+          "additionalProperties": false
+        },
         "receiver_diagonal": {
           "$ref": "#/properties/fwi_operator/properties/receiver_diagonal",
           "description": "Spectral derivative RTM GN diagonals in the constrained material-control basis. export_lower_orders exports matching lower-order diagonals; frequency aggregation uses the gradient weights without smoothing."
@@ -622,6 +645,22 @@
             "upper": {
               "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
               "description": "Full finite coefficient upper bounds for the proximal model, in the same coordinates as input. Equal bounds freeze a coefficient."
+            },
+            "inputs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+              },
+              "description": "Several full-model input vectors for one prepared non-proximal operation, replacing control_sensitivities.input and gradient; each result is written to the outputs entry at the same position and result.value sums their energies."
+            },
+            "outputs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+              },
+              "description": "One output vector path per inputs entry, resolved like gradient."
             }
           },
           "dependentRequired": {
@@ -732,6 +771,28 @@
                 "properties": {
                   "alpha1": {
                     "const": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "inputs"
+                ]
+              },
+              "then": {
+                "required": [
+                  "outputs"
+                ],
+                "properties": {
+                  "operation": {
+                    "not": {
+                      "enum": [
+                        "prepare",
+                        "proximal"
+                      ]
+                    }
                   }
                 }
               }
@@ -892,15 +953,40 @@
       },
       "additionalProperties": false,
       "dependentRequired": {
-        "Regularization": [
-          "input",
-          "gradient"
-        ],
         "MeshAdaptation": [
           "input",
           "gradient"
         ]
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "Regularization"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "input",
+                  "gradient"
+                ]
+              },
+              {
+                "properties": {
+                  "Regularization": {
+                    "required": [
+                      "inputs",
+                      "outputs"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
     },
     "fwi_operator": {
       "type": "object",
@@ -946,6 +1032,10 @@
         "state": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
           "description": "Required output fs-objective-linearization-3 path for linearize (task-suffixed), or saved state input for jvp, vjp and normal. With several f_list entries the input first tries <stem>_<task><ext>, then the exact path; the saved task index must match. Reuse requires the same realized mesh partition."
+        },
+        "background": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Optional fs-background-state-1 manifest: task-suffixed output for ordinary material linearize, input for jvp/vjp/normal. Saves native forward DOFs per rank and source batch. Reuse requires identical solver build, resolved model/mesh/partition, source batching and objective state; shard hashes are checked. Spectral, extension and source-control actions are unsupported."
         },
         "receiver_state": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
@@ -1290,6 +1380,22 @@
         "covector": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
           "description": "Output fs-control-vector-1 covector from linearize, vjp, or joint Gauss-Newton normal."
+        },
+        "directions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+          },
+          "description": "Several input fs-control-vector-1 tangents of one normal action, each resolved per task like direction. Every frequency task applies all of them after one background solve or restore and one operator assembly per source batch. Requires covectors; excludes direction and covector. Material-only controls with ordinary or phase waveform comparisons; source controls, extension, reflectivity and kernel_derivative are rejected."
+        },
+        "covectors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+          },
+          "description": "One distinct output fs-control-vector-1 covector stem per directions entry, in the same order, task-suffixed like covector."
         },
         "extension": {
           "type": "object",
@@ -1895,9 +2001,19 @@
               }
             },
             "else": {
-              "required": [
-                "direction",
-                "covector"
+              "anyOf": [
+                {
+                  "required": [
+                    "direction",
+                    "covector"
+                  ]
+                },
+                {
+                  "required": [
+                    "directions",
+                    "covectors"
+                  ]
+                }
               ]
             }
           }
@@ -2305,6 +2421,57 @@
                 }
               }
             ]
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "covectors"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "directions",
+              "covectors"
+            ],
+            "properties": {
+              "action": {
+                "const": "normal"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "direction"
+                  ]
+                },
+                {
+                  "required": [
+                    "covector"
+                  ]
+                },
+                {
+                  "required": [
+                    "extension"
+                  ]
+                },
+                {
+                  "required": [
+                    "reflectivity"
+                  ]
+                }
+              ]
+            }
           }
         }
       ],

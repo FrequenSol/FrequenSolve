@@ -390,3 +390,268 @@ def test_direct_remote_submission_stages_nested_and_absolute_vector_payloads(
         )
     assert len({p for p in uploads if p.suffix == ".h5"}) == 2
     assert not (remote / "jobs" / "client_inputs" / "dual.json").exists()
+
+
+def _vp_coefficients(path):
+    """Return the inline sediment ``vp`` control coefficients of a saved simulation."""
+
+    def find(node):
+        if isinstance(node, dict):
+            parameterized = node.get("parameterized")
+            if isinstance(parameterized, dict) and parameterized.get("id") == "vp":
+                return parameterized["control"]["coefficients"]
+            nodes = node.values()
+        else:
+            nodes = node if isinstance(node, list) else ()
+        for value in nodes:
+            found = find(value)
+            if found is not None:
+                return found
+        return None
+
+    return find(json.loads(Path(path).read_text()))
+
+
+def test_job_saves_write_each_simulation_content_once(tmp_path, monkeypatch):
+    from frequensolve.imaging.jobs import FWIOperatorJob
+    from frequensolve.model.parameterization import (
+        ParameterizedProperty,
+        TensorHatControl,
+    )
+    from frequensolve.simulation import simulation as module
+    from tests.imaging_fakes import layered_simulation
+
+    simulation = layered_simulation(tmp_path / "project", save=False)
+    control = TensorHatControl(
+        axes=("x", "z"),
+        shape=(4, 3),
+        origin=(0.0, 200.0),
+        spacing=(1000.0, 500.0),
+        coefficients=np.arange(12.0),
+    )
+    sediment = next(s for s in simulation.model.subdomains if s.name == "sediment")
+    sediment.properties["vp"] = ParameterizedProperty(1900.0, id="vp", control=control)
+    written = []
+    write = module.atomic_write_json
+    monkeypatch.setattr(
+        module,
+        "atomic_write_json",
+        lambda path, *args, **kwargs: written.append(path)
+        or write(path, *args, **kwargs),
+    )
+
+    def job(name):
+        return FWIOperatorJob(
+            name,
+            simulation,
+            [4.0],
+            action="linearize",
+            active=["model.vp"],
+            state="s.json",
+            covector="g.h5",
+        )
+
+    file = simulation.save()
+    identity = (file.stat().st_ino, file.stat().st_mtime_ns)
+    digest = JobSerializationMixin._sha256_file(file)
+    # Every job saves its simulation; unchanged content is not written again.
+    jobs = [job(name) for name in ("first", "second", "third")]
+    for each in jobs:
+        each.save()
+    assert written == [file]
+    assert (file.stat().st_ino, file.stat().st_mtime_ns) == identity
+    assert jobs[-1]._artifact_contract_fingerprints()["simulation"] == digest
+    staged, _ = jobs[-1].save_simulation_for_remote("test", "/remote/project")
+    assert _vp_coefficients(staged) == list(range(12))
+    assert json.loads(staged.read_text())["project_path"] == "/remote/project"
+    # Any content change is written, including an in-place coefficient edit.
+    sediment.properties["vp"].control.coefficients[0] = 7.0
+    job("edited").save()
+    assert len(written) == 2 and _vp_coefficients(file)[0] == 7.0
+    sediment.properties["vp"] = sediment.properties["vp"].with_coefficients(
+        np.zeros(12)
+    )
+    job("replaced").save()
+    assert len(written) == 3 and not any(_vp_coefficients(file))
+    simulation.save()
+    assert len(written) == 3
+    # Other JSON options, or a file changed or removed by anyone else, are
+    # written again.
+    simulation.save(indent=None)
+    assert len(written) == 4 and "\n" not in file.read_text()
+    simulation.save()
+    assert len(written) == 5
+    file.write_text("{}")
+    simulation.save()
+    assert len(written) == 6 and not any(_vp_coefficients(file))
+    file.unlink()
+    simulation.save()
+    assert len(written) == 7 and file.is_file()
+
+    class Note:
+        def __init__(self, text):
+            self.text = text
+
+        def to_fs(self, ctx=None):
+            return {"text": self.text}
+
+    # Content without a reliable identity is always written.
+    simulation.extra["note"] = Note("first")
+    simulation.save()
+    simulation.save()
+    assert len(written) == 9
+    assert json.loads(file.read_text())["note"] == {"text": "first"}
+
+
+def test_jobs_share_one_remote_staging_of_an_unchanged_simulation(
+    tmp_path, monkeypatch
+):
+    from frequensolve.imaging.jobs import FWIOperatorJob
+    from frequensolve.model.parameterization import (
+        ParameterizedProperty,
+        TensorHatControl,
+    )
+    from frequensolve.simulation.jobs import remote as module
+    from tests.imaging_fakes import layered_simulation
+
+    simulation = layered_simulation(tmp_path / "project", save=False)
+    sediment = next(s for s in simulation.model.subdomains if s.name == "sediment")
+    sediment.properties["vp"] = ParameterizedProperty(
+        1900.0,
+        id="vp",
+        control=TensorHatControl(
+            axes=("x", "z"),
+            shape=(4, 3),
+            origin=(0.0, 200.0),
+            spacing=(1000.0, 500.0),
+            coefficients=np.arange(12.0),
+        ),
+    )
+    direction = tmp_path / "project" / "inputs" / "direction.h5"
+    direction.parent.mkdir(parents=True)
+    direction.write_bytes(b"direction")
+    loads = []
+    load = module.json.load
+    monkeypatch.setattr(
+        module.json, "load", lambda f, *a, **k: loads.append(f.name) or load(f, *a, **k)
+    )
+
+    def staged(name, remote="/remote/project"):
+        job = FWIOperatorJob(
+            name,
+            simulation,
+            [4.0],
+            action="jvp",
+            active=["model.vp"],
+            state="s.json",
+            objective_vector="jvp.json",
+            direction=direction,
+        )
+        job.save_for_remote("SlurmSite", remote)
+        path, _ = job.save_simulation_for_remote("SlurmSite", remote)
+        return job, path
+
+    first, first_path = staged("first")
+    simulation_file = str(simulation._file)
+    assert loads.count(simulation_file) == 1
+    inputs = first.remote_input_files("/remote/project")
+    second, second_path = staged("second")
+    # The second job copies the first mapping; nothing is reloaded or remapped.
+    assert loads.count(simulation_file) == 2  # the first job's input scan
+    assert second_path != first_path
+    assert second_path.read_bytes() == first_path.read_bytes()
+    assert second_path.stat().st_mtime_ns == first_path.stat().st_mtime_ns
+    assert second.staged_artifact_fingerprints("SlurmSite")["simulation"] == (
+        first.staged_artifact_fingerprints("SlurmSite")["simulation"]
+    )
+    assert json.loads(second_path.read_text())["project_path"] == "/remote/project"
+    assert second.downloaded_task_fingerprints() == [
+        second.staged_task_fingerprints("SlurmSite")
+    ]
+    # Input scans read each simulation content once and find the same files.
+    assert [Path(local) for local, _ in inputs] == [direction]
+    assert second.remote_input_files("/remote/project") == inputs
+    assert loads.count(simulation_file) == 2
+    # Another remote project, a new simulation content, or a staged copy
+    # changed since, are mapped again.
+    _, other = staged("other", "/elsewhere")
+    assert json.loads(other.read_text())["project_path"] == "/elsewhere"
+    assert loads.count(simulation_file) == 3
+    sediment.properties["vp"] = sediment.properties["vp"].with_coefficients(
+        np.zeros(12)
+    )
+    _, changed = staged("changed")
+    assert loads.count(simulation_file) == 4
+    assert changed.read_bytes() != first_path.read_bytes()
+    changed.write_text(changed.read_text() + "\n")
+    third, third_path = staged("third")
+    assert loads.count(simulation_file) == 5
+    assert third_path.read_text() == changed.read_text()[:-1]
+    assert third.downloaded_task_fingerprints() == [
+        third.staged_task_fingerprints("SlurmSite")
+    ]
+
+
+def test_input_scans_of_a_simulation_skeleton_match_the_full_payload(tmp_path):
+    from frequensolve.simulation.jobs.remote import (
+        JobRemoteMixin,
+        _reference_skeleton,
+    )
+
+    project = tmp_path / "project"
+    payload = {
+        "project_path": str(project),
+        "Model": {
+            "coefficients": [float(i) for i in range(1000)],
+            "nested": [[1.0, 2.0], [3, {"file": "grid.rsf"}], True, None],
+            "Subdomains": [
+                {"name": "a", "properties": {"vp": {"file": str(project / "vp.h5")}}},
+                {"value": 2.5, "receiver_file": "receivers.csv"},
+            ],
+        },
+        "Acquisition": {"observed": "observed.h5", "weights": [0.5, 1.5]},
+        "control_sensitivities": {"input": str(project / "jobs" / "x" / "in.h5")},
+    }
+    skeleton = _reference_skeleton(payload)
+    assert "coefficients" in skeleton["Model"] and not skeleton["Model"]["coefficients"]
+    assert list(JobRemoteMixin._iter_file_references(skeleton)) == list(
+        JobRemoteMixin._iter_file_references(payload)
+    )
+    assert JobRemoteMixin._payload_project_roots(
+        skeleton
+    ) == JobRemoteMixin._payload_project_roots(payload)
+
+
+def test_simulation_fingerprints_hash_each_saved_content_once(tmp_path, monkeypatch):
+    from frequensolve.simulation.jobs import serialization
+    from frequensolve.simulation.jobs.run_state import SkipPolicy
+
+    job, _ = _born_job(tmp_path, n_tasks=3)
+    BaseSite().prepare_job(job, validate=False)
+    simulation = Path(job.simulation._file)
+    loads = []
+    load = serialization.json.load
+    monkeypatch.setattr(
+        serialization.json,
+        "load",
+        lambda f, *a, **k: loads.append(Path(f.name)) or load(f, *a, **k),
+    )
+    whole = job.fingerprint()
+    tasks = [job.task_fingerprint(task) for task in (1, 2, 3)]
+    compatible = [
+        job.task_policy_fingerprint(task, SkipPolicy.compatible()) for task in (1, 2, 3)
+    ]
+    job.write_run_state(status="completed")
+    # One read of the saved simulation per hashed view (whole, without Solver).
+    assert loads.count(simulation) == 2
+    job.save()
+    assert job.fingerprint() == whole
+    assert [job.task_fingerprint(task) for task in (1, 2, 3)] == tasks
+    assert loads.count(simulation) == 2
+    # A changed file is hashed again.
+    payload = json.loads(simulation.read_text())
+    payload["scaling"] = "robust"
+    simulation.write_text(json.dumps(payload))
+    assert job.fingerprint() != whole
+    assert job.task_policy_fingerprint(1, SkipPolicy.compatible()) != compatible[0]
+    assert loads.count(simulation) == 4

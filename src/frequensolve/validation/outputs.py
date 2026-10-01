@@ -55,7 +55,12 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
     if outputs.units is not None:
         _validate_output_units(outputs.units, ctx.report)
 
-    if outputs.vtk and len(getattr(job, "f_list", []) or []) != 1:
+    ordinary_vtk = [
+        output
+        for output in outputs.vtk
+        if (output.source or {}).get("kind") != "control_gradient"
+    ]
+    if ordinary_vtk and len(getattr(job, "f_list", []) or []) != 1:
         ctx.report.error(
             "outputs.vtk.frequency_count",
             "VTK outputs currently require a single-frequency job.",

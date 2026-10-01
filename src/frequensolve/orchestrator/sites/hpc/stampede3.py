@@ -40,6 +40,8 @@ class Stampede3Site(SlurmSite):
         default_queue: Deprecated compatibility alias for
             ``default_partition``.
         run_config: Optional per-run SLURM settings.
+        curvature_run_config: Optional SLURM settings for Sauce curvature
+            batch jobs; ``run_config`` is used when omitted.
         username: TACC username.
         credential: Keyring lookup name.
         ssh_key: Optional SSH private-key path.
@@ -90,6 +92,7 @@ class Stampede3Site(SlurmSite):
         environment: Optional[dict[str, object]] = None,
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
+        curvature_run_config: Optional[SlurmRunConfig] = None,
     ):
         super().__init__(
             rel_path=rel_path,
@@ -108,4 +111,5 @@ class Stampede3Site(SlurmSite):
             environment=environment,
             run_config=run_config,
             verbose=verbose,
+            curvature_run_config=curvature_run_config,
         )

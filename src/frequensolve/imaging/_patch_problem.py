@@ -551,6 +551,7 @@ class CompositeLinearization(Linearization):
             self._maps.append((np.asarray(local, int), np.asarray(global_, int)))
         self._jacobian: Jacobian | None = None
         self._normal: Normal | None = None
+        self._ops: dict[tuple[str, str], Any] = {}
         self.frequency_weights = (
             np.ones(len(self.frequencies))
             if problem.weights is None
@@ -635,13 +636,16 @@ class CompositeLinearization(Linearization):
             for frequency in self.frequencies
         ]
 
-    def apply_normal(self, direction: Any) -> ControlVector:
-        return self._sum(
-            [
-                c.apply_normal(v)
-                for c, v in zip(self.children, self._directions(direction))
-            ]
-        )
+    def _normal_products(
+        self, directions: Sequence[ControlVector]
+    ) -> list[ControlVector]:
+        # One batched normal job per patch child for all directions.
+        split = [self._directions(direction) for direction in directions]
+        parts = [
+            child.apply_normal_batch([pieces[i] for pieces in split])
+            for i, child in enumerate(self.children)
+        ]
+        return [self._sum([part[j] for part in parts]) for j in range(len(split))]
 
     def weight_data(self, dual: Any) -> DataVector:
         return self._assemble(

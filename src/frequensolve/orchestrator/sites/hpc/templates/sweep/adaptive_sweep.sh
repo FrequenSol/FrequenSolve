@@ -11,6 +11,10 @@
 {% endif %}
 #SBATCH -N {{ n_nodes }}
 #SBATCH -n {{ n_procs }}
+{% if cpus_per_task %}
+#SBATCH --ntasks-per-node={{ ranks_per_node }}
+#SBATCH --cpus-per-task={{ cpus_per_task }}
+{% endif %}
 #SBATCH -p {{ queue }}
 {% if account %}
 #SBATCH -A {{ account }}
@@ -59,6 +63,41 @@ export OMP_NUM_THREADS=$n_threads
 {% for line in mpi_async_progress_setup %}
 {{ line }}
 {% endfor %}
+
+# Give every rank its own n_threads cores for every hybrid launch. srun gets
+# them per step; the scheduler adds the same flags to task launches. Open MPI
+# on Linux binds each rank to one core by default, so map each rank onto
+# n_threads cores (macOS Open MPI rejects PE mapping); elsewhere leave
+# mpirun/mpiexec ranks unbound. Explicit launcher or binding settings win.
+rank_binding=launcher
+place=()
+case "${mpi_exec##*/}" in
+    srun) place=(--cpus-per-task "$n_threads") ;;
+    mpirun|mpiexec)
+        rank_binding=none
+        for arg in ${mpi_args[@]+"${mpi_args[@]}"}; do
+            case "$arg" in
+                -bind-to*|--bind-to*|-map-by*|--map-by*|-rank-by*|--rank-by*|\
+                -cpus-per-proc*|--cpus-per-proc*|--cpus-per-rank*|--cpu-set*|--cpu-list*)
+                    rank_binding=explicit ;;
+            esac
+        done
+        if [ -n "${PRTE_MCA_hwloc_default_binding_policy+x}${OMPI_MCA_hwloc_base_binding_policy+x}${PRTE_MCA_rmaps_default_mapping_policy+x}${OMPI_MCA_rmaps_base_mapping_policy+x}" ]; then
+            rank_binding=explicit
+        fi
+        if [ "$rank_binding" = none ]; then
+            mpi_version=$("$mpi_exec" --version 2>&1 || true)
+            if [ "$(uname -s)" = Linux ] && [[ "$mpi_version" == *"Open MPI"* ]]; then
+                rank_binding=cores
+                place=(--map-by "slot:PE=$n_threads" --bind-to core)
+                export OMP_PLACES="${OMP_PLACES:-cores}"
+                export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
+            else
+                export PRTE_MCA_hwloc_default_binding_policy=none
+                export OMPI_MCA_hwloc_base_binding_policy=none
+            fi
+        fi ;;
+esac
 n_tasks={{n_tasks}}
 n_job_tasks={{n_job_tasks}}
 executable={{executable_shell}}
@@ -109,7 +148,7 @@ begin_step mpi_startup "$mpi_health_log"
 echo "[scheduler] checking MPI startup on ${allocation_nodes} (limit ${mpi_health_timeout})"
 mpi_health_started=$(date +%s)
 set +e
-"$mpi_exec" "${mpi_args[@]}" --time="$mpi_health_timeout" -n "$n_procs" \
+"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} --time="$mpi_health_timeout" -n "$n_procs" \
     "$executable" --job "$job_file" --mpi-health-check > "$mpi_health_log" 2>&1
 mpi_health_rc=$?
 if [ "$mpi_health_rc" -eq 0 ]; then
@@ -200,11 +239,11 @@ rm -f "$sizing_json"
 begin_step init "$dir_out/init.log"
 set +e
 if [ "$skip_sizing" = "1" ]; then
-    echo "$mpi_exec -n $init_ranks $executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
-    "$mpi_exec" "${mpi_args[@]}" -n "$init_ranks" "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init-no-size > "$dir_out/init.log" 2>&1
+    echo "$mpi_exec -n $init_ranks ${place[*]+${place[*]} }$executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
+    "$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$init_ranks" ${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init-no-size > "$dir_out/init.log" 2>&1
 else
-    echo "$mpi_exec -n $init_ranks $executable -nthreads $n_threads --job $job_file --fresh --init --sizing $sizing_json"
-    "$mpi_exec" "${mpi_args[@]}" -n "$init_ranks" "$executable" -nthreads "$n_threads" --job "$job_file" --fresh --init --sizing "$sizing_json" > "$dir_out/init.log" 2>&1
+    echo "$mpi_exec -n $init_ranks ${place[*]+${place[*]} }$executable -nthreads $n_threads --job $job_file --fresh --init --sizing $sizing_json"
+    "$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$init_ranks" ${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" --job "$job_file" --fresh --init --sizing "$sizing_json" > "$dir_out/init.log" 2>&1
 fi
 sizing_rc=$?
 set -e
@@ -221,7 +260,8 @@ python3 {{ scheduler_runner }} \
     --config "$scheduler_config" \
     --job "$job_file" \
     --output "$dir_out" \
-    --status "$scheduler_status"
+    --status "$scheduler_status" \
+    --rank-binding "$rank_binding"
 {% else %}
 echo "Skipping frequency sweep; running solver postprocess only."
 {% endif %}
@@ -229,7 +269,7 @@ echo "Skipping frequency sweep; running solver postprocess only."
 {% if postprocess_job %}
 echo "Running solver postprocess step..."
 begin_step smooth "$dir_out/smooth.log"
-"$mpi_exec" "${mpi_args[@]}" -n "$n_procs" "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1
+"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$n_procs" ${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --smooth >> "$dir_out/smooth.log" 2>&1
 {% if smooth_only %}
 cat > "$scheduler_status" <<EOF
 {"state":"complete","total":0,"successful":0,"failed":0,"running":0,"pending":0,"complete":0}

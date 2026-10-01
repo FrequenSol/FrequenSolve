@@ -13,6 +13,7 @@ import numpy as np
 
 from frequensolve.imaging.controls import ControlSpace, ControlVector
 from frequensolve.imaging.regularization import BoundPreconditioner, Preconditioner
+from frequensolve.inversion.optimization import _shares_arrays
 from frequensolve.inversion.preconditioning import DiagonalInverseHessian
 
 __all__ = ["SourceEnergy"]
@@ -248,6 +249,7 @@ class _BoundSourceEnergy(BoundPreconditioner):
         """Damped diagonal; raw coverage remains in ``raw_diagonal``."""
         return self.inverse.diagonal
 
+    @_shares_arrays  # Returns a new vector.
     def apply(self, g: Any) -> ControlVector:
         """Apply the inverse metric; leave the input covector unchanged."""
         from frequensolve.imaging.regularization import _values_on

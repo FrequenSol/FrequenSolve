@@ -5,6 +5,66 @@ prepared.
 
 ## Unreleased
 
+- `NativeCurvature` deletes each operation's staged `input.h5` once its
+  result is verified, unless the result has an HDF5 external link into it
+  (warm-start factors link their unchanged `/modes`); a failed operation
+  keeps its input. The optimizers pass the SDK's own objective,
+  preconditioner and proximal adapters read-only views of their vectors and
+  adopt the arrays they return (about 6 fewer model-sized allocations per
+  L-BFGS iteration, 17 per Newton-CG iteration with 5 CG steps); user
+  callables still receive private copies and their results are copied.
+  With `scaling`, the physical-coordinate iteration records passed to
+  callbacks rescale each vector on first access. Native proximal
+  regularization rewrites a staged metric or bound file only when its content
+  changes.
+- `SeismicSimulation.save()` (called by every `job.save()`) skips rewriting
+  the simulation JSON when the serialized content equals what the object last
+  wrote and the file is unchanged since; inline `DepthProfile`/`GridParameters`
+  coefficients made every job pay an O(controls) re-save. Remote staging
+  copies one mapped simulation JSON per content and remote project
+  (preserving its mtime, so rsync skips it) and scans input references
+  without the coefficients. Job, task and compatibility fingerprints hash a
+  saved JSON document once per file state.
+- Added persistent SLURM allocation sessions with an allocation-resident
+  scheduler, adaptive frequency workers, per-run cancellation and reconnectable
+  run handles. Initialization, smoothing, packing and curvature share the same
+  resource pool. `FWI.run(execution=PersistentAllocation(...))` owns a session
+  through the complete inversion and releases it on exit; an open session may
+  also be borrowed.
+
+- Optimizer iteration records (`InexactNewtonIteration`) share the accepted
+  model, gradients and steps as read-only views instead of copying five
+  vectors per iteration; callbacks must copy a vector before modifying it.
+  `NativeCurvature` deletes a staged BFGS history once its operation finishes
+  (`NativeCurvature.retain(history)` keeps it for several operations). Native
+  regularization caches key the optimizer vector by a parallel block digest
+  without forming the full model. `CurvatureTransfer.refresh` and
+  `NativeCurvature.refresh_curvature` accept Sauce's `symmetry_tolerance`;
+  refreshed factors must report `hessian_asymmetry`, which the transfer
+  provenance records.
+- FWI checkpoints (`fs-imaging-fwi-checkpoint-2`) keep L-BFGS restart arrays
+  as float64 HDF5 files in a bounded `<stem>.restart` directory instead of
+  JSON metadata, writing each secant pair once; `fs-imaging-fwi-checkpoint-1`
+  checkpoints are rejected. `minimize_lbfgs` reports `LBFGSRestart` states
+  (`fs-lbfgs-restart-2`) that reference the optimizer's arrays; dict restart
+  states are no longer accepted. A stage interrupted during its end-of-stage
+  curvature/uncertainty factorization is finished on resume, and each stage
+  factorizes at most once. Fingerprints identify arrays with at least 4096
+  elements by their bytes, so large-array fingerprints change once.
+- `LSRTM` runs native `Tikhonov` with CG for every `method` (no proximal
+  jobs, no gradient job at the zero image, no final residual product). TV/TGV
+  proximal iterations start from `1/lambda_max` (two power iterations) and
+  stop relative to the initial proximal-gradient mapping, so they no longer
+  depend on data or image units. CG is an in-house safeguarded PCG: a non-SPD
+  preconditioner raises, nonpositive curvature stops with `status == -1`, and
+  convergence on the last iteration counts. `info["jobs"]` and
+  `info["background"]` report job counts and checkpoint reuse/misses.
+  Background reuse also requires `site.supports_background_reuse`; the run
+  deletes the checkpoint it created unless `keep_background=True`, evicted
+  linearizations delete theirs, and `LinearizationCache.background_budget`
+  bounds retained checkpoint bytes. `minimize_proximal_gradient` gains
+  `initial_step`, `relative_tolerance` and `curvature_steps`. FWI requests
+  receiver probes for `Diagonal(probes="receiver")`; patch FWI rejects them.
 - Deferred the experimental HV and AWI objectives; removed their Python
   configurations and `ImagingProblem` adapters.
 - Receiver linearization, JVP and VJP cover multiple groups sharing the same

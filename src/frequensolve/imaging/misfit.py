@@ -442,19 +442,19 @@ class Normalization:
         kind: ``"explicit"`` (one ``value`` or per-component ``components``),
             ``"observed_rms"`` (optional ``minimum`` floor), or
             ``"balance_artifact"`` (``file`` written by ``action=calibrate``).
-        value: Explicit scale, plain or with units.
+        value: Explicit scale, plain or with units (defaults to 1.0).
         components: Explicit per-component scales.
         minimum: Floor for the observed RMS scale.
         file: Balance artifact path.
-        reduction: ``"weighted_mean"`` (default) or ``"sum"``.
+        reduction: ``"sum"`` (default) or ``"weighted_mean"``.
     """
 
-    kind: str = "observed_rms"
+    kind: str = "explicit"
     value: Any = None
     components: Optional[Mapping[str, Any]] = None
     minimum: Any = None
     file: Optional[Path] = None
-    reduction: Literal["weighted_mean", "sum"] = "weighted_mean"
+    reduction: Literal["weighted_mean", "sum"] = "sum"
 
     def __post_init__(self) -> None:
         kind = str(self.kind).strip().lower()
@@ -468,10 +468,12 @@ class Normalization:
         minimum = None
         file = None
         if kind == "explicit":
-            if (self.value is None) == (self.components is None):
+            if self.value is not None and self.components is not None:
                 raise ValueError("explicit normalization needs value or components")
-            if self.value is not None:
-                value = _scale_value(self.value, "normalization value")
+            if self.components is None:
+                value = _scale_value(
+                    1.0 if self.value is None else self.value, "normalization value"
+                )
             else:
                 components = {
                     str(name): _scale_value(scale, f"normalization component {name!r}")
@@ -503,9 +505,9 @@ class Normalization:
         value: Any = None,
         *,
         components: Optional[Mapping[str, Any]] = None,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
-        """Return a fixed scale (one value or per-component values)."""
+        """Return a fixed scale (unit scale unless a value or components is given)."""
 
         return cls(
             kind="explicit", value=value, components=components, reduction=reduction
@@ -516,7 +518,7 @@ class Normalization:
         cls,
         minimum: Any = None,
         *,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
         """Return the observed-RMS scale with an optional floor."""
 
@@ -527,7 +529,7 @@ class Normalization:
         cls,
         file: Union[str, Path],
         *,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
         """Return the scale stored in a calibration balance artifact."""
 
@@ -538,7 +540,7 @@ class Normalization:
         """Normalize a kind name, number, mapping, or :class:`Normalization`."""
 
         if value is None:
-            return cls.observed_rms()
+            return cls()
         if isinstance(value, cls):
             return value
         if isinstance(value, str):
@@ -582,7 +584,7 @@ class Normalization:
             components=scale.get("components"),
             minimum=scale.get("minimum"),
             file=scale.get("file"),
-            reduction=data.get("reduction", "weighted_mean"),
+            reduction=data.get("reduction", "sum"),
         )
 
 
@@ -870,17 +872,28 @@ class Preprocess:
         *,
         units: Mapping[Any, Any],
         name: Optional[str] = None,
+        mode: str = "frozen",
+        state_file: Optional[Union[str, Path]] = None,
     ) -> "Preprocess":
-        """Apply material-defined W inside the residual norm, frozen for the objective lifetime.
+        """Apply material-defined W inside the residual norm, fixed within a job by default.
 
         Keys are one-based component IDs or tuples of coupled component IDs.
         Values are material expressions. ``units`` specifies transformed trace
         units for each block. Frequency-independent W also weights df traces.
+        ``pinned`` persists W in ``state_file`` across jobs; ``live`` includes
+        material derivatives but does not support independently selected sides.
         """
         from frequensolve.physics import ReceiverExpression
 
         if not blocks or set(blocks) != set(units):
             raise ValueError("Every material weighting block needs output units")
+        if mode not in {"frozen", "live", "pinned"}:
+            raise ValueError("Material weighting mode must be frozen, live, or pinned")
+        if mode == "pinned":
+            if not isinstance(state_file, (str, Path)) or not str(state_file).strip():
+                raise ValueError("Pinned material weighting requires state_file")
+        elif state_file is not None:
+            raise ValueError("state_file applies only to pinned material weighting")
         rows = []
         used: set[int] = set()
         for key, expression in blocks.items():
@@ -894,6 +907,10 @@ class Preprocess:
                 raise ValueError("Material weighting blocks must not overlap")
             if not isinstance(expression, ReceiverExpression) or expression.wavefield:
                 raise TypeError("Material weighting requires material expressions")
+            if mode == "live" and expression._has_material_domain():
+                raise ValueError(
+                    "Live weighting of independently selected material coefficients is unsupported"
+                )
             used.update(components)
             rows.append(
                 {
@@ -905,7 +922,11 @@ class Preprocess:
         return cls(
             "material_weighting",
             "trace_pair",
-            {"model_policy": "frozen", "blocks": rows},
+            {
+                "mode": mode,
+                "blocks": rows,
+                **({"state_file": str(state_file)} if state_file is not None else {}),
+            },
             name=name,
         )
 
@@ -1565,7 +1586,24 @@ class Misfit:
         terms: Optional[Sequence[ObjectiveTerm]] = None,
         group_preprocess: Optional[Mapping[str, Any]] = None,
         include_default_preprocess: bool = False,
+        noise_std: Any = None,
     ) -> None:
+        self.noise_std = noise_std
+        if noise_std is not None:
+            if terms is not None or normalization is not None or weights is not None:
+                raise ValueError(
+                    "noise_std requires a simple misfit without terms, weights or normalization"
+                )
+            if (
+                Loss.from_value(loss).kind != "l2"
+                or Comparison.from_value(comparison).kind != "waveform"
+            ):
+                raise ValueError("noise_std requires L2 waveform comparison")
+            normalization = (
+                Normalization.explicit(components=noise_std)
+                if isinstance(noise_std, Mapping)
+                else Normalization.explicit(noise_std)
+            )
         if terms is not None:
             if any(v is not None for v in (loss, comparison, normalization, weights)):
                 raise ValueError(
@@ -1828,7 +1866,7 @@ class Misfit:
         return cls(
             loss=data.get("objective"),
             comparison=data.get("comparison"),
-            normalization=Normalization.observed_rms(),
+            normalization=Normalization(),
             **common,
         )
 

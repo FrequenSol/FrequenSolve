@@ -97,18 +97,121 @@ Typed Fields and Material Expressions
 
 Physics namespaces expose symbolic quantities as attributes:
 ``fs.physics.acoustic()``, ``fs.physics.elastic()``,
-``fs.physics.poroelastic()``, and ``fs.physics.electromagnetic()``.
+``fs.physics.coupled()``, ``fs.physics.poroelastic()``, and
+``fs.physics.electromagnetic()``.
 Fields and materials carry units and tensor shape; values resolve against the
 simulation at receiver locations. Select components with ``velocity.z``,
 ``strain.xx``, or ``strain["x", "z"]``. Use ``.to("MPa")`` for output units.
 
 .. code-block:: python
 
+   acoustic = fs.physics.acoustic()
    elastic = fs.physics.elastic()
    momentum = elastic.materials.rho * elastic.fields.velocity
    strain = elastic.materials.compliance @ elastic.fields.stress
    acq.add_receiver_group("momentum", momentum, coords=coords, domain="solid")
    acq.add_receiver_group("strain_xx", strain.xx, coords=coords, domain="solid")
+
+Typed quantities can also be added to a reusable receiver device:
+
+.. code-block:: python
+
+   device = fs.ReceiverNode(name="pv")
+   device.add_component("pressure", acoustic.fields.pressure)
+   device.add_component("velocity", acoustic.fields.velocity)
+   acq.add_receiver_group("pv", device, coords=coords, domain="water")
+
+   derived = fs.ReceiverNode(name="derived")
+   derived.add_component("momentum", momentum)
+   derived.add_component("strain_xz", strain.xz)
+   acq.add_receiver_group("derived", derived, coords=coords, domain="solid")
+
+Device vector and tensor components expand to names such as ``velocity.x``,
+``velocity.z``, and ``strain.xz``. Scalars keep their authored name. Typed vectors
+also accept constant numeric ``direction`` vectors for a single projected
+measurement. String field names remain supported. A group resolves a copy of
+its device, so the authored expressions remain available when reusing the device.
+
+Acoustic and elastic fields request physics-qualified plans, such as
+``acoustic:pressure`` and ``elastic:velocity_all``. A support-aware Sauce backend
+averages each channel over only the mapped elements where its physics is active,
+using the same weights for adjoint injection and receiver derivatives. Valid zero
+values still count; eligibility comes from the plan's physics mask.
+Normalization applies to the resulting channel's support, rather than separately
+to each child of an expression. Arithmetic combining acoustic-qualified and
+elastic-qualified fields is rejected by the SDK. Record those fields as separate
+components. Likewise, generic fields with different support should be recorded
+separately before combining their sampled values.
+
+.. code-block:: python
+
+   device = fs.ReceiverNode(name="obn_device")
+   device.add_component("pressure", acoustic.fields.pressure)
+   device.add_component("velocity", elastic.fields.velocity)
+   acq.add_receiver_group("OBN", device, coords=interface_coords)
+
+Omit the group domain here so both interface sides remain mapped. A group domain
+restricts all components: ``domain="solid"`` excludes fluid elements, so acoustic
+pressure is zero there. A channel with no compatible mapped element remains zero.
+Older backends average masked zeros into interface measurements and dilute them.
+
+For generic fields that route to the active physics, use ``fs.physics.coupled()``:
+
+.. code-block:: python
+
+   coupled = fs.physics.coupled()
+   device = fs.ReceiverNode(name="pv")
+   device.add_component("pressure", coupled.fields.pressure)
+   device.add_component("velocity", coupled.fields.velocity)
+   acq.add_receiver_group("pv", device, coords=coords)
+
+Generic pressure is fluid pressure or solid negative mean normal stress. Generic
+velocity and stress use the active acoustic/elastic plans; generic strain and
+displacement retain the backend's elastic-only definitions. Generic interface
+fields average their supported values from both sides. Common scalar properties,
+such as ``coupled.materials.rho`` and ``coupled.materials.Sp``, can scale fields;
+material-dependent sampling still requires an unambiguous material layer.
+Shared scalar properties are local references regardless of namespace:
+``elastic.materials.rho * acoustic.fields.velocity`` can sample density and
+velocity in an acoustic layer. The factory name does not select a material side.
+Material references address active authored properties; they do not implicitly
+convert between material parameterizations. For pressure slowness in a model
+authored with ``Vp``, use ``1 / acoustic.materials.vp.on(domain="water")``.
+Use ``acoustic.materials.Sp.on(domain="water")`` when ``Sp`` is authored directly.
+At a fluid--solid interface, select the material side independently of field
+support with ``.on(domain=...)``:
+
+.. code-block:: python
+
+   rho_water = acoustic.materials.rho.on(domain="water")
+   rho_solid = elastic.materials.rho.on(domain="solid")
+   compliance = elastic.materials.compliance.on(domain="solid")
+   device.add_component("fluid_momentum", rho_water * acoustic.fields.velocity)
+   device.add_component("strain_xz", (compliance @ elastic.fields.stress).xz)
+   acq.add_receiver_group("derived", device, coords=interface_coords)
+
+The selector accepts a material subdomain name or positive mesh block ID. It
+samples that material at the receiver coordinates without changing the field's
+support. The selected domain must contain the receiver point; missing sides raise
+an error. No material averaging or extrapolation is implied. A group domain
+restricts field sampling, while explicit material selectors bind independently.
+Omit the group domain when measuring fields from both sides in one device.
+Each material reference retains its selector through arithmetic. Calling
+``.on()`` on a compound material expression replaces every reference's selector.
+Unselected material references require an unambiguous mapped material layer.
+Constitutive tensors require an elastic selected material and retain their
+Mandel representation.
+
+``.on()`` chooses the material side; receiver responses still sample the current
+model. Wavefield sampling, wavefield adjoints and frequency derivatives are
+supported. Full model derivatives that request the direct material tangent of a
+selected receiver response are currently unsupported and raise an error. Existing
+unselected response material derivatives remain available. For model inversion,
+retain measured pressure/velocity channels and use selected materials in fixed
+objective weights instead. Material dependencies are written only when requested
+in ``materials=``.
+In 2.5D, generic full velocity and stress lack a common acoustic/elastic shape;
+select ``coupled.fields.velocity.x`` or ``.z``, or use physics-qualified fields.
 
 A full vector or symmetric tensor records all its independent components;
 a selected entry records one. For multiple quantities in one group, pass a

@@ -9,6 +9,7 @@ from frequensolve.imaging._backend import (
     Backend,
     LinearizationCache,
     LinearizationEntry,
+    background_checkpoint_files,
     content_fingerprint,
     fingerprint,
     frequency_weights,
@@ -582,6 +583,191 @@ def test_linearization_cache_evicts_lru_entries_inside_workdir(tmp_path):
     assert cache.evicted == ["fp1", "fp0", "foreign", "fp2"]
     with pytest.raises(ValueError):
         LinearizationCache(workdir, capacity=0)
+
+
+def _background_linearize(sim, name):
+    """A finished two-rank, two-batch linearize laid out like a remote Sauce run.
+
+    Only the task manifest, rank 0's shard manifest and the task result (which
+    records rank 0's payloads, as Sauce does) were fetched; every payload stays
+    on the site.
+    """
+    job = FWIOperatorJob(
+        name,
+        sim,
+        [4.0],
+        action="linearize",
+        active=ACTIVE,
+        state="state.json",
+        background="background.json",
+    )
+    manifest = job.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    shards, records = [], []
+    for rank in range(2):
+        shard = manifest.with_name(f"{manifest.stem}_gen_7_rank_{rank}.json")
+        payloads = [f"{shard.stem}_batch_{batch}.h5" for batch in range(2)]
+        if rank == 0:
+            shard.write_text(json.dumps({"shards": [{"file": p} for p in payloads]}))
+            records += [
+                {
+                    "id": f"export:{payload}",
+                    "role": "checkpoint",
+                    "representation": "hdf5",
+                    "schema": "fs-solution-hdf5-3",
+                    "path": payload,
+                    "retention": "durable",
+                    "bytes": 1000,
+                }
+                for payload in payloads
+            ]
+        shards.append({"file": shard.name})
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "fs-background-state-1",
+                "ranks": 2,
+                "batches": 2,
+                "shards": shards,
+            }
+        )
+    )
+    result = job._result_path / "_fs_run" / "tasks" / "task_000001" / "result.json"
+    result.parent.mkdir(parents=True)
+    result.write_text(
+        json.dumps(
+            {
+                "schema": "fs-task-result-2",
+                "partition": {
+                    "task": 1,
+                    "task_count": 1,
+                    "frequency": {"real": 4.0, "imag": 0.0},
+                },
+                "fingerprints": {
+                    key: "sha256:" + digit * 64
+                    for key, digit in (
+                        ("job", "1"),
+                        ("simulation", "2"),
+                        ("outputs", "3"),
+                    )
+                },
+                "status": {"state": "success", "code": 0},
+                "artifacts": records,
+            }
+        )
+    )
+    return job
+
+
+def test_background_checkpoint_release_covers_every_rank_and_the_site(tmp_path):
+    sim = _simulation(tmp_path)
+    fake = FakeImagingSite(SIZES, seed=7)
+    backend = Backend(fake, sim.project_path)
+    job = _background_linearize(sim, "capture")
+    files, size = background_checkpoint_files(job)
+    stem = "background_1_gen_7_rank"
+    assert files == sorted(
+        ["background_1.json", f"{stem}_0.json", f"{stem}_1.json"]
+        + [f"{stem}_{rank}_batch_{batch}.h5" for rank in (0, 1) for batch in (0, 1)]
+    )
+    local = sum(
+        (job._result_path / name).stat().st_size
+        for name in files
+        if (job._result_path / name).is_file()
+    )
+    # Rank 0 payloads from the catalog; rank 1 payloads estimated from them.
+    assert size == local + 4 * 1000
+
+    assert backend.release_background(job) == size
+    assert job.background is None
+    assert fake.removed == [("capture", tuple(files))]
+    assert not (job._result_path / "background_1.json").exists()
+    assert backend.release_background(job) == 0  # already released
+    assert background_checkpoint_files(job) == ([], 0)
+
+
+def test_background_checkpoint_files_read_per_rank_hdf5_shards(tmp_path):
+    sim = _simulation(tmp_path)
+    job = FWIOperatorJob(
+        "capture",
+        sim,
+        FREQUENCIES,
+        action="linearize",
+        active=ACTIVE,
+        state="state.json",
+        background="background.json",
+    )
+    expected = []
+    for task in (1, 2):
+        manifest = job.background_file(task)
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        shards = [f"{manifest.stem}/generations/run_9/rank_{r:05d}.h5" for r in (0, 1)]
+        (manifest.parent / shards[0]).parent.mkdir(parents=True)
+        (manifest.parent / shards[0]).write_bytes(b"0" * 500)  # rank 1 stays remote
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-background-state-1",
+                    "ranks": 2,
+                    "batches": [{"source_first": 1, "n_sources": 2}],
+                    "shards": [{"file": name, "digest": "sha256:0"} for name in shards],
+                }
+            )
+        )
+        expected += [manifest.name, *shards]
+    files, size = background_checkpoint_files(job)
+    assert files == sorted(expected)
+    manifests = sum(job.background_file(task).stat().st_size for task in (1, 2))
+    assert size == manifests + 4 * 500
+
+
+def test_linearization_cache_releases_background_on_eviction_and_budget(tmp_path):
+    sim = _simulation(tmp_path)
+    fake = FakeImagingSite(SIZES, seed=7)
+    backend = Backend(fake, sim.project_path)
+    released = []
+
+    def release(entry):
+        released.append(entry.fingerprint)
+        return backend.release_background(entry.job)
+
+    cache = LinearizationCache(sim.project_path, capacity=2, release=release)
+    jobs = [_background_linearize(sim, f"lin{index}") for index in range(4)]
+    entries = [LinearizationEntry(f"fp{index}", job) for index, job in enumerate(jobs)]
+    cache.put(entries[0])
+    cache.put(entries[1])
+    assert released == [] and set(cache.background_bytes()) == {"fp0", "fp1"}
+    cache.put(entries[2])  # evicts fp0 with its checkpoint
+    assert released == ["fp0"] and jobs[0].background is None
+    assert jobs[1].background is not None
+
+    # A budget keeps the newest checkpoint and releases older retained ones.
+    cache.background_budget = 0
+    cache.put(entries[3])  # evicts fp1, budget releases fp2 but not fp3
+    assert released == ["fp0", "fp1", "fp2"]
+    assert jobs[3].background is not None
+    assert cache.background_bytes().keys() == {"fp3"}
+    with pytest.raises(ValueError, match="background_budget"):
+        cache.background_budget = -1
+
+    # A failing site deletion warns instead of failing the eviction.
+    def broken(entry):
+        raise OSError("ssh unavailable")
+
+    cache.release = broken
+    with pytest.warns(RuntimeWarning, match="ssh unavailable"):
+        cache.clear()
+
+
+def test_backend_records_submitted_jobs(setup):
+    sim, fake, backend = setup
+    with backend.recording() as outer:
+        first = _linearize(backend, sim)
+        with backend.recording() as inner:
+            second = _linearize(backend, sim)
+    third = _linearize(backend, sim)
+    assert outer == [first, second] and inner == [second]
+    assert third not in outer
 
 
 def test_linearization_entry_from_job_reads_fingerprints(setup):

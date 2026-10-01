@@ -35,8 +35,8 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _real_model(value: Any, *, name: str = "model") -> np.ndarray:
-    """Return one finite float64 model vector without complex truncation."""
+def _model_vector(value: Any, *, name: str = "model") -> np.ndarray:
+    """Validate one finite float64 model vector; a float64 input is not copied."""
 
     array = np.asarray(value)
     if np.iscomplexobj(array):
@@ -44,16 +44,24 @@ def _real_model(value: Any, *, name: str = "model") -> np.ndarray:
     array = np.asarray(array, dtype=np.float64)
     if array.ndim != 1 or array.size < 1:
         raise ValueError(f"{name} must be a non-empty one-dimensional vector")
-    if not np.all(np.isfinite(array)):
+    # Two reductions instead of a boolean temporary of the vector's size.
+    if not (np.isfinite(array.min()) and np.isfinite(array.max())):
         raise ValueError(f"{name} must contain only finite values")
-    return np.array(array, copy=True)
+    return array
+
+
+def _real_model(value: Any, *, name: str = "model") -> np.ndarray:
+    """Return one finite float64 model vector without complex truncation."""
+
+    return np.array(_model_vector(value, name=name), copy=True)
 
 
 def _model_digest(model: np.ndarray) -> str:
     """Hash a model vector for compact provenance without storing it per record."""
 
-    little_endian = np.asarray(model, dtype="<f8")
-    return hashlib.sha256(little_endian.tobytes(order="C")).hexdigest()
+    # Hash the contiguous little-endian buffer in place (no bytes copy).
+    little_endian = np.ascontiguousarray(model, dtype="<f8")
+    return hashlib.sha256(little_endian.data).hexdigest()
 
 
 def _finite_optional(value: Optional[float], name: str) -> Optional[float]:
@@ -296,7 +304,8 @@ class OptimizationHistory:
     ) -> OptimizationRecord:
         """Append one actual objective evaluation and persist it immediately."""
 
-        vector = _real_model(model)
+        # Only the digest is kept: validate and hash the caller's vector in place.
+        vector = _model_vector(model)
         record = OptimizationRecord(
             index=len(self.records),
             kind="evaluation",
@@ -323,7 +332,7 @@ class OptimizationHistory:
     ) -> OptimizationRecord:
         """Append one optimizer iterate linked to the current evaluation count."""
 
-        vector = _real_model(model)
+        vector = _model_vector(model)
         digest = _model_digest(vector)
         previous = self.iterations
         if previous and previous[-1].model_digest == digest:

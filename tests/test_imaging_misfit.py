@@ -148,7 +148,7 @@ def test_normalization_variants_serialize_units_and_round_trip():
 
     assert explicit.to_fs() == {
         "scale": {"kind": "explicit", "value": {"value": 2.5, "units": "Pa"}},
-        "reduction": "weighted_mean",
+        "reduction": "sum",
     }
     assert components.to_fs()["scale"]["components"] == {
         "pressure": 1.0,
@@ -160,19 +160,46 @@ def test_normalization_variants_serialize_units_and_round_trip():
     }
     assert balance.to_fs() == {
         "scale": {"kind": "balance_artifact", "file": "calibrate/balance.h5"},
-        "reduction": "weighted_mean",
+        "reduction": "sum",
     }
     for normalization in (explicit, components, rms, balance):
         assert Normalization.from_fs(normalization.to_fs()) == normalization
     assert Normalization.from_value("observed_rms") == Normalization.observed_rms()
     assert Normalization.from_value(3.0) == Normalization.explicit(3.0)
-    assert Normalization.from_value(None) == Normalization.observed_rms()
+    assert Normalization.from_value(None) == Normalization.explicit(1.0)
+
+
+def test_normalization_defaults_and_explicit_legacy_options():
+    unit_sum = Normalization.explicit(1.0, reduction="sum")
+    for normalization in (
+        Normalization(),
+        Normalization.explicit(),
+        Normalization.from_value(None),
+        Normalization.from_fs({"scale": {"kind": "explicit", "value": 1.0}}),
+        Misfit.l2().normalization,
+        ObjectiveTerm("pressure").normalization,
+        Misfit.from_fs({"objective": {"kind": "l2"}}).normalization,
+    ):
+        assert normalization == unit_sum
+        assert normalization.to_fs() == {
+            "scale": {"kind": "explicit", "value": 1.0},
+            "reduction": "sum",
+        }
+
+    rms_mean = Normalization.observed_rms(reduction="weighted_mean")
+    assert Normalization.from_fs(rms_mean.to_fs()) == rms_mean
+    assert Misfit.l2(normalization=rms_mean).normalization == rms_mean
+    assert Normalization.observed_rms().reduction == "sum"
+    assert (
+        Normalization.explicit(1.0, reduction="weighted_mean").reduction
+        == "weighted_mean"
+    )
 
 
 @pytest.mark.parametrize(
     "factory",
     [
-        lambda: Normalization.explicit(),
+        lambda: Normalization.explicit(components={}),
         lambda: Normalization.explicit(1.0, components={"p": 1.0}),
         lambda: Normalization.explicit(-1.0),
         lambda: Normalization(kind="balance_artifact"),
@@ -508,8 +535,8 @@ def test_objective_term_defaults_and_round_trip(imaging_validator):
         "comparison": {"kind": "waveform"},
         "weight": 0.3,
         "normalization": {
-            "scale": {"kind": "observed_rms"},
-            "reduction": "weighted_mean",
+            "scale": {"kind": "explicit", "value": 1.0},
+            "reduction": "sum",
         },
     }
     assert ObjectiveTerm.from_fs(payload) == term

@@ -74,6 +74,27 @@ def setup(tmp_path, fake):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("method", ["cg", "lsqr"])
+def test_lsrtm_reflectivity_falls_back_without_changing_the_image(setup, fake, method):
+    _, problem = setup
+    automatic = im.LSRTM(problem, method=method, iterations=40, tolerance=1e-10)
+    image = automatic.run()
+    assert automatic.linearization.job.background is None
+    assert not automatic.linearization._reuse_background
+    assert all(
+        job.background is None
+        for job in fake.jobs
+        if isinstance(job, im.FWIOperatorJob)
+    )
+    replay = im.LSRTM(
+        problem, method=method, iterations=40, tolerance=1e-10, reuse_background=False
+    )
+    np.testing.assert_allclose(
+        image.values, replay.run().values, rtol=1e-10, atol=1e-12
+    )
+    assert automatic.info["converged"]
+
+
 def test_bound_space_emits_the_pinned_reflectivity_payload(tmp_path):
     sim = layered_simulation(tmp_path / "project")
 

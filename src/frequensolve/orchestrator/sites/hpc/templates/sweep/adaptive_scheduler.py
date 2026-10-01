@@ -28,6 +28,10 @@ _STEP_LABELS = {
     "smooth": "Solver postprocess",
     "pack": "Packing",
 }
+_MPIRUN_LAUNCHERS = frozenset({"mpiexec", "mpirun"})
+# "cores": map each mpirun/mpiexec rank onto its OpenMP threads' cores (Open MPI
+# on Linux); "none": ranks stay unbound; "launcher"/"explicit": add nothing.
+RANK_BINDINGS = ("launcher", "cores", "none", "explicit")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -43,6 +47,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--log", default="")
     parser.add_argument("--return-code", type=int, default=1)
     parser.add_argument("--not-before", type=float, default=0.0)
+    parser.add_argument(
+        "--rank-binding",
+        choices=RANK_BINDINGS,
+        default="explicit",
+        help="How the sweep places mpirun/mpiexec ranks (see adaptive_sweep.sh)",
+    )
     args = parser.parse_args()
     if args.record_failure:
         if args.status is None:
@@ -313,7 +323,15 @@ def _free_interval(intervals, offset: int, ranks: int):
 
 
 class AdaptiveScheduler:
-    def __init__(self, config, *, job_file: str, output: str, status: str):
+    def __init__(
+        self,
+        config,
+        *,
+        job_file: str,
+        output: str,
+        status: str,
+        rank_binding: str = "explicit",
+    ):
         self.config = config
         self.job_file = job_file
         self.output = Path(output)
@@ -322,6 +340,9 @@ class AdaptiveScheduler:
         self.mpi = str(config.get("mpi", "ibrun"))
         self.mpi_args = [str(value) for value in config.get("mpi_args", [])]
         self.mpi_launcher = Path(self.mpi).name
+        if rank_binding not in RANK_BINDINGS:
+            raise ValueError(f"unsupported rank binding: {rank_binding}")
+        self.rank_binding = rank_binding
         self.fresh_flag = ["--fresh"] if config.get("fresh") else []
         self.total_ranks = int(config["total_ranks"])
         self.omp_threads = int(config["omp_threads"])
@@ -350,16 +371,30 @@ class AdaptiveScheduler:
         if rank_limit < 1 or self.min_ranks > rank_limit:
             raise ValueError("max_ranks_per_task must be positive and >= min_ranks")
         self.max_ranks_per_task = min(self.max_ranks_per_task, rank_limit)
-        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+        if self.mpi_launcher in _MPIRUN_LAUNCHERS:
             # These launchers cannot isolate concurrent steps within an allocation.
             self.max_ranks_per_task = min(self.total_ranks, rank_limit)
+        # Tasks that restore a background checkpoint run on exactly the rank
+        # count that wrote it; sizing, boosts and leftover ranks never apply.
+        self.task_ranks: Dict[int, int] = {
+            int(task): int(ranks)
+            for task, ranks in dict(config.get("task_ranks") or {}).items()
+        }
+        pin_limit = min(self.total_ranks, rank_limit)
+        for task, ranks in sorted(self.task_ranks.items()):
+            if not 1 <= ranks <= pin_limit:
+                raise ValueError(
+                    f"task {task} is pinned to {ranks} ranks; this sweep runs "
+                    f"tasks on 1 to {pin_limit} ranks"
+                )
         self.running = []
         self.successful_tasks = []
         self.failed_tasks = []
         self.failed_reasons: Dict[int, str] = {}
         self.launched_at: Dict[int, float] = {}
+        self.launched_ranks: Dict[int, int] = {}
         self.free_intervals = [(0, self.total_ranks)]
-        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+        if self.mpi_launcher in _MPIRUN_LAUNCHERS:
             self.free_intervals = [(0, self.max_ranks_per_task)]
 
     def _load_task_memory(self):
@@ -367,9 +402,11 @@ class AdaptiveScheduler:
             return [0.0] * max(self.job_task_count, max(self.task_indices, default=1))
         return _load_task_memory_file(self.sizing_json)
 
-    def _choose_base_ranks(self, task_memory: float) -> int:
-        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+    def _choose_base_ranks(self, task_memory: float, task: Optional[int] = None) -> int:
+        if self.mpi_launcher in _MPIRUN_LAUNCHERS:
             return self.max_ranks_per_task
+        if task in self.task_ranks:
+            return self.task_ranks[task]
         ranks = int(math.ceil(task_memory * self.mem_cushion / self.mem_per_rank))
         ranks = max(ranks, self.min_ranks)
         ranks = min(ranks, self.max_ranks_per_task, self.total_ranks)
@@ -406,9 +443,25 @@ class AdaptiveScheduler:
             payload["failed_reasons"] = {
                 str(task): reason for task, reason in self.failed_reasons.items()
             }
+        if self.launched_ranks:
+            # MPI ranks each launched task ran on, for run records.
+            payload["task_ranks"] = {
+                str(task): ranks for task, ranks in self.launched_ranks.items()
+            }
         if reason:
             payload["abort_reason"] = reason
         _write_json_atomic(self.status_file, payload)
+
+    def _launch_ranks(self, task_id: int, ranks: int) -> int:
+        """Return the ranks a task runs on within its ``ranks`` allocated slots.
+
+        mpirun/mpiexec tasks hold the whole allocation, even when pinned to
+        fewer ranks; other launchers allocate exactly the pinned count.
+        """
+
+        if self.mpi_launcher in _MPIRUN_LAUNCHERS:
+            return min(ranks, self.task_ranks.get(task_id, ranks))
+        return ranks
 
     def _launch_command(self, task_id: int, offset: int, ranks: int) -> list[str]:
         if self.mpi_launcher == "ibrun":
@@ -422,12 +475,21 @@ class AdaptiveScheduler:
                 "--cpus-per-task",
                 str(self.omp_threads),
             ]
-        elif self.mpi_launcher in {"mpiexec", "mpirun"}:
+        elif self.mpi_launcher in _MPIRUN_LAUNCHERS:
             if offset != 0 or ranks != self.max_ranks_per_task:
                 raise SystemExit(
                     f"{self.mpi_launcher} task launch requires exclusive use of the allocation"
                 )
-            prefix = [self.mpi, "-n", str(ranks)]
+            prefix = [self.mpi, "-n", str(self._launch_ranks(task_id, ranks))]
+            if self.rank_binding == "cores":
+                # Open MPI binds each rank to one core by default, squashing
+                # its OpenMP threads; give every rank omp_threads cores.
+                prefix += [
+                    "--map-by",
+                    f"slot:PE={self.omp_threads}",
+                    "--bind-to",
+                    "core",
+                ]
         else:
             raise SystemExit(f"unsupported MPI launcher: {self.mpi_launcher}")
         return [
@@ -466,9 +528,11 @@ class AdaptiveScheduler:
             output.close()
             raise
         self.running.append((process, offset, ranks, task_id, memory, output))
+        self.launched_ranks[task_id] = self._launch_ranks(task_id, ranks)
         print(
             f"[scheduler] launch task={task_id} mem≈{memory:.2f}GiB "
-            f"offset={offset} ranks={ranks}",
+            f"offset={offset} ranks={self.launched_ranks[task_id]}"
+            + (" (pinned)" if task_id in self.task_ranks else ""),
             flush=True,
         )
         time.sleep(self.launch_delay)
@@ -511,9 +575,14 @@ class AdaptiveScheduler:
         ]
         if bad:
             raise SystemExit(f"invalid task indices: {bad}")
-        if self.skip_sizing and len(self.task_indices) != 1:
+        if (
+            self.skip_sizing
+            and len(self.task_indices) != 1
+            and not set(self.task_indices) <= set(self.task_ranks)
+        ):
             raise SystemExit(
-                "--init-no-size scheduling requires exactly one submitted task"
+                "--init-no-size scheduling requires exactly one submitted task "
+                "or pinned ranks for every task"
             )
 
         queue = deque(
@@ -529,7 +598,12 @@ class AdaptiveScheduler:
             candidates = []
             remaining = len(queue) + len(self.running)
             for task in list(queue):
-                base = self._choose_base_ranks(memory[task - 1])
+                base = self._choose_base_ranks(memory[task - 1], task)
+                if task in self.task_ranks and self.mpi_launcher not in (
+                    _MPIRUN_LAUNCHERS
+                ):
+                    candidates.append((task, base, base, memory[task - 1]))
+                    continue
                 maximum = base
                 if len(queue) == 1:
                     maximum = free_ranks
@@ -674,6 +748,7 @@ def main() -> None:
         job_file=args.job,
         output=args.output,
         status=args.status,
+        rank_binding=args.rank_binding,
     ).run()
 
 

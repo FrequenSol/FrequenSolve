@@ -14,6 +14,30 @@ from scipy.sparse import csr_matrix
 
 __all__ = ["PropertyMesh", "read_reference_vertices"]
 
+
+def read_lumped_mass(path: str | Path, *, material: int, identity: str) -> np.ndarray:
+    """Read exact native support volumes for one immutable constrained basis."""
+    with h5py.File(path, "r") as h5:
+        group = h5["property_space"]
+        if _text(group["identity"]) != identity:
+            raise ValueError("Lumped mass belongs to a different property basis")
+        if "lumped_mass" not in group or "lumped_mass_units" not in group:
+            raise ValueError(
+                "Property artifact has no native lumped mass; regenerate it with the current Sauce build"
+            )
+        if _text(group["lumped_mass_units"]) != "km**D":
+            raise ValueError("Unsupported lumped-mass units")
+        ranges = group["material_ranges"]
+        if not 1 <= material <= len(ranges):
+            raise ValueError("Invalid lumped-mass material group")
+        offset, count = map(int, ranges[material - 1])
+        mass = np.asarray(group["lumped_mass"][offset : offset + count], dtype=float)
+        if len(mass) != count or not np.isfinite(mass).all() or np.any(mass <= 0):
+            raise ValueError("Invalid native lumped-mass vector")
+    mass.flags.writeable = False
+    return mass
+
+
 # Native element kind -> (VTK linear cell type, vertex count).
 _CELLS = {1: (12, 8), 2: (10, 4), 3: (13, 6), 4: (14, 5), 5: (9, 4), 6: (5, 3)}
 

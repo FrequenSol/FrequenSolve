@@ -1,6 +1,7 @@
 """Composite objectives use Sauce value/prox callbacks without changing derivatives."""
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -276,3 +277,115 @@ def test_smooth_native_tikhonov_resumes_with_context(tmp_path):
     np.testing.assert_allclose(problem.gradient(x).values + 0.3 * x, 0, atol=3e-6)
     assert result.stages[0].resumed
     assert result.stages[0].metrics["optimizer"] == "lbfgs"
+
+
+def test_native_cache_hits_hash_the_vector_without_forming_the_model(
+    tmp_path, monkeypatch
+):
+    site = FakeImagingSite(seed=7, support_masks={"model.vp": [1, 0, 1, 1, 0]})
+    problem = _problem(tmp_path, site)
+    problem.state = problem.state_from(np.arange(1.0, 9.0))
+    lin = problem.linearize()
+    spec = im.NativeRegularization(
+        im.Smoothing(kind="tv", alpha=0.04, normalize_amplitude=False)
+    )
+    _, native = bind_workflow_regularization(spec, lin.space, problem, lin)
+    x = lin.point.values
+    expected = native.value(x)
+    built = []
+    full = native._full
+    monkeypatch.setattr(native, "_full", lambda v: built.append(v) or full(v))
+    jobs = len(site.jobs)
+    frozen = x.copy()
+    frozen.flags.writeable = False
+    # Equal coordinates in any container are one key, stable within the run.
+    for same in (x.copy(), frozen, im.ControlVector(x, lin.space), list(x)):
+        assert native.value(same) == expected
+    assert len(site.jobs) == jobs and not built
+    model = native.prox(x, 0.3, np.ones(x.size), lin.space.bounds)
+    jobs, built[:] = len(site.jobs), []
+    # Sauce's prox energy of the returned model serves the line search's value.
+    native.value(np.array(model))
+    assert len(site.jobs) == jobs and not built
+    native.value(0.5 * x)
+    assert len(site.jobs) == jobs + 1 and len(built) == 1
+
+
+def test_prox_stages_metric_and_bounds_once_per_content(tmp_path, monkeypatch):
+    site = FakeImagingSite(seed=7, support_masks={"model.vp": [1, 0, 1, 1, 0]})
+    problem = _problem(tmp_path, site)
+    problem.state = problem.state_from(np.arange(1.0, 9.0))
+    lin = problem.linearize()
+    spec = im.NativeRegularization(
+        im.Smoothing(kind="tv", alpha=0.04, normalize_amplitude=False)
+    )
+    _, native = bind_workflow_regularization(spec, lin.space, problem, lin)
+    hashed = []
+    fingerprint = RegularizationJob._path_content_fingerprint.__func__
+    monkeypatch.setattr(
+        RegularizationJob,
+        "_path_content_fingerprint",
+        classmethod(
+            lambda cls, path: hashed.append(Path(path)) or fingerprint(cls, path)
+        ),
+    )
+    x = lin.point.values
+    metric = np.linspace(1.0, 2.0, x.size)
+    bounds = tuple(np.array(b, dtype=float) for b in lin.space.bounds)
+    for array in (metric, *bounds):
+        array.flags.writeable = False
+
+    def proximal_jobs():
+        return [
+            j
+            for j in site.jobs
+            if isinstance(j, RegularizationJob) and j.operation == "proximal"
+        ]
+
+    def status(paths):
+        return {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in paths.values()}
+
+    remote = tmp_path / "remote"
+    native.prox(x, 0.3, metric, bounds)
+    (first,) = proximal_jobs()
+    staged = dict(first.regularization_inputs)
+    # Beside the stage's native context, named by content: a stable path each.
+    assert set(staged) == {"metric", "lower", "upper"}
+    assert {path.parent for path in staged.values()} == {native.context.parent}
+    written = status(staged)
+    assert [hashed.count(path) for path in staged.values()] == [1, 1, 1]
+    uploads = {
+        pair for pair in first.remote_input_files(remote) if Path(pair[0]) in written
+    }
+    assert len(uploads) == 3
+    del hashed[:]
+    # Later calls (the same read-only arrays, or equal content in new ones)
+    # write only their target vector and reuse the recorded fingerprints.
+    native.prox(0.5 * x, 0.3, metric, bounds)
+    native.prox(0.25 * x, 0.2, np.array(metric), tuple(np.array(b) for b in bounds))
+    jobs = proximal_jobs()
+    assert len(jobs) == 3
+    for job in jobs[1:]:
+        assert job.regularization_inputs == staged
+        # The same local files at the same remote paths: uploaded once.
+        assert {
+            pair for pair in job.remote_input_files(remote) if Path(pair[0]) in written
+        } == uploads
+        assert not any(
+            (job._result_path / f"regularization_{label}.h5").exists()
+            for label in staged
+        )
+    assert status(staged) == written
+    assert not set(hashed) & set(staged.values())
+    # New metric content stages one new file; the unchanged bounds stay put.
+    native.prox(x, 0.3, 2.0 * metric, bounds)
+    changed = proximal_jobs()[-1].regularization_inputs
+    assert changed["metric"] != staged["metric"] and staged["metric"].exists()
+    assert {k: changed[k] for k in ("lower", "upper")} == {
+        k: staged[k] for k in ("lower", "upper")
+    }
+    assert status(staged) == written
+    np.testing.assert_array_equal(
+        ControlVectorFile.read(changed["metric"], native=True)["vp"][[0, 2, 3]],
+        2.0 * metric[:3],
+    )
