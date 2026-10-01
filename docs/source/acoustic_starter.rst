@@ -23,7 +23,7 @@ version used to build this guide:
 
    python3 -m venv .venv
    source .venv/bin/activate
-   python -m pip install "frequensolve[cloud,visual]==|release|"
+   python -m pip install "frequensolve[cloud,visual]==\ |release|\ "
 
 If that exact version is not available from your configured package index,
 obtain the matching approved project wheel from your project administrator.
