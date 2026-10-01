@@ -55,6 +55,7 @@
       "selectors": [
         "tests/test_awssite_auth_retry.py",
         "tests/test_cloud_cache_paths.py",
+        "tests/test_cognito_login_challenges.py",
         "tests/test_cloud_result_dependencies.py"
       ],
       "coverage_prefixes": [

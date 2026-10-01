@@ -118,6 +118,13 @@ interactive terminal. The example below uses the ``cloud`` profile. If your
 Cloud setup names a different profile, replace ``cloud`` with that exact name
 in both the login and server arguments:
 
+For a new invited account, first follow the welcome email and complete sign-in
+in your FrequenSolve web app, including setting your password. The Python client
+does not perform first-time password setup or additional verification challenges
+such as MFA. If your account requires such a challenge, use browser sign-in for
+hosted MCP or contact support about the supported Python/local MCP sign-in path;
+completing a browser session does not itself authenticate the local MCP server.
+
 .. code-block:: console
 
    /absolute/path/to/frequensolve-mcp-venv/bin/python -c 'import frequensolve as fs; fs.Site(profile="cloud", interactive=True, force_login=True)'
