@@ -11,7 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Tuple, Union
 
 import blake3
 import numpy as np
@@ -21,7 +21,11 @@ from frequensolve.simulation.artifact_contract import (
     COLLECTION_CONTRACT_VERSION,
     OPERATION_CONTRACT_VERSION,
 )
-from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
+from frequensolve.simulation.simulation import (
+    BaseSimulation,
+    CustomJSONEncoder,
+    _file_status,
+)
 from frequensolve.simulation.task_index import TASK_INDEX_VERSION
 from frequensolve.util.atomic import atomic_write_json
 from frequensolve.util.class_registry import class_registry
@@ -40,6 +44,9 @@ _ARTIFACT_CONTRACT_VERSIONS = {
     "task_index": TASK_INDEX_VERSION,
     "collection": COLLECTION_CONTRACT_VERSION,
 }
+# Fingerprinted JSON documents (chiefly saved simulations, O(controls) with
+# inline coefficients): (resolved path, ignored keys) -> (file status, hash).
+_JSON_FILE_HASHES: Dict[Tuple[str, Tuple[str, ...]], Any] = {}
 
 
 class JobSerializationMixin:
@@ -424,10 +431,26 @@ class JobSerializationMixin:
         return f"blake3:{blake3.blake3(encoded).hexdigest()}"
 
     @staticmethod
-    def _hash_json_file(path: Union[str, Path]) -> str:
+    def _hash_json_file(
+        path: Union[str, Path], ignored_keys: Tuple[str, ...] = ()
+    ) -> str:
+        """Hash a JSON document without top-level ``ignored_keys``, once per file status."""
+
+        key = (str(Path(path).resolve()), tuple(ignored_keys))
+        status = _file_status(Path(path))
+        cached = _JSON_FILE_HASHES.get(key)
+        if status is not None and cached is not None and cached[0] == status:
+            return str(cached[1])
         with open(path, "r") as f:
             payload = json.load(f)
-        return JobSerializationMixin._hash_payload(payload)
+        if ignored_keys and isinstance(payload, Mapping):
+            payload = dict(payload)
+            for name in ignored_keys:
+                payload.pop(name, None)
+        digest = JobSerializationMixin._hash_payload(payload)
+        if status is not None and _file_status(Path(path)) == status:
+            _JSON_FILE_HASHES[key] = (status, digest)
+        return digest
 
     @staticmethod
     def _sha256_file(path: Union[str, Path]) -> str:

@@ -17,6 +17,14 @@ prepared.
   callbacks rescale each vector on first access. Native proximal
   regularization rewrites a staged metric or bound file only when its content
   changes.
+- `SeismicSimulation.save()` (called by every `job.save()`) skips rewriting
+  the simulation JSON when the serialized content equals what the object last
+  wrote and the file is unchanged since; inline `DepthProfile`/`GridParameters`
+  coefficients made every job pay an O(controls) re-save. Remote staging
+  copies one mapped simulation JSON per content and remote project
+  (preserving its mtime, so rsync skips it) and scans input references
+  without the coefficients. Job, task and compatibility fingerprints hash a
+  saved JSON document once per file state.
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five
   vectors per iteration; callbacks must copy a vector before modifying it.

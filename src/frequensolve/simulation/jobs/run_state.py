@@ -776,13 +776,9 @@ class JobRunStateMixin:
             raise ValueError("Simulation must be saved before fingerprinting a task")
         if not policy.ignore_solver_options:
             return self._hash_json_file(self.simulation._file)
-        with open(self.simulation._file, "r") as f:
-            payload = json.load(f)
-        if isinstance(payload, Mapping):
-            payload = dict(payload)
-            for key in policy.ignored_simulation_keys:
-                payload.pop(key, None)
-        return self._hash_payload(payload)
+        return self._hash_json_file(
+            self.simulation._file, tuple(policy.ignored_simulation_keys)
+        )
 
     def task_policy_fingerprint_payload(
         self,
