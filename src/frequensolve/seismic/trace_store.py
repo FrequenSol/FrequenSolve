@@ -2531,20 +2531,20 @@ class TraceStore:
                     df=self.metadata["df"],
                     upscale=upscale,
                 )
-                fd = self._read_fd_eager(
+                eager_fd = self._read_fd_eager(
                     group,
                     component,
                     source,
                     max_bytes=int(eager_max_bytes),
                 )
-                if fd is not None:
+                if eager_fd is not None:
                     source_sampling = UniformSweepSampling(
                         f_min=0.0,
                         f_max=self.metadata["f_max"],
                         df=self.metadata["df"],
                     )
                     wavelet.times = source_sampling.T_list
-                    fd = self._apply_wavelet_to_fd(fd, wavelet, **kwargs)
+                    fd = self._apply_wavelet_to_fd(eager_fd, wavelet, **kwargs)
                 else:
                     fd = self.read_FD(group, component, source, wavelet, **kwargs)
                     fd = self._coalesce_td_chunks(fd)

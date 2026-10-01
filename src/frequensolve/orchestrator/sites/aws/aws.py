@@ -1156,7 +1156,7 @@ class AWSSite(BaseSite):
                 simulation_job_name=job.name,
                 send_simulation_status_email=kwargs.get("send_simulation_status_email"),
                 fresh=fresh_run,
-                **({"retry": True} if retry else {}),
+                retry=retry,
                 **execution_arguments,
             )
 

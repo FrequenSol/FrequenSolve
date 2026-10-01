@@ -9,6 +9,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import scipy as _scipy
+from numpy.typing import NDArray
 
 from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.model.parameterization import BSplineControl, HatControl
@@ -362,12 +363,14 @@ class FieldRepresentation(ABC):
         from scipy.sparse import diags
         from scipy.sparse.linalg import lsqr
 
-        values = np.asarray(samples, dtype=np.float64).reshape(-1)
+        values: NDArray[np.float64] = np.asarray(samples, dtype=np.float64).reshape(-1)
         if values.size != context.size or not np.all(np.isfinite(values)):
             raise ValueError("projection samples must be finite and match the context")
         operator = self.sampling_operator(context)
         if weights is not None:
-            scale = np.asarray(weights, dtype=np.float64).reshape(-1)
+            scale: NDArray[np.float64] = np.asarray(weights, dtype=np.float64).reshape(
+                -1
+            )
             if (
                 scale.size != context.size
                 or np.any(scale < 0.0)

@@ -65,6 +65,14 @@ class JobRemoteMixin:
         name: str
         simulation: BaseSimulation
         _file: Optional[Path]
+        # Present only on execution-site snapshots. These declarations do not
+        # add dataclass fields or change persisted authoring state.
+        _frozen_staged_provenance: Dict[str, Dict[str, Any]]
+        _cloud_staged_job_payload: Dict[str, Any]
+        _cloud_result_run_id: str
+        _cloud_output_identity: str
+        _frozen_artifact_fingerprints: Optional[Dict[str, str]]
+        _frozen_task_fingerprints: Optional[Dict[str, str]]
 
         @property
         def _local_path(self) -> Path: ...
