@@ -72,7 +72,8 @@ Choose the smallest install that matches the workflow you need:
      - Does not run the solver.
    * - Run on FrequenSol Cloud
      - ``python -m pip install "frequensolve[cloud]"``
-     - Requires a FrequenSol Cloud account and license.
+     - Includes lazy HDF5 trace reading. Cloud execution requires an account
+       and license.
    * - Use the local simulation assistant MCP
      - ``python -m pip install "frequensolve[mcp]"``
      - Add ``cloud`` to the extras for self-scoped read-only Cloud monitoring.
@@ -110,6 +111,14 @@ Extras can be combined:
 .. code-block:: bash
 
    python -m pip install "frequensolve[visual,cloud,seismic-io]"
+
+Lazy frequency-domain HDF5 trace access, including ``TraceDataset.fd()``, needs
+Dask even when the result files have already been downloaded. The ``cloud``,
+``parallel`` and ``hpc`` extras include it. The ``visual`` extra alone supports
+plotting and VTK access but does not install the lazy trace reader's dependency.
+For offline trace inspection without a Cloud or HPC workflow, add
+``"dask>=2025.1.0,<2026.0.0"`` to the same environment; no scheduler or Cloud
+credentials are required to read local traces.
 
 Solver Access
 -------------

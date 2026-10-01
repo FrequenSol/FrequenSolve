@@ -1523,7 +1523,7 @@ class TraceStore:
 
             raise optional_dependency_error(
                 "TraceDataset lazy HDF5 reading",
-                extra="hpc",
+                extra="cloud",
                 dependencies=("dask",),
                 error=exc,
             ) from exc
