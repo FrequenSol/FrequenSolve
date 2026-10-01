@@ -282,6 +282,9 @@ count: int = loaded.n_tasks
     if invalid:
         source += "wrong: str = BaseJob.load(Path('job.json'))\nBaseJob.load(123)\nwrong_path: str = loaded.save()\n"
     consumer.write_text(source)
+    # Dependencies are installed for this CI interpreter. Keep the consumer's
+    # grammar aligned with it (e.g. modern Pint on Python 3.13), while the
+    # separate Python 3.10 typecheck job retains the package support-floor gate.
     result = subprocess.run(
         [
             sys.executable,
@@ -289,6 +292,8 @@ count: int = loaded.n_tasks
             "mypy",
             "--config-file",
             str(root / "pyproject.toml"),
+            "--python-version",
+            f"{sys.version_info.major}.{sys.version_info.minor}",
             "--follow-imports=silent",
             "-O",
             "json",
