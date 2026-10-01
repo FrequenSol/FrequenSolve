@@ -8,6 +8,41 @@ space, observed data, a misfit, the frequencies and a site; gradients,
 Jacobians, normal operators, the :term:`FWI`, :term:`LSRTM` and :term:`RTM`
 workflows and the coherent focusing objectives all derive from it.
 
+FWI in one persistent allocation
+--------------------------------
+
+On Stampede3 or another SLURM site, use an inversion-owned execution policy to
+avoid a new batch submission for every objective, gradient and normal action::
+
+   from frequensolve.orchestrator.sites import (
+       AdaptiveWorkers,
+       PersistentAllocation,
+   )
+
+   result = fwi.run(
+       execution=PersistentAllocation(
+           nodes=1,
+           ranks_per_node=8,
+           duration="02:00:00",
+           workers=AdaptiveWorkers(max_ranks_per_task=2),
+       )
+   )
+
+``fwi`` is an existing ``FWI`` object whose problem uses a SLURM site. These
+resource values are examples; choose a walltime and worker limit appropriate
+for the problem. ``FWI.run`` owns the allocation through preparation, all
+stages, backtracking, normal actions, smoothing, curvature and final output
+writing. It releases the allocation on completion, error or interruption.
+The caller's site and problem views return to their original executor when the
+run exits.
+
+To reuse a session across workflows, enter ``problem.site.session(...)`` and
+pass that open session as ``fwi.run(execution=session)``. FWI borrows it and
+leaves teardown to the outer context. Alternatively, construct an
+``ImagingProblem(..., site=session)`` inside the context and use its operators
+and workflows normally. See :ref:`site-configuration` for cancellation,
+reconnection, leases and finite-walltime behavior.
+
 Mesh-gradient field outputs
 ---------------------------
 

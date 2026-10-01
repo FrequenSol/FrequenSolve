@@ -133,6 +133,7 @@ from frequensolve.imaging.operators import Jacobian, Normal
 from frequensolve.imaging.transfer import Transfer, resolve_transfer
 from frequensolve.inversion.validation import gradient_taylor_test, real_adjoint_test
 from frequensolve.orchestrator.sites.base import BaseSite
+from frequensolve.orchestrator.sites.execution import resolve_execution
 
 __all__ = ["ImagingProblem", "Linearization"]
 
@@ -432,13 +433,14 @@ class _Shared:
             from frequensolve.orchestrator.sites.config_file import Site
 
             self._site = Site()
-        return self._site
+        return resolve_execution(self._site)
 
     @property
     def backend(self) -> Backend:
         if self._backend is None:
+            self.site  # Resolve a lazily configured site before binding the backend.
             self._backend = Backend(
-                self.site,
+                self._site,
                 self.workdir,
                 submit_options=self.submit_options,
                 prefix=self.name,

@@ -3219,7 +3219,41 @@ class FWI:
 
     # -- run ------------------------------------------------------------------
 
-    def run(self, resume: bool = True) -> FWIResult:
+    def run(self, resume: bool = True, *, execution: Any = None) -> FWIResult:
+        """Run staged inversion, optionally inside one persistent allocation.
+
+        ``execution=PersistentAllocation(...)`` owns an allocation for the
+        entire workflow and releases it on success, failure or interruption.
+        Passing an already-open ``AllocationSession`` borrows it without
+        closing it. Derived problems, preparation, solver postprocessing and
+        curvature all use that executor. Existing site behavior is unchanged
+        when ``execution`` is omitted.
+        """
+        from frequensolve.orchestrator.sites.execution import (
+            PersistentAllocation,
+            execution_scope,
+        )
+
+        if execution is None:
+            return self._run(resume=resume)
+        site = self.problem.site
+        with contextlib.ExitStack() as stack:
+            if isinstance(execution, PersistentAllocation):
+                executor = stack.enter_context(execution.open(site))
+            else:
+                executor = execution
+                if (
+                    executor is not site
+                    and getattr(executor, "base_site", None) is not site
+                ):
+                    raise ValueError(
+                        "execution must be an open session for the problem's site"
+                    )
+                executor._require_ready()
+            stack.enter_context(execution_scope(site, executor))
+            return self._run(resume=resume)
+
+    def _run(self, resume: bool = True) -> FWIResult:
         """Run every stage and return the :class:`FWIResult`.
 
         With ``resume=True`` (default) a checkpoint written by an earlier run

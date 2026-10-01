@@ -1730,6 +1730,24 @@ class SlurmSite(BaseSite):
 
         return super().handle(job, job_id=job_id, mode=mode)
 
+    def session(self, **options):
+        """Create an owned persistent batch executor; enter it to await readiness.
+
+        Allocation resources (``nodes``, ``ranks_per_node``, ``queue``,
+        ``duration``) are fixed for its lifetime. An ``AdaptiveWorkers``
+        policy bounds individual solver workers. Every run, including
+        postprocessing and curvature, stays inside this allocation.
+        """
+        from frequensolve.orchestrator.sites.hpc.session import AllocationSession
+
+        return AllocationSession(self, **options)
+
+    def attach_session(self, session_id: str, **options):
+        """Borrow a persistent session by id; context exit only detaches."""
+        from frequensolve.orchestrator.sites.hpc.session import AllocationSession
+
+        return AllocationSession(self, session_id=session_id, **options)
+
     def provision(
         self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs
     ) -> RunHandle:

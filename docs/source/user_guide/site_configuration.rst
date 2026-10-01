@@ -8,6 +8,67 @@ target FrequenSol Cloud, a local solver installation, or an :term:`HPC`
 cluster. Most user scripts should call ``fs.Site()`` and let the
 :term:`site configuration file` choose the active backend.
 
+Persistent SLURM sessions
+-------------------------
+
+For small iterative workloads, reserve one batch allocation and submit all
+operations to its resident scheduler. Entering the context waits for the
+controller to become ready. It remains active while the queue is empty::
+
+   from frequensolve.orchestrator.sites import Site, AdaptiveWorkers
+
+   site = Site(profile="stampede3")
+   with site.session(
+       nodes=1,
+       ranks_per_node=8,
+       duration="02:00:00",
+       workers=AdaptiveWorkers(min_ranks=1, max_ranks_per_task=2),
+   ) as session:
+       runs = [session.submit(job) for job in jobs]
+       results = session.wait_all(runs, check=True)
+
+The resource values above are illustrative. Allocation resources are fixed;
+``AdaptiveWorkers`` bounds the ranks of individual frequency tasks. Tasks use
+memory estimates when needed and retain MPI rank counts required by saved
+partitioned artifacts. Initialization, smoothing, packing and curvature also
+reserve resources through the same scheduler. Stampede3 uses ``ibrun`` offsets
+and ``task_affinity``; generic ``srun`` sites use exclusive job steps. Generic
+``mpirun``/``mpiexec`` launchers execute one process group at a time.
+
+``session.submit`` returns the usual ``RunHandle``. Its ``id`` identifies this
+run; ``handle.backend["allocation_id"]`` identifies the enclosing Slurm job.
+``handle.cancel()`` cancels the run without releasing the allocation. Explicit
+sessions fail if the controller dies or a request cannot fit; they never
+silently submit a replacement batch job. Solver processes start afresh for
+individual operations; the session does not retain live solver factorizations.
+
+The controller accepts atomically published requests on the site's shared work
+filesystem through the existing SSH/file-transfer connection. ``request_id``
+may be supplied to ``session.submit`` as 32 lowercase hexadecimal characters;
+republication with the same id and payload does not execute the request twice.
+An id cannot be reused for different work. Durable session records remain under
+``<work_dir>/.fs_sessions/<session_id>`` after the allocation ends.
+
+To reconnect to a running session, use its ``session.session_id``::
+
+   with site.attach_session(session_id) as borrowed:
+       run = borrowed.handle(job, job_id=run_id)
+       result = run.wait(check=True)
+
+A borrowed context only detaches on exit. The context that created the
+allocation owns its lifetime. On normal exit it drains work, up to
+``cleanup_timeout`` (default 30 seconds), and releases the allocation. On an
+exception or interruption it cancels outstanding work before release. Drain
+timeout cancels remaining work and raises ``TimeoutError``. Cleanup does not
+close caller-owned site connections or delete solver artifacts.
+
+Clients renew leases while connected. If every client disappears, the
+controller cancels unfinished work and exits after ``lease_timeout`` (default
+300 seconds); the hard Slurm walltime still bounds the allocation. A warning
+signal 120 seconds before walltime stops admission and marks unfinished runs
+timed out. Resume an inversion from its last accepted checkpoint in a new
+session. Automatic allocation rollover is not supported.
+
 Quick Start
 -----------
 

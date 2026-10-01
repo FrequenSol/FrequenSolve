@@ -25,6 +25,13 @@ prepared.
   (preserving its mtime, so rsync skips it) and scans input references
   without the coefficients. Job, task and compatibility fingerprints hash a
   saved JSON document once per file state.
+- Added persistent SLURM allocation sessions with an allocation-resident
+  scheduler, adaptive frequency workers, per-run cancellation and reconnectable
+  run handles. Initialization, smoothing, packing and curvature share the same
+  resource pool. `FWI.run(execution=PersistentAllocation(...))` owns a session
+  through the complete inversion and releases it on exit; an open session may
+  also be borrowed.
+
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five
   vectors per iteration; callbacks must copy a vector before modifying it.
