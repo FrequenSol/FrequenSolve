@@ -68,3 +68,15 @@ rejects a state only when its realized mesh differs. The registry index lists
 no rank descriptors and its fingerprint is independent of the partition. These
 are targeted overlays and require a solver built from `88d8dada` or later;
 FrequenSolve still reads versions 3 and 4.
+
+## Background checkpoint version 2 overlay
+
+`fs-background-state-2` (contract, schema and examples), the fs-job-1
+`fwi_operator.background` and new `background_layout` schema descriptions and
+the matching fs-job-1 contract passage are copied from Sauce `next` `856b1277`
+(2026-10-01). A version-2 manifest names one HDF5 file per MPI rank
+(`layout: "rank"`, the default) or one file per task written by every rank
+(`layout: "shared"`), with per-rank slabs and per-batch `fs-block-sha256-1`
+digests. Sauce treats `fs-background-state-1` manifests as a cache miss;
+FrequenSolve still lists and deletes their files. These are targeted overlays
+and require a solver built from `ace2325a` or later.

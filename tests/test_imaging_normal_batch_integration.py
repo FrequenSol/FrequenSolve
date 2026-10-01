@@ -7,6 +7,7 @@ executable lookup: ``FS_SAUCE_EXECUTABLE`` or ``LOCAL_SOLVER_EXECUTABLE``).
 from __future__ import annotations
 
 import copy
+import json
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ import pytest
 from frequensolve import imaging as im
 from frequensolve.imaging import DepthProfile, ImagingProblem, ObservedData
 from frequensolve.imaging._native_regularization import bind_workflow_regularization
+from frequensolve.imaging.workflows import _task_counters
 from frequensolve.project import Project
 from frequensolve.simulation import FrequencyDomainJob
 from tests.test_imaging_integration import (
@@ -39,11 +41,14 @@ def _spy(problem):
     return jobs
 
 
-@pytest.mark.parametrize("background", [False, True])
-def test_batched_normal_matches_single_direction_jobs(tmp_path, background):
+@pytest.mark.parametrize("layout", [None, "rank", "shared"])
+def test_batched_normal_matches_single_direction_jobs(tmp_path, layout):
     from frequensolve.orchestrator.sites.local import LocalSite
 
-    site = LocalSite(solver=_executable(), n_workers=1)
+    background = layout is not None
+    site = LocalSite(
+        solver=_executable(), n_workers=1, background_layout=layout or "rank"
+    )
     project = Project(name="batch", path=tmp_path / "project", load_if_exists=False)
     truth = _simulation(project, "truth", TRUTH_VP)
     initial = _simulation(project, "initial", START_VP)
@@ -60,6 +65,11 @@ def test_batched_normal_matches_single_direction_jobs(tmp_path, background):
     ).restrict(weights=[0.5, 2.0])
     lin = problem.linearize(background=background)
     assert (lin.job.background is not None) == background
+    if background:
+        for task in (1, 2):
+            manifest = json.loads(lin.job.background_file(task).read_text())
+            assert manifest["schema"] == "fs-background-state-2"
+            assert manifest["layout"] == layout
     single = copy.copy(lin)  # an independent memo: one job per direction
     single._ops, single._normal = {}, None
     jobs = _spy(problem)
@@ -70,6 +80,10 @@ def test_batched_normal_matches_single_direction_jobs(tmp_path, background):
     (job,) = jobs
     assert job.action == "normal" and len(job.directions) == 3 and job.n_tasks == 2
     assert (job.background is not None) == background
+    if background:
+        counters = _task_counters(job)
+        assert counters["background_reuse_misses"] == 0, counters
+        assert counters["background_solves_reused"] > 0, counters
     for j, direction in enumerate(directions):
         reference = single.apply_normal(direction).values
         error = np.linalg.norm(batch[:, j] - reference) / np.linalg.norm(reference)
@@ -90,3 +104,9 @@ def test_batched_normal_matches_single_direction_jobs(tmp_path, background):
         expected = lin.apply_normal(direction).values + np.asarray(operator @ direction)
         error = np.linalg.norm(product.values - expected) / np.linalg.norm(expected)
         assert error < 1.0e-6, error
+
+    if background:
+        # Releasing removes every checkpoint file and the directories it empties.
+        assert problem.backend.release_background(lin.job) > 0
+        root = lin.job._result_path
+        assert not [path for path in root.iterdir() if "background" in path.name]

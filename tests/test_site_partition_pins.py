@@ -33,13 +33,19 @@ _STATE_V5_EXAMPLE = (
     / "contracts/sauce-f533e6f/trunk/contracts/outputs"
     / "fs-objective-linearization-5/examples/canonical.json"
 )
+# Sauce's published version-2 background manifests (two ranks).
+_BACKGROUND_V2_EXAMPLES = (
+    Path(__file__).parent
+    / "contracts/sauce-f533e6f/trunk/contracts/outputs"
+    / "fs-background-state-2/examples"
+)
 
 
 def _manifest(path, ranks=None, *, schema=_STATE, **extra):
     """Write one manifest as Sauce publishes it."""
 
     payload = {"schema": schema, **extra}
-    if schema == "fs-background-state-1":
+    if schema.startswith("fs-background-state-"):
         payload["ranks"] = ranks
     elif ranks is not None:
         payload["partition"] = {
@@ -146,6 +152,22 @@ def test_version5_states_and_vectors_pin_nothing_beside_a_background(tmp_path):
     assert task_partitions(vjp) == {
         1: TaskPartition(4, True, ("state",)),
         2: TaskPartition(6, False, ("background",)),
+    }
+
+
+@pytest.mark.parametrize("layout", ["rank", "shared"])
+def test_version2_backgrounds_pin_their_rank_count_in_either_layout(tmp_path, layout):
+    """Reuse needs the producer's rank count in both layouts; Sauce only recomputes."""
+
+    published = _BACKGROUND_V2_EXAMPLES / f"{layout}.json"
+    (tmp_path / "lin").mkdir()
+    (tmp_path / "lin" / "background_1.json").write_text(published.read_text())
+    _task_files(tmp_path, "lin/background", {3: 6}, schema="fs-background-state-2")
+    job = _Consumer(tmp_path, action="jvp", background="lin/background.json")
+
+    assert task_partitions(job) == {
+        1: TaskPartition(2, False, ("background",)),
+        3: TaskPartition(6, False, ("background",)),
     }
 
 

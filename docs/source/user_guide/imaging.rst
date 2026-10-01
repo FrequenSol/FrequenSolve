@@ -1542,8 +1542,10 @@ ordinary material actions, including encoded shots. JVP/VJP need one propagation
 stage each; a normal action needs two. Eligible frozen-Gram acoustic/elastic DPG
 actions store only native L2 fields; trace-dependent boundaries, receiver terms,
 or field outputs retain full checkpoints. Checkpoints stay on disk, not all
-source fields in RAM. They require the same solver build, resolved mesh
-partition and source batching. Matrix assembly/factors are still rebuilt by each
+source fields in RAM, as one HDF5 file per MPI rank or, with the site's
+``background_layout = "shared"``, one file per task (see
+:doc:`site_configuration`). They require the same solver build, MPI rank count
+and source batching. Matrix assembly/factors are still rebuilt by each
 action job. ``reuse_background=False`` replays the background solve. LSRTM
 automatically falls back to uncached actions for unsupported controls, spectral
 objectives or sites without ``supports_background_reuse`` (``LocalSite`` and
@@ -1554,17 +1556,18 @@ transfer as well as the manifests.
 
 Full checkpoints hold ``n_dof * n_src`` complex values per frequency, often
 terabytes in production, so LSRTM deletes the checkpoint it created when it
-finishes, on this machine and in the site's result directory
-(``site.remove_result_files``). ``keep_background=True`` keeps it for later
-actions on the same linearization. Kept checkpoints are deleted when their
-linearization leaves ``problem.cache`` (eviction or ``problem.cache.clear()``)
-or, least recently used first, once ``problem.cache.background_budget``
-(bytes) is exceeded; ``problem.backend.release_background(lin.job)`` deletes
-one immediately. Later actions on a released linearization run uncached. When
-Sauce cannot use a checkpoint for environmental reasons (rank count, batching,
-missing or corrupt shards), it recomputes those forward fields and counts them
-in ``background_reuse_misses``; LSRTM reports the total as
-``info["background"]["misses"]`` and issues a :class:`RuntimeWarning`.
+finishes, with the directories this empties, on this machine and in the
+site's result directory (``site.remove_result_files``). ``keep_background=True``
+keeps it for later actions on the same linearization. Kept checkpoints are
+deleted when their linearization leaves ``problem.cache`` (eviction or
+``problem.cache.clear()``) or, least recently used first, once
+``problem.cache.background_budget`` (bytes) is exceeded;
+``problem.backend.release_background(lin.job)`` deletes one immediately. Later
+actions on a released linearization run uncached. When Sauce cannot use a
+checkpoint for environmental reasons (rank count, batching, an earlier
+checkpoint version, missing or corrupt files), it recomputes those forward
+fields and counts them in ``background_reuse_misses``; LSRTM reports the total
+as ``info["background"]["misses"]`` and issues a :class:`RuntimeWarning`.
 
 Receiver-probe preconditioning requests the diagonal with the initial gradient,
 adds the regularization/damping diagonal, and freezes the resulting positive

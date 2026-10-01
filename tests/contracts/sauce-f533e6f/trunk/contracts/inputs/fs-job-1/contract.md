@@ -217,6 +217,28 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   source RHS count), not a source-batch limit. See the supported layouts and
   control-basis contraction in [curvature](../../../docs/imaging/curvature.md).
 
+  Ordinary material `linearize` may also supply `background: "background.json"`.
+  It saves native forward DOFs and RHS normalizations per rank/source batch,
+  publishing a task-suffixed `fs-background-state-2` manifest only after
+  capture completes; a failed capture publishes none and linearize continues.
+  `background_layout: "rank"` (default) writes one HDF5 file per rank without
+  collective I/O; `"shared"` writes one file per task shared by every rank
+  through parallel HDF5, which keeps the file count independent of the rank
+  count. The environment variable `FS_BACKGROUND_LAYOUT` overrides it for a
+  site. Eligible frozen-Gram
+  acoustic/elastic DPG actions retain only L2 fields; trace-dependent cases
+  retain full DOFs. See the
+  [checkpoint contract](../../outputs/fs-background-state-2/contract.md).
+  Pass that manifest to material `jvp`, `vjp`, or `normal` to replace
+  their background propagation with restoration. A different solver build, MPI
+  rank count or source batching, an older manifest version, or a missing or
+  corrupt file is a counted cache miss that recomputes the forward fields; a
+  different resolved PDE or objective state is an error. Spectral, source-control and extension actions
+  do not support this option. Operators/factors are still rebuilt. Large HDF5
+  fields have artifact role `checkpoint` (explicit remote transfer only); small
+  manifests are durable default outputs. Keep both on the execution site for
+  subsequent actions.
+
   Spectral derivative RTM also accepts `control_sensitivities.receiver_diagonal`.
   With `kernel_derivative.export_lower_orders`, matching `receiver_diagonal_dN`
   artifacts accompany lower-order gradients; the highest order keeps the ordinary

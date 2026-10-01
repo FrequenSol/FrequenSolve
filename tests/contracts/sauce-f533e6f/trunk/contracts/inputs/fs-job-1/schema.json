@@ -1035,7 +1035,13 @@
         },
         "background": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-          "description": "Optional fs-background-state-1 manifest: task-suffixed output for ordinary material linearize, input for jvp/vjp/normal. Saves native forward DOFs per rank and source batch. Reuse requires identical solver build, resolved model/mesh/partition, source batching and objective state; shard hashes are checked. Spectral, extension and source-control actions are unsupported."
+          "description": "Optional fs-background-state-2 manifest: task-suffixed output for ordinary material linearize, input for jvp/vjp/normal. Saves native forward DOFs with a group per source batch, in one HDF5 file per rank or one file per task shared by every rank (background_layout); a failed capture publishes no manifest. A different solver build, MPI rank count or source batching, an older manifest version, or a missing or corrupt file is a counted cache miss that recomputes the forward fields; a different resolved model/mesh or objective state is an error. Spectral, extension and source-control actions are unsupported."
+        },
+        "background_layout": {
+          "type": "string",
+          "enum": ["rank", "shared"],
+          "default": "rank",
+          "description": "Files of a background capture: one HDF5 file per rank and task, written independently without collective I/O (rank), or one HDF5 file per task written by every rank through parallel HDF5 where available (shared). The environment variable FS_BACKGROUND_LAYOUT overrides it. Readers take the layout from the manifest."
         },
         "receiver_state": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",

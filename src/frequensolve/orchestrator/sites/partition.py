@@ -8,7 +8,8 @@ the rank count of the task that wrote them:
 - receiver states and vectors (``fs-receiver-state-1``,
   ``fs-receiver-vector-1``, or a ``fs-receiver-*-bundle-1`` of per-group
   files), in ``partition.n_ranks``;
-- background checkpoints (``fs-background-state-1``), in ``ranks``.
+- background checkpoints (``fs-background-state-1`` and ``-2``, in either
+  file layout), in ``ranks``.
 
 Every later task reading one of them must run on the recorded count. Sauce
 rejects another count for states, vectors and receiver states and recomputes
@@ -110,7 +111,7 @@ def recorded_ranks(payload: Any) -> Optional[int]:
 
     if not isinstance(payload, Mapping):
         return None
-    if payload.get("schema") == "fs-background-state-1":
+    if payload.get("schema") in ("fs-background-state-1", "fs-background-state-2"):
         value = payload.get("ranks")
     else:
         partition = payload.get("partition")

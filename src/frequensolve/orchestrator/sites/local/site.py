@@ -37,7 +37,9 @@ from frequensolve.orchestrator.sites.base import (
     JobStatus,
     RunHandle,
     RunResult,
+    _background_layout,
     _merge_task_status_with_plan,
+    _remove_emptied_directories,
     _result_relative_paths,
     _wait_for_path,
 )
@@ -882,6 +884,8 @@ class LocalSite(BaseSite):
         dashboard_port: Dashboard port, or ``0`` to let Dask choose.
         curvature_ranks: MPI ranks for row-distributed Sauce curvature
             operations; they share the worker thread budget.
+        background_layout: Files of a background capture, ``"rank"``
+            (default) or ``"shared"`` (see :attr:`BaseSite.background_layout`).
     """
 
     supports_frequency_groups = True
@@ -895,8 +899,8 @@ class LocalSite(BaseSite):
         Paths follow :meth:`BaseSite.remove_result_files`; a path whose
         parent resolves outside the result directory (through a symbolic
         link) is rejected as well. Every path is checked before any file is
-        removed; missing files are skipped and directories raise
-        :class:`IsADirectoryError`.
+        removed; missing files are skipped, directories raise
+        :class:`IsADirectoryError` and emptied parent directories are removed.
         """
 
         relative = _result_relative_paths(relative_paths)
@@ -915,6 +919,7 @@ class LocalSite(BaseSite):
             targets.append(target)
         for target in targets:
             target.unlink(missing_ok=True)
+        _remove_emptied_directories(root, relative)
 
     def run_curvature(
         self,
@@ -995,6 +1000,7 @@ class LocalSite(BaseSite):
     dashboard_host: str = "localhost"
     dashboard_port: int = 0
     curvature_ranks: int = 1
+    background_layout: str = "rank"
 
     _dask_client: Optional[Client] = field(default=None, init=False)
     _dask_cluster: Optional[LocalCluster] = field(default=None, init=False)
@@ -1013,6 +1019,7 @@ class LocalSite(BaseSite):
 
     def __post_init__(self) -> None:
         self.curvature_ranks = positive_count(self.curvature_ranks, "curvature_ranks")
+        self.background_layout = _background_layout(self.background_layout)
         self._explicit_environment_keys = frozenset(self.env) | frozenset(
             self.environment
         )

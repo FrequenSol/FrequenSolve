@@ -64,6 +64,7 @@ from frequensolve.orchestrator.sites.base import (
     JobStatus,
     RunHandle,
     RunResult,
+    _background_layout,
     _check_if_notebook,
     _merge_task_status_with_plan,
     _result_relative_paths,
@@ -694,6 +695,8 @@ class SlurmSite(BaseSite):
         run_config: Default SLURM resource request.
         curvature_run_config: Optional resource request for Sauce curvature
             batch jobs; ``run_config`` is used when omitted.
+        background_layout: Files of a background capture, ``"rank"``
+            (default) or ``"shared"`` (see :attr:`BaseSite.background_layout`).
         config.tmp_dir: Optional remote directory for transient transfer
             tarballs and provisioning scripts. Defaults to ``/tmp``.
         verbose: Whether to print site status messages in addition to logging.
@@ -763,6 +766,7 @@ class SlurmSite(BaseSite):
         verbose: bool = False,
         solver_policy: Optional[str] = None,
         curvature_run_config: Optional[Union[SlurmRunConfig, Mapping[str, Any]]] = None,
+        background_layout: str = "rank",
     ):
         if (
             default_partition is not None
@@ -772,6 +776,7 @@ class SlurmSite(BaseSite):
             raise ValueError(
                 "Pass either default_partition or default_queue, not conflicting values"
             )
+        self.background_layout = _background_layout(background_layout)
         partition = (
             default_partition
             if default_partition is not None
@@ -1365,7 +1370,9 @@ class SlurmSite(BaseSite):
 
         Paths follow :meth:`BaseSite.remove_result_files` and are validated
         before any command runs. One ``rm -f`` login command removes them,
-        split only when the quoted list would exceed a safe command length.
+        split only when the quoted list would exceed a safe command length,
+        then ``rmdir`` removes each file's parent directories, deepest first,
+        while they are empty and physically below the result directory.
         Missing files (or a missing result directory) are not errors; a
         directory fails the command before its batch removes anything.
 
@@ -1386,7 +1393,13 @@ class SlurmSite(BaseSite):
                 f"set -- {batch}; "
                 'for f in "$@"; do if [ -d "$f" ] && [ ! -L "$f" ]; then '
                 'printf "%s is a directory\\n" "$f" >&2; exit 1; fi; done; '
-                'rm -f -- "$@"'
+                'rm -f -- "$@" || exit; '
+                # rmdir each file's emptied parents (no symlinks, nothing above root).
+                'root=$(pwd -P); for f in "$@"; do d=$f; '
+                'while [ "${d%/*}" != "$d" ]; do d=${d%/*}; [ ! -L "$d" ] || break; '
+                'case $(cd -P -- "$d" 2>/dev/null && pwd) in "$root"/*) ;; '
+                '*) break ;; esac; rmdir -- "$d" 2>/dev/null || break; done; done; '
+                "exit 0"
             )
             _, stdout, stderr = self.run_login_cmd(command)
             _read_stream(stdout)

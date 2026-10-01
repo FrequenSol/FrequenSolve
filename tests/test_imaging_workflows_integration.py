@@ -139,11 +139,13 @@ def test_lsrtm_solvers_and_fwi_checkpoint_through_public_api(tmp_path, site):
 
 
 def _background_files(job):
+    """Checkpoint files and directories left in ``job``'s result directory."""
+
     root = job._result_path
     return [
         path
         for path in root.rglob("*")
-        if path.is_file() and "background" in path.relative_to(root).as_posix()
+        if "background" in path.relative_to(root).as_posix()
     ]
 
 

@@ -28,6 +28,7 @@ CONTRACT_ROOT = (
 )
 JOB_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-job-1" / "schema.json"
 JOB_EXAMPLES = CONTRACT_ROOT / "inputs" / "fs-job-1" / "examples"
+BACKGROUND_EXAMPLES = CONTRACT_ROOT / "outputs" / "fs-background-state-2" / "examples"
 
 
 def _job_validator() -> Draft202012Validator:
@@ -146,6 +147,68 @@ def test_background_checkpoint_roundtrip_and_recursive_staging(tmp_path):
     field.unlink()
     pairs = loaded.remote_input_files("/remote/project")
     assert {manifest, shard} <= {Path(pair[0]) for pair in pairs}
+
+
+@pytest.mark.parametrize("layout", ["rank", "shared"])
+def test_version2_background_layout_roundtrip_and_staging(tmp_path, layout):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "capture",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["vp"],
+        state="state.json",
+        background="background.json",
+        background_layout=layout,
+    )
+    loaded = BaseJob.load(linearize.save())
+    assert loaded.background_layout == layout
+    assert _assert_valid(loaded.to_fs())["fwi_operator"]["background_layout"] == layout
+    # Sauce's published manifest names one file per rank or one shared file.
+    example = BACKGROUND_EXAMPLES / f"{layout}.json"
+    payload = json.loads(example.read_text())
+    manifest = linearize.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(example.read_text())
+    files = [manifest.parent / entry["file"] for entry in payload.get("shards", [])]
+    files = files or [manifest.parent / payload["file"]]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"native-checkpoint-fixture")
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction-fixture")
+    action = FWIOperatorJob(
+        "reuse",
+        sim,
+        [3.0],
+        action="normal",
+        active=["vp"],
+        state=state,
+        direction=direction,
+        covector="normal.h5",
+        background=manifest,
+    )
+    pairs = BaseJob.load(action.save()).remote_input_files("/remote/project")
+    assert {manifest, *files} <= {Path(pair[0]) for pair in pairs}
+
+
+def test_background_layout_requires_a_linearize_capture(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    options = dict(action="linearize", active=["vp"], state="state.json")
+    with pytest.raises(ValueError, match="'rank' or 'shared', not 'striped'"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [3.0],
+            background="background.json",
+            background_layout="striped",
+            **options,
+        )
+    with pytest.raises(ValueError, match="requires a linearize background"):
+        FWIOperatorJob("bad", sim, [3.0], background_layout="shared", **options)
 
 
 @pytest.mark.parametrize(

@@ -1411,6 +1411,12 @@ class ImagingProblem:
             active=list(space.blocks),
             state="state.json",
             background="background.json" if background else None,
+            # A file-system property of the site (one file per rank or task).
+            background_layout=(
+                getattr(shared.backend.site, "background_layout", "rank")
+                if background
+                else None
+            ),
             covector="gradient.h5" if gradient else None,
             objective="report.json",
             control_state=control_state,
@@ -1911,7 +1917,8 @@ class ImagingProblem:
                 ``{}`` uses min(16, source RHS); ``{"probes": 32, "seed": 0}``
                 overrides it. Matching cached probe products are reused.
             background: Save native forward DOFs for ordinary material actions
-                on the same model, source batches and MPI mesh partition.
+                on the same model, source batches and MPI rank count, in the
+                site's ``background_layout``.
 
         The first linearize of a problem learns Sauce's complete registry
         baseline from ``state_output``/``manifest``: a linearize at the

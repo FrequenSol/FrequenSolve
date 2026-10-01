@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from jsonschema import Draft202012Validator
 
 from frequensolve.imaging._artifacts import ControlStateFile, ControlVectorFile
 from frequensolve.imaging._backend import (
@@ -38,6 +39,11 @@ pytestmark = pytest.mark.unit
 ACTIVE = ["model.vp", "model.rho"]
 SIZES = {"model.vp": 5, "model.rho": 3}
 FREQUENCIES = [4.0, 6.0]
+# Sauce's published version-2 background checkpoint contract.
+BACKGROUND_V2 = (
+    Path(__file__).parent
+    / "contracts/sauce-f533e6f/trunk/contracts/outputs/fs-background-state-2"
+)
 
 
 def _simulation(tmp_path):
@@ -589,6 +595,20 @@ def test_linearization_cache_evicts_lru_entries_inside_workdir(tmp_path):
         LinearizationCache(workdir, capacity=0)
 
 
+def _checkpoint(path, size, schema="fs-background-data-2"):
+    """A task-catalog record of one background checkpoint file."""
+
+    return {
+        "id": f"export:{path}",
+        "role": "checkpoint",
+        "representation": "hdf5",
+        "schema": schema,
+        "path": path,
+        "retention": "durable",
+        "bytes": size,
+    }
+
+
 def _background_linearize(sim, name):
     """A finished two-rank, two-batch linearize laid out like a remote Sauce run.
 
@@ -614,16 +634,7 @@ def _background_linearize(sim, name):
         if rank == 0:
             shard.write_text(json.dumps({"shards": [{"file": p} for p in payloads]}))
             records += [
-                {
-                    "id": f"export:{payload}",
-                    "role": "checkpoint",
-                    "representation": "hdf5",
-                    "schema": "fs-solution-hdf5-3",
-                    "path": payload,
-                    "retention": "durable",
-                    "bytes": 1000,
-                }
-                for payload in payloads
+                _checkpoint(payload, 1000, "fs-solution-hdf5-3") for payload in payloads
             ]
         shards.append({"file": shard.name})
     manifest.write_text(
@@ -636,6 +647,13 @@ def _background_linearize(sim, name):
             }
         )
     )
+    _task_result(job, records)
+    return job
+
+
+def _task_result(job, records):
+    """Commit task 1 of ``job`` with Sauce's artifact ``records``."""
+
     result = job._result_path / "_fs_run" / "tasks" / "task_000001" / "result.json"
     result.parent.mkdir(parents=True)
     result.write_text(
@@ -660,7 +678,6 @@ def _background_linearize(sim, name):
             }
         )
     )
-    return job
 
 
 def test_background_checkpoint_release_covers_every_rank_and_the_site(tmp_path):
@@ -723,6 +740,109 @@ def test_background_checkpoint_files_read_per_rank_hdf5_shards(tmp_path):
     assert files == sorted(expected)
     manifests = sum(job.background_file(task).stat().st_size for task in (1, 2))
     assert size == manifests + 4 * 500
+
+
+def _background_v2(job, task, layout, *, run="run_7f3a9c2e"):
+    """Publish Sauce's example manifest of ``layout`` for one task of ``job``.
+
+    Returns the HDF5 files it names, relative to the result directory.
+    """
+
+    payload = json.loads((BACKGROUND_V2 / "examples" / f"{layout}.json").read_text())
+    folder = f"{job.background_file(task).stem}/generations/{run}"
+    if layout == "shared":
+        files = [f"{folder}/fields.h5"]
+        payload["file"] = files[0]
+    else:
+        files = [f"{folder}/rank_{rank:05d}.h5" for rank in range(payload["ranks"])]
+        payload["shards"] = [{"file": name} for name in files]
+    Draft202012Validator(
+        json.loads((BACKGROUND_V2 / "schema.json").read_text())
+    ).validate(payload)
+    job.background_file(task).parent.mkdir(parents=True, exist_ok=True)
+    job.background_file(task).write_text(json.dumps(payload))
+    return files
+
+
+@pytest.mark.parametrize("layout", ["rank", "shared"])
+def test_background_checkpoint_files_follow_version2_manifests(tmp_path, layout):
+    job = FWIOperatorJob(
+        "capture",
+        _simulation(tmp_path),
+        [4.0],
+        action="linearize",
+        active=ACTIVE,
+        state="state.json",
+        background="background.json",
+    )
+    files = _background_v2(job, 1, layout)
+    manifest = job.background_file(1).stat().st_size
+    # A remote run: its task catalog records every file, which stays on the site.
+    _task_result(job, [_checkpoint(name, 700) for name in files])
+
+    assert background_checkpoint_files(job) == (
+        sorted(["background_1.json", *files]),
+        manifest + 700 * len(files),
+    )
+    # A file present on this machine counts its own size.
+    local = job._result_path / files[0]
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"0" * 500)
+    expected = manifest + 500 + 700 * (len(files) - 1)
+    assert background_checkpoint_files(job)[1] == expected
+
+
+@pytest.mark.parametrize("schema", ["fs-background-state-2", "fs-background-state-1"])
+def test_release_background_removes_the_directories_it_empties(tmp_path, schema):
+    sim = _simulation(tmp_path)
+    fake = FakeImagingSite(SIZES, seed=7)
+    job = FWIOperatorJob(
+        "capture",
+        sim,
+        FREQUENCIES,
+        action="linearize",
+        active=ACTIVE,
+        state="state.json",
+        background="background.json",
+    )
+    root = job._result_path
+    for task in (1, 2):
+        files = _background_v2(job, task, "rank")
+        if schema == "fs-background-state-1":
+            job.background_file(task).write_text(
+                json.dumps(
+                    {
+                        "schema": schema,
+                        "ranks": 2,
+                        "batches": [{"source_first": 1, "n_sources": 2}],
+                        "shards": [
+                            {"file": name, "digest": "sha256:" + "0" * 64}
+                            for name in files
+                        ],
+                    }
+                )
+            )
+        for name in files:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(b"0" * 500)
+    run = "background_1/generations/run_7f3a9c2e"
+    (root / run / "notes.txt").write_text("not part of the checkpoint")
+    files, size = background_checkpoint_files(job)
+
+    assert Backend(fake, sim.project_path).release_background(job) == size
+    assert fake.removed == [("capture", tuple(files))]
+    remaining = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.relative_to(root).parts[0].startswith("background")
+    )
+    # Emptied run, generations and stem directories go; non-empty ones stay.
+    assert remaining == [
+        "background_1",
+        "background_1/generations",
+        run,
+        f"{run}/notes.txt",
+    ]
 
 
 def test_linearization_cache_releases_background_on_eviction_and_budget(tmp_path):

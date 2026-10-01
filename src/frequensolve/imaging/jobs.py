@@ -1178,6 +1178,9 @@ class FWIOperatorJob(_ImagingJobBase):
             ``linearize`` (result-relative), an input otherwise.
         background: Optional native background checkpoint manifest; output
             for linearize, input for ordinary material JVP/VJP/normal.
+        background_layout: Files of a linearize ``background`` capture,
+            ``"rank"`` (one HDF5 file per MPI rank) or ``"shared"`` (one file
+            per task); ``None`` keeps Sauce's default (``"rank"``).
         covector: ``fs-control-vector-1`` output stem (``model_covector`` for
             ``wri``).
         direction: ``fs-control-vector-1`` input (``model_direction`` for
@@ -1247,6 +1250,7 @@ class FWIOperatorJob(_ImagingJobBase):
         field_reuse: Optional[str] = None,
         state: Optional[Union[str, Path]] = None,
         background: Optional[Union[str, Path]] = None,
+        background_layout: Optional[str] = None,
         covector: Optional[Union[str, Path]] = None,
         direction: Optional[Union[str, Path]] = None,
         directions: Optional[Sequence[Union[str, Path]]] = None,
@@ -1322,6 +1326,11 @@ class FWIOperatorJob(_ImagingJobBase):
             if state_is_output
             else _input_path(background, simulation)
         )
+        if background_layout not in (None, "rank", "shared"):
+            raise ValueError(
+                f"background_layout must be 'rank' or 'shared', not {background_layout!r}"
+            )
+        self.background_layout = background_layout
         self.state = (
             _output_path(state, result_dir)
             if state_is_output
@@ -1526,6 +1535,10 @@ class FWIOperatorJob(_ImagingJobBase):
                 raise ValueError(
                     "background reuse currently requires material-only controls"
                 )
+        if self.background_layout is not None and (
+            action != "linearize" or self.background is None
+        ):
+            raise ValueError("background_layout requires a linearize background")
         if action in _RECEIVER_ACTIONS:
             self._validate_receiver()
             return
@@ -2310,6 +2323,8 @@ class FWIOperatorJob(_ImagingJobBase):
         op: Dict[str, Any] = {"action": self.action}
         if self.background is not None:
             op["background"] = _job_path(self.background, ctx, False)
+        if self.background_layout is not None:
+            op["background_layout"] = self.background_layout
         if self.action in _STATE_ACTIONS | _RECEIVER_ACTIONS:
             if self.action in _STATE_ACTIONS:
                 op["state"] = _job_path(self.state, ctx, False)
@@ -2591,6 +2606,7 @@ class FWIOperatorJob(_ImagingJobBase):
                 if op.get("action") == "linearize"
                 else resolve(op.get("background"))
             ),
+            background_layout=op.get("background_layout"),
             active=controls.get("active") if "controls" in op else None,
             state=resolve(op.get("state")),
             covector=resolve(

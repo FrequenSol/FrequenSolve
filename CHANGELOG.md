@@ -5,6 +5,19 @@ prepared.
 
 ## Unreleased
 
+- Background checkpoints follow Sauce's `fs-background-state-2`: one HDF5 file
+  per MPI rank (`"rank"`) or one file per task written by every rank
+  (`"shared"`). The new site option and `site.toml` key `background_layout`
+  (`LocalSite` and SLURM sites; default `"rank"`) reaches background-capturing
+  linearize jobs as `fwi_operator.background_layout`
+  (`FWIOperatorJob(background_layout=...)`); Sauce's `FS_BACKGROUND_LAYOUT`
+  overrides it. `background_checkpoint_files`, `Backend.release_background`
+  and the background budget cover both layouts and version-1 checkpoints, and
+  `remove_result_files` on local and SLURM sites also removes the directories
+  (`<stem>/generations/<run>/` and its parents) it leaves empty, never
+  recursively. Consumers keep their non-required pin to the producer's rank
+  count. Version-2 checkpoints need a matching solver; Sauce treats version-1
+  manifests as a cache miss.
 - Imaging reads Sauce's `fs-objective-linearization-5` states and reads and
   writes `fs-objective-vector-5` vectors: one manifest and one canonical HDF5
   file per task, with every dataset identified by its `fs-block-sha256-1`

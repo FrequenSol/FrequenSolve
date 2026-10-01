@@ -445,9 +445,9 @@ class FakeImagingSite(BaseSite):
 
     ``submissions`` records one summary per submit and ``jobs`` the submitted
     job objects in the same order. Background checkpoints are written like
-    Sauce's (task manifest and one HDF5 shard per rank) and ``removed``
-    records ``remove_result_files`` calls, which unlink files like
-    ``LocalSite``.
+    Sauce's (task manifest and the HDF5 file of the job's layout) and
+    ``removed`` records ``remove_result_files`` calls, which unlink files
+    (but, unlike ``LocalSite``, leave directories in place).
     """
 
     supports_background_reuse = True
@@ -729,24 +729,43 @@ class FakeImagingSite(BaseSite):
 
     @staticmethod
     def _write_background(job: FWIOperatorJob, task: int, state_fp: str) -> None:
-        """Write a one-rank, one-batch checkpoint laid out like Sauce's."""
+        """Write a one-rank, one-batch ``fs-background-state-2`` checkpoint.
+
+        Laid out like Sauce's in the job's ``background_layout``: one file
+        per rank (``rank``, the default) or one shared file per task.
+        """
 
         manifest = job.background_file(task)
-        shard = Path(f"{manifest.stem}/generations/fake/rank_00000.h5")
-        payload = manifest.parent / shard
+        layout = job.background_layout or "rank"
+        name = "fields.h5" if layout == "shared" else "rank_00000.h5"
+        data = f"{manifest.stem}/generations/fake/{name}"
+        payload = manifest.parent / data
         payload.parent.mkdir(parents=True, exist_ok=True)
         payload.write_bytes(b"\0" * 4096)
+        digest = hashlib.sha256(state_fp.encode("utf-8")).hexdigest()
         manifest.write_text(
             json.dumps(
                 {
-                    "schema": "fs-background-state-1",
+                    "schema": "fs-background-state-2",
+                    "layout": layout,
                     "storage": "full",
                     "context": "fake",
                     "state": state_fp,
                     "build": "fake",
                     "ranks": 1,
-                    "batches": [{"source_first": 1, "n_sources": 2}],
-                    "shards": [{"file": shard.as_posix(), "digest": _sha256(state_fp)}],
+                    "slabs": [{"columns": 256, "offset": 0}],
+                    "batches": [
+                        {
+                            "source_first": 1,
+                            "n_sources": 2,
+                            "digest": f"fs-block-sha256-1:{digest}",
+                        }
+                    ],
+                    **(
+                        {"file": data}
+                        if layout == "shared"
+                        else {"shards": [{"file": data}]}
+                    ),
                 }
             )
         )
