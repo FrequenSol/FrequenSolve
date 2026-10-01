@@ -747,7 +747,8 @@ def test_canonical_state_keeps_simulated_and_term_configuration(tmp_path):
     path = tmp_path / "state.json"
     path.write_text(json.dumps(payload))
     state = ObjectiveState(path)
-    assert state.vector_schema == "fs-objective-vector-4"
+    # Canonical states record no partition: any rank count reloads them.
+    assert (state.vector_schema, state.n_ranks) == ("fs-objective-vector-4", None)
     np.testing.assert_array_equal(
         state.terms["waveform"]["simulated"], [2 + 1j, 4 + 2j]
     )

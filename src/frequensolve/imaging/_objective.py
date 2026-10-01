@@ -89,7 +89,11 @@ class ObjectiveState:
     Attributes:
         schema: The state's schema.
         vector_schema: Objective-vector schema of the duals of this state.
-        n_ranks: MPI rank count the state is pinned to (one for ``-4``).
+        n_ranks: MPI rank count recorded in the manifest's ``partition``,
+            which derivative actions on the state must run on (``-3`` states
+            and ``-5`` states from earlier Sauce builds); ``None`` when the
+            manifest records no partition (``-4`` and current ``-5``) and any
+            rank count reloads the state.
         value_dtype: Stored element type of the cached receiver values
             (``float32`` from single-precision builds); ``-5`` duals are
             written in it.
@@ -109,14 +113,17 @@ class ObjectiveState:
         canonical = schema != _DISTRIBUTED_STATE
         digested = schema in _DIGESTED_STATES
         partition = manifest.get("partition")
-        if not canonical:
-            self.n_ranks = int(manifest["partition"]["n_ranks"])
-            if self.n_ranks < 1 or len(manifest["shards"]) != self.n_ranks:
-                raise ValueError("objective state has an inconsistent rank partition")
-        elif isinstance(partition, Mapping) and "n_ranks" in partition:
-            self.n_ranks = int(partition["n_ranks"])
-        else:
-            self.n_ranks = 1
+        self.n_ranks: Optional[int] = (
+            int(partition["n_ranks"])
+            if isinstance(partition, Mapping) and "n_ranks" in partition
+            else None
+        )
+        if not canonical and (
+            self.n_ranks is None
+            or self.n_ranks < 1
+            or len(manifest["shards"]) != self.n_ranks
+        ):
+            raise ValueError("objective state has an inconsistent rank partition")
         if digested and "manifest_fingerprint" not in manifest:
             raise ValueError("objective state manifest has no manifest fingerprint")
         if "manifest_fingerprint" in manifest:

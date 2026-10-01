@@ -149,23 +149,6 @@
     "n_ranks": {
       "type": "integer",
       "minimum": 1
-    },
-    "rank_descriptors": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "required": [
-          "fingerprint"
-        ],
-        "properties": {
-          "fingerprint": {
-            "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
-          }
-        },
-        "additionalProperties": false
-      }
     }
   },
   "required": [
@@ -179,8 +162,7 @@
     "active_offsets",
     "blocks",
     "descriptor_rank",
-    "n_ranks",
-    "rank_descriptors"
+    "n_ranks"
   ],
   "additionalProperties": false
 }

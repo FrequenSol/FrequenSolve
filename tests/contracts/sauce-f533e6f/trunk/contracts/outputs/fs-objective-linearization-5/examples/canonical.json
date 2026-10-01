@@ -10,11 +10,7 @@
   },
   "frequency_hz": 4.0,
   "laplace_damping_hz": 0.0,
-  "manifest_fingerprint": "sha256:e5a741dd7e2fb220024e0b5e59a358ff7efdb267d9466471ec4601e0fdea96cb",
-  "partition": {
-    "compatibility": "same_mesh_partition",
-    "n_ranks": 2
-  },
+  "manifest_fingerprint": "sha256:3c65b889ddb1a4b76e159e48cb332098231cfaa8d71be7c2da953e1029820e3e",
   "resolved_context": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
   "runtime": {
     "n_terms": 1

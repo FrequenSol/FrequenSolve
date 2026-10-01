@@ -134,7 +134,7 @@ frequency-independent `raytrace` and `eikonal` workflows use versioned
   gradient. `jvp`, `vjp`, and `normal` use one ordered `controls.active`
   subspace and canonical `direction`/`covector` files. Joint `normal` computes
   `J*J`, including cross-block terms, with saved weights, phase floors and masks.
-  Every action validates the frozen state, control registry and MPI partition.
+  Every action validates the frozen state, control registry and realized mesh.
   Complex controls use real-interleaved coordinates and the real-Hermitian pairing.
   The `wri` action instead solves one reduced wavefield-reconstruction
   subproblem per source-encoding RHS,
@@ -531,10 +531,10 @@ The required `fwi_operator/controls/active` list selects ordered blocks named
 `model.<control ID>` and `source.<physical ID>.<position|mechanism|signature|signature_df>`.
 Unknown, repeated and unsupported blocks fail. `controls/state` optionally
 applies a complete canonical baseline before assembly; `controls/state_output`
-exports that baseline. `controls/manifest` exports the resolved registry and all
-MPI ownership descriptors. Both output paths are exact in a single-task job and
-receive the `_<task>` suffix before the extension when `f_list` has more than one
-entry. A `state_output` records each mechanism block's physical scaling, so a
+exports that baseline. `controls/manifest` exports the resolved registry, with
+the root rank's view of distributed blocks. Both output paths are exact in a
+single-task job and receive the `_<task>` suffix before the extension when
+`f_list` has more than one entry. A `state_output` records each mechanism block's physical scaling, so a
 baseline written by one frequency task replays in another
 ([fs-control-state-1](../fs-control-state-1/contract.md)).
 

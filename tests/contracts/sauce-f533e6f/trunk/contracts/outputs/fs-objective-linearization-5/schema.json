@@ -9,7 +9,6 @@
     "frequency_hz",
     "laplace_damping_hz",
     "resolved_context",
-    "partition",
     "fingerprints",
     "runtime",
     "terms",
@@ -32,23 +31,6 @@
     },
     "resolved_context": {
       "type": "string"
-    },
-    "partition": {
-      "type": "object",
-      "required": [
-        "n_ranks",
-        "compatibility"
-      ],
-      "properties": {
-        "n_ranks": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "compatibility": {
-          "const": "same_mesh_partition"
-        }
-      },
-      "additionalProperties": false
     },
     "fingerprints": {
       "type": "object",

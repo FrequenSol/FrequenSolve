@@ -484,7 +484,6 @@ def _remote_linearization(tmp_path):
             json.dumps(
                 {
                     "schema": "fs-objective-linearization-5",
-                    "partition": {"n_ranks": 4, "compatibility": "same_mesh_partition"},
                     "terms": [{"id": "surface", "cache": {"file": cache.name}}],
                 }
             )

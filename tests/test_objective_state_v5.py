@@ -210,10 +210,11 @@ def test_objective_state_v5_reads_canonical_rows(tmp_path, dtype):
         )
         assert not list(path.parent.glob(f"{path.stem}*rank*"))
         state = ObjectiveState(path)
+        # Written on three ranks, the state records no partition to pin.
         assert (state.schema, state.vector_schema, state.n_ranks) == (
             "fs-objective-linearization-5",
             "fs-objective-vector-5",
-            3,
+            None,
         )
         assert state.value_dtype == np.dtype(dtype)
         # Duals are unpartitioned and use the state's precision.
@@ -241,6 +242,19 @@ def test_objective_state_v5_reads_canonical_rows(tmp_path, dtype):
             )
             assert term["convention"] == "simulated_minus_observed"
         assert state.term_configs[layout.id][0]["reduction"] == "sum"
+
+
+@pytest.mark.unit
+def test_objective_state_v5_reports_a_partition_earlier_builds_recorded(tmp_path):
+    _, lin = _linearized(tmp_path)
+    path = lin.job.state_file(1)
+    manifest = json.loads(path.read_text())
+    manifest["partition"] = {"n_ranks": 4, "compatibility": "same_mesh_partition"}
+    path.write_text(json.dumps(seal_state_manifest(manifest)))
+    state = ObjectiveState(path)
+    assert state.n_ranks == 4
+    # Canonical duals stay unpartitioned whatever rank count the state records.
+    assert "n_ranks" not in state.vector_options()
 
 
 @pytest.mark.unit

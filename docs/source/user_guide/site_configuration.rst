@@ -573,11 +573,12 @@ them, and explicit construction-time overrides are applied last.
 Partitioned Solver Inputs
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sauce partitions the objective state a ``linearize`` task saves, objective
-vectors, receiver states and background checkpoints by MPI rank, records the
-rank count of the task that wrote them, and rejects a later JVP, VJP, normal
-or receiver action that reads them on another count (a background is
-recomputed instead). Local and SLURM sites therefore run each such task on
+Sauce partitions version-3 objective states and vectors, receiver states and
+background checkpoints by MPI rank, records the rank count of the task that
+wrote them, and rejects a later JVP, VJP, normal or receiver action that reads
+them on another count (a background is recomputed instead). Version-5
+objective states and vectors reload on any rank count and impose none. Local
+and SLURM sites therefore run each task reading a partitioned input on
 the rank count recorded in its producer's manifest, read from the fetched
 copy or, when absent, from the remote project in one login command; all other
 tasks keep their adaptive sizing. A batch job whose tasks all have recorded

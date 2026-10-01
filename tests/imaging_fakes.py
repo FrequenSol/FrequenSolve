@@ -418,8 +418,9 @@ class FakeImagingSite(BaseSite):
             Required when a job has no ``controls.state``; when it has one the
             file's sizes are used and checked against this table.
         seed: Seed of the surrogate.
-        n_ranks: Rank count recorded in objective states (and version-3
-            objective vectors).
+        n_ranks: Rank count of the emulated run, recorded in version-3
+            objective states and vectors and in the control registry;
+            version-5 states and vectors carry no partition.
         state_schema: ``fs-objective-linearization-5`` (default) or ``-3``.
         state_dtype: Stored value type of version-5 caches and vectors
             (``float32`` emulates a single-precision build).
@@ -1756,13 +1757,13 @@ class FakeImagingSite(BaseSite):
             "sizes": dict(lin.sizes),
             "m": lin.m.tolist(),
         }
+        if self.state_schema == FAKE_STATE_SCHEMA:
+            self._write_canonical_state(path, payload, lin, frequency, task)
+            return
         payload["partition"] = {
             "n_ranks": self.n_ranks,
             "compatibility": "same_mesh_partition",
         }
-        if self.state_schema == FAKE_STATE_SCHEMA:
-            self._write_canonical_state(path, payload, lin, frequency, task)
-            return
         simulated = lin.J @ lin.m
         residual = simulated - lin.d
         payload["shards"] = []
@@ -1918,7 +1919,6 @@ class FakeImagingSite(BaseSite):
             "frequency_hz": f.real,
             "laplace_damping_hz": f.imag,
             "resolved_context": context,
-            "partition": payload["partition"],
             "fingerprints": {
                 "resolved_context": context,
                 "model": lin.state_fingerprint,
@@ -1935,7 +1935,7 @@ class FakeImagingSite(BaseSite):
             "fake": {
                 key: value
                 for key, value in payload.items()
-                if key not in {"schema", "state_fingerprint", "task", "partition"}
+                if key not in {"schema", "state_fingerprint", "task"}
             },
         }
         seal_state_manifest(manifest)
@@ -2103,10 +2103,6 @@ class FakeImagingSite(BaseSite):
             "blocks": blocks,
             "descriptor_rank": 0,
             "n_ranks": self.n_ranks,
-            "rank_descriptors": [
-                {"fingerprint": _sha256({"rank": rank, "registry": lin.active})}
-                for rank in range(self.n_ranks)
-            ],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

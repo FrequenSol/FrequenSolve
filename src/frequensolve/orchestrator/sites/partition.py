@@ -3,21 +3,21 @@
 Sauce partitions several ``fwi_operator`` artifacts by MPI rank and records
 the rank count of the task that wrote them:
 
-- the objective state a ``linearize`` task saves
-  (``fs-objective-linearization-3`` and ``-5``) and version-3 objective
-  vectors (``fs-objective-vector-3``), in ``partition.n_ranks``;
+- version-3 objective states and vectors (``fs-objective-linearization-3``,
+  ``fs-objective-vector-3``), in ``partition.n_ranks``;
 - receiver states and vectors (``fs-receiver-state-1``,
   ``fs-receiver-vector-1``, or a ``fs-receiver-*-bundle-1`` of per-group
   files), in ``partition.n_ranks``;
 - background checkpoints (``fs-background-state-1``), in ``ranks``.
 
 Every later task reading one of them must run on the recorded count. Sauce
-rejects another count for states, vectors and receiver states ("Objective
-state requires the saved mesh partition and MPI rank count") and recomputes a
-background instead of restoring it. Sites therefore pin such tasks to the
+rejects another count for states, vectors and receiver states and recomputes
+a background instead of restoring it. Sites therefore pin such tasks to the
 recorded count and size all other tasks as usual. Manifests without a
-``same_mesh_partition`` binding impose no count: canonical ``-4`` states and
-vectors, and ``fs-objective-vector-5`` vectors, which any rank count reads.
+``same_mesh_partition`` binding impose no count: canonical ``-4`` and ``-5``
+objective states and vectors, which any rank count reloads (Sauce rejects a
+``-5`` state only when its realized mesh differs). A ``-5`` state from an
+earlier Sauce build that still records the binding keeps its pin.
 
 Sauce resolves an input of a multi-task job as its ``<stem>_<task><ext>``
 sibling when that file exists and as the named file otherwise; a single-task

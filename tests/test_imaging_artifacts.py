@@ -360,35 +360,36 @@ def test_control_registry_manifest_reads_pinned_example():
     np.testing.assert_array_equal(
         manifest.unpack_state()["source.1.position"], [513.7, 34.1]
     )
-    # Sauce publishes only the index: rank fingerprints, no descriptor files.
+    # Sauce publishes only the index, without rank descriptors.
     assert manifest.n_ranks == 1 and manifest.descriptor_rank == 0
-    assert manifest.rank_descriptors == ({"fingerprint": "sha256:" + "1" * 64},)
+    assert manifest.rank_descriptors == ()
 
 
-def test_control_registry_rank_index_validates_and_keeps_legacy_file_entries():
+def test_control_registry_reads_current_and_legacy_rank_indexes():
     from jsonschema import Draft202012Validator
 
     root = CONTRACT_ROOT / "outputs" / "fs-control-registry-1"
     example = json.loads((root / "examples" / "source-position.json").read_text())
     schema = json.loads((root / "schema.json").read_text())
-    two_ranks = dict(
-        example,
-        n_ranks=2,
-        rank_descriptors=[{"fingerprint": "sha256:" + d * 64} for d in "12"],
-    )
+    two_ranks = dict(example, n_ranks=2)
     Draft202012Validator(schema).validate(two_ranks)
+    current = ControlRegistryManifest.from_dict(two_ranks)
+    assert current.n_ranks == 2 and current.rank_descriptors == ()
+    # Registries from earlier solver builds list every rank's fingerprint.
+    fingerprints = ["sha256:" + d * 64 for d in "12"]
+    indexed = dict(
+        two_ranks, rank_descriptors=[{"fingerprint": item} for item in fingerprints]
+    )
     assert [
         entry["fingerprint"][-1]
-        for entry in ControlRegistryManifest.from_dict(two_ranks).rank_descriptors
+        for entry in ControlRegistryManifest.from_dict(indexed).rank_descriptors
     ] == ["1", "2"]
-    # Registries from earlier solver builds also name per-rank files.
+    # Older builds also name per-rank files.
     legacy = dict(
         two_ranks,
         rank_descriptors=[
             {"file": f"controls.json.rank_{rank}.json", "fingerprint": entry}
-            for rank, entry in enumerate(
-                item["fingerprint"] for item in two_ranks["rank_descriptors"]
-            )
+            for rank, entry in enumerate(fingerprints)
         ],
     )
     manifest = ControlRegistryManifest.from_dict(legacy)

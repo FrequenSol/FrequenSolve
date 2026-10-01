@@ -912,8 +912,9 @@ class ControlRegistryManifest:
             pairing=str(data.get("pairing", "real_euclidean")),
             descriptor_rank=int(data.get("descriptor_rank", 0)),
             n_ranks=int(data.get("n_ranks", 1)),
-            # Current Sauce writes no per-rank descriptor files; earlier
-            # builds name one per rank.
+            # Current Sauce writes no rank descriptors (its fingerprint is
+            # partition-independent); earlier builds list every rank's
+            # fingerprint, some also a per-rank descriptor file.
             rank_descriptors=tuple(
                 {
                     "fingerprint": str(item["fingerprint"]),

@@ -1819,8 +1819,10 @@ solver's version 5 (one manifest and one canonical HDF5 file per task, each
 dataset checked against its ``fs-block-sha256-1`` digest), solver 0.4.1's
 canonical version 4 and the earlier distributed version 3. Operator calls write
 each task's duals in the format of its saved state: version-5 duals carry no
-rank partition and use the state's precision (single), while derivative
-actions on a version-5 state still run on the rank count that linearized it.
+rank partition and use the state's precision (single). Version-5 states carry
+none either, so sites size derivative actions on them like other tasks
+(Sauce rejects a state only when its realized mesh differs); a reused
+background checkpoint still prefers the rank count that wrote it.
 Keep states with the solver build that created them and regenerate the
 linearization when changing builds. Low-level
 ``DataVector.write_objective_vector`` callers pass

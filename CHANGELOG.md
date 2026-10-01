@@ -13,14 +13,18 @@ prepared.
   state carry no partition and store values in the state's precision;
   `ObjectiveState.vector_options()` supplies a state's dual format, and
   `write_task_objective_vectors` gains `schema` and `dtype`. Version-5 states
-  still pin consumer tasks to their rank count; version-5 vectors do not.
-  Manifest fingerprints hash floats exactly as Sauce's nlohmann/json prints
-  them. Remote staging no longer re-uploads a state or vector (manifest and
-  cache/data file) that a completed run on the same site wrote, and SLURM
-  submissions upload operator inputs once instead of twice
-  (`BaseSite.stages_job_inputs`). Control-registry manifests without per-rank
-  descriptor `file` entries are accepted. `objective_layout_fingerprint` is
-  O(N log N) instead of quadratic in the row count.
+  are no longer pinned to the linearize task's MPI rank count (Sauce rejects
+  one only when its realized mesh differs), so sites size their consumer tasks
+  normally; background checkpoints still prefer their recorded count, and
+  `ObjectiveState.n_ranks` is `None` for states without a partition (version
+  4 and current version 5). Manifest fingerprints hash floats exactly as
+  Sauce's nlohmann/json prints them. Remote staging no longer re-uploads a
+  state or vector (manifest and cache/data file) that a completed run on the
+  same site wrote, and SLURM submissions upload operator inputs once instead
+  of twice (`BaseSite.stages_job_inputs`). Control-registry manifests without rank
+  descriptors (current Sauce) or their per-rank `file` entries are accepted.
+  `objective_layout_fingerprint` is O(N log N) instead of quadratic in the row
+  count.
 - `NativeCurvature` deletes each operation's staged `input.h5` once its
   result is verified, unless the result has an HDF5 external link into it
   (warm-start factors link their unchanged `/modes`); a failed operation

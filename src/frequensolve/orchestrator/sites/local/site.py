@@ -2081,9 +2081,10 @@ class LocalSite(BaseSite):
     ) -> Dict[int, TaskPartition]:
         """Return the producer's rank count for tasks reading partitioned inputs.
 
-        Keys are zero-based task indices. Sauce reads a saved objective state,
-        objective vector, receiver state or background checkpoint only on the
-        rank count that wrote it, so these tasks ignore ``procs_per_job``.
+        Keys are zero-based task indices. Sauce reads a saved input that
+        records its rank partition (see
+        :mod:`frequensolve.orchestrator.sites.partition`) only on the rank
+        count that wrote it, so these tasks ignore ``procs_per_job``.
 
         Raises:
             ValueError: If a required count exceeds ``max_ranks_per_task``.

@@ -12,9 +12,11 @@ a job with several `f_list` entries the `state` input first tries
 ## Manifest
 
 - `schema`, `task`, `frequency_hz`, `laplace_damping_hz`, `resolved_context`.
-- `partition`: `{"n_ranks": N, "compatibility": "same_mesh_partition"}`. It is
-  the only partition-specific field; readers reject another MPI rank count.
-  The cache rows themselves are canonical and independent of the partition.
+  The manifest carries no partition binding: cache rows are canonical and
+  `resolved_context` identifies the resolved PDE, controls and realized mesh
+  independently of the MPI partition, so any rank count reloads the state. A
+  realized mesh that differs on another rank count (3D jump refinement)
+  changes `resolved_context` and the state is rejected.
 - `fingerprints`: `resolved_context`, `model`, `observations`, `acquisition`,
   `source_signature`, `preprocessing`, `objective_terms`, and when present
   `preprocess_state` (content of hook state files such as a pinned material
@@ -109,10 +111,11 @@ every rank closed it, and the manifest is then written atomically. A manifest
 left at the same path by an earlier run is removed first, so a failed run
 publishes no manifest. Manifest and cache are durable task outputs.
 
-Readers validate the schema, task, partition, frequency, fingerprints and
-manifest identity. Every rank reads one canonical slice of each dataset, the
-digests are verified in memory, and rows are scattered to their execution
-owners, rebuilding a rank-local lazily read cache in task scratch. Keys must
+Readers on any MPI rank count validate the schema, task, frequency,
+fingerprints and manifest identity. Every rank reads one canonical slice of
+each dataset, the digests are verified in memory, and rows are scattered to
+their execution owners, rebuilding a rank-local lazily read cache in task
+scratch. Keys must
 equal the current execution rows. Versions 1 to 4 are rejected: regenerate the
 state with `linearize`. Reusing a state stem replaces its cache; distinct stems
 preserve separate checkpoints. A loaded state must stay immutable while

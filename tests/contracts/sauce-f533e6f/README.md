@@ -53,12 +53,18 @@ The version-4 objective contracts and partition-independent control registry are
 
 ## Objective state and vector version 5 overlay
 
-`fs-objective-linearization-5`, `fs-objective-vector-5` and the
-`fs-control-registry-1` contract/schema/example are copied from Sauce `next`
-commit `c3d0abd4` (2026-10-01). Version 5
-publishes one manifest and one canonical HDF5 file per task whose datasets are
-identified by `fs-block-sha256-1` digests of the dataset flattened to one axis;
-states keep the `same_mesh_partition` binding, vectors carry none. The registry
-index keeps every rank's descriptor fingerprint but no longer names per-rank
-descriptor files. These are targeted overlays and require a solver built from
-that commit or later; FrequenSolve still reads versions 3 and 4.
+`fs-objective-vector-5` is copied from Sauce `next` commit `c3d0abd4`
+(2026-10-01). `fs-objective-linearization-5`, the `fs-control-registry-1`
+contract/schema/example and two fs-job-1 contract passages (actions validate
+the realized mesh; the `controls/manifest` export) are copied from the
+partition-independence follow-up, Sauce `next` commit `88d8dada`
+(2026-10-01). The fs-job-1 overlay still describes version-3 states,
+so its MPI reload sentence and `fwi_operator.state` schema description keep
+their earlier wording. Version 5 publishes one manifest and one canonical HDF5
+file per task whose datasets are identified by `fs-block-sha256-1` digests of
+the dataset flattened to one axis. Neither states nor vectors carry a
+`same_mesh_partition` binding: any MPI rank count reloads them, and Sauce
+rejects a state only when its realized mesh differs. The registry index lists
+no rank descriptors and its fingerprint is independent of the partition. These
+are targeted overlays and require a solver built from `88d8dada` or later;
+FrequenSolve still reads versions 3 and 4.

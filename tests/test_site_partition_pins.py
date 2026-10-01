@@ -1,9 +1,10 @@
 """Tasks reading partitioned solver artifacts run on their producer's MPI ranks.
 
-Sauce records the rank count of the task that saved an objective state,
-objective vector, receiver state or background checkpoint, and rejects (or,
+Sauce records the rank count of the task that saved a version-3 objective
+state or vector, a receiver state or a background checkpoint, and rejects (or,
 for backgrounds, recomputes) a consumer task on any other count. Sites pin
-those tasks to the recorded count and size every other task as before.
+those tasks to the recorded count and size every other task as before;
+version-5 objective states and vectors reload on any rank count.
 """
 
 import json
@@ -26,6 +27,12 @@ pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
 _STATE = "fs-objective-linearization-3"
 _STATE_V5 = "fs-objective-linearization-5"
+# Sauce's published version-5 state manifest.
+_STATE_V5_EXAMPLE = (
+    Path(__file__).parent
+    / "contracts/sauce-f533e6f/trunk/contracts/outputs"
+    / "fs-objective-linearization-5/examples/canonical.json"
+)
 
 
 def _manifest(path, ranks=None, *, schema=_STATE, **extra):
@@ -108,11 +115,14 @@ def test_writers_canonical_artifacts_and_other_jobs_impose_nothing(tmp_path):
     assert partitioned_inputs(other) == []
 
 
-def test_version5_states_pin_and_version5_vectors_do_not(tmp_path):
-    """A -5 state keeps its partition binding; -5 vectors any rank count reads."""
+def test_version5_states_and_vectors_pin_nothing_beside_a_background(tmp_path):
+    """-5 states and vectors reload on any rank count; a background still pins."""
     from frequensolve.imaging.data import DataSpace, _DataSegment
 
-    _task_files(tmp_path, "lin/state", {1: 4, 2: 2}, schema=_STATE_V5)
+    example = json.loads(_STATE_V5_EXAMPLE.read_text())
+    for task in (1, 2):
+        _manifest(tmp_path / "lin" / f"state_{task}.json", **example)
+    _task_files(tmp_path, "lin/background", {2: 6}, schema="fs-background-state-1")
     space = DataSpace([4.0, 6.0], [_DataSegment("g", ("p",), (1, 2), (1, 2, 3))])
     for task, frequency in ((1, 4.0), (2, 6.0)):
         space.ones().write_objective_vector(
@@ -127,16 +137,16 @@ def test_version5_states_pin_and_version5_vectors_do_not(tmp_path):
         n_tasks=2,
         state="lin/state.json",
         objective_vector="ops/dual.json",
-    )
-    dual_only = _Consumer(
-        tmp_path, action="vjp", n_tasks=2, objective_vector="ops/dual.json"
+        background="lin/background.json",
     )
 
+    assert task_partitions(vjp) == {2: TaskPartition(6, False, ("background",))}
+    # A -5 state from an earlier build that records the binding keeps its pin.
+    _task_files(tmp_path, "lin/state", {1: 4}, schema=_STATE_V5)
     assert task_partitions(vjp) == {
         1: TaskPartition(4, True, ("state",)),
-        2: TaskPartition(2, True, ("state",)),
+        2: TaskPartition(6, False, ("background",)),
     }
-    assert task_partitions(dual_only) == {}
 
 
 def test_tasks_fall_back_to_the_named_file_like_sauce(tmp_path):
