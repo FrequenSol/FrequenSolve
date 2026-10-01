@@ -10,25 +10,50 @@ is a separate, explicit action and consumes Credits for work performed.
 1. Install and download
 -----------------------
 
-Use Python 3.10–3.14 in a virtual environment on Linux or macOS. On Windows,
-run these commands and your notebook kernel inside WSL2; native Windows is
-unsupported. Keep the workspace inside the Linux filesystem.
+Use Python 3.10–3.14. On Linux or macOS, open a terminal in the folder where
+you want to keep the starter. On Windows, open your WSL2 Linux terminal and
+choose a folder under your Linux home directory (for example,
+``~/frequensolve-starter``), not under ``/mnt/c``. Native Windows is
+unsupported; run both these commands and your notebook kernel inside WSL2.
 
-.. code-block:: console
+Create and activate a virtual environment, then install the exact package
+version used to build this guide:
 
-   python -m venv .venv
+.. parsed-literal::
+
+   python3 -m venv .venv
    source .venv/bin/activate
-   python -m pip install "frequensolve[cloud,visual]"
-   python -c 'import frequensolve as fs; print(fs.__version__)'
+   python -m pip install "frequensolve[cloud,visual]==|release|"
+
+If that exact version is not available from your configured package index,
+obtain the matching approved project wheel from your project administrator.
+Install that wheel with the ``cloud,visual`` extras in this environment, or
+use the documentation supplied with a different approved package version.
+Do not replace the version above with an unpinned install or silently use a
+different release.
+
+Before preparing the starter, verify the installed version and required
+Cloud configuration support:
+
+.. parsed-literal::
+
+   python -c 'import frequensolve as fs; print(fs.__version__); assert fs.__version__ == "|release|", "Install the exact package version for this guide"'
+   python -c 'from frequensolve.orchestrator.sites.aws import AWSSiteConfig; assert "compute_profile" in AWSSiteConfig.__dataclass_fields__, "This guide requires compute_profile support"'
+   frequensolve site check --help
+
+The help must list ``--local`` as validating local TOML only, without network,
+login or solver checks. The existence of ``site check`` alone is not enough:
+older versions use that command for a live SSH/solver check. If either feature
+check fails, stop and obtain the matching package; never omit ``--local`` or
+remove ``compute_profile`` to get past an incompatibility.
 
 Download :download:`acoustic_starter.py
 <../../tutorials/00_getting_started/acoustic_starter.py>` and, if you prefer
 cells, :download:`acoustic_starter.ipynb
 <../../tutorials/00_getting_started/acoustic_starter.ipynb>` into the same folder.
 Select this virtual environment as your notebook kernel. The script's
-``--help`` lists the available actions. These instructions belong to the
-package version shown at the top of this documentation; check that your
-installed version contains ``frequensolve site check`` before continuing.
+``--help`` lists the available actions. Keep the script, notebook, and installed
+package matched to this documentation version.
 
 2. Prepare and inspect locally
 ------------------------------
@@ -66,9 +91,9 @@ Keep passwords and tokens out of TOML and notebooks.
 This validates local TOML and selection settings without creating a config,
 authenticating or contacting Cloud. Success does not prove your subscription,
 seat, balance, storage or compute is ready. Check those in Cloud first. If your
-package does not recognize the command or ``compute_profile``, install the
-compatible version linked by your Cloud guide; do not silently remove the
-selector and run elsewhere.
+package does not recognize ``--local`` or ``compute_profile``, return to the
+version and feature checks above. Do not run the live check by omitting
+``--local``, or remove the selector and run elsewhere.
 
 4. Submit deliberately
 ----------------------
@@ -123,9 +148,11 @@ If something blocks you
 -----------------------
 
 - **Package or optional module missing:** activate the same virtual environment
-  used by the notebook and install ``cloud,visual``; MCP needs ``mcp`` separately.
+  used by the notebook and reinstall the exact version above with ``cloud,visual``;
+  MCP needs ``mcp`` separately.
 - **No profile or invalid TOML:** copy configuration from **Compute**, then run
-  ``site check`` again. Never paste secrets into an AI conversation.
+  ``frequensolve site check --local --profile cloud`` again. Never paste secrets
+  into an AI conversation.
 - **Sign-in or access denied:** use Cloud password recovery and check your seat
   and subscription. If blocked, open **Support**; running a job is not required.
 - **Compute unavailable or insufficient Credits:** follow the action shown by
