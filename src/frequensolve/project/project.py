@@ -17,9 +17,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
+# Postponed public annotations resolve through the lazy root when reflected,
+# without importing execution sites during ordinary project construction.
+import frequensolve as _fs
 from frequensolve._version import get_versions
-from frequensolve.orchestrator.sites.base import BaseSite
-from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.units import UnitConfig
 from frequensolve.util.atomic import atomic_write_json
@@ -555,7 +556,7 @@ class Project:
         except Exception:
             pass
 
-    def _transfer(self, site: BaseSite) -> None:
+    def _transfer(self, site: _fs.BaseSite) -> None:
         """Transfer project files to a remote site with path substitution."""
 
         self.save()
@@ -584,7 +585,11 @@ class Project:
                 site.put(staged_path, remote / staged_path.name)
 
     @staticmethod
-    def _transfer_host_tmp_dir(site: BaseSite) -> Path:
+    def _transfer_host_tmp_dir(site: _fs.BaseSite) -> Path:
+        from frequensolve.orchestrator.sites.config_file import (
+            _host_tmp_path_for_config,
+        )
+
         path = _host_tmp_path_for_config(getattr(site, "_site_config_path", None))
         path.mkdir(parents=True, exist_ok=True)
         return path
@@ -849,13 +854,13 @@ class Project:
                 )
 
     @staticmethod
-    def _site_is_local(site: BaseSite) -> bool:
+    def _site_is_local(site: _fs.BaseSite) -> bool:
         site_class = site.__class__
         return site_class.__name__ == "LocalSite" and site_class.__module__.endswith(
             ".local"
         )
 
-    def _remote_project_root(self, site: BaseSite) -> Path:
+    def _remote_project_root(self, site: _fs.BaseSite) -> Path:
         site_class = site.__class__
         if site_class.__name__ == "AWSSite" and ".aws" in site_class.__module__:
             return site.work_dir / self.path.name
