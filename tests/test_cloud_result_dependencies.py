@@ -12,9 +12,11 @@ from frequensolve.seismic.traces import TraceDataset
 @pytest.fixture
 def downloaded_pressure_traces(tmp_path):
     path = tmp_path / "traces.h5"
-    values = np.zeros((1, 2, 1, 1, 2), dtype=np.float32)
-    values[0, :, 0, 0, 0] = [3.0, 5.0]
-    values[0, :, 0, 0, 1] = [4.0, -2.0]
+    # dense_trace_v1 stores frequency, shot, component, receiver, complex;
+    # its dimension-name attribute lists the non-complex axes in reverse.
+    values = np.zeros((1, 1, 1, 2, 2), dtype=np.float32)
+    values[0, 0, 0, :, 0] = [3.0, 5.0]
+    values[0, 0, 0, :, 1] = [4.0, -2.0]
     strings = h5py.string_dtype(encoding="utf-8")
     with h5py.File(path, "w") as h5:
         h5.create_dataset("frequency", data=[10.0])
