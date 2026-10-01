@@ -174,10 +174,42 @@ material-dependent sampling still requires an unambiguous material layer.
 Shared scalar properties are local references regardless of namespace:
 ``elastic.materials.rho * acoustic.fields.velocity`` can sample density and
 velocity in an acoustic layer. The factory name does not select a material side.
-At a fluid--solid interface, material-dependent receiver expressions and objective
-weights require a group domain identifying one material layer; ambiguous layers
-raise an error rather than average the material properties. Constitutive tensors
-retain their physics restrictions.
+Material references address active authored properties; they do not implicitly
+convert between material parameterizations. For pressure slowness in a model
+authored with ``Vp``, use ``1 / acoustic.materials.vp.on(domain="water")``.
+Use ``acoustic.materials.Sp.on(domain="water")`` when ``Sp`` is authored directly.
+At a fluid--solid interface, select the material side independently of field
+support with ``.on(domain=...)``:
+
+.. code-block:: python
+
+   rho_water = acoustic.materials.rho.on(domain="water")
+   rho_solid = elastic.materials.rho.on(domain="solid")
+   compliance = elastic.materials.compliance.on(domain="solid")
+   device.add_component("fluid_momentum", rho_water * acoustic.fields.velocity)
+   device.add_component("strain_xz", (compliance @ elastic.fields.stress).xz)
+   acq.add_receiver_group("derived", device, coords=interface_coords)
+
+The selector accepts a material subdomain name or positive mesh block ID. It
+samples that material at the receiver coordinates without changing the field's
+support. The selected domain must contain the receiver point; missing sides raise
+an error. No material averaging or extrapolation is implied. A group domain
+restricts field sampling, while explicit material selectors bind independently.
+Omit the group domain when measuring fields from both sides in one device.
+Each material reference retains its selector through arithmetic. Calling
+``.on()`` on a compound material expression replaces every reference's selector.
+Unselected material references require an unambiguous mapped material layer.
+Constitutive tensors require an elastic selected material and retain their
+Mandel representation.
+
+``.on()`` chooses the material side; receiver responses still sample the current
+model. Wavefield sampling, wavefield adjoints and frequency derivatives are
+supported. Full model derivatives that request the direct material tangent of a
+selected receiver response are currently unsupported and raise an error. Existing
+unselected response material derivatives remain available. For model inversion,
+retain measured pressure/velocity channels and use selected materials in fixed
+objective weights instead. Material dependencies are written only when requested
+in ``materials=``.
 In 2.5D, generic full velocity and stress lack a common acoustic/elastic shape;
 select ``coupled.fields.velocity.x`` or ``.z``, or use physics-qualified fields.
 

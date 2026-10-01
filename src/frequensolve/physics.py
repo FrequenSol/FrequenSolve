@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from numbers import Real
+from numbers import Integral, Real
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -73,6 +73,7 @@ class ReceiverExpression:
     value: float | None = None
     selection: tuple[str, ...] = ()
     wavefield: bool = False
+    domain: int | str | None = None
 
     @property
     def shape(self) -> tuple[int | None, ...]:
@@ -89,6 +90,37 @@ class ReceiverExpression:
             raise ValueError("Output units are incompatible with the expression")
         # Return the base expression type; namespace leaves have custom constructors.
         return ReceiverExpression(**{**self.__dict__, "units": units})
+
+    def on(self, *, domain: int | str) -> ReceiverExpression:
+        """Sample material references from a named layer or mesh block at each point.
+
+        Applies to every property in a material expression, replacing existing
+        selectors. Field support is unchanged and receiver responses resample
+        the current model. Direct material-response derivatives of selected
+        receiver expressions are currently unsupported.
+        """
+        if self.wavefield:
+            raise ValueError("Domain selection applies only to material expressions")
+        if isinstance(domain, bool) or not isinstance(domain, (Integral, str)):
+            raise TypeError("Material domain must be a mesh block ID or layer name")
+        if isinstance(domain, str) and not domain.strip():
+            raise ValueError("Material layer name must not be empty")
+        if isinstance(domain, Integral) and domain < 1:
+            raise ValueError("Material mesh block ID must be positive")
+        domain = int(domain) if isinstance(domain, Integral) else domain
+        if self.kind == "material":
+            return ReceiverExpression(**{**self.__dict__, "domain": domain})
+        return ReceiverExpression(
+            **{
+                **self.__dict__,
+                "args": tuple(arg.on(domain=domain) for arg in self.args),
+            }
+        )
+
+    def _has_material_domain(self) -> bool:
+        return self.domain is not None or any(
+            arg._has_material_domain() for arg in self.args
+        )
 
     def _context(
         self, other: ReceiverExpression
@@ -245,7 +277,11 @@ class ReceiverExpression:
         if self.wavefield:
             raise ValueError("Objective coefficients must depend only on materials")
         if self.rank == 4:
-            return {"tensor": self.name, "basis": basis}
+            return {
+                "tensor": self.name,
+                "basis": basis,
+                **({"domain": self.domain} if self.domain is not None else {}),
+            }
         if self.rank:
             raise ValueError(
                 "Material coefficients must be scalar or constitutive tensors"
@@ -254,7 +290,10 @@ class ReceiverExpression:
 
     def _material_node(self) -> dict[str, Any]:
         if self.kind == "material":
-            return {"ref": self.name}
+            return {
+                "ref": self.name,
+                **({"domain": self.domain} if self.domain is not None else {}),
+            }
         if self.kind == "value":
             return {
                 "value": self.value,

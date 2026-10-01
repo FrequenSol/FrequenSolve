@@ -872,17 +872,28 @@ class Preprocess:
         *,
         units: Mapping[Any, Any],
         name: Optional[str] = None,
+        mode: str = "frozen",
+        state_file: Optional[Union[str, Path]] = None,
     ) -> "Preprocess":
-        """Apply material-defined W inside the residual norm, frozen for the objective lifetime.
+        """Apply material-defined W inside the residual norm, fixed within a job by default.
 
         Keys are one-based component IDs or tuples of coupled component IDs.
         Values are material expressions. ``units`` specifies transformed trace
         units for each block. Frequency-independent W also weights df traces.
+        ``pinned`` persists W in ``state_file`` across jobs; ``live`` includes
+        material derivatives but does not support independently selected sides.
         """
         from frequensolve.physics import ReceiverExpression
 
         if not blocks or set(blocks) != set(units):
             raise ValueError("Every material weighting block needs output units")
+        if mode not in {"frozen", "live", "pinned"}:
+            raise ValueError("Material weighting mode must be frozen, live, or pinned")
+        if mode == "pinned":
+            if not isinstance(state_file, (str, Path)) or not str(state_file).strip():
+                raise ValueError("Pinned material weighting requires state_file")
+        elif state_file is not None:
+            raise ValueError("state_file applies only to pinned material weighting")
         rows = []
         used: set[int] = set()
         for key, expression in blocks.items():
@@ -896,6 +907,10 @@ class Preprocess:
                 raise ValueError("Material weighting blocks must not overlap")
             if not isinstance(expression, ReceiverExpression) or expression.wavefield:
                 raise TypeError("Material weighting requires material expressions")
+            if mode == "live" and expression._has_material_domain():
+                raise ValueError(
+                    "Live weighting of independently selected material coefficients is unsupported"
+                )
             used.update(components)
             rows.append(
                 {
@@ -907,7 +922,11 @@ class Preprocess:
         return cls(
             "material_weighting",
             "trace_pair",
-            {"model_policy": "frozen", "blocks": rows},
+            {
+                "mode": mode,
+                "blocks": rows,
+                **({"state_file": str(state_file)} if state_file is not None else {}),
+            },
             name=name,
         )
 

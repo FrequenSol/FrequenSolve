@@ -20,8 +20,7 @@ from frequensolve.seismic.receivers import (
 from frequensolve.util.mixins import ExportContext
 
 
-@pytest.fixture
-def validator():
+def _contract_validator(schema_name, definition):
     root = Path(__file__).parent / "contracts/sauce-f533e6f/trunk/contracts"
     registry = Registry()
     for path in root.rglob("*.json"):
@@ -30,10 +29,20 @@ def validator():
             registry = registry.with_resource(
                 contents["$id"], Resource.from_contents(contents)
             )
-    schema = json.loads((root / "inputs/fs-acquisition-1/schema.json").read_text())
+    schema = json.loads((root / f"inputs/{schema_name}/schema.json").read_text())
     return Draft202012Validator(
-        {"$ref": schema["$id"] + "#/$defs/receiverGroup"}, registry=registry
+        {"$ref": schema["$id"] + f"#/$defs/{definition}"}, registry=registry
     )
+
+
+@pytest.fixture
+def validator():
+    return _contract_validator("fs-acquisition-1", "receiverGroup")
+
+
+@pytest.fixture
+def hook_validator():
+    return _contract_validator("fs-imaging-1", "preprocessHook")
 
 
 @pytest.mark.parametrize(
@@ -277,21 +286,133 @@ def test_legacy_components_roundtrip_unchanged():
     assert ReceiverGroup.from_fs(payload).to_fs() == payload
 
 
-def test_material_weighting_uses_frozen_trace_pair_policy_and_physical_units():
+def test_material_weighting_uses_frozen_trace_pair_mode_and_physical_units(
+    hook_validator,
+):
     acoustic = fs.physics.acoustic()
     hook = Preprocess.material_weighting(
         {1: 1 / acoustic.materials.rho}, units={1: "m^2/s^2"}
     )
     payload = hook.to_fs()
     assert payload["stage"] == "trace_pair"
-    assert payload["params"]["model_policy"] == "frozen"
+    assert payload["params"]["mode"] == "frozen"
     assert payload["params"]["blocks"][0]["coefficient"]["expr"]["op"] == "div"
+    hook_validator.validate(payload)
     assert Preprocess.from_fs(payload).to_fs() == payload
     with pytest.raises(ValueError, match="overlap"):
         Preprocess.material_weighting(
             {1: acoustic.materials.rho, (1, 2): acoustic.materials.rho},
             units={1: "Pa", (1, 2): "Pa"},
         )
+
+
+@pytest.mark.parametrize("domain", ["water", 1])
+def test_material_side_selection_preserves_field_support_and_device_roundtrip(
+    domain, validator
+):
+    acoustic, elastic = fs.physics.acoustic(), fs.physics.elastic()
+    rho = elastic.materials.rho.on(domain=domain)
+    assert elastic.materials.rho.domain is None
+    assert rho.coefficient() == {"expr": {"ref": "rho", "domain": domain}}
+    device = ReceiverNode(name="obn")
+    device.add_component("pressure", acoustic.fields.pressure)
+    device.add_component("momentum", rho * elastic.fields.velocity)
+    group = ReceiverGroup("obn", device, [[0, 0]], materials={"rho": rho})
+    payload = group.to_fs(ExportContext(dimension=2, physics="coupled"))
+    assert "domain" not in payload
+    scale = payload["device"]["components"][1]["expression"]["child"]
+    assert scale["coefficient"] == rho.coefficient()
+    assert scale["child"]["name"] == "elastic:velocity_all"
+    assert payload["material_samples"][0]["coefficient"] == rho.coefficient()
+    validator.validate(payload)
+    assert ReceiverGroup.from_fs(payload).to_fs() == payload
+
+
+def test_compound_material_selection_preserves_and_replaces_individual_domains():
+    materials = fs.physics.acoustic().materials
+    expression = materials.rho.on(domain="water") / materials.rho.on(domain="solid")
+    assert expression.coefficient()["expr"]["args"] == [
+        {"ref": "rho", "domain": "water"},
+        {"ref": "rho", "domain": "solid"},
+    ]
+    rebound = expression.on(domain=2)
+    assert rebound.coefficient()["expr"]["args"] == [
+        {"ref": "rho", "domain": 2},
+        {"ref": "rho", "domain": 2},
+    ]
+    compound = (1 / (materials.rho * materials.vp**2)).on(domain="water")
+    assert compound.coefficient()["expr"]["args"][1]["args"][0] == {
+        "ref": "rho",
+        "domain": "water",
+    }
+    assert compound.to("1/Pa").coefficient() == compound.coefficient()
+
+
+def test_selected_constitutive_tensor_retains_basis_and_field_scope(validator):
+    elastic = fs.physics.elastic()
+    compliance = elastic.materials.compliance.on(domain="solid")
+    assert compliance.coefficient() == {
+        "tensor": "compliance",
+        "basis": "mandel",
+        "domain": "solid",
+    }
+    expression = (compliance @ elastic.fields.stress).xz._native(2)
+    assert expression["child"]["coefficient"] == compliance.coefficient()
+    assert expression["child"]["child"]["name"] == "elastic:stress_all"
+    payload = ReceiverGroup(
+        "strain", (compliance @ elastic.fields.stress).xz, [[0, 0]]
+    ).to_fs(ExportContext(dimension=2, physics="coupled"))
+    validator.validate(payload)
+
+
+@pytest.mark.parametrize("domain", [None, True, 1.5, [], "", "   ", 0, -1])
+def test_material_side_selection_rejects_invalid_domains(domain):
+    with pytest.raises((TypeError, ValueError)):
+        fs.physics.acoustic().materials.rho.on(domain=domain)
+
+
+def test_material_side_selection_does_not_select_wavefield_domains():
+    with pytest.raises(ValueError, match="only to material"):
+        fs.physics.acoustic().fields.pressure.on(domain="water")
+    with pytest.raises(ValueError, match="only to material"):
+        (
+            fs.physics.acoustic().materials.rho * fs.physics.acoustic().fields.velocity
+        ).on(domain="water")
+
+
+def test_material_weighting_selected_coefficients_are_fixed_and_can_be_pinned(
+    tmp_path, hook_validator
+):
+    rho = fs.physics.acoustic().materials.rho.on(domain="water")
+    frozen = Preprocess.material_weighting({1: 1 / rho}, units={1: "m^2/s^2"})
+    assert frozen.to_fs()["params"]["mode"] == "frozen"
+    hook_validator.validate(frozen.to_fs())
+    pinned = Preprocess.material_weighting(
+        {1: 1 / rho},
+        units={1: "m^2/s^2"},
+        mode="pinned",
+        state_file=tmp_path / "weights.h5",
+    )
+    assert pinned.to_fs()["params"]["state_file"] == str(tmp_path / "weights.h5")
+    hook_validator.validate(pinned.to_fs())
+    assert Preprocess.from_fs(pinned.to_fs()).to_fs() == pinned.to_fs()
+    with pytest.raises(ValueError, match="independently selected"):
+        Preprocess.material_weighting({1: 1 / rho}, units={1: "m^2/s^2"}, mode="live")
+    live = Preprocess.material_weighting(
+        {1: fs.physics.acoustic().materials.rho}, units={1: "Pa"}, mode="live"
+    )
+    assert live.to_fs()["params"]["mode"] == "live"
+    hook_validator.validate(live.to_fs())
+    for mode, state_file in (
+        ("pinned", None),
+        ("pinned", True),
+        ("frozen", "weights.h5"),
+        ("bad", None),
+    ):
+        with pytest.raises(ValueError):
+            Preprocess.material_weighting(
+                {1: rho}, units={1: "Pa"}, mode=mode, state_file=state_file
+            )
 
 
 @pytest.mark.parametrize("domain", [True, 1.5, [], "", "   "])
