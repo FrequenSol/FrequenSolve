@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence, Tuple
+from typing import Any, Callable, Optional, Sequence, Tuple, TypeVar
 
 import numpy as np
 
@@ -38,7 +38,7 @@ def _finite_vector(value: Any, *, name: str, size: Optional[int] = None) -> np.n
     if array.size < 1 or (size is not None and array.size != size):
         expected = "non-empty" if size is None else f"size {size}"
         raise ValueError(f"{name} must be a {expected} vector")
-    if not np.all(np.isfinite(array)):
+    if not _all_finite(array):
         raise ValueError(f"{name} must contain only finite values")
     return np.array(array, copy=True)
 
@@ -371,6 +371,71 @@ def _read_only(array: np.ndarray) -> np.ndarray:
     return view
 
 
+_SHARES_ARRAYS = "_frequensolve_shares_arrays"
+_Function = TypeVar("_Function", bound=Callable[..., Any])
+
+
+def _shares_arrays(function: _Function) -> _Function:
+    """Mark an SDK callable that the optimizers call without defensive copies.
+
+    A marked callable never writes its array arguments or keeps them after
+    returning (it receives read-only views of the optimizer's vectors), and
+    an array it returns is new and never touched by it again, so the
+    optimizer adopts it as its own. Unmarked (user) callables keep receiving
+    private copies, and their results are copied.
+    """
+
+    setattr(function, _SHARES_ARRAYS, True)
+    return function
+
+
+def _shares(function: Any) -> bool:
+    """Return whether ``function`` (or a bound method's function) is marked."""
+
+    return getattr(function, _SHARES_ARRAYS, False) is True
+
+
+def _argument(vector: np.ndarray, shared: bool) -> np.ndarray:
+    """Pass a marked callable a read-only view and any other one a private copy."""
+
+    return _read_only(vector) if shared else np.array(vector, copy=True)
+
+
+def _result(value: Any, shared: bool, *, name: str, size: int) -> np.ndarray:
+    """Adopt a marked callable's new float64 vector; validate and copy any other."""
+
+    if (
+        shared
+        and isinstance(value, np.ndarray)
+        and value.dtype == np.float64
+        and value.shape == (size,)
+        and value.flags.c_contiguous
+        and value.flags.writeable
+    ):
+        if not _all_finite(value):
+            raise ValueError(f"{name} must contain only finite values")
+        return value
+    return _finite_vector(value, name=name, size=size)
+
+
+def _hessian_action(
+    hessian_product: HessianProduct,
+    model: np.ndarray,
+    direction: np.ndarray,
+    shared: bool,
+) -> np.ndarray:
+    """Apply ``hessian_product``; unmarked, it gets a model copy and ``direction`` itself."""
+
+    return _result(
+        hessian_product(
+            _argument(model, shared), _read_only(direction) if shared else direction
+        ),
+        shared,
+        name="Hessian product",
+        size=model.size,
+    )
+
+
 @dataclass(frozen=True, eq=False)
 class LBFGSRestart:
     """Exact restart state of :func:`minimize_lbfgs` (``fs-lbfgs-restart-2``).
@@ -651,12 +716,18 @@ def _inexact_cg(
     target = forcing * initial_norm
     if initial_norm == 0.0:
         return _CGResult(step, hessian_step, 0, 0.0, False), 0
+    shares_hessian = _shares(hessian_product)
+    shares_preconditioner = _shares(preconditioner)
 
     def apply_preconditioner(value: np.ndarray) -> np.ndarray:
         if preconditioner is None:
             return np.array(value, copy=True)
-        result = _finite_vector(
-            preconditioner(np.array(model, copy=True), np.array(value, copy=True)),
+        result = _result(
+            preconditioner(
+                _argument(model, shares_preconditioner),
+                _argument(value, shares_preconditioner),
+            ),
+            shares_preconditioner,
             name="preconditioned residual",
             size=value.size,
         )
@@ -673,10 +744,8 @@ def _inexact_cg(
         restricted_direction = (
             direction if free is None else np.where(free, direction, 0.0)
         )
-        hessian_direction = _finite_vector(
-            hessian_product(np.array(model, copy=True), restricted_direction),
-            name="Hessian product",
-            size=model.size,
+        hessian_direction = _hessian_action(
+            hessian_product, model, restricted_direction, shares_hessian
         )
         hessian_products += 1
         if free is not None:
@@ -691,10 +760,8 @@ def _inexact_cg(
                 step = np.array(right_hand_side, copy=True)
                 if free is not None:
                     step[~free] = 0.0
-                hessian_step = _finite_vector(
-                    hessian_product(np.array(model, copy=True), step),
-                    name="Hessian product",
-                    size=model.size,
+                hessian_step = _hessian_action(
+                    hessian_product, model, step, shares_hessian
                 )
                 hessian_products += 1
                 if free is not None:
@@ -808,13 +875,17 @@ def minimize_inexact_newton(
     total_line_search_evaluations = 0
     negative_curvature_events = 0
     steepest_descent_fallbacks = 0
+    # SDK callables marked by ``_shares_arrays`` are passed read-only views.
+    shares_objective, shares_gradient = _shares(objective), _shares(gradient)
+    shares_hessian, shares_limit = _shares(hessian_product), _shares(step_limit)
+    shares_transform = _shares(step_transform)
 
     def evaluate(candidate: np.ndarray) -> float:
         nonlocal objective_evaluations
         limit = options.max_objective_evaluations
         if limit is not None and objective_evaluations >= limit:
             raise _EvaluationLimit
-        value = float(objective(np.array(candidate, copy=True)))
+        value = float(objective(_argument(candidate, shares_objective)))
         objective_evaluations += 1
         if not np.isfinite(value):
             raise ValueError("objective must return a finite scalar")
@@ -822,8 +893,9 @@ def minimize_inexact_newton(
 
     def evaluate_gradient(candidate: np.ndarray) -> np.ndarray:
         nonlocal gradient_evaluations
-        value = _finite_vector(
-            gradient(np.array(candidate, copy=True)),
+        value = _result(
+            gradient(_argument(candidate, shares_gradient)),
+            shares_gradient,
             name="gradient",
             size=model.size,
         )
@@ -947,18 +1019,17 @@ def minimize_inexact_newton(
         cg_rhs_norm = max(projected_norm, float(np.finfo(float).tiny))
         if cg.negative_curvature:
             negative_curvature_events += 1
-        direction = np.array(cg.step, copy=True)
-        hessian_direction = np.array(cg.hessian_step, copy=True)
+        # The CG vectors are this iteration's own and never written in place.
+        direction = cg.step
+        hessian_direction = cg.hessian_step
         directional_derivative = float(np.dot(grad, direction))
         fallback = (
             not np.isfinite(directional_derivative) or directional_derivative >= 0.0
         )
         if fallback:
             direction = -projected_gradient
-            hessian_direction = _finite_vector(
-                hessian_product(np.array(model, copy=True), direction),
-                name="Hessian product",
-                size=model.size,
+            hessian_direction = _hessian_action(
+                hessian_product, model, direction, shares_hessian
             )
             hessian_products += 1
             if free is not None:
@@ -974,7 +1045,9 @@ def minimize_inexact_newton(
         maximum_step = np.inf
         if step_limit is not None:
             representation_step = float(
-                step_limit(np.array(model, copy=True), np.array(direction, copy=True))
+                step_limit(
+                    _argument(model, shares_limit), _argument(direction, shares_limit)
+                )
             )
             if np.isnan(representation_step) or representation_step < 0.0:
                 raise ValueError("step_limit must return a nonnegative value")
@@ -1001,7 +1074,8 @@ def minimize_inexact_newton(
         line_search_evaluations = 0
         line_search_trials = 0
         accepted = False
-        trial = np.array(model, copy=True)
+        # A placeholder: every evaluated trial is a new array.
+        trial = model
         trial_value = value
         try:
             while step_length >= options.minimum_step_length and (
@@ -1012,10 +1086,12 @@ def minimize_inexact_newton(
                 raw_step = step_length * direction
                 step = raw_step
                 if step_transform is not None:
-                    step = _finite_vector(
+                    step = _result(
                         step_transform(
-                            np.array(model, copy=True), np.array(step, copy=True)
+                            _argument(model, shares_transform),
+                            _argument(step, shares_transform),
                         ),
+                        shares_transform,
                         name="transformed step",
                         size=model.size,
                     )
@@ -1263,13 +1339,17 @@ def minimize_lbfgs(
     gradient_evaluations = 0
     total_line_search_evaluations = 0
     steepest_descent_fallbacks = 0
+    # SDK callables marked by ``_shares_arrays`` are passed read-only views.
+    shares_objective, shares_gradient = _shares(objective), _shares(gradient)
+    shares_preconditioner, shares_limit = _shares(preconditioner), _shares(step_limit)
+    shares_transform = _shares(step_transform)
 
     def evaluate(candidate: np.ndarray) -> float:
         nonlocal objective_evaluations
         limit = options.max_objective_evaluations
         if limit is not None and objective_evaluations >= limit:
             raise _EvaluationLimit
-        value = float(objective(np.array(candidate, copy=True)))
+        value = float(objective(_argument(candidate, shares_objective)))
         objective_evaluations += 1
         if not np.isfinite(value):
             raise ValueError("objective must return a finite scalar")
@@ -1277,8 +1357,9 @@ def minimize_lbfgs(
 
     def evaluate_gradient(candidate: np.ndarray) -> np.ndarray:
         nonlocal gradient_evaluations
-        value = _finite_vector(
-            gradient(np.array(candidate, copy=True)),
+        value = _result(
+            gradient(_argument(candidate, shares_gradient)),
+            shares_gradient,
             name="gradient",
             size=model.size,
         )
@@ -1287,8 +1368,13 @@ def minimize_lbfgs(
 
     def initial_inverse_action(vector: np.ndarray) -> np.ndarray:
         if preconditioner is not None:
-            return _finite_vector(
-                preconditioner(np.array(model, copy=True), np.array(vector, copy=True)),
+            # Written in place by the two-loop recursion: a new array either way.
+            return _result(
+                preconditioner(
+                    _argument(model, shares_preconditioner),
+                    _argument(vector, shares_preconditioner),
+                ),
+                shares_preconditioner,
                 name="preconditioned gradient",
                 size=model.size,
             )
@@ -1488,10 +1574,9 @@ def minimize_lbfgs(
 
         line_search_evaluations = 0
         accepted = False
-        trial = np.array(model, copy=True)
+        # Placeholders: an accepted trial assigns all three new arrays.
+        trial = bounded_raw_step = step = model
         trial_value = value
-        bounded_raw_step = np.zeros_like(model)
-        step = np.zeros_like(model)
         recovery_attempted = fallback
         line_search_trials = 0
         try:
@@ -1500,8 +1585,8 @@ def minimize_lbfgs(
                 if step_limit is not None:
                     representation_step = float(
                         step_limit(
-                            np.array(model, copy=True),
-                            np.array(direction, copy=True),
+                            _argument(model, shares_limit),
+                            _argument(direction, shares_limit),
                         )
                     )
                     if np.isnan(representation_step) or representation_step < 0.0:
@@ -1519,11 +1604,12 @@ def minimize_lbfgs(
                     raw_step = step_length * direction
                     step = raw_step
                     if step_transform is not None:
-                        step = _finite_vector(
+                        step = _result(
                             step_transform(
-                                np.array(model, copy=True),
-                                np.array(step, copy=True),
+                                _argument(model, shares_transform),
+                                _argument(step, shares_transform),
                             ),
+                            shares_transform,
                             name="transformed step",
                             size=model.size,
                         )
@@ -1817,6 +1903,10 @@ def minimize_proximal_gradient(
     if np.any(x < box[0]) or np.any(x > box[1]):
         raise ValueError("initial model violates its bounds")
     evaluations = gradients = searches = 0
+    # SDK callables marked by ``_shares_arrays`` are passed read-only views.
+    shares_objective, shares_gradient = _shares(objective), _shares(gradient)
+    shares_regularization, shares_proximal = _shares(regularization), _shares(proximal)
+    shares_limit = _shares(step_limit)
 
     def evaluate(v: np.ndarray) -> Tuple[float, float]:
         nonlocal evaluations
@@ -1825,16 +1915,24 @@ def minimize_proximal_gradient(
             and evaluations >= options.max_objective_evaluations
         ):
             raise _EvaluationLimit
-        f = float(objective(v.copy()))
-        r = float(regularization(v.copy()))
+        f = float(objective(_argument(v, shares_objective)))
+        r = float(regularization(_argument(v, shares_regularization)))
         evaluations += 1
         if not np.isfinite(f + r):
             raise ValueError("composite objective must be finite")
         return f, r
 
+    def evaluate_gradient(v: np.ndarray) -> np.ndarray:
+        return _result(
+            gradient(_argument(v, shares_gradient)),
+            shares_gradient,
+            name="gradient",
+            size=v.size,
+        )
+
     f, reg = evaluate(x)
     stopping = _StoppingCriteria(options, f + reg)
-    g = _finite_vector(gradient(x.copy()), name="gradient", size=x.size)
+    g = evaluate_gradient(x)
     gradients += 1
     tau = first_step
     minimum_step = options.minimum_step_length * first_step
@@ -1880,8 +1978,11 @@ def minimize_proximal_gradient(
                 ):
                     break
                 trials += 1
-                trial = _finite_vector(
-                    proximal(x - tau * g, tau, box), name="proximal model", size=x.size
+                trial = _result(
+                    proximal(x - tau * g, tau, box),
+                    shares_proximal,
+                    name="proximal model",
+                    size=x.size,
                 )
                 if np.any(trial < box[0] - options.bound_tolerance) or np.any(
                     trial > box[1] + options.bound_tolerance
@@ -1899,7 +2000,12 @@ def minimize_proximal_gradient(
                     )
                 if (
                     step_limit is not None
-                    and float(step_limit(x.copy(), step.copy())) < 1.0
+                    and float(
+                        step_limit(
+                            _argument(x, shares_limit), _argument(step, shares_limit)
+                        )
+                    )
+                    < 1.0
                 ):
                     tau *= options.backtrack_factor
                     continue
@@ -1953,7 +2059,7 @@ def minimize_proximal_gradient(
             return finish(False, -1, "composite line search failed", iteration - 1)
         x = trial
         f, reg = trial_f, trial_reg
-        g = _finite_vector(gradient(x.copy()), name="gradient", size=x.size)
+        g = evaluate_gradient(x)
         gradients += 1
         reduction, momentum = stopping.update(old_total, f + reg)
         if callback is not None:

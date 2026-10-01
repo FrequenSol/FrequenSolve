@@ -13,6 +13,8 @@ from typing import Any, Mapping, Optional, Union
 
 import numpy as np
 
+from frequensolve.inversion.optimization import _shares_arrays
+
 from ._artifacts import ControlVectorFile, SmoothingConfig, control_smoothing
 from ._block_digest import block_digest
 from .controls import ControlSpace, ControlState, ControlVector
@@ -275,6 +277,7 @@ class BoundNativeRegularization(BoundRegularization):
             raise ValueError("Sauce returned an invalid regularization value")
         return value
 
+    @_shares_arrays
     def value(self, v: Any) -> float:
         key = self._key(v)
         if key not in self._value_cache:
@@ -419,6 +422,7 @@ class BoundNativeRegularization(BoundRegularization):
             for (label, values), digest in zip(blocks.items(), digests)
         }
 
+    @_shares_arrays
     def prox(
         self,
         v: np.ndarray,

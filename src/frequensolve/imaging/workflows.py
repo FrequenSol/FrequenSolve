@@ -116,6 +116,8 @@ from frequensolve.inversion.optimization import (
     LBFGSOptions,
     LBFGSRestart,
     _read_only,
+    _shares,
+    _shares_arrays,
     minimize_inexact_newton,
     minimize_lbfgs,
     minimize_proximal_gradient,
@@ -679,10 +681,59 @@ def _preconditioner_callable(
             vector = g if space is None else ControlVector(g, space)
             return np.asarray(apply(vector), dtype=np.float64).reshape(-1)
 
-        return bound
+        # An SDK preconditioner's new vector needs no copy in the optimizer.
+        return _shares_arrays(bound) if _shares(apply) else bound
     if callable(preconditioner):
         return preconditioner
     raise TypeError("preconditioner must be callable or provide apply()")
+
+
+# Record vectors in physical coordinates x = s * y: whether each multiplies by s
+# (iterates and steps) or divides by it (gradients).
+_PHYSICAL_VECTORS = {
+    "model": True,
+    "gradient": False,
+    "linearization_gradient": False,
+    "step": True,
+    "raw_step": True,
+}
+
+
+class _PhysicalIteration(InexactNewtonIteration):
+    """A scaled optimizer record presented in physical coordinates.
+
+    Scalar fields are the record's. Each vector is rescaled on first access
+    and cached, read-only like the optimizer's own, so a consumer pays only
+    for the vectors it reads; the scaled source is released once rescaled.
+    """
+
+    @classmethod
+    def of(
+        cls, record: InexactNewtonIteration, scale: np.ndarray
+    ) -> InexactNewtonIteration:
+        physical = object.__new__(cls)
+        state = physical.__dict__
+        for item in dataclasses.fields(record):
+            name = item.name
+            key = name if name not in _PHYSICAL_VECTORS else f"_scaled_{name}"
+            state[key] = getattr(record, name)
+        state["_scale"] = scale
+        return physical
+
+    def __getattr__(self, name: str) -> Any:
+        state = self.__dict__
+        source = state.get(f"_scaled_{name}")
+        if source is None or name not in _PHYSICAL_VECTORS:
+            if name in state:  # Rescaled by another thread meanwhile.
+                return state[name]
+            raise AttributeError(name)
+        scale = state["_scale"]
+        value = _read_only(
+            scale * source if _PHYSICAL_VECTORS[name] else source / scale
+        )
+        state[name] = value
+        state.pop(f"_scaled_{name}", None)
+        return value
 
 
 @dataclass(frozen=True)
@@ -891,18 +942,26 @@ class _OptimizerConfig:
             )
             return to_scaled(transformed)
 
+        def share(wrapper: Callable[..., Any], wrapped: Any) -> None:
+            # Only SDK callables skip the optimizer's defensive copies. Scaled
+            # wrappers pass and return new arrays; unscaled ones hand over the
+            # optimizer's vectors and their callable's results.
+            if wrapped is not None and (scale is not None or _shares(wrapped)):
+                _shares_arrays(wrapper)
+
+        share(f, value_fn)
+        share(g, gradient_fn)
+        share(h, curvature_fn)
+        share(p, precondition)
+        share(transform, step_transform)
+        _shares_arrays(step_limit_fn)
+
         def unscale_iteration(it: InexactNewtonIteration) -> InexactNewtonIteration:
             if scale is None:
                 return it
-            # Read-only like the optimizer's own records, scaled or not.
-            return dataclasses.replace(
-                it,
-                model=_read_only(to_physical(it.model)),
-                gradient=_read_only(it.gradient / scale),
-                linearization_gradient=_read_only(it.linearization_gradient / scale),
-                step=_read_only(to_physical(it.step)),
-                raw_step=_read_only(to_physical(it.raw_step)),
-            )
+            # Read-only like the optimizer's own records; each vector is
+            # rescaled only when a consumer first reads it.
+            return _PhysicalIteration.of(it, scale)
 
         def on_iteration(it: InexactNewtonIteration) -> None:
             physical = unscale_iteration(it)
@@ -973,10 +1032,19 @@ class _OptimizerConfig:
                     native.prox(to_physical(y), tau, metric, boxes["physical"])
                 )
 
+            def smooth(y: np.ndarray) -> float:
+                return objective.smooth_value(to_physical(y))
+
+            def regularizer(y: np.ndarray) -> float:
+                return native.value(to_physical(y))
+
+            share(smooth, objective.smooth_value)
+            share(regularizer, native.value)
+            share(prox, native.prox)
             result = minimize_proximal_gradient(
-                lambda y: objective.smooth_value(to_physical(y)),
+                smooth,
                 g,
-                lambda y: native.value(to_physical(y)),
+                regularizer,
                 prox,
                 y0,
                 bounds=scaled_bounds,
@@ -1064,7 +1132,9 @@ class _StageObjective:
     One ``linearize`` (value and covector) per distinct point; the value,
     gradient, curvature action (Gauss-Newton normal plus regularization curvature) and
     loss terms of the last point are reused.  Every new evaluation is
-    appended to the history with the stage metrics.
+    appended to the history with the stage metrics. The optimizer callables
+    below never write or keep their array arguments and return new arrays,
+    so the optimizers pass them read-only views without copying.
     """
 
     def __init__(
@@ -1130,9 +1200,11 @@ class _StageObjective:
         assert self._linearization is not None
         return self._linearization
 
+    @_shares_arrays
     def value(self, x: Any) -> float:
         return self.loss(x).total
 
+    @_shares_arrays
     def smooth_value(self, x: Any) -> float:
         loss = self.loss(x)
         return (
@@ -1141,6 +1213,7 @@ class _StageObjective:
             else loss.total - self.native_regularization.value(self.vector(x))
         )
 
+    @_shares_arrays
     def gradient(self, x: Any) -> np.ndarray:
         self._evaluate(x)
         assert self._gradient is not None
@@ -1151,6 +1224,7 @@ class _StageObjective:
         assert self._loss is not None
         return self._loss
 
+    @_shares_arrays
     def hessian_action(self, x: Any, dx: Any) -> np.ndarray:
         lin = self.linearization(x)
         direction = self.vector(dx)
@@ -3875,6 +3949,8 @@ class LSRTM:
                 trial.update(key=name, q=q, dq=base["dq"] + hs)
             return name, trial["q"], trial["dq"]
 
+        # The optimizer's callables below only read their arguments.
+        @_shares_arrays
         def smooth_value(x: np.ndarray) -> float:
             _, q, _ = model(x)
             value = lin.value + q + 0.5 * damping * float(x @ x)
@@ -3882,6 +3958,7 @@ class LSRTM:
                 value += float(bound.value(ControlVector(x, space)))
             return value
 
+        @_shares_arrays
         def smooth_gradient(x: np.ndarray) -> np.ndarray:
             name, q, dq = model(x)
             if name != base["key"]:
@@ -3904,11 +3981,19 @@ class LSRTM:
 
         # Read-only, like the optimizer's box: metric and bound files are staged once.
         metric = _read_only(np.ones(size))
+
+        def prox(
+            x: np.ndarray, tau: float, box: Tuple[np.ndarray, np.ndarray]
+        ) -> np.ndarray:
+            return native.prox(x, tau, metric, box)
+
+        if _shares(native.prox):
+            _shares_arrays(prox)
         result = minimize_proximal_gradient(
             smooth_value,
             smooth_gradient,
             native.value,
-            lambda x, tau, box: native.prox(x, tau, metric, box),
+            prox,
             zero,
             options=InexactNewtonOptions(
                 max_iterations=self.iterations,

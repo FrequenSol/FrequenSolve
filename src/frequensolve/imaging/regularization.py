@@ -40,6 +40,7 @@ from frequensolve.imaging.controls import (
 from frequensolve.imaging.jobs import FWIOperatorJob, SmoothJob
 from frequensolve.imaging.operators import ModelOperator
 from frequensolve.inversion.least_squares import QuadraticRegularization
+from frequensolve.inversion.optimization import _shares_arrays
 from frequensolve.inversion.preconditioning import (
     DiagonalInverseHessian,
     GaussNewtonDiagonalEstimate,
@@ -717,6 +718,7 @@ class Identity(Preconditioner):
 
 
 class _BoundIdentity(BoundPreconditioner):
+    @_shares_arrays  # Reads ``g``; returns a new vector.
     def apply(self, g: Any) -> ControlVector:
         return ControlVector(np.array(_values_on(self.space, g), copy=True), self.space)
 
@@ -889,6 +891,7 @@ class _BoundDiagonal(BoundPreconditioner):
             maximum_inverse_ratio=config.maximum_inverse_ratio,
         )
 
+    @_shares_arrays  # Reads ``g``; returns a new vector.
     def apply(self, g: Any) -> ControlVector:
         if self.inverse is None:
             raise RuntimeError(

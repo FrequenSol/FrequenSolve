@@ -1,5 +1,6 @@
 """Workflow tests on the solver-free fake site (linear surrogate)."""
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -36,9 +37,11 @@ from frequensolve.imaging.workflows import (
 from frequensolve.inversion import (
     ContinuationSchedule,
     ContinuationStage,
+    InexactNewtonIteration,
     OptimizationCheckpoint,
     OptimizationHistory,
 )
+from frequensolve.inversion.optimization import _shares_arrays
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 from tests.test_imaging_jobs import _assert_valid
 
@@ -356,6 +359,134 @@ def test_optimizer_configs_wrap_the_generic_minimizers_with_scaling_and_step_lim
     first_order = SimpleNamespace(value=quadratic.value, gradient=quadratic.gradient)
     with pytest.raises(ValueError, match="hessian_action"):
         NewtonCG().solve(first_order, np.zeros(6))
+
+
+class _Recording(_Quadratic):
+    """A user objective recording every array it receives."""
+
+    def __init__(self, A, b):
+        super().__init__(A, b)
+        self.arguments = []
+
+    def value(self, x):
+        self.arguments.append(x)
+        return super().value(x)
+
+    def gradient(self, x):
+        self.arguments.append(x)
+        return super().gradient(x)
+
+    def hessian_action(self, x, dx):
+        self.arguments += [x, dx]
+        return super().hessian_action(x, dx)
+
+
+class _SharedRecording(_Recording):
+    """The same objective declaring the SDK array contract."""
+
+    @_shares_arrays
+    def value(self, x):
+        return super().value(x)
+
+    @_shares_arrays
+    def gradient(self, x):
+        return super().gradient(x)
+
+    @_shares_arrays
+    def hessian_action(self, x, dx):
+        return super().hessian_action(x, dx)
+
+
+@pytest.mark.parametrize("config", [LBFGS, NewtonCG])
+@pytest.mark.parametrize("scaled", [False, True])
+def test_optimizer_configs_share_vectors_only_with_sdk_objectives(config, scaled):
+    rng = np.random.default_rng(5)
+    root = rng.standard_normal((6, 6))
+    A, b = root @ root.T + np.eye(6), rng.standard_normal(6)
+    scaling = np.linspace(0.5, 2.0, 6) if scaled else None
+    optimizer = config(**TIGHT)
+    user, sdk = _Recording(A, b), _SharedRecording(A, b)
+    expected = optimizer.solve(user, np.zeros(6), scaling=scaling, max_iterations=6)
+    result = optimizer.solve(sdk, np.zeros(6), scaling=scaling, max_iterations=6)
+    # Identical runs; only the copies differ.
+    assert result.iterations == expected.iterations > 1
+    np.testing.assert_array_equal(result.model, expected.model)
+    np.testing.assert_array_equal(result.gradient, expected.gradient)
+    # A user objective owns writable arrays; unscaled, an SDK objective is
+    # handed the optimizer's vectors read-only (scaled, new physical arrays).
+    assert all(x.flags.writeable for x in user.arguments)
+    assert all(x.flags.writeable == scaled for x in sdk.arguments)
+
+
+def test_stage_objective_reads_the_optimizer_vectors_in_place(tmp_path, monkeypatch):
+    from frequensolve.imaging.workflows import _StageObjective
+
+    problem = _problem(tmp_path, FakeImagingSite(seed=7))
+    objective = _StageObjective(problem, problem.space, None, None, {})
+    seen = []
+    evaluate = _StageObjective._evaluate
+    monkeypatch.setattr(
+        _StageObjective,
+        "_evaluate",
+        lambda self, x: seen.append(x) or evaluate(self, x),
+    )
+    LBFGS(max_iterations=3, **TIGHT).solve(objective, problem.space.zeros().values)
+    assert len(seen) > 3 and all(not x.flags.writeable for x in seen)
+    # Its gradients are new arrays: the caller may modify them.
+    gradient = objective.gradient(seen[-1])
+    gradient[:] = 0.0
+    assert np.any(objective.gradient(seen[-1]))
+
+
+def test_scaled_iteration_records_rescale_each_vector_on_first_read(monkeypatch):
+    import frequensolve.imaging.workflows as workflows
+
+    rng = np.random.default_rng(3)
+    root = rng.standard_normal((6, 6))
+    A, b = root @ root.T + np.eye(6), rng.standard_normal(6)
+    scale = np.linspace(0.5, 2.0, 6)
+    scaled, physical = [], []
+    minimize = workflows.minimize_lbfgs
+
+    def recording(*args, callback, **kwargs):
+        def both(it):
+            scaled.append(it)
+            callback(it)
+
+        return minimize(*args, callback=both, **kwargs)
+
+    monkeypatch.setattr(workflows, "minimize_lbfgs", recording)
+    LBFGS(**TIGHT).solve(
+        _Quadratic(A, b),
+        np.zeros(6),
+        scaling=scale,
+        max_iterations=4,
+        callback=physical.append,
+    )
+    assert len(physical) == len(scaled) == 5
+    vectors = ("model", "gradient", "linearization_gradient", "step", "raw_step")
+    # Reading one vector rescales only that one.
+    assert physical[0].model is not None
+    assert set(vectors) & set(vars(physical[0])) == {"model"}
+    for index, (record, source) in enumerate(zip(physical, scaled)):
+        assert isinstance(record, InexactNewtonIteration)
+        assert record.objective == source.objective
+        assert record.optimizer_state is source.optimizer_state
+        # Nothing is rescaled before a consumer reads it.
+        assert set(vectors) & set(vars(record)) == ({"model"} if index == 0 else set())
+        for name in vectors:
+            value = getattr(record, name)
+            assert getattr(record, name) is value and not value.flags.writeable
+            # The same values the eager physical record had.
+            factor = getattr(source, name)
+            np.testing.assert_array_equal(
+                value, factor / scale if "gradient" in name else scale * factor
+            )
+        with pytest.raises(ValueError, match="read-only"):
+            record.model[0] = 1.0
+    replaced = dataclasses.replace(physical[-1], step_length=2.0)
+    assert replaced.step_length == 2.0
+    np.testing.assert_array_equal(replaced.raw_step, physical[-1].raw_step)
 
 
 # ---------------------------------------------------------------------------

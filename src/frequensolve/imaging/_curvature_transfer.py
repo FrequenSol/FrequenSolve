@@ -12,6 +12,8 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from frequensolve.inversion.optimization import _shares_arrays
+
 from .curvature import (
     BFGSHistory,
     CurvatureResult,
@@ -224,6 +226,7 @@ def _history_inverse(
     if scale.shape != base.shape or scale.min() <= 0:
         raise ValueError("History coordinate scale must be a positive matching vector")
 
+    @_shares_arrays  # Reads its arguments; returns a new array.
     def apply(model: Any, gradient: np.ndarray) -> np.ndarray:
         scaled = scale * gradient  # Controls last: one vector or a batch of rows.
         result = base * scaled

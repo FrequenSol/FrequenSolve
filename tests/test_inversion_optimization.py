@@ -26,7 +26,10 @@ from frequensolve.inversion import (
     minimize_lbfgs,
     run_continuation,
 )
-from frequensolve.inversion.optimization import minimize_proximal_gradient
+from frequensolve.inversion.optimization import (
+    _shares_arrays,
+    minimize_proximal_gradient,
+)
 
 
 @pytest.fixture(params=["newton", "lbfgs"])
@@ -1574,6 +1577,104 @@ def test_iteration_diagnostics_share_never_rewritten_optimizer_vectors(method):
     if method != "proximal":
         assert np.shares_memory(events[-1].model, result.model)
         assert np.shares_memory(events[-1].gradient, result.gradient)
+
+
+@pytest.mark.parametrize("method", ["newton", "lbfgs", "proximal"])
+def test_only_marked_callables_share_optimizer_vectors(method):
+    """SDK callables get read-only views and give up their results; others get copies.
+
+    Unmarked callables may scribble on their arguments and on results they
+    returned earlier, so the optimizer copies both; both runs are identical.
+    """
+    diagonal = np.linspace(1.0, 30.0, 40)
+    bounds = (np.full(40, -0.5), np.full(40, 0.04))
+
+    def run(marked):
+        copied, results, events = [], [], []
+
+        def done(arguments, value):
+            copied.extend(arguments)
+            if not marked:
+                for array in arguments + results[-1:]:
+                    array[...] = np.nan
+            if isinstance(value, np.ndarray):
+                results.append(value)
+            return value
+
+        def objective(x):
+            return done([x], 0.5 * float(np.dot(diagonal * x, x)) - float(np.sum(x)))
+
+        def gradient(x):
+            return done([x], diagonal * x - 1.0)
+
+        def hessian(x, v):  # The direction itself was never copied.
+            return done([x], diagonal * v)
+
+        callables = dict(
+            preconditioner=lambda x, g: done([x, g], g / diagonal),
+            step_limit=lambda x, step: done([x, step], 50.0),
+            step_transform=lambda x, step: done([x, step], 0.9 * step),
+        )
+        if marked:
+            for function in (objective, gradient, hessian, *callables.values()):
+                _shares_arrays(function)
+        options = dict(max_iterations=8, gradient_tolerance=0, objective_tolerance=0)
+        if method == "proximal":
+
+            def proximal(v, tau, box):
+                return done([], np.clip(v, *box))
+
+            if marked:
+                _shares_arrays(proximal)
+            result = minimize_proximal_gradient(
+                objective,
+                gradient,
+                _shares_arrays(lambda x: done([x], 0.0)) if marked else lambda x: 0.0,
+                proximal,
+                np.zeros(40),
+                bounds=bounds,
+                options=InexactNewtonOptions(step_tolerance=0, **options),
+                initial_step=0.02,
+                step_limit=callables["step_limit"],
+                callback=events.append,
+            )
+        elif method == "newton":
+            result = minimize_inexact_newton(
+                objective,
+                gradient,
+                hessian,
+                np.zeros(40),
+                bounds=bounds,
+                options=InexactNewtonOptions(step_tolerance=0, **options),
+                callback=events.append,
+                **callables,
+            )
+        else:
+            result = minimize_lbfgs(
+                objective,
+                gradient,
+                np.zeros(40),
+                bounds=bounds,
+                options=LBFGSOptions(step_tolerance=0, **options),
+                callback=events.append,
+                **callables,
+            )
+        return result, events, copied, results
+
+    shared, events, views, returned = run(True)
+    private, private_events, copies, _ = run(False)
+    assert shared.iterations == private.iterations > 3
+    assert shared.objective == private.objective
+    np.testing.assert_array_equal(shared.model, private.model)
+    np.testing.assert_array_equal(shared.gradient, private.gradient)
+    for event, other in zip(events, private_events):
+        for name in DIAGNOSTIC_VECTORS:
+            np.testing.assert_array_equal(getattr(event, name), getattr(other, name))
+    assert views and all(not array.flags.writeable for array in views)
+    assert copies and all(array.flags.writeable for array in copies)
+    # Marked results are adopted: every recorded gradient is one returned.
+    for event in events:
+        assert any(np.shares_memory(event.gradient, value) for value in returned)
 
 
 def test_history_records_digest_a_read_only_model_without_copying_it():
