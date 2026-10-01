@@ -5,6 +5,39 @@ prepared.
 
 ## Unreleased
 
+- Optimizer iteration records (`InexactNewtonIteration`) share the accepted
+  model, gradients and steps as read-only views instead of copying five
+  vectors per iteration; callbacks must copy a vector before modifying it.
+  `NativeCurvature` deletes a staged BFGS history once its operation finishes
+  (`NativeCurvature.retain(history)` keeps it for several operations). Native
+  regularization caches key the optimizer vector by a parallel block digest
+  without forming the full model. `CurvatureTransfer.refresh` and
+  `NativeCurvature.refresh_curvature` accept Sauce's `symmetry_tolerance`;
+  refreshed factors must report `hessian_asymmetry`, which the transfer
+  provenance records.
+- FWI checkpoints (`fs-imaging-fwi-checkpoint-2`) keep L-BFGS restart arrays
+  as float64 HDF5 files in a bounded `<stem>.restart` directory instead of
+  JSON metadata, writing each secant pair once; `fs-imaging-fwi-checkpoint-1`
+  checkpoints are rejected. `minimize_lbfgs` reports `LBFGSRestart` states
+  (`fs-lbfgs-restart-2`) that reference the optimizer's arrays; dict restart
+  states are no longer accepted. A stage interrupted during its end-of-stage
+  curvature/uncertainty factorization is finished on resume, and each stage
+  factorizes at most once. Fingerprints identify arrays with at least 4096
+  elements by their bytes, so large-array fingerprints change once.
+- `LSRTM` runs native `Tikhonov` with CG for every `method` (no proximal
+  jobs, no gradient job at the zero image, no final residual product). TV/TGV
+  proximal iterations start from `1/lambda_max` (two power iterations) and
+  stop relative to the initial proximal-gradient mapping, so they no longer
+  depend on data or image units. CG is an in-house safeguarded PCG: a non-SPD
+  preconditioner raises, nonpositive curvature stops with `status == -1`, and
+  convergence on the last iteration counts. `info["jobs"]` and
+  `info["background"]` report job counts and checkpoint reuse/misses.
+  Background reuse also requires `site.supports_background_reuse`; the run
+  deletes the checkpoint it created unless `keep_background=True`, evicted
+  linearizations delete theirs, and `LinearizationCache.background_budget`
+  bounds retained checkpoint bytes. `minimize_proximal_gradient` gains
+  `initial_step`, `relative_tolerance` and `curvature_steps`. FWI requests
+  receiver probes for `Diagonal(probes="receiver")`; patch FWI rejects them.
 - Deferred the experimental HV and AWI objectives; removed their Python
   configurations and `ImagingProblem` adapters.
 - Receiver linearization, JVP and VJP cover multiple groups sharing the same

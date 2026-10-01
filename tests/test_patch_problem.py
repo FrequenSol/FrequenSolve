@@ -49,6 +49,10 @@ class _Child:
     def apply_normal(self, direction):
         return self.vjp(self.weight_data(self.jvp(direction)))
 
+    def apply_normal_batch(self, directions):
+        self.normal_batches = getattr(self, "normal_batches", 0) + 1
+        return [self.apply_normal(direction) for direction in directions]
+
     def weight_data(self, dual):
         return DataVector(self.weight * dual.values, self.data_space)
 
@@ -130,6 +134,19 @@ def test_exact_composite_adjoint_weighting_and_frequency_parts(composite):
             child.matrix @ direction.values,
         )
     np.testing.assert_allclose((lin.jacobian.H @ dual).values, lin.vjp(dual).values)
+
+
+def test_composite_normal_matmat_batches_each_child_once(composite):
+    _, lin, children = composite
+    directions = [lin.space.random(seed) for seed in (21, 22, 23)]
+    products = lin.normal @ np.column_stack([d.values for d in directions])
+    for j, direction in enumerate(directions):
+        np.testing.assert_allclose(
+            products[:, j],
+            lin.vjp(lin.weight_data(lin.jvp(direction))).values,
+            rtol=1e-13,
+        )
+    assert [child.normal_batches for child in children] == [1] * len(children)
 
 
 def test_duplicate_physical_observation_rejected(composite):

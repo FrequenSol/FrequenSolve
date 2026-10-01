@@ -93,6 +93,86 @@ def _saved_simulation(tmp_path, name="controlled"):
     return simulation
 
 
+def test_background_checkpoint_roundtrip_and_recursive_staging(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "capture",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["vp"],
+        state="state.json",
+        background="background.json",
+    )
+    loaded = BaseJob.load(linearize.save())
+    assert loaded.background == linearize.background
+    _assert_valid(loaded.to_fs())
+    manifest = linearize.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    shard = manifest.with_name("rank_0.json")
+    field = manifest.with_name("field.h5")
+    field.write_bytes(b"native-checkpoint-fixture")
+    shard.write_text(
+        json.dumps(
+            {"schema": "fs-background-shard-1", "shards": {"0": {"file": field.name}}}
+        )
+    )
+    manifest.write_text(
+        json.dumps(
+            {"schema": "fs-background-state-1", "shards": {"0": {"file": shard.name}}}
+        )
+    )
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction-fixture")
+    action = FWIOperatorJob(
+        "reuse",
+        sim,
+        [3.0],
+        action="normal",
+        active=["vp"],
+        state=state,
+        direction=direction,
+        covector="normal.h5",
+        background=manifest,
+    )
+    loaded = BaseJob.load(action.save())
+    assert loaded.background == manifest
+    pairs = loaded.remote_input_files("/remote/project")
+    local = {Path(pair[0]) for pair in pairs}
+    assert {manifest, shard, field} <= local
+    # A cache already resident on the execution site need not be downloaded.
+    field.unlink()
+    pairs = loaded.remote_input_files("/remote/project")
+    assert {manifest, shard} <= {Path(pair[0]) for pair in pairs}
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {
+            "kernel_derivative": {
+                "axis": "fourier",
+                "order": 1,
+                "residual": "derivative",
+            }
+        },
+        {"source_controls": {"location_method": "analytic"}},
+    ],
+)
+def test_background_rejects_unsupported_actions(tmp_path, extra):
+    with pytest.raises(ValueError, match="background reuse"):
+        FWIOperatorJob(
+            "bad",
+            _saved_simulation(tmp_path),
+            [3.0],
+            action="linearize",
+            background="background.json",
+            **extra,
+        )
+
+
 def _elastic_simulation(tmp_path):
     sim = SeismicSimulation(
         name="smooth", physics="elastic", dimension=2, project_path=tmp_path

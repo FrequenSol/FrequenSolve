@@ -21,6 +21,7 @@ Task-suffixed outputs follow Sauce's ``<stem>_<task><ext>`` rule.
 from __future__ import annotations
 
 import copy
+import functools
 import inspect
 import json
 import math
@@ -59,6 +60,7 @@ from frequensolve.simulation.jobs.artifacts import TraceOutputSpec
 from frequensolve.simulation.jobs.base import BaseJob
 from frequensolve.simulation.outputs import JobOutputs, Output
 from frequensolve.simulation.simulation import BaseSimulation
+from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.class_registry import register_class
 from frequensolve.util.mixins import ExportContext
 
@@ -196,6 +198,30 @@ def _task_path(path: Path, task: Optional[int]) -> Path:
     if int(task) < 1:
         raise ValueError("task numbers are one-based and positive")
     return path.with_name(f"{path.stem}_{int(task)}{path.suffix}")
+
+
+def _paths(
+    values: Iterable[Union[str, Path]], resolve: Callable[[Any], Optional[Path]]
+) -> List[Path]:
+    """Resolve every entry of a path list; entries are never null."""
+
+    paths = [resolve(value) for value in values]
+    if any(path is None for path in paths):
+        raise ValueError("path lists cannot contain null entries")
+    return [Path(path) for path in paths if path is not None]
+
+
+def _resolve_regularization(
+    request: Mapping[str, Any], resolve: Callable[[Any], Optional[Path]]
+) -> Dict[str, Any]:
+    """Resolve the paths of a serialized native regularization request."""
+
+    resolved = dict(request)
+    for key in ("context", "result"):
+        resolved[key] = _paths([resolved[key]], resolve)[0]
+    for key in ("inputs", "outputs"):
+        resolved[key] = _paths(resolved[key], resolve)
+    return resolved
 
 
 def _raw_path(path: Path) -> Path:
@@ -1150,10 +1176,20 @@ class FWIOperatorJob(_ImagingJobBase):
             state actions; must be ``None`` for ``calibrate`` and ``wri``.
         state: ``fs-objective-linearization-4`` stem: an output for
             ``linearize`` (result-relative), an input otherwise.
+        background: Optional native background checkpoint manifest; output
+            for linearize, input for ordinary material JVP/VJP/normal.
         covector: ``fs-control-vector-1`` output stem (``model_covector`` for
             ``wri``).
         direction: ``fs-control-vector-1`` input (``model_direction`` for
             ``wri``).
+        directions: Several ``fs-control-vector-1`` inputs of one material
+            ``normal``; each task applies all of them after one background
+            solve (or restore) per source batch.
+        covectors: One ``fs-control-vector-1`` output stem per entry of
+            ``directions``.
+        regularization: Native ``control_sensitivities.Regularization``
+            request with ``inputs``/``outputs`` lists that a ``normal`` job's
+            postprocess applies after its tasks (requires ``control_active``).
         objective_vector: ``fs-objective-vector-4`` output (``jvp``) or input
             (``vjp``, optional ``solve`` target).
         objective: Optional scalar objective report output.
@@ -1210,8 +1246,12 @@ class FWIOperatorJob(_ImagingJobBase):
         field_retention: Optional[str] = None,
         field_reuse: Optional[str] = None,
         state: Optional[Union[str, Path]] = None,
+        background: Optional[Union[str, Path]] = None,
         covector: Optional[Union[str, Path]] = None,
         direction: Optional[Union[str, Path]] = None,
+        directions: Optional[Sequence[Union[str, Path]]] = None,
+        covectors: Optional[Sequence[Union[str, Path]]] = None,
+        regularization: Optional[Mapping[str, Any]] = None,
         objective_vector: Optional[Union[str, Path]] = None,
         objective: Optional[Union[str, Path]] = None,
         control_state: Optional[Union[str, Path]] = None,
@@ -1277,6 +1317,11 @@ class FWIOperatorJob(_ImagingJobBase):
         self.field_retention = field_retention
         self.field_reuse = field_reuse
         state_is_output = action == "linearize"
+        self.background = (
+            _output_path(background, result_dir)
+            if state_is_output
+            else _input_path(background, simulation)
+        )
         self.state = (
             _output_path(state, result_dir)
             if state_is_output
@@ -1284,6 +1329,19 @@ class FWIOperatorJob(_ImagingJobBase):
         )
         self.covector = _output_path(covector, result_dir)
         self.direction = _input_path(direction, simulation)
+        input_path = functools.partial(_input_path, simulation=simulation)
+        output_path = functools.partial(_output_path, result_dir=result_dir)
+        self.directions = None if directions is None else _paths(directions, input_path)
+        self.covectors = None if covectors is None else _paths(covectors, output_path)
+        self.regularization: Optional[Dict[str, Any]] = None
+        if regularization is not None:
+            request = dict(regularization)
+            request.setdefault("result", "regularization_result.json")
+            request["context"] = _paths([request["context"]], input_path)[0]
+            request["result"] = _paths([request["result"]], output_path)[0]
+            request["inputs"] = _paths(request["inputs"], input_path)
+            request["outputs"] = _paths(request["outputs"], output_path)
+            self.regularization = request
         self.objective_vector = (
             _output_path(objective_vector, result_dir)
             if action == "jvp"
@@ -1439,6 +1497,35 @@ class FWIOperatorJob(_ImagingJobBase):
 
     def _validate(self) -> None:
         action = self.action
+        if self.directions is not None or self.covectors is not None:
+            self._validate_directions()
+        if self.regularization is not None:
+            request = self.regularization
+            if action != "normal" or self.control_active is None:
+                raise ValueError(
+                    "job regularization requires a normal with control_active"
+                )
+            if (
+                request.get("operation") in {"prepare", "proximal"}
+                or not request["inputs"]
+                or len(request["inputs"]) != len(request["outputs"])
+            ):
+                raise ValueError(
+                    "job regularization needs a prepared operation and one output per input"
+                )
+        if self.background is not None:
+            if (
+                action not in {"linearize", "jvp", "vjp", "normal"}
+                or self.extension is not None
+                or self.kernel_derivative is not None
+            ):
+                raise ValueError(
+                    "background reuse requires ordinary material linearize/JVP/VJP/normal"
+                )
+            if self.source_controls is not None or self.reflectivity is not None:
+                raise ValueError(
+                    "background reuse currently requires material-only controls"
+                )
         if action in _RECEIVER_ACTIONS:
             self._validate_receiver()
             return
@@ -1675,7 +1762,9 @@ class FWIOperatorJob(_ImagingJobBase):
                         "extension normal uses extension.direction/covector"
                     )
             else:
-                if self.direction is None or self.covector is None:
+                if (
+                    self.direction is None or self.covector is None
+                ) and self.directions is None:
                     raise ValueError("normal requires direction and covector")
                 if not self.active:
                     raise ValueError("normal requires a nonempty active subspace")
@@ -1739,6 +1828,32 @@ class FWIOperatorJob(_ImagingJobBase):
             and self.covector is None
         ):
             raise ValueError("weights require a smoothed covector postprocess")
+
+    def _validate_directions(self) -> None:
+        """Check one covector output per direction of a multi-direction normal."""
+
+        if self.action != "normal" or self.extension is not None:
+            raise ValueError("directions and covectors require a material normal")
+        if self.direction is not None or self.covector is not None:
+            raise ValueError(
+                "normal takes direction/covector or directions/covectors, not both"
+            )
+        if (
+            not self.directions
+            or self.covectors is None
+            or len(self.covectors) != len(self.directions)
+        ):
+            raise ValueError("normal needs one covector output per direction")
+        if len(set(self.covectors)) != len(self.covectors):
+            raise ValueError("normal covector outputs must be distinct")
+        if (
+            self.source_controls is not None
+            or self.reflectivity is not None
+            or self.kernel_derivative is not None
+        ):
+            raise ValueError(
+                "several normal directions require material-only ordinary or phase normals"
+            )
 
     def _validate_receiver(self) -> None:
         """Validate the raw receiver actions independently of objective states."""
@@ -1860,9 +1975,28 @@ class FWIOperatorJob(_ImagingJobBase):
             raise ValueError("this job has no objective state path")
         return _task_path(self.state, task)
 
-    def covector_file(self, task: Optional[int] = None, *, raw: bool = False) -> Path:
-        """Return the covector stem, one task part, or the raw smoothing aggregate."""
+    def background_file(self, task: Optional[int] = None) -> Path:
+        """Return the immutable background manifest stem or one task's manifest."""
+        if self.background is None:
+            raise ValueError("this job has no background checkpoint path")
+        return _task_path(self.background, task)
 
+    def covector_file(
+        self,
+        task: Optional[int] = None,
+        *,
+        raw: bool = False,
+        output: Optional[int] = None,
+    ) -> Path:
+        """Return the covector stem, one task part, or the raw smoothing aggregate.
+
+        ``output`` selects the covector of one entry of ``directions``.
+        """
+
+        if output is not None:
+            if self.covectors is None:
+                raise ValueError("this job has no per-direction covector outputs")
+            return _task_path(self.covectors[output], task)
         if self.covector is None:
             raise ValueError("this job has no covector output")
         if raw:
@@ -2096,30 +2230,47 @@ class FWIOperatorJob(_ImagingJobBase):
     # -- postprocess ----------------------------------------------------------
 
     def requires_postprocess(self) -> bool:
-        """Return whether the covector parts are smoothed after the tasks."""
+        """Return whether covectors are smoothed, or a regularization applied, after the tasks."""
 
-        return self.smoothing is not None
+        return self.smoothing is not None or self.regularization is not None
 
     def postprocess_file(self, part: Optional[int] = None) -> Path:
-        """Return the aggregate or one task-local covector path."""
+        """Return the aggregate or one task-local covector path.
 
+        A regularization postprocess publishes its result report; its task
+        parts are the (first) covector parts it follows.
+        """
+
+        if self.regularization is not None:
+            if part is None:
+                return Path(self.regularization["result"])
+            return self.covector_file(
+                part, output=None if self.covectors is None else 0
+            )
         return self.covector_file(part)
 
     def postprocess_fetch_files(self) -> List[Path]:
         """Return both the exact aggregate covector and the smoothed result."""
 
+        if self.regularization is not None:
+            return [
+                *map(Path, self.regularization["outputs"]),
+                Path(self.regularization["result"]),
+            ]
         return [self.covector_file(raw=True), self.covector_file()]
 
     def postprocess_output_exists(self) -> bool:
         """Return whether the smoothed covector exists locally."""
 
+        if self.regularization is not None:
+            return all(path.is_file() for path in self.postprocess_fetch_files())
         return self.covector_file().is_file()
 
     def postprocess_part_outputs_exist(self) -> bool:
         """Return whether every task covector part exists locally."""
 
         return all(
-            self.covector_file(part).is_file() for part in range(1, self.n_tasks + 1)
+            self.postprocess_file(part).is_file() for part in range(1, self.n_tasks + 1)
         )
 
     def is_run_current(self) -> bool:
@@ -2157,6 +2308,8 @@ class FWIOperatorJob(_ImagingJobBase):
             payload["Image"] = copy.deepcopy(imaging)
 
         op: Dict[str, Any] = {"action": self.action}
+        if self.background is not None:
+            op["background"] = _job_path(self.background, ctx, False)
         if self.action in _STATE_ACTIONS | _RECEIVER_ACTIONS:
             if self.action in _STATE_ACTIONS:
                 op["state"] = _job_path(self.state, ctx, False)
@@ -2212,6 +2365,10 @@ class FWIOperatorJob(_ImagingJobBase):
                 op["direction"] = _job_path(self.direction, ctx, False)
             if self.covector is not None:
                 op["covector"] = _job_path(self.covector, ctx, False)
+            if self.directions is not None:
+                op["directions"] = [_job_path(p, ctx, False) for p in self.directions]
+            if self.covectors is not None:
+                op["covectors"] = [_job_path(p, ctx, False) for p in self.covectors]
             if self.objective_vector is not None:
                 op["objective_vector"] = _job_path(self.objective_vector, ctx, False)
         if self.objective is not None:
@@ -2252,6 +2409,13 @@ class FWIOperatorJob(_ImagingJobBase):
                 sensitivities["Smoothing"] = self.smoothing.to_control_fs()
             if self.weights is not None:
                 sensitivities["weights"] = list(self.weights)
+            if self.regularization is not None:
+                request = dict(self.regularization)
+                for key in ("context", "result"):
+                    request[key] = _job_path(request[key], ctx, False)
+                for key in ("inputs", "outputs"):
+                    request[key] = [_job_path(p, ctx, False) for p in request[key]]
+                sensitivities["Regularization"] = request
             sensitivities["quadrature"] = self.sensitivity_quadrature
             payload["control_sensitivities"] = sensitivities
         return payload
@@ -2277,6 +2441,8 @@ class FWIOperatorJob(_ImagingJobBase):
         inputs: Dict[str, Any] = _kernel_window_fingerprint(
             self.kernel_derivative, self.project_path
         )
+        if self.background is not None and self.action != "linearize":
+            inputs["background"] = self._resolved_input_fingerprint(self.background)
         if self.receiver_state is not None and self.action != "receiver_linearize":
             inputs["receiver_state"] = self._resolved_input_fingerprint(
                 self.receiver_state
@@ -2287,6 +2453,18 @@ class FWIOperatorJob(_ImagingJobBase):
             )
         if self.direction is not None:
             inputs["direction"] = self._resolved_input_fingerprint(self.direction)
+        if self.directions is not None:
+            inputs["directions"] = [
+                self._resolved_input_fingerprint(path) for path in self.directions
+            ]
+        if self.regularization is not None:
+            inputs["regularization"] = [
+                self._path_content_fingerprint(path)
+                for path in (
+                    self.regularization["context"],
+                    *self.regularization["inputs"],
+                )
+            ]
         if self.objective_vector is not None and self.action != "jvp":
             inputs["objective_vector"] = self._task_input_fingerprints(
                 self.objective_vector
@@ -2408,6 +2586,11 @@ class FWIOperatorJob(_ImagingJobBase):
             source_derivative=op.get("source_derivative"),
             field_retention=op.get("field_retention"),
             field_reuse=op.get("field_reuse"),
+            background=(
+                op.get("background")
+                if op.get("action") == "linearize"
+                else resolve(op.get("background"))
+            ),
             active=controls.get("active") if "controls" in op else None,
             state=resolve(op.get("state")),
             covector=resolve(
@@ -2415,6 +2598,21 @@ class FWIOperatorJob(_ImagingJobBase):
             ),
             direction=resolve(
                 op.get("model_direction") if action == "wri" else op.get("direction")
+            ),
+            directions=(
+                None
+                if op.get("directions") is None
+                else _paths(op["directions"], resolve)
+            ),
+            covectors=(
+                None
+                if op.get("covectors") is None
+                else _paths(op["covectors"], resolve)
+            ),
+            regularization=(
+                _resolve_regularization(sensitivities["Regularization"], resolve)
+                if action == "normal" and "Regularization" in sensitivities
+                else None
             ),
             objective_vector=resolve(op.get("objective_vector")),
             objective=resolve(op.get("objective")),
@@ -3956,12 +4154,32 @@ class MeshAdaptationJob(SmoothJob):
         return job
 
 
+# Content fingerprints of stage-invariant regularization inputs, hashed once when
+# staged: resolved path -> (file status when hashed, fingerprint). A changed
+# status (rewrite, replacement) falls back to hashing the file again.
+_STAGED_INPUTS: Dict[str, Tuple[Tuple[int, ...], Dict[str, Any]]] = {}
+
+
+def _file_status(path: Path) -> Tuple[int, ...]:
+    status = path.stat()
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
 @register_class
 class RegularizationJob(SmoothJob):
     """Evaluate Sauce's native model regularizer or solve its constrained prox.
 
     ``input_vector`` contains full model coefficients, including fixed values.
     A prepared context freezes native weights and amplitude scales for a stage.
+    Stage-invariant ``metric``/``lower``/``upper`` files written once with
+    :meth:`stage_input` are referenced in place by every job of the stage and
+    hashed only when staged.
     """
 
     def __init__(
@@ -4033,20 +4251,56 @@ class RegularizationJob(SmoothJob):
                 path = _output_path(f"regularization_{label}.h5", self._result_path)
                 assert path is not None
                 if isinstance(vector, ControlVectorFile):
-                    ControlVectorFile(
-                        {
-                            unqualified_block_name(k): v
-                            for k, v in vector.blocks.items()
-                        },
-                        native=True,
-                        control_spaces={
-                            unqualified_block_name(k): v
-                            for k, v in vector.control_spaces.items()
-                        },
-                    ).write(path)
+                    self._native_input(vector).write(path)
                 else:
                     path = Path(vector)
                 self.regularization_inputs[label] = path
+
+    @staticmethod
+    def _native_input(vector: ControlVectorFile) -> ControlVectorFile:
+        """Return ``vector`` in Sauce's native ``/controls/<id>`` layout."""
+
+        return ControlVectorFile(
+            {unqualified_block_name(k): v for k, v in vector.blocks.items()},
+            native=True,
+            control_spaces={
+                unqualified_block_name(k): v for k, v in vector.control_spaces.items()
+            },
+        )
+
+    @classmethod
+    def stage_input(cls, vector: ControlVectorFile, path: Union[str, Path]) -> Path:
+        """Publish a stage-invariant ``metric``/``lower``/``upper`` file once.
+
+        The native file is written atomically and hashed once; jobs passing
+        ``path`` reuse that fingerprint while the file's status is unchanged
+        instead of rehashing the file per job. Remote sites receive a stable
+        path that their transfer skips when the copy is current.
+        """
+
+        path = Path(path)
+        with atomic_output_path(path) as temporary:
+            cls._native_input(vector).write(temporary)
+        _STAGED_INPUTS[str(path.resolve())] = (
+            _file_status(path),
+            cls._path_content_fingerprint(path),
+        )
+        return path
+
+    @classmethod
+    def _input_fingerprint(cls, path: Path) -> Dict[str, Any]:
+        """Return a staged input's recorded fingerprint, else hash the file."""
+
+        key = str(Path(path).resolve())
+        recorded = _STAGED_INPUTS.get(key)
+        if recorded is not None:
+            try:
+                if _file_status(Path(path)) == recorded[0]:
+                    return dict(recorded[1])
+            except OSError:
+                pass
+            _STAGED_INPUTS.pop(key, None)
+        return cls._path_content_fingerprint(path)
 
     def to_fs(
         self, ctx: Optional[ExportContext] = None, *, project_relative: bool = False
@@ -4083,7 +4337,7 @@ class RegularizationJob(SmoothJob):
         paths = dict(self.regularization_inputs)
         if self.operation != "prepare":
             paths["context"] = self.context
-        payload.update({k: self._path_content_fingerprint(v) for k, v in paths.items()})
+        payload.update({k: self._input_fingerprint(v) for k, v in paths.items()})
         return payload
 
     @classmethod

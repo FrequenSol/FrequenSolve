@@ -443,7 +443,7 @@ class JobRemoteMixin:
                 return
             schema = payload.get("schema", "")
             if not (
-                schema.startswith(("fs-objective-", "fs-receiver-"))
+                schema.startswith(("fs-objective-", "fs-receiver-", "fs-background-"))
                 or "terms" in payload
                 or "file" in payload
             ):
@@ -760,6 +760,7 @@ class JobRemoteMixin:
                 keys = ["model_direction"]
                 if operator.get("action") != "linearize":
                     keys.append("state")
+                    keys.append("background")
                 if operator.get("action") in {"jvp", "normal", "solve", "wri"}:
                     keys.append("direction")
                 if operator.get("action") == "vjp":
@@ -768,6 +769,10 @@ class JobRemoteMixin:
                     path = operator.get(key)
                     if isinstance(path, (str, Path)):
                         yield JobRemoteMixin._strip_file_locator(path)
+                if operator.get("action") == "normal":
+                    for path in operator.get("directions") or ():
+                        if isinstance(path, (str, Path)):
+                            yield JobRemoteMixin._strip_file_locator(path)
                 for section, key in (("controls", "state"), ("extension", "direction")):
                     path = operator.get(section, {}).get(key)
                     if isinstance(path, (str, Path)):
@@ -779,6 +784,9 @@ class JobRemoteMixin:
                     keys.append("context")
                 for key in keys:
                     path = regularization.get(key)
+                    if isinstance(path, (str, Path)):
+                        yield JobRemoteMixin._strip_file_locator(path)
+                for path in regularization.get("inputs") or ():
                     if isinstance(path, (str, Path)):
                         yield JobRemoteMixin._strip_file_locator(path)
             derivatives = value.get("observed_derivatives")

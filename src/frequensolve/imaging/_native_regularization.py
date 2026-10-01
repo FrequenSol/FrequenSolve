@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import json
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Union
 
 import numpy as np
 
 from ._artifacts import ControlVectorFile, SmoothingConfig, control_smoothing
+from ._block_digest import block_digest
 from .controls import ControlSpace, ControlState, ControlVector
 from .jobs import RegularizationJob
 from .regularization import (
@@ -110,8 +113,11 @@ class BoundNativeRegularization(BoundRegularization):
         self.source.simulation = copy.deepcopy(self.source.simulation)
         self.source.simulation.name = problem.backend.job_name("regularization_model")
         self.source.simulation.save()
-        self._value_cache: dict[bytes, float] = {}
-        self._gradient_cache: dict[bytes, np.ndarray] = {}
+        self._value_cache: dict[tuple, float] = {}
+        self._gradient_cache: dict[tuple, np.ndarray] = {}
+        # Staged prox metric/bounds: (weak references to read-only sources,
+        # their digests, the published files).
+        self._proximal: Optional[tuple] = None
         job = self._run("prepare", self.baseline.values, context=None)
         self.context = job.context
         self.context_identity = json.loads(self.context.read_text())
@@ -120,7 +126,10 @@ class BoundNativeRegularization(BoundRegularization):
         return {
             "config": self.regularization.smoothing.to_control_fs(),
             "factor": self.factor,
-            "reference": hashlib.sha256(self.reference.tobytes()).hexdigest(),
+            # Same digest as hashing tobytes(), without copying the vector.
+            "reference": hashlib.sha256(
+                np.ascontiguousarray(self.reference).data
+            ).hexdigest(),
             "context": self.context_identity,
         }
 
@@ -162,22 +171,84 @@ class BoundNativeRegularization(BoundRegularization):
         vector = v if isinstance(v, ControlVector) else ControlVector(v, self.space)
         return self.baseline.with_update(vector).values.copy()
 
+    @functools.cached_property
+    def _model_layout(self) -> tuple:
+        """``(block, state slice, active slice, support mask)`` of each native block.
+
+        In :meth:`_model_file` order; the baseline, reference and space are
+        fixed for this binding, so the layout is resolved once.
+        """
+        space = self.baseline.space
+        active = self.space.slices
+        blocks = {block.name: block for block in self.space.resolved_blocks}
+        return tuple(
+            (
+                block.name,
+                full,
+                active[block.name],
+                self.space._mask_of(blocks[block.name]),
+            )
+            for block, full in zip(space.resolved_blocks, space.full_slices.values())
+            if block.name.startswith("model.") and block.name in blocks
+        )
+
+    @functools.cached_property
+    def _tangent_origin(self) -> np.ndarray:
+        """The full model at zero active coordinates (fixed values elsewhere)."""
+        origin = self._full(np.zeros(self.space.size))
+        origin.flags.writeable = False
+        return origin
+
+    def _at_reference(self, offset: np.ndarray) -> bool:
+        """Whether every regularized coefficient equals its reference.
+
+        The native energies vanish there with a zero Tikhonov gradient, so no
+        job is needed (e.g. an LS-RTM image at zero without a reference).
+        """
+        space = self.baseline.space
+        return not any(
+            np.any(offset[space.full_slices[block.name]])
+            for block in space.resolved_blocks
+            if block.name.startswith("model.") and block.name in self.space.blocks
+        )
+
+    def _key(self, v: Any) -> tuple:
+        """Cache key of an input, computed without forming the full model.
+
+        A vector on this space is identified by its own coordinates: the
+        baseline, reference and space expanding it to Sauce's model are fixed
+        for this instance (rebinding them resets the caches), so equal keys
+        mean equal native inputs within a run. The zero-copy
+        ``fs-block-sha256-1`` digest hashes the caller's buffer in parallel; a
+        cache hit therefore costs one pass over the vector, no copies.
+        """
+        if isinstance(v, ControlVector):
+            if v.space is not self.space and not v.space.equivalent(self.space):
+                return ("model", block_digest(self._full(v) - self.reference))
+            v = v.values
+        values = np.asarray(v)
+        if np.iscomplexobj(values):
+            raise ValueError("control vectors are real; complex blocks interleave")
+        return ("active", block_digest(values.reshape(-1)))
+
     def _run(
         self,
         operation: str,
-        full: np.ndarray,
+        full: Union[np.ndarray, ControlVectorFile],
         *,
         context: Optional[Path],
         tau: float = 1.0,
-        metric: Optional[ControlVectorFile] = None,
-        lower: Optional[ControlVectorFile] = None,
-        upper: Optional[ControlVectorFile] = None,
+        metric: Optional[Union[Path, ControlVectorFile]] = None,
+        lower: Optional[Union[Path, ControlVectorFile]] = None,
+        upper: Optional[Union[Path, ControlVectorFile]] = None,
     ) -> RegularizationJob:
         spec = self.regularization
         job = RegularizationJob(
             self.source,
             smoothing=spec.smoothing,
-            input_vector=self._model_file(full),
+            input_vector=(
+                full if isinstance(full, ControlVectorFile) else self._model_file(full)
+            ),
             operation=operation,
             context=context,
             tau=tau,
@@ -205,15 +276,22 @@ class BoundNativeRegularization(BoundRegularization):
         return value
 
     def value(self, v: Any) -> float:
-        full = self._full(v) - self.reference
-        key = hashlib.sha256(full.tobytes()).digest()
+        key = self._key(v)
         if key not in self._value_cache:
-            job = self._run(
-                "gradient" if self.is_smooth else "value", full, context=self.context
-            )
-            if self.is_smooth:
-                self._gradient_cache = {key: self._read_gradient(job)}
-            self._value_cache[key] = self._read_value(job)
+            full = self._full(v) - self.reference
+            if self._at_reference(full):
+                if self.is_smooth:
+                    self._gradient_cache = {key: np.zeros(self.space.size)}
+                self._value_cache[key] = 0.0
+            else:
+                job = self._run(
+                    "gradient" if self.is_smooth else "value",
+                    full,
+                    context=self.context,
+                )
+                if self.is_smooth:
+                    self._gradient_cache = {key: self._read_gradient(job)}
+                self._value_cache[key] = self._read_value(job)
         return self.factor * self._value_cache[key]
 
     @property
@@ -234,12 +312,16 @@ class BoundNativeRegularization(BoundRegularization):
     def gradient(self, v: Any) -> ControlVector:
         if not self.is_smooth:
             raise ValueError("TV/TGV require their proximal callback")
-        full = self._full(v) - self.reference
-        key = hashlib.sha256(full.tobytes()).digest()
+        key = self._key(v)
         if key not in self._gradient_cache:
-            job = self._run("gradient", full, context=self.context)
-            self._value_cache[key] = self._read_value(job)
-            self._gradient_cache = {key: self._read_gradient(job)}
+            full = self._full(v) - self.reference
+            if self._at_reference(full):
+                self._value_cache[key] = 0.0
+                self._gradient_cache = {key: np.zeros(self.space.size)}
+            else:
+                job = self._run("gradient", full, context=self.context)
+                self._value_cache[key] = self._read_value(job)
+                self._gradient_cache = {key: self._read_gradient(job)}
         return self._wrap(self.factor * self._gradient_cache[key])
 
     def hessian_operator(self, v: Any = None) -> Any:
@@ -248,7 +330,7 @@ class BoundNativeRegularization(BoundRegularization):
 
         def action(direction: np.ndarray) -> np.ndarray:
             # Tangents have zero fixed entries, unlike full model values.
-            full = self._full(direction) - self._full(np.zeros(self.space.size))
+            full = self._full(direction) - self._tangent_origin
             job = self._run("gradient", full, context=self.context)
             self._read_value(job)
             return self.factor * self._read_gradient(job)
@@ -264,6 +346,79 @@ class BoundNativeRegularization(BoundRegularization):
         self._read_value(job)
         return self.factor * self._read_gradient(job)
 
+    @functools.cached_property
+    def _model_spaces(self) -> dict:
+        """Basis identities of the native blocks, as :meth:`_model_file` records them."""
+        return {
+            block.name: block.basis_identity
+            for block in self.baseline.space.resolved_blocks
+            if block.name.startswith("model.")
+            and block.name in self.space.blocks
+            and block.basis_identity
+        }
+
+    def _proximal_inputs(
+        self, metric: Any, bounds: tuple[np.ndarray, np.ndarray]
+    ) -> dict[str, Path]:
+        """Return the metric and bound files of :meth:`prox`, staged once per content.
+
+        They depend only on ``metric`` and ``bounds`` (baseline, reference and
+        space are fixed for this binding), so each distinct content is written
+        once beside the stage's native context and every later prox job
+        references it in place (a remote site receives one stable path).
+        Read-only arrays are immutable inputs: passing the same ones again is
+        free; other arrays are identified by their ``fs-block-sha256-1``
+        digests (one parallel pass each).
+        """
+        arrays = tuple(np.asarray(a, dtype=float) for a in (metric, *bounds))
+        if any(a.shape != (self.space.size,) for a in arrays):
+            raise ValueError("proximal metric and bounds must match the control space")
+        staged = self._proximal
+        if staged is not None and not all(p.is_file() for p in staged[2].values()):
+            staged = None
+        if staged is not None and all(
+            ref is not None and ref() is array for ref, array in zip(staged[0], arrays)
+        ):
+            return staged[2]
+        digests = tuple(block_digest(array) for array in arrays)
+        paths = (
+            staged[2]
+            if staged is not None and staged[1] == digests
+            else self._stage_proximal(arrays, digests)
+        )
+        # Weak references never keep a caller's arrays alive.
+        refs = tuple(
+            None if array.flags.writeable else weakref.ref(array) for array in arrays
+        )
+        self._proximal = (refs, digests, paths)
+        return paths
+
+    def _stage_proximal(self, arrays: tuple, digests: tuple) -> dict[str, Path]:
+        metric, lower, upper = arrays
+        # Bounds are finite in the native files; inactive DOFs inside each
+        # included block keep equal fixed bounds (their baseline values).
+        limit = np.finfo(float).max / 100
+        baseline = self.baseline.values
+        blocks: dict[str, dict[str, np.ndarray]] = dict(metric={}, lower={}, upper={})
+        for name, full, active, mask in self._model_layout:
+            values = np.ones(mask.size)
+            values[mask] = metric[active]
+            blocks["metric"][name] = values
+            for label, bound in (("lower", lower), ("upper", upper)):
+                segment = baseline[full].copy()
+                segment[mask] = np.clip(bound[active], -limit, limit)
+                blocks[label][name] = np.clip(
+                    segment - self.reference[full], -limit, limit
+                )
+        directory = self.context.parent
+        return {
+            label: RegularizationJob.stage_input(
+                ControlVectorFile(values, control_spaces=self._model_spaces),
+                directory / f"regularization_{label}_{digest.split(':')[-1][:16]}.h5",
+            )
+            for (label, values), digest in zip(blocks.items(), digests)
+        }
+
     def prox(
         self,
         v: np.ndarray,
@@ -271,50 +426,46 @@ class BoundNativeRegularization(BoundRegularization):
         metric: np.ndarray,
         bounds: tuple[np.ndarray, np.ndarray],
     ) -> np.ndarray:
-        full = self._full(np.clip(v, bounds[0], bounds[1]))
+        """Solve Sauce's constrained proximal problem around ``v``.
+
+        Only the target changes between calls: each call writes the native
+        target, while the metric and bound files are staged once per content
+        (:meth:`_proximal_inputs`).
+        """
+        values = np.asarray(v, dtype=float).reshape(-1)
+        if values.size != self.space.size:
+            raise ValueError(
+                f"vector has {values.size} entries; the space has {self.space.size}"
+            )
         # Fidelity targets may lie outside the box; only non-material coordinates
         # are projected here. Native material targets retain their full values.
-        target = self._full(v)
-        for block in self.space.resolved_blocks:
-            if block.name.startswith("model."):
-                sl = self.baseline.space.full_slices[block.name]
-                full[sl] = target[sl]
-        full_metric = np.ones_like(full)
-        # with_update maps active coordinates to the complete model layout;
-        # zeros from tangent-vector expansion are never used as frozen values.
-        limit = np.finfo(float).max / 100
-        lower = self._full(np.clip(bounds[0], -limit, limit))
-        upper = self._full(np.clip(bounds[1], -limit, limit))
-        # Material blocks outside the active space are excluded from the job;
-        # inactive DOFs inside each included block have equal fixed bounds.
-        for block in self.space.resolved_blocks:
-            block_slice = self.baseline.space.full_slices[block.name]
-            active = self.space._mask_of(block)
-            values = np.ones(block.size)
-            values[active] = np.asarray(metric)[self.space.slices[block.name]]
-            full_metric[block_slice] = values
+        model = np.clip(values, bounds[0], bounds[1])
+        baseline = self.baseline.values
+        target = {}
+        for name, full, active, mask in self._model_layout:
+            segment = baseline[full].copy()
+            segment[mask] = values[active]
+            segment -= self.reference[full]
+            target[name] = segment
         job = self._run(
             "proximal",
-            full - self.reference,
+            ControlVectorFile(target, control_spaces=self._model_spaces),
             context=self.context,
             tau=tau * self.factor,
-            metric=self._model_file(full_metric),
-            lower=self._model_file(np.clip(lower - self.reference, -limit, limit)),
-            upper=self._model_file(np.clip(upper - self.reference, -limit, limit)),
+            **self._proximal_inputs(metric, bounds),
         )
-        self._read_value(job)
+        del target
+        energy = self._read_value(job)
         result = ControlVectorFile.read(job.gradient_file(), native=True)
-        for block in self.space.resolved_blocks:
-            if block.name.startswith("model."):
-                sl = self.baseline.space.full_slices[block.name]
-                full[sl] = result[block.name] + self.reference[sl]
-        state = ControlState(
-            self.baseline.space,
-            full,
-            scaling=self.baseline.scaling,
-            scaling_units=self.baseline.scaling_units,
-        )
-        return state.vector(self.space).values
+        for name, full, active, mask in self._model_layout:
+            block = result[name] + self.reference[full]
+            if not (np.isfinite(block.min()) and np.isfinite(block.max())):
+                raise ValueError("control state values must be finite")
+            model[active] = block[mask]
+        # Sauce reports the energy of the returned model: the composite line
+        # search's value() of this trial needs no separate value job.
+        self._value_cache[self._key(model)] = energy
+        return model
 
 
 def bind_workflow_regularization(

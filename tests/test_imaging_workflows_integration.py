@@ -138,6 +138,54 @@ def test_lsrtm_solvers_and_fwi_checkpoint_through_public_api(tmp_path, site):
     )
 
 
+def _background_files(job):
+    root = job._result_path
+    return [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and "background" in path.relative_to(root).as_posix()
+    ]
+
+
+def test_lsrtm_native_regularization_job_counts_and_checkpoint_cleanup(tmp_path, site):
+    problem = _problem(tmp_path, site)
+    problem.linearize()
+    # The default method is LSQR; native Tikhonov still runs CG.
+    tikhonov = im.LSRTM(
+        problem, iterations=25, regularization=im.Tikhonov(1e-3, order=1)
+    )
+    image = tikhonov.run()
+    info = tikhonov.info
+    assert info["method"] == "cg" and info["converged"], info
+    assert np.all(np.isfinite(image.values)) and image.norm() > 0
+    iterations = info["iterations"]
+    folded = 0 if info["fused_regularization"] else iterations
+    assert info["jobs"] == {
+        "linearize": 1,
+        "regularization_prepare": 1,
+        "normal": iterations,
+        **({"regularization_gradient": folded} if folded else {}),
+    }
+    background = info["background"]
+    assert background["enabled"] and background["misses"] == 0, background
+    assert background["reused_solves"] >= iterations
+    job = tikhonov.linearization.job
+    assert job.background is None and background["released_bytes"] > 0
+    assert not _background_files(job)
+
+    tv = im.LSRTM(problem, iterations=40, regularization=im.TV(1e-6))
+    image = tv.run()
+    assert tv.info["method"] == "proximal_gradient", tv.info
+    assert np.all(np.isfinite(image.values))
+    jobs = tv.info["jobs"]
+    # Two power iterations, then one normal and one prox job per trial (the
+    # prox meeting the tolerance needs no normal) and no energy evaluations.
+    assert "regularization_value" not in jobs
+    trials = jobs["regularization_proximal"]
+    assert jobs["normal"] - 2 in {trials, trials - 1}
+    assert not _background_files(tv.linearization.job)
+
+
 @pytest.mark.parametrize("loss", ["l2", "huber"])
 @pytest.mark.parametrize("sparse", [False, True], ids=["dense", "sparse"])
 def test_saved_residual_and_adjoint_through_public_api(tmp_path, site, loss, sparse):

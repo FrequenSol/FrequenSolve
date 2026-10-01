@@ -276,3 +276,35 @@ def test_smooth_native_tikhonov_resumes_with_context(tmp_path):
     np.testing.assert_allclose(problem.gradient(x).values + 0.3 * x, 0, atol=3e-6)
     assert result.stages[0].resumed
     assert result.stages[0].metrics["optimizer"] == "lbfgs"
+
+
+def test_native_cache_hits_hash_the_vector_without_forming_the_model(
+    tmp_path, monkeypatch
+):
+    site = FakeImagingSite(seed=7, support_masks={"model.vp": [1, 0, 1, 1, 0]})
+    problem = _problem(tmp_path, site)
+    problem.state = problem.state_from(np.arange(1.0, 9.0))
+    lin = problem.linearize()
+    spec = im.NativeRegularization(
+        im.Smoothing(kind="tv", alpha=0.04, normalize_amplitude=False)
+    )
+    _, native = bind_workflow_regularization(spec, lin.space, problem, lin)
+    x = lin.point.values
+    expected = native.value(x)
+    built = []
+    full = native._full
+    monkeypatch.setattr(native, "_full", lambda v: built.append(v) or full(v))
+    jobs = len(site.jobs)
+    frozen = x.copy()
+    frozen.flags.writeable = False
+    # Equal coordinates in any container are one key, stable within the run.
+    for same in (x.copy(), frozen, im.ControlVector(x, lin.space), list(x)):
+        assert native.value(same) == expected
+    assert len(site.jobs) == jobs and not built
+    model = native.prox(x, 0.3, np.ones(x.size), lin.space.bounds)
+    jobs, built[:] = len(site.jobs), []
+    # Sauce's prox energy of the returned model serves the line search's value.
+    native.value(np.array(model))
+    assert len(site.jobs) == jobs and not built
+    native.value(0.5 * x)
+    assert len(site.jobs) == jobs + 1 and len(built) == 1
