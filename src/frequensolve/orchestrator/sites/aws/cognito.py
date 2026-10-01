@@ -87,7 +87,7 @@ def _authentication_result(
             "about the supported sign-in method for your account."
         )
     result = response.get("AuthenticationResult")
-    required = ("IdToken", "AccessToken")
+    required: tuple[str, ...] = ("IdToken", "AccessToken")
     if not refreshing:
         required += ("RefreshToken",)
     if not isinstance(result, dict) or any(
