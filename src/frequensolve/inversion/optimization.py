@@ -12,6 +12,7 @@ __all__ = [
     "InexactNewtonOptions",
     "InexactNewtonResult",
     "LBFGSOptions",
+    "LBFGSRestart",
     "minimize_inexact_newton",
     "minimize_lbfgs",
     "minimize_proximal_gradient",
@@ -40,6 +41,23 @@ def _finite_vector(value: Any, *, name: str, size: Optional[int] = None) -> np.n
     if not np.all(np.isfinite(array)):
         raise ValueError(f"{name} must contain only finite values")
     return np.array(array, copy=True)
+
+
+def _restart_vector(value: Any, name: str, size: int) -> np.ndarray:
+    """Adopt a read-only float64 restart vector by reference; copy anything else once."""
+
+    if (
+        isinstance(value, np.ndarray)
+        and value.dtype == np.float64
+        and value.shape == (size,)
+        and not value.flags.writeable
+    ):
+        if not _all_finite(value):
+            raise ValueError(f"{name} must contain only finite values")
+        return value
+    vector = _finite_vector(value, name=name, size=size)
+    vector.flags.writeable = False
+    return vector
 
 
 def _positive(value: float, name: str, *, allow_zero: bool = False) -> float:
@@ -336,9 +354,101 @@ class LBFGSOptions:
         object.__setattr__(self, "backtrack_factor", backtrack)
 
 
+LBFGS_RESTART_SCHEMA = "fs-lbfgs-restart-2"
+
+
+def _all_finite(array: np.ndarray) -> bool:
+    """Check finiteness with two reductions instead of a boolean temporary."""
+
+    return bool(np.isfinite(array.min()) and np.isfinite(array.max()))
+
+
+def _read_only(array: np.ndarray) -> np.ndarray:
+    """Share a vector the optimizer never writes again as a read-only view."""
+
+    view = array.view()
+    view.flags.writeable = False
+    return view
+
+
+@dataclass(frozen=True, eq=False)
+class LBFGSRestart:
+    """Exact restart state of :func:`minimize_lbfgs` (``fs-lbfgs-restart-2``).
+
+    Every accepted L-BFGS iteration reports one as
+    ``InexactNewtonIteration.optimizer_state``. It references the optimizer's
+    own read-only arrays, so building it copies nothing: ``model`` is the
+    accepted iterate and ``steps``/``gradient_differences`` hold one vector per
+    retained curvature pair, oldest first. ``pair_ids`` number each pair by the
+    accepted iteration that produced it; they are unique within one run and its
+    restarts, so a consumer can persist each immutable pair exactly once.
+    Passing the state back as ``minimize_lbfgs(restart=...)`` continues the
+    iteration bitwise identically. Read-only restart arrays are adopted by
+    reference; writable ones are copied once. Do not modify the arrays.
+    """
+
+    model: np.ndarray
+    steps: Tuple[np.ndarray, ...]
+    gradient_differences: Tuple[np.ndarray, ...]
+    pair_ids: Tuple[int, ...]
+    history_size: int
+    accepted_iterations: int
+    initial_objective: float
+    improvement: Optional[float] = None
+    schema: str = LBFGS_RESTART_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema != LBFGS_RESTART_SCHEMA:
+            raise ValueError(
+                f"Unsupported L-BFGS restart schema {self.schema!r}; "
+                f"expected {LBFGS_RESTART_SCHEMA!r}"
+            )
+        model = self.model
+        if not isinstance(model, np.ndarray) or model.ndim != 1 or not model.size:
+            raise ValueError("L-BFGS restart model must be a non-empty vector")
+        steps = tuple(self.steps)
+        differences = tuple(self.gradient_differences)
+        identifiers = tuple(int(value) for value in self.pair_ids)
+        if not len(steps) == len(differences) == len(identifiers):
+            raise ValueError("L-BFGS restart pairs and identifiers disagree")
+        for vector in steps + differences:
+            if not isinstance(vector, np.ndarray) or vector.shape != model.shape:
+                raise ValueError("L-BFGS restart pairs must match the model shape")
+        accepted = int(self.accepted_iterations)
+        if accepted < 0 or int(self.history_size) < 1:
+            raise ValueError("L-BFGS restart counters must be nonnegative")
+        if any(
+            later <= earlier for earlier, later in zip(identifiers, identifiers[1:])
+        ):
+            raise ValueError("L-BFGS restart pair identifiers must increase")
+        if identifiers and (identifiers[0] < 1 or identifiers[-1] > accepted):
+            raise ValueError("L-BFGS restart pair identifiers exceed its iterations")
+        object.__setattr__(self, "steps", steps)
+        object.__setattr__(self, "gradient_differences", differences)
+        object.__setattr__(self, "pair_ids", identifiers)
+        object.__setattr__(self, "history_size", int(self.history_size))
+        object.__setattr__(self, "accepted_iterations", accepted)
+        object.__setattr__(self, "initial_objective", float(self.initial_objective))
+        if self.improvement is not None:
+            object.__setattr__(self, "improvement", float(self.improvement))
+
+    @property
+    def pair_count(self) -> int:
+        """Return the number of retained curvature pairs."""
+
+        return len(self.steps)
+
+
 @dataclass(frozen=True)
 class InexactNewtonIteration:
-    """Diagnostics for the initial point or one accepted outer iteration."""
+    """Diagnostics for the initial point or one accepted outer iteration.
+
+    The vectors are read-only views of the optimizer's own arrays, not copies.
+    The optimizer never writes an accepted iterate, gradient or step again, so
+    a callback may retain them; they may share memory with other records (one
+    iteration's ``gradient`` is the next one's ``linearization_gradient``), the
+    restart state and the returned result. Copy a vector before modifying it.
+    """
 
     iteration: int
     model: np.ndarray
@@ -365,7 +475,7 @@ class InexactNewtonIteration:
     objective_evaluations: int
     gradient_evaluations: int
     hessian_products: int
-    optimizer_state: Optional[dict[str, Any]] = None
+    optimizer_state: Optional[LBFGSRestart] = None
 
 
 @dataclass(frozen=True)
@@ -730,17 +840,18 @@ def minimize_inexact_newton(
     forcing = min(
         options.maximum_forcing, max(options.minimum_forcing, options.initial_forcing)
     )
-    zero = np.zeros_like(model)
     if callback is not None:
+        # Accepted vectors are never written again: share them read-only.
+        zero = _read_only(np.zeros_like(model))
         callback(
             InexactNewtonIteration(
                 iteration=0,
-                model=np.array(model, copy=True),
+                model=_read_only(model),
                 objective=value,
                 objective_relative_reduction=0.0,
                 objective_reduction_momentum=0.0,
-                gradient=np.array(grad, copy=True),
-                linearization_gradient=np.array(grad, copy=True),
+                gradient=_read_only(grad),
+                linearization_gradient=_read_only(grad),
                 projected_gradient_norm=projected_norm,
                 step=zero,
                 raw_step=zero,
@@ -761,6 +872,7 @@ def minimize_inexact_newton(
                 hessian_products=hessian_products,
             )
         )
+        del zero  # Held by the record only; never pinned for the whole run.
     if options.objective_target is not None and value <= options.objective_target:
         return InexactNewtonResult(
             True,
@@ -1011,15 +1123,15 @@ def minimize_inexact_newton(
             callback(
                 InexactNewtonIteration(
                     iteration=iteration,
-                    model=np.array(model, copy=True),
+                    model=_read_only(model),
                     objective=value,
                     objective_relative_reduction=objective_relative_reduction,
                     objective_reduction_momentum=objective_reduction_momentum,
-                    gradient=np.array(grad, copy=True),
-                    linearization_gradient=np.array(old_gradient, copy=True),
+                    gradient=_read_only(grad),
+                    linearization_gradient=_read_only(old_gradient),
                     projected_gradient_norm=projected_norm,
-                    step=np.array(step, copy=True),
-                    raw_step=np.array(bounded_raw_step, copy=True),
+                    step=_read_only(step),
+                    raw_step=_read_only(bounded_raw_step),
                     directional_derivative=float(np.dot(old_gradient, step)),
                     raw_directional_derivative=float(
                         np.dot(old_gradient, bounded_raw_step)
@@ -1106,7 +1218,7 @@ def minimize_lbfgs(
     step_limit: Optional[StepLimit] = None,
     step_transform: Optional[StepTransform] = None,
     callback: Optional[IterationCallback] = None,
-    restart: Optional[dict[str, Any]] = None,
+    restart: Optional[LBFGSRestart] = None,
 ) -> InexactNewtonResult:
     """Minimize a real objective with projected limited-memory BFGS.
 
@@ -1120,6 +1232,10 @@ def minimize_lbfgs(
     The common result and iteration records are retained so optimization
     history consumers can compare Newton-CG and L-BFGS runs directly. Their CG
     and Hessian counters are identically zero for this method.
+
+    Every iteration record carries an :class:`LBFGSRestart` that references
+    (never copies) the optimizer's accepted model and curvature pairs;
+    ``restart`` continues bitwise identically from such a state.
     """
 
     if not callable(objective) or not callable(gradient):
@@ -1203,44 +1319,46 @@ def minimize_lbfgs(
             )
         return result
 
+    # Accepted pairs are immutable: the restart state shares them by reference.
     steps: list[np.ndarray] = []
     gradient_differences: list[np.ndarray] = []
     inverse_curvatures: list[float] = []
+    pair_ids: list[int] = []
     accepted_before = 0
     if restart is not None:
-        if restart.get("schema") != "fs-lbfgs-restart-1":
-            raise ValueError("Unsupported L-BFGS restart state")
-        if not np.array_equal(
-            _finite_vector(restart["model"], name="restart model", size=model.size),
-            model,
+        if not isinstance(restart, LBFGSRestart):
+            raise TypeError(
+                "L-BFGS restart must be an LBFGSRestart (fs-lbfgs-restart-2); "
+                "JSON-list fs-lbfgs-restart-1 states are no longer supported"
+            )
+        if restart.model.shape != model.shape or not np.array_equal(
+            restart.model, model
         ):
             raise ValueError("L-BFGS restart belongs to a different model or scaling")
-        if restart["history_size"] != options.history_size:
+        if restart.history_size != options.history_size:
             raise ValueError("L-BFGS restart history size changed")
-        pairs = restart["pairs"]
-        if len(pairs) > options.history_size:
+        if restart.pair_count > options.history_size:
             raise ValueError("L-BFGS restart exceeds its history size")
-        for pair in pairs:
-            step = _finite_vector(pair["step"], name="restart step", size=model.size)
-            difference = _finite_vector(
-                pair["difference"], name="restart difference", size=model.size
-            )
+        for step, difference, identifier in zip(
+            restart.steps, restart.gradient_differences, restart.pair_ids
+        ):
+            step = _restart_vector(step, "restart step", model.size)
+            difference = _restart_vector(difference, "restart difference", model.size)
             curvature = float(np.dot(step, difference))
             if not np.isfinite(curvature) or curvature <= 0:
                 raise ValueError("L-BFGS restart requires positive finite curvature")
             steps.append(step)
             gradient_differences.append(difference)
             inverse_curvatures.append(1.0 / curvature)
-        accepted_before = int(restart["accepted_iterations"])
-        if accepted_before < 0:
-            raise ValueError("L-BFGS restart has a negative iteration count")
+            pair_ids.append(identifier)
+        accepted_before = restart.accepted_iterations
 
     value = evaluate(model)
     reference = (
         value
         if restart is None
         else _positive(
-            restart["initial_objective"], "restart initial objective", allow_zero=True
+            restart.initial_objective, "restart initial objective", allow_zero=True
         )
     )
     if (
@@ -1251,43 +1369,46 @@ def minimize_lbfgs(
         raise ValueError("L-BFGS restart initial objective changed")
     stopping = _StoppingCriteria(options, reference)
     if restart is not None:
-        improvement = restart.get("improvement")
+        improvement = restart.improvement
         if improvement is not None and (
             not np.isfinite(improvement) or improvement < 0
         ):
             raise ValueError("L-BFGS restart has invalid stopping momentum")
         stopping.improvement = improvement
 
-    def restart_state(iteration: int) -> dict[str, Any]:
-        return {
-            "schema": "fs-lbfgs-restart-1",
-            "model": model.tolist(),
-            "history_size": options.history_size,
-            "accepted_iterations": accepted_before + iteration,
-            "improvement": stopping.improvement,
-            "initial_objective": stopping.reference,
-            "pairs": [
-                {"step": step.tolist(), "difference": difference.tolist()}
-                for step, difference in zip(steps, gradient_differences)
-            ],
-        }
+    def restart_state(iteration: int) -> LBFGSRestart:
+        # A read-only view of the accepted iterate; the optimizer never writes
+        # an accepted model or pair in place, so no vector is copied here.
+        current = model.view()
+        current.flags.writeable = False
+        return LBFGSRestart(
+            model=current,
+            steps=tuple(steps),
+            gradient_differences=tuple(gradient_differences),
+            pair_ids=tuple(pair_ids),
+            history_size=options.history_size,
+            accepted_iterations=accepted_before + iteration,
+            initial_objective=stopping.reference,
+            improvement=stopping.improvement,
+        )
 
     grad = evaluate_gradient(model)
     free, projected_gradient = _free_variables(
         model, grad, lower, upper, options.bound_tolerance
     )
     projected_norm = float(np.linalg.norm(projected_gradient))
-    zero = np.zeros_like(model)
     if callback is not None:
+        # Accepted vectors are never written again: share them read-only.
+        zero = _read_only(np.zeros_like(model))
         callback(
             InexactNewtonIteration(
                 iteration=0,
-                model=np.array(model, copy=True),
+                model=_read_only(model),
                 objective=value,
                 objective_relative_reduction=0.0,
                 objective_reduction_momentum=0.0,
-                gradient=np.array(grad, copy=True),
-                linearization_gradient=np.array(grad, copy=True),
+                gradient=_read_only(grad),
+                linearization_gradient=_read_only(grad),
                 projected_gradient_norm=projected_norm,
                 step=zero,
                 raw_step=zero,
@@ -1309,6 +1430,7 @@ def minimize_lbfgs(
                 optimizer_state=restart_state(0),
             )
         )
+        del zero  # Held by the record only; never pinned for the whole run.
     if options.objective_target is not None and value <= options.objective_target:
         return InexactNewtonResult(
             True,
@@ -1357,6 +1479,7 @@ def minimize_lbfgs(
             steps.clear()
             gradient_differences.clear()
             inverse_curvatures.clear()
+            pair_ids.clear()
             direction = -projected_gradient
             raw_directional_derivative = -float(
                 np.dot(projected_gradient, projected_gradient)
@@ -1450,6 +1573,7 @@ def minimize_lbfgs(
                 steps.clear()
                 gradient_differences.clear()
                 inverse_curvatures.clear()
+                pair_ids.clear()
                 direction = -initial_inverse_action(projected_gradient)
                 if free is not None:
                     direction[~free] = 0.0
@@ -1523,13 +1647,19 @@ def minimize_lbfgs(
             float(np.finfo(float).tiny),
         )
         if curvature > options.curvature_tolerance * curvature_scale:
-            steps.append(np.array(step, copy=True))
-            gradient_differences.append(np.array(gradient_difference, copy=True))
+            # Both vectors were freshly computed above and are never written
+            # again; retain them read-only instead of copying.
+            step.flags.writeable = False
+            gradient_difference.flags.writeable = False
+            steps.append(step)
+            gradient_differences.append(gradient_difference)
             inverse_curvatures.append(1.0 / curvature)
+            pair_ids.append(accepted_before + iteration)
             if len(steps) > options.history_size:
                 del steps[0]
                 del gradient_differences[0]
                 del inverse_curvatures[0]
+                del pair_ids[0]
 
         if callback is not None:
             raw_norm = float(np.linalg.norm(bounded_raw_step))
@@ -1543,15 +1673,15 @@ def minimize_lbfgs(
             callback(
                 InexactNewtonIteration(
                     iteration=iteration,
-                    model=np.array(model, copy=True),
+                    model=_read_only(model),
                     objective=value,
                     objective_relative_reduction=objective_relative_reduction,
                     objective_reduction_momentum=objective_reduction_momentum,
-                    gradient=np.array(grad, copy=True),
-                    linearization_gradient=np.array(old_gradient, copy=True),
+                    gradient=_read_only(grad),
+                    linearization_gradient=_read_only(old_gradient),
                     projected_gradient_norm=projected_norm,
-                    step=np.array(step, copy=True),
-                    raw_step=np.array(bounded_raw_step, copy=True),
+                    step=_read_only(step),
+                    raw_step=_read_only(bounded_raw_step),
                     directional_derivative=float(np.dot(old_gradient, step)),
                     raw_directional_derivative=float(
                         np.dot(old_gradient, bounded_raw_step)
@@ -1636,20 +1766,53 @@ def minimize_proximal_gradient(
     options: Optional[InexactNewtonOptions | LBFGSOptions] = None,
     callback: Optional[IterationCallback] = None,
     step_limit: Optional[StepLimit] = None,
+    initial_step: float = 1.0,
+    relative_tolerance: Optional[float] = None,
+    curvature_steps: bool = False,
 ) -> InexactNewtonResult:
     """Minimize a smooth objective plus a native convex regularizer.
 
     ``proximal(v, tau, bounds)`` solves the constrained proximal problem in
     these optimizer coordinates. Backtracking tests the smooth majorization
     inequality and composite decrease. Stationarity uses the proximal-gradient
-    mapping, including at nonsmooth points and fixed bounds.
+    mapping ``||prox(x - tau g) - x|| / tau``, including at nonsmooth points
+    and fixed bounds.
+
+    ``initial_step`` is the first step ``tau``; backtracking stops below
+    ``options.minimum_step_length * initial_step``. After an accepted
+    iteration the step grows by ``1 / backtrack_factor``, by default up to
+    ``initial_step``. The unit default suits scaled optimizer coordinates.
+    Objectives without a natural scale (e.g. a frozen least-squares model in
+    physical units) pass an inverse-curvature estimate ``1 / lambda_max``.
+
+    ``relative_tolerance`` adds a scale-free stationarity test: stop once the
+    mapping norm is at most ``relative_tolerance`` times its value at the
+    initial model (first trial step), in addition to the absolute/relative
+    thresholds of ``options``. Value comparisons then allow roundoff relative
+    to the objective magnitude only, without the unit floor used otherwise.
+
+    ``curvature_steps`` suits smooth parts with (nearly) constant curvature,
+    such as a frozen Gauss-Newton model, where every rejected trial costs a
+    full objective and proximal evaluation. Steps then follow the secant
+    curvature ``kappa`` along each trial (exact for a quadratic): a trial
+    rejected by the majorization test is retried at ``1 / kappa`` (at most
+    ``backtrack_factor`` times the rejected step), and an accepted iteration
+    grows the step towards the Barzilai-Borwein step ``1 / kappa`` of the
+    accepted trial without the ``initial_step`` cap.
     """
     options = InexactNewtonOptions() if options is None else options
+    first_step = _positive(initial_step, "initial_step")
+    if relative_tolerance is not None:
+        relative_tolerance = _positive(
+            relative_tolerance, "relative_tolerance", allow_zero=True
+        )
     x = _finite_vector(initial_model, name="initial model")
     lower, upper = _bounds(bounds, x.size, None)
+    # The same read-only pair reaches every proximal call, so a callable can
+    # stage bound-dependent inputs once per solve.
     box = (
-        np.full(x.size, -np.inf) if lower is None else lower,
-        np.full(x.size, np.inf) if upper is None else upper,
+        _read_only(np.full(x.size, -np.inf) if lower is None else lower),
+        _read_only(np.full(x.size, np.inf) if upper is None else upper),
     )
     if np.any(x < box[0]) or np.any(x > box[1]):
         raise ValueError("initial model violates its bounds")
@@ -1673,8 +1836,14 @@ def minimize_proximal_gradient(
     stopping = _StoppingCriteria(options, f + reg)
     g = _finite_vector(gradient(x.copy()), name="gradient", size=x.size)
     gradients += 1
-    tau = 1.0
+    tau = first_step
+    minimum_step = options.minimum_step_length * first_step
     stable_tau: Optional[float] = None
+    threshold = stopping.gradient_threshold
+    reference_mapping: Optional[float] = None
+    # Value comparisons allow 32 eps of the objective magnitude, floored at
+    # one unless stopping is relative (no unit scale is assumed then).
+    roundoff_floor = 1.0 if relative_tolerance is None else 0.0
 
     def finish(
         success: bool, status: int, message: str, iteration: int
@@ -1699,11 +1868,12 @@ def minimize_proximal_gradient(
     for iteration in range(1, options.max_iterations + 1):
         accepted = False
         trials = 0
-        previous = x.copy()
-        old_gradient = g.copy()
+        # ``x`` and ``g`` are rebound, never written in place: no copies needed.
+        previous = x
+        old_gradient = g
         old_total = f + reg
         try:
-            while tau >= options.minimum_step_length:
+            while tau >= minimum_step:
                 if (
                     options.max_line_search_trials is not None
                     and trials >= options.max_line_search_trials
@@ -1719,7 +1889,11 @@ def minimize_proximal_gradient(
                     raise ValueError("proximal result violates the supplied bounds")
                 step = trial - x
                 mapping = float(np.linalg.norm(step) / tau)
-                if mapping <= stopping.gradient_threshold:
+                if reference_mapping is None:
+                    reference_mapping = mapping
+                    if relative_tolerance is not None:
+                        threshold += relative_tolerance * mapping
+                if mapping <= threshold:
                     return finish(
                         True, 0, "proximal gradient tolerance reached", iteration - 1
                     )
@@ -1736,7 +1910,7 @@ def minimize_proximal_gradient(
                 roundoff = (
                     32
                     * np.finfo(float).eps
-                    * max(1.0, abs(f), abs(trial_f), abs(old_total))
+                    * max(roundoff_floor, abs(f), abs(trial_f), abs(old_total))
                 )
                 # At machine precision the value test cannot distinguish large
                 # unstable steps. Keep the last step certified above roundoff.
@@ -1749,6 +1923,9 @@ def minimize_proximal_gradient(
                     continue
                 majorized = trial_f <= f + slope + 0.5 * norm2 / tau + roundoff
                 composite_slope = slope + trial_reg - reg
+                # Secant curvature along the step (exact for a quadratic).
+                excess = trial_f - f - slope
+                curvature = 2.0 * excess / norm2 if excess > roundoff else 0.0
                 if (
                     majorized
                     and composite_slope <= roundoff - 0.5 * norm2 / tau
@@ -1761,6 +1938,9 @@ def minimize_proximal_gradient(
                         stable_tau = tau
                     accepted = True
                     break
+                if curvature_steps and not majorized and excess > 0:
+                    tau = min(tau * options.backtrack_factor, 0.5 * norm2 / excess)
+                    continue
                 tau *= options.backtrack_factor
         except _EvaluationLimit:
             return finish(
@@ -1780,15 +1960,15 @@ def minimize_proximal_gradient(
             callback(
                 InexactNewtonIteration(
                     iteration=iteration,
-                    model=x.copy(),
+                    model=_read_only(x),
                     objective=f + reg,
                     objective_relative_reduction=reduction,
                     objective_reduction_momentum=momentum,
-                    gradient=g.copy(),
-                    linearization_gradient=old_gradient,
+                    gradient=_read_only(g),
+                    linearization_gradient=_read_only(old_gradient),
                     projected_gradient_norm=mapping,
-                    step=step.copy(),
-                    raw_step=-tau * old_gradient,
+                    step=_read_only(step),
+                    raw_step=_read_only(-tau * old_gradient),
                     directional_derivative=composite_slope,
                     raw_directional_derivative=-tau
                     * float(old_gradient @ old_gradient),
@@ -1819,5 +1999,10 @@ def minimize_proximal_gradient(
         ):
             return finish(True, 0, "objective tolerance reached", iteration)
         if norm2 / tau >= 100 * roundoff:
-            tau = min(1.0, tau / options.backtrack_factor)
+            growth = tau / options.backtrack_factor
+            if not curvature_steps:
+                growth = min(growth, first_step)
+            elif curvature > 0:
+                growth = min(growth, 1.0 / curvature)
+            tau = max(tau, growth)
     return finish(False, 1, "maximum iterations reached", options.max_iterations)

@@ -161,6 +161,104 @@ def test_proximal_relative_tolerance_includes_regularization():
     assert result.objective == 12.0
 
 
+def _soft_threshold(v, t):
+    return np.sign(v) * np.maximum(np.abs(v) - t, 0.0)
+
+
+def _scaled_lasso(scale):
+    """``scale * (g.x + x.Hx/2 + alpha |x|_1)``: minimizer independent of scale."""
+
+    rng = np.random.default_rng(4)
+    basis, _ = np.linalg.qr(rng.standard_normal((12, 12)))
+    hessian = (basis * np.geomspace(1.0, 50.0, 12)) @ basis.T
+    target = rng.standard_normal(12) * (rng.random(12) < 0.5)
+    return scale * hessian, -scale * hessian @ target, 0.05 * scale
+
+
+def _lasso_solution():
+    hessian, g, alpha = _scaled_lasso(1.0)
+    step = 1.0 / np.linalg.eigvalsh(hessian).max()
+    x = np.zeros(12)
+    for _ in range(20000):
+        x = _soft_threshold(x - step * (g + hessian @ x), step * alpha)
+    return x
+
+
+@pytest.mark.parametrize("curvature_steps", [False, True])
+def test_proximal_relative_stopping_and_initial_step_are_scale_free(curvature_steps):
+    exact = _lasso_solution()
+    runs, products = [], []
+    for scale in (1.0, 1e-3, 1e-5):
+        hessian, g, alpha = _scaled_lasso(scale)
+        count = [0]
+
+        def value(x, hessian=hessian, g=g, count=count):
+            count[0] += 1
+            return float(g @ x + 0.5 * x @ hessian @ x)
+
+        runs.append(
+            minimize_proximal_gradient(
+                value,
+                lambda x, hessian=hessian, g=g: g + hessian @ x,
+                lambda x, alpha=alpha: alpha * float(np.abs(x).sum()),
+                lambda v, tau, box, alpha=alpha: np.clip(
+                    _soft_threshold(v, tau * alpha), *box
+                ),
+                np.zeros(12),
+                options=InexactNewtonOptions(
+                    max_iterations=5000,
+                    gradient_tolerance=0.0,
+                    objective_tolerance=0.0,
+                    step_tolerance=0.0,
+                ),
+                initial_step=1.0 / np.linalg.eigvalsh(hessian).max(),
+                relative_tolerance=1e-4,
+                curvature_steps=curvature_steps,
+            )
+        )
+        products.append(count[0])
+    errors = [np.linalg.norm(r.model - exact) / np.linalg.norm(exact) for r in runs]
+    assert all(r.success and r.message.startswith("proximal gradient") for r in runs)
+    # Identical iterates at every scale: same iterations and evaluations.
+    assert len({r.iterations for r in runs}) == 1 and len(set(products)) == 1
+    np.testing.assert_allclose(errors, errors[0], rtol=1e-3)
+    assert errors[0] < 2e-3
+
+
+def test_proximal_curvature_steps_avoid_repeated_rejected_trials():
+    hessian, g, alpha = _scaled_lasso(1.0)
+    kwargs = dict(
+        objective=lambda x: float(g @ x + 0.5 * x @ hessian @ x),
+        gradient=lambda x: g + hessian @ x,
+        regularization=lambda x: alpha * float(np.abs(x).sum()),
+        proximal=lambda v, tau, box: np.clip(_soft_threshold(v, tau * alpha), *box),
+        initial_model=np.zeros(12),
+        options=InexactNewtonOptions(
+            max_iterations=5000,
+            gradient_tolerance=0.0,
+            objective_tolerance=0.0,
+            step_tolerance=0.0,
+        ),
+        initial_step=1.0 / np.linalg.eigvalsh(hessian).max(),
+        relative_tolerance=1e-4,
+    )
+    plain = minimize_proximal_gradient(**kwargs)
+    curved = minimize_proximal_gradient(**kwargs, curvature_steps=True)
+    assert plain.success and curved.success
+    # Every evaluation is a full objective: rejected doublings cost as much as steps.
+    assert curved.objective_evaluations < plain.objective_evaluations
+    assert curved.objective_evaluations - 1 <= 1.5 * curved.iterations
+    np.testing.assert_allclose(curved.model, _lasso_solution(), atol=1e-3)
+
+
+def test_proximal_initial_step_and_relative_tolerance_are_validated():
+    args = (lambda x: 0.0, lambda x: 0 * x, lambda x: 0.0, lambda v, t, b: v, [1.0])
+    with pytest.raises(ValueError, match="initial_step"):
+        minimize_proximal_gradient(*args, initial_step=0.0)
+    with pytest.raises(ValueError, match="relative_tolerance"):
+        minimize_proximal_gradient(*args, relative_tolerance=-1.0)
+
+
 class _ControlSpace:
     """Minimal control space for the toolkit: ``size`` plus mapping ``pack``."""
 
@@ -1286,7 +1384,7 @@ def test_lbfgs_restart_reproduces_uninterrupted_accepted_models():
         minimize_lbfgs(rosen, rosen_der, initial, options=options, callback=checkpoint)
     resumed = []
     state = saved[0].optimizer_state
-    assert len(state["pairs"]) > 0
+    assert state.pair_count > 0
     import dataclasses
 
     minimize_lbfgs(
@@ -1308,10 +1406,64 @@ def test_lbfgs_restart_reproduces_uninterrupted_accepted_models():
         minimize_lbfgs(
             rosen, rosen_der, saved[0].model + 0.01, options=options, restart=state
         )
-    invalid = dict(state, pairs=[dict(step=[1.0, 0.0], difference=[-1.0, 0.0])])
+    invalid = dataclasses.replace(
+        state,
+        steps=(np.array([1.0, 0.0]),),
+        gradient_differences=(np.array([-1.0, 0.0]),),
+        pair_ids=(1,),
+    )
     with pytest.raises(ValueError, match="positive finite curvature"):
         minimize_lbfgs(
             rosen, rosen_der, saved[0].model, options=options, restart=invalid
+        )
+    legacy = dict(schema="fs-lbfgs-restart-1", model=saved[0].model.tolist())
+    with pytest.raises(TypeError, match="fs-lbfgs-restart-1"):
+        minimize_lbfgs(
+            rosen, rosen_der, saved[0].model, options=options, restart=legacy
+        )
+
+
+def test_lbfgs_restart_state_shares_immutable_optimizer_arrays():
+    """Reporting the restart state copies no vector and never lists elements."""
+    from frequensolve.inversion.optimization import (
+        LBFGSOptions,
+        LBFGSRestart,
+        minimize_lbfgs,
+    )
+
+    diagonal = np.linspace(1.0, 30.0, 40)
+    states = []
+    minimize_lbfgs(
+        lambda x: 0.5 * float(np.dot(diagonal * x, x)) - float(np.sum(x)),
+        lambda x: diagonal * x - 1.0,
+        np.zeros(40),
+        options=LBFGSOptions(
+            history_size=3,
+            max_iterations=6,
+            gradient_tolerance=0,
+            objective_tolerance=0,
+            step_tolerance=0,
+        ),
+        callback=lambda event: states.append(event.optimizer_state),
+    )
+    assert all(isinstance(state, LBFGSRestart) for state in states)
+    assert [s.accepted_iterations for s in states] == list(range(len(states)))
+    final = states[-1]
+    assert final.pair_count == 3 and final.pair_ids == (4, 5, 6)
+    # Surviving pairs are the very same read-only arrays in every later state.
+    assert final.steps[0] is states[-2].steps[1]
+    assert final.gradient_differences[1] is states[-2].gradient_differences[2]
+    for vector in (final.model, *final.steps, *final.gradient_differences):
+        assert isinstance(vector, np.ndarray) and not vector.flags.writeable
+    with pytest.raises(ValueError, match="identifiers"):
+        LBFGSRestart(
+            model=np.zeros(2),
+            steps=(np.ones(2), np.ones(2)),
+            gradient_differences=(np.ones(2), np.ones(2)),
+            pair_ids=(2, 2),
+            history_size=3,
+            accepted_iterations=2,
+            initial_objective=1.0,
         )
 
 
@@ -1344,3 +1496,101 @@ def test_lbfgs_shares_trial_budget_and_preserves_accepted_model(
     assert result.steepest_descent_fallbacks == 0
     np.testing.assert_array_equal(result.model, [2.0])
     np.testing.assert_allclose([x[0] for x in attempted], -(0.5 ** np.arange(limit)))
+
+
+DIAGNOSTIC_VECTORS = ("model", "gradient", "linearization_gradient", "step", "raw_step")
+
+
+@pytest.mark.parametrize("method", ["newton", "lbfgs", "proximal"])
+def test_iteration_diagnostics_share_never_rewritten_optimizer_vectors(method):
+    """Records hold read-only views, not copies, that stay valid after the run."""
+    diagonal = np.linspace(1.0, 30.0, 40)
+    bounds = (np.full(40, -0.5), np.full(40, 0.04))
+
+    def objective(x):
+        return 0.5 * float(np.dot(diagonal * x, x)) - float(np.sum(x))
+
+    def gradient(x):
+        return diagonal * x - 1.0
+
+    def solve(callback):
+        options = dict(
+            max_iterations=8,
+            gradient_tolerance=0,
+            objective_tolerance=0,
+            step_tolerance=0,
+        )
+        if method == "proximal":
+            return minimize_proximal_gradient(
+                objective,
+                gradient,
+                lambda x: 0.0,
+                lambda v, tau, box: np.clip(v, *box),
+                np.zeros(40),
+                bounds=bounds,
+                options=InexactNewtonOptions(**options),
+                initial_step=0.02,
+                callback=callback,
+            )
+        # Bounds and a step transform exercise the in-place trial projections.
+        kwargs = dict(
+            bounds=bounds,
+            preconditioner=lambda x, g: g / diagonal,
+            step_transform=lambda x, step: 0.9 * step,
+            callback=callback,
+        )
+        if method == "newton":
+            return minimize_inexact_newton(
+                objective,
+                gradient,
+                lambda x, v: diagonal * v,
+                np.zeros(40),
+                options=InexactNewtonOptions(**options),
+                **kwargs,
+            )
+        return minimize_lbfgs(
+            objective, gradient, np.zeros(40), options=LBFGSOptions(**options), **kwargs
+        )
+
+    events, snapshots = [], []
+
+    def record(event):
+        events.append(event)
+        snapshots.append({k: getattr(event, k).copy() for k in DIAGNOSTIC_VECTORS})
+
+    result = solve(record)
+    np.testing.assert_array_equal(result.model, solve(None).model)
+    assert len(events) > 3
+    for event, snapshot in zip(events, snapshots):
+        for name, values in snapshot.items():
+            vector = getattr(event, name)
+            assert not vector.flags.writeable
+            # The optimizer never rewrites a shared vector after reporting it.
+            np.testing.assert_array_equal(vector, values)
+        with pytest.raises(ValueError, match="read-only"):
+            event.model[0] = 1.0
+    for earlier, later in zip(events, events[1:]):
+        assert np.shares_memory(earlier.gradient, later.linearization_gradient)
+    if method != "proximal":
+        assert np.shares_memory(events[-1].model, result.model)
+        assert np.shares_memory(events[-1].gradient, result.gradient)
+
+
+def test_history_records_digest_a_read_only_model_without_copying_it():
+    import hashlib
+    import tracemalloc
+
+    model = np.linspace(-1.0, 1.0, 200_000)
+    model.flags.writeable = False
+    history = OptimizationHistory()
+    tracemalloc.start()
+    try:
+        record = history.record_iteration(model, LossTerms(1.0))
+        history.record_evaluation(model, LossTerms(1.0))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert record.model_digest == hashlib.sha256(model.tobytes()).hexdigest()
+    assert peak < model.nbytes // 8
+    with pytest.raises(ValueError, match="finite"):
+        history.record_iteration(np.array([0.0, np.nan]), LossTerms(1.0))
