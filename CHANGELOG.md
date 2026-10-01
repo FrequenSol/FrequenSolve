@@ -5,6 +5,18 @@ prepared.
 
 ## Unreleased
 
+- `NativeCurvature` deletes each operation's staged `input.h5` once its
+  result is verified, unless the result has an HDF5 external link into it
+  (warm-start factors link their unchanged `/modes`); a failed operation
+  keeps its input. The optimizers pass the SDK's own objective,
+  preconditioner and proximal adapters read-only views of their vectors and
+  adopt the arrays they return (about 6 fewer model-sized allocations per
+  L-BFGS iteration, 17 per Newton-CG iteration with 5 CG steps); user
+  callables still receive private copies and their results are copied.
+  With `scaling`, the physical-coordinate iteration records passed to
+  callbacks rescale each vector on first access. Native proximal
+  regularization rewrites a staged metric or bound file only when its content
+  changes.
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five
   vectors per iteration; callbacks must copy a vector before modifying it.

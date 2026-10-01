@@ -4287,6 +4287,16 @@ class RegularizationJob(SmoothJob):
         )
         return path
 
+    @staticmethod
+    def _is_staged(path: Union[str, Path]) -> bool:
+        """Return whether ``path`` still holds what :meth:`stage_input` wrote there."""
+
+        recorded = _STAGED_INPUTS.get(str(Path(path).resolve()))
+        try:
+            return recorded is not None and _file_status(Path(path)) == recorded[0]
+        except OSError:
+            return False
+
     @classmethod
     def _input_fingerprint(cls, path: Path) -> Dict[str, Any]:
         """Return a staged input's recorded fingerprint, else hash the file."""

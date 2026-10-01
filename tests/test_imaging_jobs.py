@@ -2443,6 +2443,89 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(
         }
 
 
+def test_staged_regularization_inputs_are_hashed_once_and_used_in_place(
+    tmp_path, monkeypatch
+):
+    from frequensolve.imaging.jobs import RegularizationJob
+
+    sim = _saved_simulation(tmp_path)
+    source = FWIOperatorJob(
+        "native",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="g.h5",
+    )
+    vector = ControlVectorFile(
+        {"model.vp": [1.0, 2.0]}, control_spaces={"model.vp": "mesh-basis"}
+    )
+    context = tmp_path / "context.json"
+    context.write_text("{}")
+    staged = {
+        label: RegularizationJob.stage_input(vector, tmp_path / "stage" / f"{label}.h5")
+        for label in ("metric", "lower", "upper")
+    }
+    # Published in Sauce's native layout; nothing but the final file remains.
+    assert sorted(p.name for p in (tmp_path / "stage").iterdir()) == [
+        "lower.h5",
+        "metric.h5",
+        "upper.h5",
+    ]
+    for path in staged.values():
+        assert ControlVectorFile.read(path, native=True).control_spaces == {
+            "vp": "mesh-basis"
+        }
+        assert RegularizationJob._is_staged(path)
+    hashed = []
+    fingerprint = RegularizationJob._path_content_fingerprint.__func__
+    monkeypatch.setattr(
+        RegularizationJob,
+        "_path_content_fingerprint",
+        classmethod(
+            lambda cls, path: hashed.append(Path(path)) or fingerprint(cls, path)
+        ),
+    )
+
+    def prox(index):
+        return RegularizationJob(
+            source,
+            smoothing=SmoothingConfig(kind="tv"),
+            input_vector=vector,
+            operation="proximal",
+            context=context,
+            name=f"prox{index}",
+            **staged,
+        )
+
+    jobs = [prox(index) for index in range(3)]
+    payloads = [job._input_fingerprint_payload() for job in jobs]
+    for job, payload in zip(jobs, payloads):
+        # Every job references the same files in place: one stable path each.
+        assert job.regularization_inputs == staged
+        request = job.to_fs()["control_sensitivities"]["Regularization"]
+        assert {label: request[label] for label in staged} == {
+            label: str(path) for label, path in staged.items()
+        }
+        assert {label: payload[label] for label in staged} == {
+            label: payloads[0][label] for label in staged
+        }
+    # The fingerprints recorded at staging serve every job: no staged file is
+    # hashed again, only each job's own input vector and context.
+    assert not set(hashed) & set(staged.values())
+    assert len(hashed) == 2 * len(jobs)
+    # A file changed after staging is no longer trusted and is hashed again.
+    ControlVectorFile(
+        {"vp": [3.0, 4.0]}, native=True, control_spaces={"vp": "mesh-basis"}
+    ).write(staged["lower"])
+    assert not RegularizationJob._is_staged(staged["lower"])
+    changed = prox(3)._input_fingerprint_payload()
+    assert changed["lower"] != payloads[0]["lower"]
+    assert changed["metric"] == payloads[0]["metric"]
+    assert staged["lower"] in hashed
+
+
 @pytest.mark.parametrize(
     "curvature", ["metric_frozen", "exact_gn", "fixed_wavefield", "joint_schur"]
 )

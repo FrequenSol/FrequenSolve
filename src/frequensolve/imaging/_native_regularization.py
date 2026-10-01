@@ -397,30 +397,34 @@ class BoundNativeRegularization(BoundRegularization):
         return paths
 
     def _stage_proximal(self, arrays: tuple, digests: tuple) -> dict[str, Path]:
-        metric, lower, upper = arrays
-        # Bounds are finite in the native files; inactive DOFs inside each
-        # included block keep equal fixed bounds (their baseline values).
+        directory = self.context.parent
+        paths = {
+            label: directory / f"regularization_{label}_{digest.split(':')[-1][:16]}.h5"
+            for label, digest in zip(("metric", "lower", "upper"), digests)
+        }
+        # Names address the content within this binding: a file this process
+        # staged and nothing changed since is current (e.g. the bounds when
+        # only the metric changes), so it is neither rewritten nor uploaded.
         limit = np.finfo(float).max / 100
         baseline = self.baseline.values
-        blocks: dict[str, dict[str, np.ndarray]] = dict(metric={}, lower={}, upper={})
-        for name, full, active, mask in self._model_layout:
-            values = np.ones(mask.size)
-            values[mask] = metric[active]
-            blocks["metric"][name] = values
-            for label, bound in (("lower", lower), ("upper", upper)):
+        for (label, path), array in zip(paths.items(), arrays):
+            if RegularizationJob._is_staged(path):
+                continue
+            blocks: dict[str, np.ndarray] = {}
+            for name, full, active, mask in self._model_layout:
+                if label == "metric":
+                    blocks[name] = np.ones(mask.size)
+                    blocks[name][mask] = array[active]
+                    continue
+                # Bounds are finite in the native files; inactive DOFs inside
+                # each included block keep equal fixed bounds (baseline values).
                 segment = baseline[full].copy()
-                segment[mask] = np.clip(bound[active], -limit, limit)
-                blocks[label][name] = np.clip(
-                    segment - self.reference[full], -limit, limit
-                )
-        directory = self.context.parent
-        return {
-            label: RegularizationJob.stage_input(
-                ControlVectorFile(values, control_spaces=self._model_spaces),
-                directory / f"regularization_{label}_{digest.split(':')[-1][:16]}.h5",
+                segment[mask] = np.clip(array[active], -limit, limit)
+                blocks[name] = np.clip(segment - self.reference[full], -limit, limit)
+            RegularizationJob.stage_input(
+                ControlVectorFile(blocks, control_spaces=self._model_spaces), path
             )
-            for (label, values), digest in zip(blocks.items(), digests)
-        }
+        return paths
 
     @_shares_arrays
     def prox(
