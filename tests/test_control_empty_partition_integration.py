@@ -107,6 +107,8 @@ def test_meshed_controls_allow_water_only_rank(tmp_path):
         )
         serial = problem.linearize()
         assert serial.value > 0 and np.linalg.norm(serial.gradient.values) > 0
+        direction = np.ones(serial.space.size)
+        expected_normal = serial.apply_normal(direction).values
         problem.clear_cache()
         problem.backend.submit_options["procs_per_job"] = 2
         distributed = problem.linearize()
@@ -123,3 +125,8 @@ def test_meshed_controls_allow_water_only_rank(tmp_path):
         assert relative_error < 5e-4
         adjoint = distributed.jacobian.dot_test(seed=7, tolerance=1e-3)
         assert adjoint["passed"], adjoint
+        actual_normal = distributed.apply_normal(direction).values
+        normal_error = np.linalg.norm(actual_normal - expected_normal) / np.linalg.norm(
+            expected_normal
+        )
+        assert normal_error < 5e-4
