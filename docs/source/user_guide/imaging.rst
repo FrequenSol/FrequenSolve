@@ -1424,6 +1424,54 @@ gradient covector in the control basis is a visualization only, not a
 physical gradient density or a gradient transfer to grid parameters. The
 example labels that distinction and includes a single tensor-hat basis image.
 
+Packed property artifact contract
+---------------------------------
+
+``fs-property-space-3`` separates initial root metadata, solver records and
+optional visualization. A sorted ``root_directory`` maps root IDs to physical
+cells, material groups and kinds. ``root_geometry`` stores exact float64 physical
+corners in native units, and ``root_linear_geometry`` stores initial geometry
+flags. Geometry and initial identities are independent of refinement and basis
+identities. Python dataset axes reverse the Fortran order.
+
+``payload`` is one fixed, contiguous, uncompressed little-endian int64 dataset.
+``payload_offsets`` holds zero-based int64 word offsets in root-directory order,
+including an end sentinel equal to the payload extent. The codec header is
+``[1179865682, 1, int32_count, int64_count, float64_count]``. Int32 values occupy
+low then high halves of each word; an odd section has a zero high padding half.
+Int64 IDs occupy whole signed words. Float64 values retain their IEEE bit
+patterns. Section lengths must consume the record exactly.
+
+The int32 root section starts with 15 fields: material, GMP kind/id, cell kind,
+linear flag, refinement bit count (low/high halves), then lengths of tree words,
+dyadic vertex words, raw reference coordinates, constraint CSR offsets,
+constraint entries, controls, support offsets and support roots. Tree words,
+dyadic words, constraint offsets/indices, canonical owners, support offsets
+and support roots follow in that order. The int64 section contains ascending
+control IDs. The float64 section contains raw reference coordinates followed
+by constrained weights. Constraint offsets/indices are one-based. Support
+offsets are zero-based with a sentinel; inverse incidence is stored only at a
+control's canonical root. Reference coordinates keep ``2**D`` corner slots;
+physical geometry is never quantized or repeated in refined records.
+
+``visualization_points_m`` and ``visualization_kind`` are leaf arrays indexed
+by ``visualization_offsets``. Solver reads and reference/transfer reads do not
+require them. Plotting reports their absence explicitly. ``lumped_mass`` retains
+exact constrained support in ``km**D`` for output normalization. Legacy
+``fs-property-space-1`` artifacts remain readable offline, but solver jobs stage
+only packed artifacts. Job validation therefore rejects, before submission, an
+existing artifact that Sauce would reuse (the declared path, or its mesh-keyed
+``<stem>.<key>.h5`` sibling) unless it is ``fs-property-space-3``. Move it aside
+to regenerate the space; the regenerated basis has a new identity. The
+unpublished intermediate ``fs-property-space-2`` codec is rejected.
+
+The internal ``PackedPropertyReader`` serves visualization, statistical metadata,
+and reference/transfer consumers. Selected roots are read in contiguous bounded
+batches; typed sections use NumPy views. ``tests/fixtures/property-record-v1.json``
+is the SDK lossless interoperability fixture, including integer extremes,
+64-bit IDs, odd sections and floating-point bit patterns. Each repository keeps its own
+implementation, contract and fixture; there is no private solver dependency.
+
 Adapted property meshes
 ~~~~~~~~~~~~~~~~~~~~~~~
 

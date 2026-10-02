@@ -2620,6 +2620,14 @@ def test_eikonal_batch_caps_initialization_and_task_launches(monkeypatch, tmp_pa
     assert config["max_ranks_per_task"] == 1
 
 
+@pytest.mark.parametrize("minimum", [0, -1])
+def test_sweep_rejects_nonpositive_minimum_before_staging(monkeypatch, minimum):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    with pytest.raises(ValueError, match="min_ranks must be positive"):
+        site._sweep_SLURM_script(n_tasks=1, n_nodes=1, stdout="logs", min_ranks=minimum)
+
+
 def test_selected_dispatcher_exports_its_installation_after_modules(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite(

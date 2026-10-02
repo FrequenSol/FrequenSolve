@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import glob
+import re
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -44,6 +46,7 @@ from .outputs import _validate_field
 from .report import ValidationReport
 
 _SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
+_PROPERTY_SPACE_SCHEMA = "fs-property-space-3"
 
 
 def _validate_simulation(ctx: _ValidationContext) -> None:
@@ -142,6 +145,53 @@ def _validate_model(model: Any, ctx: _ValidationContext) -> None:
                 )
             seen_ids.add(mesh_block_id)
         _validate_property_map(getattr(subdomain, "properties", {}), sub_path, ctx)
+    _validate_property_space_artifacts(model, ctx)
+
+
+def _validate_property_space_artifacts(model: Any, ctx: _ValidationContext) -> None:
+    """Reject existing artifacts that Sauce cannot stage, before queue wait."""
+
+    for name, space in (getattr(model, "property_spaces", None) or {}).items():
+        declared = _resolve_project_file(getattr(space, "artifact", None), ctx)
+        if declared is None:
+            continue
+        # Sauce reuses the declared file; otherwise a job-sized generated mesh
+        # selects the mesh-keyed sibling <stem>.<16 hex digits>.h5.
+        if declared.is_file():
+            candidates = [declared]
+        else:
+            keyed = re.compile(rf"{re.escape(declared.stem)}\.[0-9a-f]{{16}}\.h5")
+            try:
+                siblings = declared.parent.glob(f"{glob.escape(declared.stem)}.*.h5")
+                candidates = sorted(p for p in siblings if keyed.fullmatch(p.name))
+            except OSError:
+                candidates = []
+        for file in candidates:
+            schema = _property_space_schema(file)
+            if schema == _PROPERTY_SPACE_SCHEMA:
+                continue
+            found = "no readable schema" if schema is None else f"schema {schema!r}"
+            ctx.report.error(
+                "model.property_space.artifact.unsupported",
+                f"Property space {name!r} artifact {file} has {found}; solver jobs "
+                f"stage only {_PROPERTY_SPACE_SCHEMA} artifacts.",
+                path=f"model.property_spaces.{name}.artifact",
+                hint="Move the artifact aside so the job regenerates the space. "
+                "The regenerated basis has a new identity, so control states "
+                "saved for the old basis no longer match it. PropertyMesh.read "
+                "still reads fs-property-space-1 offline.",
+            )
+
+
+def _property_space_schema(file: Path) -> Optional[str]:
+    try:
+        with h5py.File(file, "r") as h5:
+            value = h5["property_space/schema"][()]
+    except (OSError, KeyError):
+        return None
+    if isinstance(value, bytes):
+        value = value.decode(errors="replace")
+    return str(value).rstrip(" \0")
 
 
 def _validate_property_map(

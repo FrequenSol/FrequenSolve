@@ -29,6 +29,119 @@ def test_adaptive_scheduler_interval_allocation_and_coalescing():
     assert scheduler._free_interval(remaining, 4, 4) == [(3, 7)]
 
 
+def _idle_scheduler(tmp_path, **options):
+    module = _load_scheduler_module()
+    return module.AdaptiveScheduler(
+        {
+            "executable": "unused-solver",
+            "mpi": "srun",
+            "total_ranks": 64,
+            "omp_threads": 14,
+            "mem_per_rank_gib": 10,
+            "job_task_count": 3,
+            "task_indices": [1, 2, 3],
+            **options,
+        },
+        job_file="job.json",
+        output=str(tmp_path),
+        status=str(tmp_path / "status.json"),
+    )
+
+
+def test_idle_sweep_balances_equal_tasks_before_launch(monkeypatch, tmp_path):
+    instance = _idle_scheduler(tmp_path)
+    # Previously two ceil(64/3) boosts left the third task at its three-rank
+    # memory minimum: 22/22/3 instead of a balanced, fully occupied allocation.
+    launches = _launched_ranks(monkeypatch, instance, [20.0, 20.0, 20.0])
+    assert launches == {1: 22, 2: 21, 3: 21}
+
+
+@pytest.mark.parametrize("minimum", [0, -1])
+@pytest.mark.parametrize("skip_sizing", [False, True])
+def test_scheduler_rejects_nonpositive_minimum(tmp_path, minimum, skip_sizing):
+    with pytest.raises(ValueError, match="min_ranks must be positive"):
+        _idle_scheduler(tmp_path, min_ranks=minimum, skip_sizing=skip_sizing)
+
+
+@pytest.mark.parametrize("skip_sizing", [False, True])
+def test_zero_memory_task_still_launches_with_positive_ranks(
+    monkeypatch, tmp_path, skip_sizing
+):
+    instance = _idle_scheduler(
+        tmp_path, job_task_count=1, task_indices=[1], skip_sizing=skip_sizing
+    )
+    assert instance._choose_base_ranks(0.0) == 1
+    assert _launched_ranks(monkeypatch, instance, [0.0]) == {1: 64}
+
+
+def test_idle_sweep_weights_work_and_redistributes_after_caps(monkeypatch, tmp_path):
+    instance = _idle_scheduler(tmp_path, total_ranks=60)
+    assert _launched_ranks(monkeypatch, instance, [20.0, 30.0, 50.0]) == {
+        1: 12,
+        2: 18,
+        3: 30,
+    }
+    instance = _idle_scheduler(tmp_path, total_ranks=60, max_ranks_per_task=24)
+    assert _launched_ranks(monkeypatch, instance, [20.0, 30.0, 50.0]) == {
+        1: 14,
+        2: 22,
+        3: 24,
+    }
+
+
+def test_idle_sweep_preserves_pins_and_boost_caps(monkeypatch, tmp_path):
+    instance = _idle_scheduler(tmp_path, total_ranks=60, task_ranks={"1": 3})
+    launches = _launched_ranks(monkeypatch, instance, [20.0, 30.0, 50.0])
+    assert launches == {1: 3, 2: 21, 3: 36}
+    instance = _idle_scheduler(tmp_path, boost_max_factor=2)
+    assert _launched_ranks(monkeypatch, instance, [20.0] * 3) == {1: 6, 2: 6, 3: 6}
+
+
+@pytest.mark.parametrize("ranks, expected", [(64, [24, 20, 20]), (63, [20, 20, 20])])
+def test_idle_sweep_obeys_rank_quanta(monkeypatch, tmp_path, ranks, expected):
+    instance = _idle_scheduler(tmp_path, total_ranks=ranks, round_to=4)
+    assert sorted(
+        _launched_ranks(monkeypatch, instance, [20.0] * 3).values()
+    ) == sorted(expected)
+
+
+def test_idle_sweep_zero_cost_and_exact_minimum_budget(tmp_path):
+    instance = _idle_scheduler(tmp_path, total_ranks=12)
+    plan = instance._balanced_idle_plan(
+        [(1, 4, 8, 0.0), (2, 4, 8, 0.0), (3, 4, 8, 0.0)]
+    )
+    assert plan == [(1, 0, 4, 0.0), (2, 4, 4, 0.0), (3, 8, 4, 0.0)]
+    plan = instance._balanced_idle_plan([(1, 1, 8, 0.0), (2, 1, 8, 0.0)])
+    assert [entry[2] for entry in plan] == [6, 6]
+
+
+def test_busy_and_overfull_sweeps_keep_existing_packing(tmp_path):
+    instance = _idle_scheduler(tmp_path)
+    candidates = [(1, 3, 22, 20.0), (2, 3, 22, 20.0), (3, 3, 22, 20.0)]
+    instance.running = [object()]
+    assert instance._balanced_idle_plan(candidates) is None
+    assert [entry[2] for entry in instance._plan_launches(candidates)] == [22, 22, 3]
+    instance.running = []
+    instance.free_intervals = [(0, 20), (40, 24)]
+    assert instance._balanced_idle_plan(candidates) is None
+    assert instance._plan_launches(candidates) == [
+        (1, 40, 22, 20.0),
+        (2, 0, 3, 20.0),
+        (3, 3, 3, 20.0),
+    ]
+    instance.free_intervals = [(0, 64)]
+    assert (
+        instance._balanced_idle_plan([(1, 40, 50, 100.0), (2, 40, 50, 100.0)]) is None
+    )
+    assert instance._balanced_idle_plan([]) is None
+
+
+@pytest.mark.parametrize("launcher", ["mpiexec", "mpirun"])
+def test_idle_balance_does_not_partition_exclusive_launchers(tmp_path, launcher):
+    instance = _idle_scheduler(tmp_path, mpi=launcher)
+    assert instance._balanced_idle_plan([(1, 32, 64, 20.0), (2, 32, 64, 20.0)]) is None
+
+
 def test_adaptive_scheduler_reads_structured_config_without_environment(
     tmp_path,
 ):

@@ -3971,6 +3971,8 @@ class SlurmSite(BaseSite):
         ranks_per_node = int(rank_values.get("ranks_per_node") or 8)
         mem_cushion = float(kwargs.pop("mem_cushion", 1.5))
         min_ranks = int(kwargs.pop("min_ranks", 1))
+        if min_ranks < 1:
+            raise ValueError("min_ranks must be positive")
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
         max_ranks_per_task = int(

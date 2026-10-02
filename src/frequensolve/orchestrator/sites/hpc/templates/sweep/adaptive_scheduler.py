@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import math
 import os
@@ -351,6 +352,8 @@ class AdaptiveScheduler:
         self.task_indices = [int(value) for value in config.get("task_indices", [])]
         self.skip_sizing = bool(config.get("skip_sizing", False))
         self.min_ranks = int(config.get("min_ranks", 1))
+        if self.min_ranks < 1:
+            raise ValueError("min_ranks must be positive")
         self.round_to = int(config.get("round_to", 1))
         self.cap_fraction = float(config.get("cap_fraction", 1.0))
         self.mem_cushion = float(config.get("mem_cushion", 1.5))
@@ -414,6 +417,103 @@ class AdaptiveScheduler:
         return min(
             max(ranks, self.min_ranks), self.total_ranks, self.max_ranks_per_task
         )
+
+    def _balanced_idle_plan(self, candidates):
+        """Reserve every pending minimum, then balance estimated work per rank.
+
+        Memory is a cost proxy, not a runtime prediction. Only rebalance a fully
+        idle allocation when the whole pending cohort fits; running tasks retain
+        their ranks and the existing backfilling policy.
+        """
+        if (
+            not candidates
+            or self.running
+            or self.mpi_launcher in _MPIRUN_LAUNCHERS
+            or self.free_intervals != [(0, self.total_ranks)]
+        ):
+            return None
+        ranks = [minimum for _, minimum, _, _ in candidates]
+        spare = self.total_ranks - sum(ranks)
+        if spare < 0:
+            return None
+        limits = []
+        weights = []
+        for task, minimum, _, memory in candidates:
+            limit = self.max_ranks_per_task
+            if task in self.task_ranks:
+                limit = minimum
+            elif len(candidates) > 1:
+                limit = min(limit, math.ceil(max(2.0, self.boost_max_factor) * minimum))
+            limits.append(limit)
+            weights.append(memory if memory > 0 else 1.0)
+        # Grant the next rank quantum to the task with the largest work/rank.
+        # The heap costs O(granted ranks * log(tasks)); no rank-count search.
+        heap = [
+            (-weights[i] / ranks[i], i)
+            for i in range(len(ranks))
+            if ranks[i] < limits[i]
+        ]
+        heapq.heapify(heap)
+        while spare and heap:
+            _, i = heapq.heappop(heap)
+            increment = (
+                min(_round_up(ranks[i] + 1, self.round_to), limits[i]) - ranks[i]
+            )
+            if increment > spare:
+                continue
+            ranks[i] += increment
+            spare -= increment
+            if ranks[i] < limits[i]:
+                heapq.heappush(heap, (-weights[i] / ranks[i], i))
+        plan = []
+        offset = 0
+        for (task, _, _, memory), count in zip(candidates, ranks):
+            plan.append((task, offset, count, memory))
+            offset += count
+        return plan
+
+    def _plan_launches(self, candidates):
+        """Balance an idle cohort, otherwise preserve greedy interval backfilling."""
+        balanced = self._balanced_idle_plan(candidates)
+        if balanced is not None:
+            return balanced
+        simulated = list(self.free_intervals)
+        plan = []
+        chosen = set()
+        boost_pool = sorted(
+            candidates, key=lambda item: (item[2], item[3]), reverse=True
+        )
+        while True:
+            best = None
+            best_metric = None
+            for task, _, maximum, task_memory in boost_pool:
+                if task in chosen:
+                    continue
+                offset, updated = _allocate_interval(simulated, maximum)
+                if offset is None:
+                    continue
+                metric = (
+                    _total_free_ranks(updated),
+                    max((length for _, length in updated), default=0),
+                )
+                if best is None or metric < best_metric:
+                    best = (task, offset, maximum, task_memory, updated)
+                    best_metric = metric
+            if best is None:
+                break
+            task, offset, maximum, task_memory, simulated = best
+            plan.append((task, offset, maximum, task_memory))
+            chosen.add(task)
+        for task, minimum, _, task_memory in sorted(
+            (item for item in candidates if item[0] not in chosen),
+            key=lambda item: item[1],
+            reverse=True,
+        ):
+            offset, updated = _allocate_interval(simulated, minimum)
+            if offset is not None:
+                plan.append((task, offset, minimum, task_memory))
+                simulated = updated
+        return plan
 
     def _write_status(
         self,
@@ -625,45 +725,7 @@ class AdaptiveScheduler:
                 )
                 candidates.append((task, minimum, maximum, memory[task - 1]))
 
-            simulated = list(self.free_intervals)
-            plan = []
-            chosen = set()
-
-            boost_pool = sorted(
-                candidates, key=lambda item: (item[2], item[3]), reverse=True
-            )
-            while True:
-                best = None
-                best_metric = None
-                for task, _, maximum, task_memory in boost_pool:
-                    if task in chosen:
-                        continue
-                    offset, updated = _allocate_interval(simulated, maximum)
-                    if offset is None:
-                        continue
-                    metric = (
-                        _total_free_ranks(updated),
-                        max((length for _, length in updated), default=0),
-                    )
-                    if best is None or metric < best_metric:
-                        best = (task, offset, maximum, task_memory, updated)
-                        best_metric = metric
-                if best is None:
-                    break
-                task, offset, maximum, task_memory, simulated = best
-                plan.append((task, offset, maximum, task_memory))
-                chosen.add(task)
-
-            for task, minimum, _, task_memory in sorted(
-                (item for item in candidates if item[0] not in chosen),
-                key=lambda item: item[1],
-                reverse=True,
-            ):
-                offset, updated = _allocate_interval(simulated, minimum)
-                if offset is not None:
-                    plan.append((task, offset, minimum, task_memory))
-                    simulated = updated
-
+            plan = self._plan_launches(candidates)
             for task, _, ranks, task_memory in plan:
                 queue.remove(task)
                 offset, self.free_intervals = _allocate_interval(
