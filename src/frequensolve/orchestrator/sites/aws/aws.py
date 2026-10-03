@@ -105,7 +105,6 @@ class AWSSiteConfig(BaseSiteConfig):
     s3_prefix: str = ""
     max_duration: Optional[str] = None
     execution_site_id: Optional[str] = None
-    compute_profile: Optional[str] = None
     execution_resources: Optional[dict[str, int]] = None
 
     @classmethod
@@ -270,7 +269,6 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
-        compute_profile: Optional[str] = None,
         execution_site_id: Optional[str] = None,
         execution_resources: Optional[dict[str, int]] = None,
     ):
@@ -303,7 +301,6 @@ class AWSSite(BaseSite):
         profile_values = {
             name: value
             for name, value in {
-                "compute_profile": compute_profile,
                 "execution_site_id": execution_site_id,
                 "execution_resources": execution_resources,
             }.items()
@@ -321,7 +318,6 @@ class AWSSite(BaseSite):
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
-        config.compute_profile = self.execution_profile.compute_profile
         config.execution_site_id = self.execution_profile.execution_site_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
 
@@ -495,7 +491,6 @@ class AWSSite(BaseSite):
 
         # A domain-config refresh replaces the dataclass instance, so reapply
         # the immutable named-profile selection before exposing it.
-        config.compute_profile = self.execution_profile.compute_profile
         config.execution_site_id = self.execution_profile.execution_site_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
         self.config = config
@@ -1031,7 +1026,7 @@ class AWSSite(BaseSite):
             RuntimeError: If job submission fails.
         """
         unsupported = kwargs.keys() - {
-            "compute_profile",
+            "execution_site_id",
             "name",
             "send_simulation_status_email",
             "allow_cpu_sharing",
@@ -1055,12 +1050,12 @@ class AWSSite(BaseSite):
         if type(allow_cpu_sharing) is not bool:
             raise ValueError("allow_cpu_sharing must be a boolean")
         execution_arguments = self.execution_profile.graphql_arguments()
-        if "compute_profile" in kwargs:
-            from .execution_profile import validate_compute_profile_name
+        if "execution_site_id" in kwargs:
+            from .execution_profile import validate_execution_site_id
 
-            override = validate_compute_profile_name(kwargs.pop("compute_profile"))
-            execution_arguments.pop("execution_site_id", None)
-            execution_arguments["compute_profile"] = override
+            execution_arguments["execution_site_id"] = validate_execution_site_id(
+                kwargs.pop("execution_site_id")
+            )
         resources = execution_arguments["execution_resources"]
         if allow_cpu_sharing and (
             resources["nodes"] != 1 or resources["mpiRanks"] != 1
@@ -1088,8 +1083,7 @@ class AWSSite(BaseSite):
                 "GraphQL API. Recreate this Site with a current Cloud profile."
             )
         # Resolve before any local reuse decision. The server revalidates at submit.
-        resolved_compute = self.graphql_client.resolve_compute_profile(
-            compute_profile=execution_arguments.get("compute_profile"),
+        resolved_compute = self.graphql_client.resolve_compute_cluster(
             execution_site_id=execution_arguments.get("execution_site_id"),
         )
         execution_arguments["expected_compute_identity"] = resolved_compute[
