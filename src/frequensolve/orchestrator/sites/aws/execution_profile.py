@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 MANAGED_EXECUTION_PROFILE_FIELDS = frozenset(
-    {"execution_site_id", "execution_resources", "compute_profile"}
+    {"execution_site_id", "execution_resources"}
 )
 
 
@@ -28,8 +28,6 @@ class ManagedExecutionProfile:
         }
     )
 
-    compute_profile: str | None = None
-
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "ManagedExecutionProfile":
         if not isinstance(values, Mapping):
@@ -39,19 +37,8 @@ class ManagedExecutionProfile:
                 "Use execution_site_id and execution_resources for managed execution"
             )
         site_id = values.get("execution_site_id")
-        compute_profile = values.get("compute_profile")
-        if site_id is not None and compute_profile is not None:
-            raise ManagedExecutionProfileError(
-                "Select compute_profile or execution_site_id, not both"
-            )
-        if site_id is not None and (
-            not isinstance(site_id, str)
-            or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", site_id)
-            or site_id == "managed-batch"
-        ):
-            raise ManagedExecutionProfileError("Invalid execution_site_id")
-        if compute_profile is not None:
-            validate_compute_profile_name(compute_profile)
+        if site_id is not None:
+            validate_execution_site_id(site_id)
         resources = values.get("execution_resources")
         if resources is None:
             resources = {"nodes": 1, "mpi_ranks": 1, "wall_time_seconds": 3600}
@@ -106,9 +93,7 @@ class ManagedExecutionProfile:
                 or (nodes > 1 and pool.partition != "cpu-efa")
             ):
                 raise ManagedExecutionProfileError("Unsupported managed adaptive pool")
-            return cls(
-                site_id, {**resources, "pool": dict(resources["pool"])}, compute_profile
-            )
+            return cls(site_id, {**resources, "pool": dict(resources["pool"])})
         if (
             resources.get("mode", "independent-frequency.v1")
             != "independent-frequency.v1"
@@ -140,7 +125,6 @@ class ManagedExecutionProfile:
         return cls(
             execution_site_id=site_id,
             execution_resources=validated,
-            compute_profile=compute_profile,
         )
 
     def graphql_arguments(self) -> dict[str, Any]:
@@ -155,11 +139,6 @@ class ManagedExecutionProfile:
             **(
                 {"execution_site_id": self.execution_site_id}
                 if self.execution_site_id is not None
-                else {}
-            ),
-            **(
-                {"compute_profile": self.compute_profile}
-                if self.compute_profile is not None
                 else {}
             ),
             "execution_resources": {
@@ -189,14 +168,12 @@ def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
     return value
 
 
-def validate_compute_profile_name(value: Any) -> str:
-    """Validate a Cloud-owned profile selector without normalizing its identity."""
+def validate_execution_site_id(value: Any) -> str:
+    """Validate an explicit cluster without normalizing its identity."""
     if (
         not isinstance(value, str)
-        or len(value) > 64
-        or not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", value)
+        or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", value)
+        or value == "managed-batch"
     ):
-        raise ManagedExecutionProfileError(
-            "compute_profile must use up to 64 lowercase letters, numbers and single hyphens"
-        )
+        raise ManagedExecutionProfileError("Invalid execution_site_id")
     return value

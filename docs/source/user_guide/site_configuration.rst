@@ -124,7 +124,7 @@ rest of the profile. For example, this keeps the local profile's configured
 
 Cloud resource shapes are accepted only from a named ``site.toml`` profile.
 They cannot be overridden on ``fs.Site(...)`` or ``submit(...)``. A Cloud
-``compute_profile`` can also be selected for an individual submission as below.
+``execution_site_id`` can also be selected for an individual submission as below.
 
 Set ``FREQUENSOLVE_SITE_CONFIG`` or pass ``fs.Site(config_path=...)`` when a
 test, notebook, or shared workstation should use a different config file:
@@ -138,44 +138,36 @@ remain available when code intentionally targets one backend.
 ``fs.Stampede3Site(...)`` remains as a compatibility adapter for existing code
 and persisted run records.
 
-Cloud Compute Profiles
-----------------------
+Cloud cluster selection
+-----------------------
 
-Create a personal profile in the Cloud application's **Compute** page to name
-an authorized cluster. This profile is separate from the local TOML profile:
-``fs.Site(profile="cloud")`` selects your connection settings; ``compute_profile``
-selects the cluster shortcut saved in your Cloud account.
+Choose a default cluster on the Cloud application's **Compute** page, or copy
+its SDK configuration to select it explicitly. ``fs.Site(profile="cloud")``
+selects your saved connection settings; ``execution_site_id`` selects the cluster.
 
 .. code-block:: toml
 
    [sites.cloud]
    type = "aws"
    domain = "app.frequensol.com"
-   compute_profile = "research-cluster"
+   execution_site_id = "research-cluster"
 
 Override that selection for one run:
 
 .. code-block:: python
 
    site = fs.Site(profile="cloud")
-   run = site.submit(job, compute_profile="shared")
+   run = site.submit(job, execution_site_id="managed-slurm")
 
-Selection uses the submit override, then the configured ``compute_profile``,
-then your personal Cloud default. If none is selected, Cloud checks access to
-the legacy ``managed-slurm`` default. An explicit missing, unavailable, or
-unauthorized profile fails without falling back to another cluster.
+Selection uses the submission override, then the configured ``execution_site_id``,
+then your personal Cloud default, then FrequenSol shared compute when no default
+is saved. Missing, unavailable or unauthorized clusters fail without falling back.
 
-An explicit ``execution_site_id`` remains supported for existing configurations.
-Do not combine it with ``compute_profile`` in the same configuration or API
-request. Remove an implicit ``execution_site_id = "managed-slurm"`` from older
-configuration files if you want to follow your personal Cloud default.
-
-Profile resolution happens before local output reuse. The SDK checks the
+Cluster resolution happens before local output reuse. The SDK checks the
 previous run's registered cluster identity, and Cloud revalidates that identity
 before submission. If it changed during preparation, retry after reviewing the
-profile in Compute. Profile deletion does not redirect existing run handles;
+cluster in Compute. Changing your default does not redirect existing runs;
 logs, results, and cancellation continue to use their simulation identifier.
-This requires a Cloud backend with Compute profile resolution support.
 
 .. _site-config-spec:
 
@@ -297,13 +289,9 @@ site before submission. The SDK never creates a cluster.
    * - ``email`` / ``password``
      - Accepted for non-interactive login. Prefer cached login state or a secrets
        manager instead of storing credentials in ``site.toml``.
-   * - ``compute_profile``
-     - Optional stable name of a personal profile created in Cloud Compute.
-       Omit to follow the personal default.
    * - ``execution_site_id``
-     - An explicitly authorized Cloud execution-site identifier. Existing
-       ``managed-slurm`` configurations retain their meaning. Omit when
-       selecting a personal ``compute_profile``.
+     - An authorized Cloud cluster identifier. Omit to follow your personal
+       default cluster, or FrequenSol shared compute when none is saved.
    * - ``execution_resources``
      - ``nodes``, ``mpi_ranks``, and ``wall_time_seconds`` are required together.
        The managed site supports one node with one MPI rank, or two nodes with
