@@ -91,7 +91,7 @@ def test_site_check_validates_configuration_without_authentication(
     )
     path = tmp_path / "site.toml"
     path.write_text(
-        f'default = "cloud"\n[sites.cloud]\ntype = "aws"\ndomain = "{domain}"\nexecution_site_id = "managed-slurm"\n'
+        f'default = "cloud"\n[sites.cloud]\ntype = "aws"\ndomain = "{domain}"\ncluster_id = "frequensol-shared-us-east-1"\n'
     )
     original = path.read_bytes()
     result = CliRunner().invoke(
@@ -108,7 +108,7 @@ def test_site_check_validates_configuration_without_authentication(
         'domain = "https://user:password@example.test"',
         'domain = "http://example.test"',
         'domain = "https://example.test/?token=secret"',
-        'domain = "app.example.test"\nexecution_site_id = "Upper"',
+        'domain = "app.example.test"\ncluster_id = "Upper"',
     ],
 )
 def test_site_check_rejects_unsafe_or_invalid_selection(tmp_path, extra):

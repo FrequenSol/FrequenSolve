@@ -1,6 +1,6 @@
 {
   "version": "execution-site-job.v1",
-  "executionSiteId": "managed-slurm",
+  "executionSiteId": "frequensol-shared-us-east-1",
   "simulationId": "simulation-test-1",
   "logicalAttemptId": "simulation-test-1:1",
   "requiredCapabilities": [

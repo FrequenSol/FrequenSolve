@@ -6,16 +6,21 @@ from typing import Any, Mapping
 
 @dataclass(frozen=True)
 class ExecutionDetails:
-    execution_site_id: str | None = None
+    cluster_id: str | None = None
     logical_attempt_id: str | None = None
     provider_job_id: str | None = None
     state: str | None = None
     failure_reason: str | None = None
     requested_resources: Mapping[str, Any] | None = None
     allocated_resources: Mapping[str, Any] | None = None
+    partition: str | None = None
+    allow_unverified_compute: bool = False
+    compatibility_findings: tuple[str, ...] = ()
+    partition_catalog_revision: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ExecutionDetails":
+        placement = value.get("computePlacement") or {}
         return cls(
             value.get("executionSiteId"),
             value.get("logicalAttemptId"),
@@ -24,6 +29,10 @@ class ExecutionDetails:
             value.get("failureReason"),
             value.get("requestedResources"),
             value.get("allocatedResources"),
+            placement.get("partition"),
+            placement.get("allowUnverifiedCompute", False),
+            tuple(placement.get("compatibilityFindings", [])),
+            placement.get("catalogRevision"),
         )
 
 

@@ -309,21 +309,31 @@ class GraphQLClient:
     def resolve_compute_cluster(
         self,
         *,
-        execution_site_id: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        execution_resources: Optional[Dict[str, Any]] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Resolve current access and immutable identity before local reuse."""
-        from .execution_profile import validate_execution_site_id
+        from .execution_profile import validate_cluster_id
 
-        if execution_site_id is not None:
-            validate_execution_site_id(execution_site_id)
+        if cluster_id is not None:
+            validate_cluster_id(cluster_id)
         result = self.execute(
-            """query ResolveMyComputeCluster($executionSiteId: String) {
-                resolveMyComputeCluster(executionSiteId: $executionSiteId)
+            """query ResolveMyComputeCluster($executionSiteId: String, $partition: String, $allowUnverifiedCompute: Boolean, $executionResources: AWSJSON) {
+                resolveMyComputeCluster(executionSiteId: $executionSiteId, partition: $partition, allowUnverifiedCompute: $allowUnverifiedCompute, executionResources: $executionResources)
             }""",
             {
                 key: value
                 for key, value in {
-                    "executionSiteId": execution_site_id,
+                    "executionSiteId": cluster_id,
+                    "partition": partition,
+                    "allowUnverifiedCompute": allow_unverified_compute,
+                    "executionResources": (
+                        json.dumps(execution_resources)
+                        if execution_resources is not None
+                        else None
+                    ),
                 }.items()
                 if value is not None
             },
@@ -341,10 +351,7 @@ class GraphQLClient:
             or not isinstance(resolved.get("executionSiteId"), str)
             or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", resolved["executionSiteId"])
             or resolved["executionSiteId"] == "managed-batch"
-            or (
-                execution_site_id is not None
-                and resolved["executionSiteId"] != execution_site_id
-            )
+            or (cluster_id is not None and resolved["executionSiteId"] != cluster_id)
             or not isinstance(resolved.get("executionIdentity"), str)
             or not re.fullmatch(r"[a-f0-9]{64}", resolved["executionIdentity"])
         ):
@@ -365,15 +372,17 @@ class GraphQLClient:
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
-        execution_site_id: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
         expected_compute_identity: Optional[str] = None,
         execution_resources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Submit through the current managed execution-site contract."""
-        from .execution_profile import validate_execution_site_id
+        from .execution_profile import validate_cluster_id
 
-        if execution_site_id is not None:
-            validate_execution_site_id(execution_site_id)
+        if cluster_id is not None:
+            validate_cluster_id(cluster_id)
         if expected_compute_identity is not None and (
             not isinstance(expected_compute_identity, str)
             or not re.fullmatch(r"[a-f0-9]{64}", expected_compute_identity)
@@ -384,7 +393,7 @@ class GraphQLClient:
                 $jobFileS3Key: String!, $jobName: String, $sendSimulationStatusEmail: Boolean,
                 $projectName: String, $projectDisplayName: String, $simulationName: String,
                 $simulationJobName: String, $executionSiteId: String, $executionResources: AWSJSON,
-                $expectedComputeIdentity: String,
+                $expectedComputeIdentity: String, $partition: String, $allowUnverifiedCompute: Boolean,
                 $forceRun: Boolean
             ) {
                 submitJob(jobFileS3Key: $jobFileS3Key, jobName: $jobName,
@@ -392,9 +401,9 @@ class GraphQLClient:
                     projectName: $projectName, projectDisplayName: $projectDisplayName,
                     simulationName: $simulationName, simulationJobName: $simulationJobName,
                     executionSiteId: $executionSiteId, executionResources: $executionResources,
-                    expectedComputeIdentity: $expectedComputeIdentity,
+                    expectedComputeIdentity: $expectedComputeIdentity, partition: $partition, allowUnverifiedCompute: $allowUnverifiedCompute,
                     forceRun: $forceRun) {
-                    simulationId status executionSiteId executionRegistrationFingerprint logicalAttemptId providerJobId executionState
+                    simulationId status executionSiteId executionRegistrationFingerprint logicalAttemptId providerJobId executionState computePlacement
                 }
             }
         """
@@ -414,7 +423,9 @@ class GraphQLClient:
             "projectDisplayName": project_display_name,
             "simulationName": simulation_name,
             "simulationJobName": simulation_job_name,
-            "executionSiteId": execution_site_id,
+            "executionSiteId": cluster_id,
+            "partition": partition,
+            "allowUnverifiedCompute": allow_unverified_compute,
             "expectedComputeIdentity": expected_compute_identity,
             "executionResources": (
                 json.dumps(execution_resources)
@@ -430,7 +441,10 @@ class GraphQLClient:
         )
         if not result.get("submitJob"):
             raise RuntimeError("Job submission failed: No response from API")
-        return result["submitJob"]
+        submission = result["submitJob"]
+        if isinstance(submission.get("computePlacement"), str):
+            submission["computePlacement"] = json.loads(submission["computePlacement"])
+        return submission
 
     def cancel_simulation(self, simulation_id: str) -> None:
         """Request cancellation; terminal state remains authoritative in Cloud."""
@@ -496,6 +510,7 @@ class GraphQLClient:
                     requestedResources
                     allocatedResources
                     executionSiteId
+                    computePlacement
                     executionRegistrationFingerprint
                     logicalAttemptId
                     providerJobId
@@ -541,6 +556,11 @@ class GraphQLClient:
             "requestedResources": resources("requestedResources"),
             "allocatedResources": resources("allocatedResources"),
             "executionSiteId": details.get("executionSiteId"),
+            "computePlacement": (
+                json.loads(details["computePlacement"])
+                if isinstance(details.get("computePlacement"), str)
+                else details.get("computePlacement")
+            ),
             "executionRegistrationFingerprint": details.get(
                 "executionRegistrationFingerprint"
             ),

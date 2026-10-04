@@ -124,7 +124,7 @@ rest of the profile. For example, this keeps the local profile's configured
 
 Cloud resource shapes are accepted only from a named ``site.toml`` profile.
 They cannot be overridden on ``fs.Site(...)`` or ``submit(...)``. A Cloud
-``execution_site_id`` can also be selected for an individual submission as below.
+``cluster_id`` can also be selected for an individual submission as below.
 
 Set ``FREQUENSOLVE_SITE_CONFIG`` or pass ``fs.Site(config_path=...)`` when a
 test, notebook, or shared workstation should use a different config file:
@@ -143,23 +143,23 @@ Cloud cluster selection
 
 Choose a default cluster on the Cloud application's **Compute** page, or copy
 its SDK configuration to select it explicitly. ``fs.Site(profile="cloud")``
-selects your saved connection settings; ``execution_site_id`` selects the cluster.
+selects your saved connection settings; ``cluster_id`` selects the cluster.
 
 .. code-block:: toml
 
    [sites.cloud]
    type = "aws"
    domain = "app.frequensol.com"
-   execution_site_id = "research-cluster"
+   cluster_id = "research-cluster"
 
 Override that selection for one run:
 
 .. code-block:: python
 
    site = fs.Site(profile="cloud")
-   run = site.submit(job, execution_site_id="managed-slurm")
+   run = site.submit(job, cluster_id="frequensol-shared-us-east-1")
 
-Selection uses the submission override, then the configured ``execution_site_id``,
+Selection uses the submission override, then the configured ``cluster_id``,
 then your personal Cloud default, then FrequenSol shared compute when no default
 is saved. Missing, unavailable or unauthorized clusters fail without falling back.
 
@@ -168,6 +168,51 @@ previous run's registered cluster identity, and Cloud revalidates that identity
 before submission. If it changed during preparation, retry after reviewing the
 cluster in Compute. Changing your default does not redirect existing runs;
 logs, results, and cancellation continue to use their simulation identifier.
+
+Partition selection and compatibility
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Both ``partition`` and ``allow_unverified_compute`` can be configured in the
+site file or overridden in ``submit``. Each submit argument overrides its
+configured value independently, including an explicit ``False``.
+
+.. code-block:: toml
+
+   default = "research"
+
+   [sites.research]
+   type = "aws"
+   domain = "app.frequensol.com"
+   cluster_id = "research-cluster"
+   partition = "lab-mpi"
+   allow_unverified_compute = true
+
+.. code-block:: python
+
+   site = fs.Site(profile="research")
+   run = site.submit(job, partition="verified-cpu", allow_unverified_compute=False)
+
+Without an explicit partition, Cloud selects a compatible registered partition
+by priority, then identifier. The Compute page exposes execution modes, node
+hardware, MPI/network information, CPU-sharing support, and resource ceilings.
+``cluster_id`` is a stable cluster identifier, separate from its display name
+and your ``fs.Site`` connection name. The shared cluster uses
+``frequensol-shared-us-east-1``; other clusters have their own identifiers.
+
+Compatibility checks are best effort. ``allow_unverified_compute=True`` requires
+an explicit partition and can override missing metadata or incorrect findings.
+Any user with submission access to a customer-owned cluster may use it without
+additional approval. Platform-owned shared clusters permit this override only
+when their catalog policy explicitly allows it. Authorization, billing,
+enforced resource limits, and executable protocol requirements still apply.
+Usage is billed at standard rates even if compatibility issues cause failure.
+
+Each accepted run freezes its selected partition, catalog revision, override
+choice, and compatibility findings. These are available through
+``run.execution.partition``, ``run.execution.partition_catalog_revision``,
+``run.execution.allow_unverified_compute``, and
+``run.execution.compatibility_findings``. Later catalog changes do not redirect
+accepted runs or make a previous placement eligible for local output reuse.
 
 .. _site-config-spec:
 
@@ -246,7 +291,7 @@ Cloud profiles create ``AWSSite`` instances and require the ``cloud`` extra.
    interactive = true
    verbose = true
 
-Cloud execution uses the registered ``managed-slurm`` site. Select the resources
+Cloud execution uses the registered shared cluster. Select the resources
 in the profile, then submit jobs without resource overrides:
 
 .. code-block:: toml
@@ -254,7 +299,7 @@ in the profile, then submit jobs without resource overrides:
    [sites.cloud-slurm]
    type = "aws"
    domain = "app.frequensol.com"
-   execution_site_id = "managed-slurm"
+   cluster_id = "frequensol-shared-us-east-1"
 
    [sites.cloud-slurm.execution_resources]
    nodes = 1
@@ -266,7 +311,7 @@ in the profile, then submit jobs without resource overrides:
    site = fs.Site(profile="cloud-slurm")
    run = site.submit(job)
 
-Omitting the execution settings selects ``managed-slurm`` with one node, one MPI
+Omitting the execution settings selects your default Cloud cluster with one node, one MPI
 rank, and a one-hour wall time. The environment must have an available registered
 site before submission. The SDK never creates a cluster.
 
@@ -289,7 +334,7 @@ site before submission. The SDK never creates a cluster.
    * - ``email`` / ``password``
      - Accepted for non-interactive login. Prefer cached login state or a secrets
        manager instead of storing credentials in ``site.toml``.
-   * - ``execution_site_id``
+   * - ``cluster_id``
      - An authorized Cloud cluster identifier. Omit to follow your personal
        default cluster, or FrequenSol shared compute when none is saved.
    * - ``execution_resources``
@@ -735,7 +780,7 @@ partitions, instance types, or cluster provisioning settings::
     [sites.hosted]
     type = "aws"
     domain = "example.frequensol.com"
-    execution_site_id = "managed-slurm"
+    cluster_id = "frequensol-shared-us-east-1"
 
     [sites.hosted.execution_resources]
     nodes = 1
@@ -751,7 +796,7 @@ one-hour wall time, allowing the existing site planner to choose CPU and memory.
 Batch and legacy managed-Slurm profiles are no longer supported. Use the named
 site and its resource table; remove old backend and partition settings.
 
-``run.execution`` and ``result.execution`` expose ``execution_site_id``,
+``run.execution`` and ``result.execution`` expose ``cluster_id``,
 ``logical_attempt_id``, ``provider_job_id``, ``state``, and ``failure_reason``.
 Provider identity comes from the current Cloud record. Status requests require
 the current GraphQL schema and report incompatible deployments directly.

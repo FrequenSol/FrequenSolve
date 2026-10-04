@@ -34,7 +34,7 @@ Cloud configuration support:
 .. parsed-literal::
 
    python -c 'import frequensolve as fs; print(fs.__version__); assert fs.__version__ == "|release|", "Install the exact package version for this guide"'
-   python -c 'from frequensolve.orchestrator.sites.aws import AWSSiteConfig; assert "execution_site_id" in AWSSiteConfig.__dataclass_fields__, "This guide requires cluster selection support"'
+   python -c 'from frequensolve.orchestrator.sites.aws import AWSSiteConfig; assert "cluster_id" in AWSSiteConfig.__dataclass_fields__, "This guide requires cluster selection support"'
    frequensolve site check --help
 
 The help must list ``--local`` as validating local TOML only, without network,
@@ -87,7 +87,7 @@ Keep passwords and tokens out of TOML and notebooks.
 This validates local TOML and selection settings without creating a config,
 authenticating or contacting Cloud. Success does not prove your subscription,
 seat, balance, storage or compute is ready. Check those in Cloud first. If your
-package does not recognize ``--local`` or ``execution_site_id``, return to the
+package does not recognize ``--local`` or ``cluster_id``, return to the
 version and feature checks above. Do not run the live check by omitting
 ``--local``, or remove the selector and run elsewhere.
 

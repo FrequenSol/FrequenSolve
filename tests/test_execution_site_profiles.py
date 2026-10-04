@@ -7,11 +7,11 @@ from frequensolve.orchestrator.sites.aws.execution_profile import (
 from frequensolve.orchestrator.sites.execution import ExecutionDetails
 
 
-@pytest.mark.parametrize("site_id", ["managed-slurm", "research-slurm"])
+@pytest.mark.parametrize("site_id", ["frequensol-shared-us-east-1", "research-slurm"])
 def test_named_site_uses_portable_submission_arguments(site_id):
-    profile = ManagedExecutionProfile.from_mapping({"execution_site_id": site_id})
+    profile = ManagedExecutionProfile.from_mapping({"cluster_id": site_id})
     assert profile.graphql_arguments() == {
-        "execution_site_id": site_id,
+        "cluster_id": site_id,
         "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
     }
 
@@ -21,10 +21,10 @@ def test_named_site_uses_portable_submission_arguments(site_id):
     [
         None,
         [],
-        {"execution_site_id": []},
-        {"execution_site_id": "invalid site"},
-        {"execution_site_id": "managed-slurm", "execution_resources": []},
-        {"execution_site_id": "managed-slurm", "slurm_partition": "cpu-single"},
+        {"cluster_id": []},
+        {"cluster_id": "invalid site"},
+        {"cluster_id": "frequensol-shared-us-east-1", "execution_resources": []},
+        {"cluster_id": "frequensol-shared-us-east-1", "slurm_partition": "cpu-single"},
         {"execution_resources": {"nodes": 1}},
     ],
 )
@@ -38,15 +38,15 @@ def test_default_profile_leaves_site_selection_to_the_server():
         "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
     }
     with pytest.raises(ManagedExecutionProfileError):
-        ManagedExecutionProfile.from_mapping({"execution_site_id": "managed-batch"})
+        ManagedExecutionProfile.from_mapping({"cluster_id": "managed-batch"})
     details = ExecutionDetails.from_mapping(
         {
-            "executionSiteId": "managed-slurm",
+            "executionSiteId": "frequensol-shared-us-east-1",
             "providerJobId": "opaque-id",
             "executionState": "succeeded",
         }
     )
-    assert details.execution_site_id == "managed-slurm"
+    assert details.cluster_id == "frequensol-shared-us-east-1"
     assert details.provider_job_id == "opaque-id"
     assert details.state == "succeeded"
 
@@ -60,7 +60,8 @@ def test_named_site_does_not_fall_back_to_another_backend():
     client.execute = Mock(side_effect=RuntimeError("Unknown argument executionSiteId"))
     with pytest.raises(RuntimeError, match="Unknown argument executionSiteId"):
         client.submit_job(
-            job_file_s3_key="private/test/job.json", execution_site_id="managed-slurm"
+            job_file_s3_key="private/test/job.json",
+            cluster_id="frequensol-shared-us-east-1",
         )
     assert client.execute.call_count == 1
 
@@ -93,7 +94,7 @@ def test_status_uses_current_identity_without_historical_provider_fallbacks():
             "getSimulation": {
                 "id": "test",
                 "status": "RUNNING",
-                "executionSiteId": "managed-slurm",
+                "executionSiteId": "frequensol-shared-us-east-1",
                 "logicalAttemptId": "test:1",
                 "providerJobId": "current",
                 "providerAttemptId": "stale",
@@ -103,7 +104,7 @@ def test_status_uses_current_identity_without_historical_provider_fallbacks():
         }
     )
     details = client.get_simulation_status_details("test")
-    assert details["executionSiteId"] == "managed-slurm"
+    assert details["executionSiteId"] == "frequensol-shared-us-east-1"
     assert details["logicalAttemptId"] == "test:1"
     assert details["providerJobId"] == "current"
     assert details["requestedResources"] == {

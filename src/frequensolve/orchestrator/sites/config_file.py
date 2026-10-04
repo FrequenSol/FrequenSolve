@@ -49,8 +49,8 @@ verbose = true
 [sites.cloud-slurm]
 type = "aws"
 domain = "app.frequensol.com"
-# Omit execution_site_id to use your personal Cloud default.
-# execution_site_id = "research-cluster"
+# Omit cluster_id to use your personal Cloud default.
+# cluster_id = "research-cluster"
 interactive = true
 verbose = true
 

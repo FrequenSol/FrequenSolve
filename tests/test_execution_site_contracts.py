@@ -25,7 +25,7 @@ def profile(value):
     }
     return ManagedExecutionProfile.from_mapping(
         {
-            "execution_site_id": "managed-slurm",
+            "cluster_id": "frequensol-shared-us-east-1",
             "execution_resources": {names.get(k, k): v for k, v in value.items()},
         }
     )

@@ -262,7 +262,7 @@ domain = "app.frequensol.com"
 [sites.cloud-slurm]
 type = "aws"
 domain = "app.frequensol.com"
-execution_site_id = "managed-slurm"
+cluster_id = "frequensol-shared-us-east-1"
 [sites.cloud-slurm.execution_resources]
 nodes = 2
 mpi_ranks = 8
@@ -275,7 +275,7 @@ wall_time_seconds = 1800
 
     assert site.kwargs == {
         "domain": "app.frequensol.com",
-        "execution_site_id": "managed-slurm",
+        "cluster_id": "frequensol-shared-us-east-1",
         "execution_resources": {"nodes": 2, "mpi_ranks": 8, "wall_time_seconds": 1800},
         "_credential_profile": "cloud-slurm",
     }
@@ -290,7 +290,7 @@ default = "cloud-single"
 [sites.cloud-single]
 type = "aws"
 domain = "app.frequensol.com"
-execution_site_id = "managed-slurm"
+cluster_id = "frequensol-shared-us-east-1"
 [sites.cloud-single.execution_resources]
 nodes = 1
 mpi_ranks = 1
@@ -301,7 +301,7 @@ wall_time_seconds = 1800
 
     site = sites.Site(config_path=config_path)
 
-    assert site.kwargs["execution_site_id"] == "managed-slurm"
+    assert site.kwargs["cluster_id"] == "frequensol-shared-us-east-1"
     assert site.kwargs["execution_resources"] == {
         "nodes": 1,
         "mpi_ranks": 1,
@@ -312,7 +312,7 @@ wall_time_seconds = 1800
 @pytest.mark.parametrize(
     "profile_body,message",
     [
-        ('execution_site_id = "managed-batch"', "Invalid execution_site_id"),
+        ('cluster_id = "managed-batch"', "Invalid cluster_id"),
         ('execution_backend = "batch"', "Unsupported managed Cloud profile settings"),
         ('compute_mode = "auto"', "Unsupported managed Cloud profile settings"),
         (
@@ -354,7 +354,7 @@ def test_managed_cloud_resources_cannot_be_overridden_at_factory_call(
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
 
     with pytest.raises(ValueError, match="only be selected through a named"):
-        sites.Site(config_path=config_path, execution_site_id="managed-slurm")
+        sites.Site(config_path=config_path, cluster_id="frequensol-shared-us-east-1")
     with pytest.raises(ValueError, match="direct Slurm-site overrides"):
         sites.Site(config_path=config_path, nodes=2)
 
@@ -742,3 +742,24 @@ def test_site_factory_does_not_create_missing_env_config(monkeypatch, tmp_path):
         sites.Site()
 
     assert not missing_path.exists()
+
+
+def test_site_factory_accepts_partition_and_override_in_cloud_config(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """default = "research"
+[sites.research]
+type = "aws"
+domain = "app.frequensol.com"
+cluster_id = "research-cluster"
+partition = "lab-mpi"
+allow_unverified_compute = true
+"""
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+    site = sites.Site(config_path=config_path, profile="research")
+    assert site.kwargs["cluster_id"] == "research-cluster"
+    assert site.kwargs["partition"] == "lab-mpi"
+    assert site.kwargs["allow_unverified_compute"] is True

@@ -47,7 +47,7 @@
           "failedFrequencies": 0,
           "abortedFrequencies": 0,
           "executionBackend": "SLURM",
-          "executionSiteId": "managed-slurm",
+          "executionSiteId": "frequensol-shared-us-east-1",
           "slurmPartition": "cpu-single",
           "slurmNodes": 1,
           "slurmRanksPerNode": 1,
@@ -75,7 +75,7 @@
         "aborted": 0
       },
       "executionBackend": "SLURM",
-      "executionSiteId": "managed-slurm",
+      "executionSiteId": "frequensol-shared-us-east-1",
       "slurmPartition": "cpu-single",
       "slurmNodes": 1,
       "slurmRanksPerNode": 1,

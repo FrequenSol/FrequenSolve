@@ -104,7 +104,9 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
-    execution_site_id: Optional[str] = None
+    partition: Optional[str] = None
+    allow_unverified_compute: Optional[bool] = None
+    cluster_id: Optional[str] = None
     execution_resources: Optional[dict[str, int]] = None
 
     @classmethod
@@ -269,7 +271,9 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
-        execution_site_id: Optional[str] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
+        cluster_id: Optional[str] = None,
         execution_resources: Optional[dict[str, int]] = None,
     ):
         """Initialize AWS site with domain-based authentication.
@@ -301,7 +305,9 @@ class AWSSite(BaseSite):
         profile_values = {
             name: value
             for name, value in {
-                "execution_site_id": execution_site_id,
+                "partition": partition,
+                "allow_unverified_compute": allow_unverified_compute,
+                "cluster_id": cluster_id,
                 "execution_resources": execution_resources,
             }.items()
             if value is not None
@@ -318,7 +324,11 @@ class AWSSite(BaseSite):
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
-        config.execution_site_id = self.execution_profile.execution_site_id
+        config.partition = self.execution_profile.partition
+        config.allow_unverified_compute = (
+            self.execution_profile.allow_unverified_compute
+        )
+        config.cluster_id = self.execution_profile.cluster_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
 
         # Store domain for potential config refresh
@@ -491,7 +501,11 @@ class AWSSite(BaseSite):
 
         # A domain-config refresh replaces the dataclass instance, so reapply
         # the immutable named-profile selection before exposing it.
-        config.execution_site_id = self.execution_profile.execution_site_id
+        config.partition = self.execution_profile.partition
+        config.allow_unverified_compute = (
+            self.execution_profile.allow_unverified_compute
+        )
+        config.cluster_id = self.execution_profile.cluster_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
@@ -1000,7 +1014,7 @@ class AWSSite(BaseSite):
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
-        Resolves the selected Cloud compute profile before preparing or reusing work.
+        Resolves the selected Cloud cluster and partition before preparing or reusing work.
 
         Submits through the authenticated GraphQL API.
 
@@ -1011,11 +1025,17 @@ class AWSSite(BaseSite):
                 default for failed runs, or ``validate=False`` to skip SDK
                 pre-run validation. Pass ``allow_cpu_sharing=True`` to allow up to
                 two eligible single-CPU frequency jobs per vCPU; defaults to False.
+                ``cluster_id``, ``partition`` and ``allow_unverified_compute``
+                override site configuration defaults independently. Compatibility
+                checks are best effort; allow_unverified_compute=True overrides
+                incomplete or incorrect findings on an explicit partition.
+                Standard usage charges apply even if compatibility issues cause failure.
+                Access, enforced limits and execution protocols remain checked.
                 Memory reservations remain unchanged. Pass ``retry=True`` with
                 the authored job to reuse verified completed frequencies from the
                 latest compatible terminal, settled Cloud run. Strict retries require unchanged
                 scientific inputs, outputs, runtime version and execution topology.
-                Resource budgets may change through the selected profile. A retry
+                Resource budgets may change through the site configuration. A retry
                 creates a new run; its ordinary rates and minimum charge apply only
                 to newly performed work. ``force=True`` runs every frequency.
 
@@ -1026,7 +1046,9 @@ class AWSSite(BaseSite):
             RuntimeError: If job submission fails.
         """
         unsupported = kwargs.keys() - {
-            "execution_site_id",
+            "cluster_id",
+            "partition",
+            "allow_unverified_compute",
             "name",
             "send_simulation_status_email",
             "allow_cpu_sharing",
@@ -1050,12 +1072,11 @@ class AWSSite(BaseSite):
         if type(allow_cpu_sharing) is not bool:
             raise ValueError("allow_cpu_sharing must be a boolean")
         execution_arguments = self.execution_profile.graphql_arguments()
-        if "execution_site_id" in kwargs:
-            from .execution_profile import validate_execution_site_id
+        from .execution_profile import resolve_compute_options
 
-            execution_arguments["execution_site_id"] = validate_execution_site_id(
-                kwargs.pop("execution_site_id")
-            )
+        execution_arguments = resolve_compute_options(execution_arguments, kwargs)
+        for key in ("cluster_id", "partition", "allow_unverified_compute"):
+            kwargs.pop(key, None)
         resources = execution_arguments["execution_resources"]
         if allow_cpu_sharing and (
             resources["nodes"] != 1 or resources["mpiRanks"] != 1
@@ -1084,7 +1105,12 @@ class AWSSite(BaseSite):
             )
         # Resolve before any local reuse decision. The server revalidates at submit.
         resolved_compute = self.graphql_client.resolve_compute_cluster(
-            execution_site_id=execution_arguments.get("execution_site_id"),
+            cluster_id=execution_arguments.get("cluster_id"),
+            execution_resources=execution_arguments.get("execution_resources"),
+            partition=execution_arguments.get("partition"),
+            allow_unverified_compute=execution_arguments.get(
+                "allow_unverified_compute"
+            ),
         )
         execution_arguments["expected_compute_identity"] = resolved_compute[
             "executionIdentity"
@@ -1099,6 +1125,8 @@ class AWSSite(BaseSite):
                 previous.get("executionSiteId") == resolved_compute["executionSiteId"]
                 and previous.get("executionRegistrationFingerprint")
                 == resolved_compute["executionIdentity"]
+                and previous.get("computePlacement")
+                == resolved_compute.get("computePlacement")
                 and previous.get("status") in {"SUCCEEDED", "COMPLETED"}
             )
         if reusable_execution:
