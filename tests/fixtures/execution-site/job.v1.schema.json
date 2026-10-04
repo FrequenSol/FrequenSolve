@@ -233,10 +233,8 @@
                   "maximum": 124518
                 },
                 "partition": {
-                  "enum": [
-                    "cpu-single",
-                    "cpu-efa"
-                  ]
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
                 }
               }
             }
@@ -260,6 +258,45 @@
           "pattern": "^sha256:[a-f0-9]{64}$"
         }
       }
+    },
+    "placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "partition": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+        },
+        "schedulerPartition": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+        },
+        "catalogRevision": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,100}$"
+        },
+        "allowUnverifiedCompute": {
+          "type": "boolean"
+        },
+        "networkFabric": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compatibilityFindings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "partition",
+        "schedulerPartition",
+        "catalogRevision",
+        "allowUnverifiedCompute",
+        "networkFabric",
+        "compatibilityFindings"
+      ]
     }
   },
   "allOf": [

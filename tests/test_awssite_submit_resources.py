@@ -16,9 +16,12 @@ class FakeGraphQLClient:
         self.submit_calls = []
         self.resolve_calls = []
 
-    def resolve_compute_profile(self, **kwargs):
+    def resolve_compute_cluster(self, **kwargs):
         self.resolve_calls.append(kwargs)
-        return {"executionSiteId": "managed-slurm", "executionIdentity": "a" * 64}
+        return {
+            "executionSiteId": "frequensol-shared-us-east-1",
+            "executionIdentity": "a" * 64,
+        }
 
     def execute(self, query, variables=None):
         assert query == "query CloudConnectivity { __typename }"
@@ -119,10 +122,15 @@ def test_graphql_submit_defers_implicit_default_to_cloud():
     site = make_graphql_site()
     site.submit(FakeJob())
     submitted = site.graphql_client.submit_calls[0]
-    assert "execution_site_id" not in submitted
+    assert "cluster_id" not in submitted
     assert submitted["expected_compute_identity"] == "a" * 64
     assert site.graphql_client.resolve_calls == [
-        {"compute_profile": None, "execution_site_id": None}
+        {
+            "cluster_id": None,
+            "partition": None,
+            "allow_unverified_compute": None,
+            "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
+        }
     ]
     assert submitted["execution_resources"] == {
         "nodes": 1,
@@ -140,7 +148,7 @@ def test_graphql_submit_uses_only_the_named_managed_slurm_shape():
     site = make_graphql_site()
     site.execution_profile = ManagedExecutionProfile.from_mapping(
         {
-            "execution_site_id": "managed-slurm",
+            "cluster_id": "frequensol-shared-us-east-1",
             "execution_resources": {
                 "nodes": 2,
                 "mpi_ranks": 8,
@@ -155,8 +163,8 @@ def test_graphql_submit_uses_only_the_named_managed_slurm_shape():
         "mpiRanks": 8,
         "wallTimeSeconds": 1800,
     }
-    assert submitted["execution_site_id"] == "managed-slurm"
-    assert run.backend["executionSiteId"] == "managed-slurm"
+    assert submitted["cluster_id"] == "frequensol-shared-us-east-1"
+    assert run.backend["executionSiteId"] == "frequensol-shared-us-east-1"
     assert run.backend["requestedResources"] == submitted["execution_resources"]
 
 
@@ -201,7 +209,7 @@ def test_graphql_submit_current_job_fetches_once_when_waited():
     job._cloud_result_run_id = "previous-run"
     site.graphql_client.get_simulation_status_details = lambda _: {
         "status": "SUCCEEDED",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "executionRegistrationFingerprint": "a" * 64,
     }
     job.write_run_state = lambda **kwargs: None
@@ -398,7 +406,6 @@ def test_graphql_submit_never_checks_or_provisions_compute():
     [
         {"vcpu": 8},
         {"memory": 16384},
-        {"execution_site_id": "managed-batch"},
         {"execution_backend": "batch"},
     ],
 )
@@ -594,15 +601,14 @@ def test_invalid_retry_options_fail_before_staging(options):
     assert not site.graphql_client.submit_calls
 
 
-def test_submit_profile_override_wins_over_configured_selection():
+def test_submit_cluster_override_wins_over_configured_selection():
     site = make_graphql_site()
     site.execution_profile = ManagedExecutionProfile.from_mapping(
-        {"compute_profile": "configured"}
+        {"cluster_id": "configured"}
     )
-    site.submit(FakeJob(), compute_profile="override")
-    assert site.graphql_client.resolve_calls[0]["compute_profile"] == "override"
-    assert site.graphql_client.submit_calls[0]["compute_profile"] == "override"
-    assert "execution_site_id" not in site.graphql_client.submit_calls[0]
+    site.submit(FakeJob(), cluster_id="override")
+    assert site.graphql_client.resolve_calls[0]["cluster_id"] == "override"
+    assert site.graphql_client.submit_calls[0]["cluster_id"] == "override"
 
 
 def test_cloud_resolution_failure_happens_before_staging_or_cache_reuse():
@@ -611,11 +617,11 @@ def test_cloud_resolution_failure_happens_before_staging_or_cache_reuse():
     def denied(**kwargs):
         raise RuntimeError("Access removed")
 
-    site.graphql_client.resolve_compute_profile = denied
+    site.graphql_client.resolve_compute_cluster = denied
     job = FakeJob()
     job.is_run_current = lambda: True
     with pytest.raises(RuntimeError, match="Access removed"):
-        site.submit(job, compute_profile="research")
+        site.submit(job, cluster_id="research")
     assert site.graphql_client.submit_calls == []
 
 
@@ -633,24 +639,78 @@ def test_matching_local_outputs_cannot_reuse_a_different_registered_site():
     assert len(site.graphql_client.submit_calls) == 1
 
 
-def test_profile_selector_validation_and_explicit_legacy_compatibility():
-    assert ManagedExecutionProfile.from_mapping({}).execution_site_id is None
+def test_cluster_selector_validation_and_cloud_default():
+    assert ManagedExecutionProfile.from_mapping({}).cluster_id is None
     assert (
         ManagedExecutionProfile.from_mapping(
-            {"compute_profile": "research"}
-        ).graphql_arguments()["compute_profile"]
+            {"cluster_id": "research"}
+        ).graphql_arguments()["cluster_id"]
         == "research"
     )
-    assert (
-        ManagedExecutionProfile.from_mapping(
-            {"execution_site_id": "managed-slurm"}
-        ).graphql_arguments()["execution_site_id"]
-        == "managed-slurm"
+    for value in ["", "Upper", "-a", "a" * 65, "managed-batch", 1]:
+        with pytest.raises(ValueError, match="cluster_id"):
+            ManagedExecutionProfile.from_mapping({"cluster_id": value})
+    with pytest.raises(ValueError):
+        ManagedExecutionProfile.from_mapping({"compute_profile": "research"})
+
+
+@pytest.mark.parametrize("value", ["", None, "Upper", "managed-batch", 1])
+def test_invalid_cluster_override_fails_before_resolution(value):
+    site = make_graphql_site()
+    with pytest.raises(ValueError, match="cluster_id"):
+        site.submit(FakeJob(), cluster_id=value)
+    assert site.graphql_client.resolve_calls == []
+    assert site.graphql_client.submit_calls == []
+
+
+def test_removed_compute_profile_option_is_rejected():
+    site = make_graphql_site()
+    with pytest.raises(ValueError, match="Unsupported managed submission options"):
+        site.submit(FakeJob(), compute_profile="research")
+    assert site.graphql_client.submit_calls == []
+
+
+def test_compute_selectors_merge_independently_and_false_overrides_true():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {
+            "cluster_id": "research-cluster",
+            "partition": "configured",
+            "allow_unverified_compute": True,
+        }
     )
-    for value in ["", "Upper", "a--b", "-a", "a-", "a" * 65]:
-        with pytest.raises(ValueError, match="compute_profile"):
-            ManagedExecutionProfile.from_mapping({"compute_profile": value})
-    with pytest.raises(ValueError, match="not both"):
-        ManagedExecutionProfile.from_mapping(
-            {"compute_profile": "research", "execution_site_id": "managed-slurm"}
-        )
+    site.submit(FakeJob(), partition="verified", allow_unverified_compute=False)
+    resolved = site.graphql_client.resolve_calls[0]
+    submitted = site.graphql_client.submit_calls[0]
+    for args in (resolved, submitted):
+        assert args["cluster_id"] == "research-cluster"
+        assert args["partition"] == "verified"
+        assert args["allow_unverified_compute"] is False
+
+
+def test_submission_override_can_use_configured_partition():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {"partition": "lab-mpi"}
+    )
+    site.submit(FakeJob(), cluster_id="another-cluster", allow_unverified_compute=True)
+    assert site.graphql_client.submit_calls[0]["partition"] == "lab-mpi"
+    assert site.graphql_client.submit_calls[0]["allow_unverified_compute"] is True
+    assert site.graphql_client.submit_calls[0]["cluster_id"] == "another-cluster"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"allow_unverified_compute": True},
+        {"allow_unverified_compute": "true"},
+        {"partition": "cpu;injected"},
+        {"execution_site_id": "old-cluster"},
+    ],
+)
+def test_invalid_compute_selection_fails_before_cloud_or_upload(kwargs):
+    site = make_graphql_site()
+    with pytest.raises(ValueError):
+        site.submit(FakeJob(), **kwargs)
+    assert not site.graphql_client.resolve_calls
+    assert not site.graphql_client.submit_calls

@@ -34,14 +34,14 @@ Cloud configuration support:
 .. parsed-literal::
 
    python -c 'import frequensolve as fs; print(fs.__version__); assert fs.__version__ == "|release|", "Install the exact package version for this guide"'
-   python -c 'from frequensolve.orchestrator.sites.aws import AWSSiteConfig; assert "compute_profile" in AWSSiteConfig.__dataclass_fields__, "This guide requires compute_profile support"'
+   python -c 'from frequensolve.orchestrator.sites.aws import AWSSiteConfig; assert "cluster_id" in AWSSiteConfig.__dataclass_fields__, "This guide requires cluster selection support"'
    frequensolve site check --help
 
 The help must list ``--local`` as validating local TOML only, without network,
 login or solver checks. The existence of ``site check`` alone is not enough:
 older versions use that command for a live SSH/solver check. If either feature
 check fails, stop and obtain the matching package; never omit ``--local`` or
-remove ``compute_profile`` to get past an incompatibility.
+remove cluster selection to get past an incompatibility.
 
 Download :download:`acoustic_starter.py
 <../../tutorials/00_getting_started/acoustic_starter.py>` and, if you prefer
@@ -87,7 +87,7 @@ Keep passwords and tokens out of TOML and notebooks.
 This validates local TOML and selection settings without creating a config,
 authenticating or contacting Cloud. Success does not prove your subscription,
 seat, balance, storage or compute is ready. Check those in Cloud first. If your
-package does not recognize ``--local`` or ``compute_profile``, return to the
+package does not recognize ``--local`` or ``cluster_id``, return to the
 version and feature checks above. Do not run the live check by omitting
 ``--local``, or remove the selector and run elsewhere.
 

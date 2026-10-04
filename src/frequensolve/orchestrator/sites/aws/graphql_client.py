@@ -306,54 +306,57 @@ class GraphQLClient:
             "status": storage_stack.get("status", ""),
         }
 
-    def resolve_compute_profile(
+    def resolve_compute_cluster(
         self,
         *,
-        compute_profile: Optional[str] = None,
-        execution_site_id: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        execution_resources: Optional[Dict[str, Any]] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Resolve current access and immutable identity before local reuse."""
-        from .execution_profile import validate_compute_profile_name
+        from .execution_profile import validate_cluster_id
 
-        if compute_profile is not None and execution_site_id is not None:
-            raise ValueError("Select compute_profile or execution_site_id, not both")
-        if compute_profile is not None:
-            validate_compute_profile_name(compute_profile)
+        if cluster_id is not None:
+            validate_cluster_id(cluster_id)
         result = self.execute(
-            """query ResolveMyComputeProfile($computeProfileName: String, $executionSiteId: String) {
-                resolveMyComputeProfile(computeProfileName: $computeProfileName, executionSiteId: $executionSiteId)
+            """query ResolveMyComputeCluster($executionSiteId: String, $partition: String, $allowUnverifiedCompute: Boolean, $executionResources: AWSJSON) {
+                resolveMyComputeCluster(executionSiteId: $executionSiteId, partition: $partition, allowUnverifiedCompute: $allowUnverifiedCompute, executionResources: $executionResources)
             }""",
             {
                 key: value
                 for key, value in {
-                    "computeProfileName": compute_profile,
-                    "executionSiteId": execution_site_id,
+                    "executionSiteId": cluster_id,
+                    "partition": partition,
+                    "allowUnverifiedCompute": allow_unverified_compute,
+                    "executionResources": (
+                        json.dumps(execution_resources)
+                        if execution_resources is not None
+                        else None
+                    ),
                 }.items()
                 if value is not None
             },
         )
-        resolved = result.get("resolveMyComputeProfile")
+        resolved = result.get("resolveMyComputeCluster")
         if isinstance(resolved, str):
             try:
                 resolved = json.loads(resolved)
             except json.JSONDecodeError as exc:
                 raise RuntimeError(
-                    "Cloud returned malformed compute profile resolution"
+                    "Cloud returned malformed compute cluster resolution"
                 ) from exc
         if (
             not isinstance(resolved, dict)
             or not isinstance(resolved.get("executionSiteId"), str)
             or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", resolved["executionSiteId"])
             or resolved["executionSiteId"] == "managed-batch"
-            or (
-                execution_site_id is not None
-                and resolved["executionSiteId"] != execution_site_id
-            )
+            or (cluster_id is not None and resolved["executionSiteId"] != cluster_id)
             or not isinstance(resolved.get("executionIdentity"), str)
             or not re.fullmatch(r"[a-f0-9]{64}", resolved["executionIdentity"])
         ):
             raise RuntimeError(
-                "Cloud returned an invalid compute profile resolution; update the Cloud backend and retry"
+                "Cloud returned an invalid compute cluster resolution; update the Cloud backend and retry"
             )
         return resolved
 
@@ -369,24 +372,17 @@ class GraphQLClient:
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
-        execution_site_id: Optional[str] = None,
-        compute_profile: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
         expected_compute_identity: Optional[str] = None,
         execution_resources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Submit through the current managed execution-site contract."""
-        from .execution_profile import validate_compute_profile_name
+        from .execution_profile import validate_cluster_id
 
-        if compute_profile is not None and execution_site_id is not None:
-            raise ValueError("Select compute_profile or execution_site_id, not both")
-        if compute_profile is not None:
-            validate_compute_profile_name(compute_profile)
-        if execution_site_id is not None and (
-            not isinstance(execution_site_id, str)
-            or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", execution_site_id)
-            or execution_site_id == "managed-batch"
-        ):
-            raise ValueError("Invalid execution_site_id")
+        if cluster_id is not None:
+            validate_cluster_id(cluster_id)
         if expected_compute_identity is not None and (
             not isinstance(expected_compute_identity, str)
             or not re.fullmatch(r"[a-f0-9]{64}", expected_compute_identity)
@@ -397,7 +393,7 @@ class GraphQLClient:
                 $jobFileS3Key: String!, $jobName: String, $sendSimulationStatusEmail: Boolean,
                 $projectName: String, $projectDisplayName: String, $simulationName: String,
                 $simulationJobName: String, $executionSiteId: String, $executionResources: AWSJSON,
-                $computeProfileName: String, $expectedComputeIdentity: String,
+                $expectedComputeIdentity: String, $partition: String, $allowUnverifiedCompute: Boolean,
                 $forceRun: Boolean
             ) {
                 submitJob(jobFileS3Key: $jobFileS3Key, jobName: $jobName,
@@ -405,9 +401,9 @@ class GraphQLClient:
                     projectName: $projectName, projectDisplayName: $projectDisplayName,
                     simulationName: $simulationName, simulationJobName: $simulationJobName,
                     executionSiteId: $executionSiteId, executionResources: $executionResources,
-                    computeProfileName: $computeProfileName, expectedComputeIdentity: $expectedComputeIdentity,
+                    expectedComputeIdentity: $expectedComputeIdentity, partition: $partition, allowUnverifiedCompute: $allowUnverifiedCompute,
                     forceRun: $forceRun) {
-                    simulationId status executionSiteId executionRegistrationFingerprint logicalAttemptId providerJobId executionState
+                    simulationId status executionSiteId executionRegistrationFingerprint logicalAttemptId providerJobId executionState computePlacement
                 }
             }
         """
@@ -427,8 +423,9 @@ class GraphQLClient:
             "projectDisplayName": project_display_name,
             "simulationName": simulation_name,
             "simulationJobName": simulation_job_name,
-            "executionSiteId": execution_site_id,
-            "computeProfileName": compute_profile,
+            "executionSiteId": cluster_id,
+            "partition": partition,
+            "allowUnverifiedCompute": allow_unverified_compute,
             "expectedComputeIdentity": expected_compute_identity,
             "executionResources": (
                 json.dumps(execution_resources)
@@ -444,7 +441,10 @@ class GraphQLClient:
         )
         if not result.get("submitJob"):
             raise RuntimeError("Job submission failed: No response from API")
-        return result["submitJob"]
+        submission = result["submitJob"]
+        if isinstance(submission.get("computePlacement"), str):
+            submission["computePlacement"] = json.loads(submission["computePlacement"])
+        return submission
 
     def cancel_simulation(self, simulation_id: str) -> None:
         """Request cancellation; terminal state remains authoritative in Cloud."""
@@ -510,6 +510,7 @@ class GraphQLClient:
                     requestedResources
                     allocatedResources
                     executionSiteId
+                    computePlacement
                     executionRegistrationFingerprint
                     logicalAttemptId
                     providerJobId
@@ -555,6 +556,11 @@ class GraphQLClient:
             "requestedResources": resources("requestedResources"),
             "allocatedResources": resources("allocatedResources"),
             "executionSiteId": details.get("executionSiteId"),
+            "computePlacement": (
+                json.loads(details["computePlacement"])
+                if isinstance(details.get("computePlacement"), str)
+                else details.get("computePlacement")
+            ),
             "executionRegistrationFingerprint": details.get(
                 "executionRegistrationFingerprint"
             ),

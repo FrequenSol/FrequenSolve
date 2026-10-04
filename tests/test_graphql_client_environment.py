@@ -86,6 +86,7 @@ def test_simulation_status_details_include_customer_safe_failure_message():
         "failureCode": "SCU_BALANCE_INSUFFICIENT",
         "failureMessage": "This simulation needs more SCUs.",
         "executionSiteId": None,
+        "computePlacement": None,
         "executionRegistrationFingerprint": None,
         "logicalAttemptId": None,
         "providerJobId": None,
@@ -187,14 +188,14 @@ def test_submit_job_sends_managed_site_contract():
     resources = {"nodes": 2, "mpiRanks": 8, "wallTimeSeconds": 1800}
     result = client.submit_job(
         "project/jobs/model/job/job.json",
-        execution_site_id="managed-slurm",
+        cluster_id="frequensol-shared-us-east-1",
         execution_resources=resources,
     )
     assert "executionSiteId: $executionSiteId" in client.last_query
     assert "providerJobId" in client.last_query
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "executionResources": json.dumps(resources),
         "forceRun": False,
     }
@@ -340,11 +341,11 @@ def test_compute_resolution_accepts_awsjson_and_preserves_selection(encoded):
 
     def execute(query, variables):
         calls.append(variables)
-        return {"resolveMyComputeProfile": json.dumps(value) if encoded else value}
+        return {"resolveMyComputeCluster": json.dumps(value) if encoded else value}
 
     client.execute = execute
-    assert client.resolve_compute_profile(compute_profile="research") == value
-    assert calls == [{"computeProfileName": "research"}]
+    assert client.resolve_compute_cluster(cluster_id="research-cluster") == value
+    assert calls == [{"executionSiteId": "research-cluster"}]
 
 
 @pytest.mark.parametrize(
@@ -363,30 +364,28 @@ def test_compute_resolution_never_falls_back_on_invalid_response(value):
 
     def execute(*args):
         calls.append(args)
-        return {"resolveMyComputeProfile": value}
+        return {"resolveMyComputeCluster": value}
 
     client.execute = execute
-    with pytest.raises(RuntimeError, match="compute profile resolution"):
-        client.resolve_compute_profile(compute_profile="research")
+    with pytest.raises(RuntimeError, match="compute cluster resolution"):
+        client.resolve_compute_cluster(cluster_id="research-cluster")
     assert len(calls) == 1
 
 
-def test_compute_resolution_rejects_selector_conflict_before_network():
+@pytest.mark.parametrize("value", ["", "Upper", "managed-batch", 1])
+def test_compute_resolution_rejects_invalid_cluster_before_network(value):
     client = CapturingGraphQLClient()
-    with pytest.raises(ValueError, match="not both"):
-        client.resolve_compute_profile(
-            compute_profile="research", execution_site_id="managed-slurm"
-        )
+    with pytest.raises(ValueError, match="cluster_id"):
+        client.resolve_compute_cluster(cluster_id=value)
     assert not client.last_query
 
 
-def test_submit_sends_profile_and_resolved_identity_without_implicit_legacy_site():
+def test_submit_sends_cluster_and_resolved_identity():
     client = CapturingGraphQLClient()
     client.submit_job(
         "project/job.json",
-        compute_profile="research",
+        cluster_id="research",
         expected_compute_identity="a" * 64,
     )
-    assert client.last_variables["computeProfileName"] == "research"
+    assert client.last_variables["executionSiteId"] == "research"
     assert client.last_variables["expectedComputeIdentity"] == "a" * 64
-    assert "executionSiteId" not in client.last_variables
