@@ -1,5 +1,7 @@
 """Workflow execution scopes retain caller sites and reach every problem view."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -129,3 +131,53 @@ def test_backend_scope_routes_preparation_and_job_families(tmp_path):
             assert first.site is nested
         assert first.site is executor
     assert first.site is site and second.site is site
+
+
+class FailingCloseSession(TrackedSession):
+    session_id = "f" * 32
+    allocation_id = "4242"
+
+    def __exit__(self, exc_type, *exc):
+        self.closed = True
+        if exc_type is None:
+            raise RuntimeError("scancel: connection reset")
+        return False
+
+
+def test_fwi_returns_result_when_owned_session_teardown_fails(tmp_path, monkeypatch):
+    from frequensolve.imaging.results import FWIResult
+
+    site = FakeImagingSite(seed=11)
+    problem = _problem(tmp_path, site)
+    session = FailingCloseSession(site)
+    monkeypatch.setattr(site, "session", lambda **kwargs: session, raising=False)
+    fwi = FWI(problem, _stages())
+    assert fwi.checkpoint_path is None
+    with pytest.warns(RuntimeWarning, match="connection reset") as caught:
+        result = fwi.run(execution=PersistentAllocation())
+    message = next(str(w.message) for w in caught if w.category is RuntimeWarning)
+    assert "f" * 32 in message and "4242" in message
+    assert session.closed and result.success
+    # The final state was saved before teardown, without a checkpoint.
+    assert fwi.result_path == Path(problem.workdir) / "fwi_results" / (
+        "session_" + "f" * 32
+    )
+    assert str(fwi.result_path) in message
+    saved = FWIResult.load(fwi.result_path, problem)
+    np.testing.assert_array_equal(saved.state.values, result.state.values)
+    assert problem.site is site
+
+
+def test_fwi_failure_is_not_masked_by_teardown_or_saved(tmp_path, monkeypatch):
+    site = FakeImagingSite(seed=11)
+    problem = _problem(tmp_path, site)
+    session = FailingCloseSession(site)
+    monkeypatch.setattr(site, "session", lambda **kwargs: session, raising=False)
+
+    def fail(_event):
+        raise ValueError("inversion failed")
+
+    fwi = FWI(problem, _stages(), callback=fail)
+    with pytest.raises(ValueError, match="inversion failed"):
+        fwi.run(execution=PersistentAllocation())
+    assert session.closed and fwi.result_path is None

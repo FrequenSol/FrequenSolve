@@ -36,7 +36,9 @@ import glob
 import hashlib
 import inspect
 import json
+import logging
 import math
+import uuid
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -141,6 +143,8 @@ __all__ = [
 ]
 
 from ._patch_updates import PatchUpdates
+
+logger = logging.getLogger(__name__)
 
 CHECKPOINT_SCHEMA = "fs-imaging-fwi-checkpoint-2"
 # Earlier checkpoints kept optimizer restart state as JSON metadata.
@@ -1528,6 +1532,9 @@ class FWI:
             if not path.is_absolute():
                 path = Path(problem.workdir) / path
             self.checkpoint_path = path
+        # Where ``run(execution=PersistentAllocation(...))`` saved the final
+        # result before releasing its allocation.
+        self.result_path: Optional[Path] = None
         if callback is not None and not callable(callback):
             raise TypeError("callback must be callable")
         self.callback = callback
@@ -3228,6 +3235,12 @@ class FWI:
         closing it. Derived problems, preparation, solver postprocessing and
         curvature all use that executor. Existing site behavior is unchanged
         when ``execution`` is omitted.
+
+        An owned allocation's final result is saved (:meth:`FWIResult.save`)
+        under ``<workdir>/fwi_results/session_<id>`` before the allocation is
+        released, even without a checkpoint; :attr:`result_path` names it.
+        Release failures after a successful inversion return the result with
+        a ``RuntimeWarning`` naming the session and allocation.
         """
         from frequensolve.orchestrator.sites.execution import (
             PersistentAllocation,
@@ -3237,21 +3250,76 @@ class FWI:
         if execution is None:
             return self._run(resume=resume)
         site = self.problem.site
-        with contextlib.ExitStack() as stack:
-            if isinstance(execution, PersistentAllocation):
-                executor = stack.enter_context(execution.open(site))
-            else:
-                executor = execution
-                if (
-                    executor is not site
-                    and getattr(executor, "base_site", None) is not site
-                ):
-                    raise ValueError(
-                        "execution must be an open session for the problem's site"
-                    )
-                executor._require_ready()
-            stack.enter_context(execution_scope(site, executor))
-            return self._run(resume=resume)
+        owned = isinstance(execution, PersistentAllocation)
+        executor: Any = None
+        result: Optional[FWIResult] = None
+        try:
+            with contextlib.ExitStack() as stack:
+                if owned:
+                    executor = stack.enter_context(execution.open(site))
+                else:
+                    executor = execution
+                    if (
+                        executor is not site
+                        and getattr(executor, "base_site", None) is not site
+                    ):
+                        raise ValueError(
+                            "execution must be an open session for the problem's site"
+                        )
+                    executor._require_ready()
+                stack.enter_context(execution_scope(site, executor))
+                result = self._run(resume=resume)
+                if owned:
+                    self._persist_result(result, executor)
+        except Exception as error:
+            if result is None:
+                raise
+            # Teardown must not discard a completed inversion.
+            identity = _session_identity(executor)
+            saved = (
+                f"; it was also saved to {self.result_path}"
+                if self.result_path is not None
+                else ""
+            )
+            logger.warning(
+                "Releasing %s after FWI completed failed: %s",
+                identity,
+                error,
+                exc_info=error,
+            )
+            warnings.warn(
+                f"FWI completed but releasing {identity} failed: {error}. The "
+                f"result is returned{saved}.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        assert result is not None
+        return result
+
+    def _persist_result(self, result: FWIResult, executor: Any) -> None:
+        """Save the final result before an owned allocation is released."""
+
+        workdir = getattr(self.problem, "workdir", None)
+        if workdir is None:
+            return
+        name = getattr(executor, "session_id", None) or uuid.uuid4().hex
+        directory = Path(workdir) / "fwi_results" / f"session_{name}"
+        try:
+            result.save(directory)
+        except Exception as exc:  # saving must not discard the result
+            warnings.warn(
+                f"Could not save the FWI result to {directory} before releasing "
+                f"{_session_identity(executor)}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return
+        self.result_path = directory
+        logger.info(
+            "Saved the final FWI result to %s before releasing %s",
+            directory,
+            _session_identity(executor),
+        )
 
     def _run(self, resume: bool = True) -> FWIResult:
         """Run every stage and return the :class:`FWIResult`.
@@ -3412,6 +3480,16 @@ class FWI:
             checkpoint=self.checkpoint_path,
             problem=final_problem,
         )
+
+
+def _session_identity(executor: Any) -> str:
+    """Describe an execution session so a user can reattach or release it."""
+
+    session = getattr(executor, "session_id", None)
+    allocation = getattr(executor, "allocation_id", None)
+    if session is None and allocation is None:
+        return f"execution {type(executor).__name__}"
+    return f"session {session} (Slurm allocation {allocation})"
 
 
 # ---------------------------------------------------------------------------
