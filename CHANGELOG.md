@@ -30,7 +30,14 @@ prepared.
   run handles. Initialization, smoothing, packing and curvature share the same
   resource pool. `FWI.run(execution=PersistentAllocation(...))` owns a session
   through the complete inversion and releases it on exit; an open session may
-  also be borrowed.
+  also be borrowed. Controller liveness is judged by an advancing heartbeat
+  sequence on the client's monotonic clock (`heartbeat_timeout`, default the
+  site's `scheduler_heartbeat_timeout` with a 300 s floor), never by comparing
+  hosts' clocks; leases renew during uploads and tolerate clock skew. Owned
+  sessions drain without `scancel` while the controller is alive
+  (`cleanup_timeout=None` by default), and cleanup failures after successful
+  work warn instead of discarding results. `FWI.run` saves the final result
+  before releasing its allocation.
 
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five

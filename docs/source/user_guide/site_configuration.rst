@@ -56,18 +56,51 @@ To reconnect to a running session, use its ``session.session_id``::
        result = run.wait(check=True)
 
 A borrowed context only detaches on exit. The context that created the
-allocation owns its lifetime. On normal exit it drains work, up to
-``cleanup_timeout`` (default 30 seconds), and releases the allocation. On an
-exception or interruption it cancels outstanding work before release. Drain
-timeout cancels remaining work and raises ``TimeoutError``. Cleanup does not
+allocation owns its lifetime. On normal exit it drains work: runs already in
+flight finish, including their packing and output writes, and the allocation
+is cancelled only after the controller reports that it has closed.
+``cleanup_timeout`` caps the drain; the default ``None`` waits as long as the
+controller heartbeat keeps advancing (the walltime still bounds it). If the
+cap is reached, or the heartbeat stops advancing during the drain, exit emits
+a ``RuntimeWarning`` naming the session and Slurm allocation and leaves the
+allocation running rather than killing work mid-write: the controller cancels
+unfinished work once the lease lapses, and Slurm ends the job at walltime.
+Reattach with ``site.attach_session(session_id)`` or release it with
+``scancel``. On an exception or interruption the context cancels outstanding
+work, waits up to ``cleanup_timeout`` (120 seconds when unset) for the
+controller, and cancels the allocation; cleanup errors there are logged and
+never replace the original exception. Cleanup errors after the body has
+completed (for example a lost SSH connection) are reported as a
+``RuntimeWarning`` with the session and allocation ids instead of being
+raised, so results computed in the context are not lost. Cleanup does not
 close caller-owned site connections or delete solver artifacts.
 
-Clients renew leases while connected. If every client disappears, the
-controller cancels unfinished work and exits after ``lease_timeout`` (default
-300 seconds); the hard Slurm walltime still bounds the allocation. A warning
-signal 120 seconds before walltime stops admission and marks unfinished runs
-timed out. Resume an inversion from its last accepted checkpoint in a new
-session. Automatic allocation rollover is not supported.
+The controller writes a heartbeat with an increasing ``sequence`` from a
+dedicated thread, so per-run status writes on a slow work filesystem cannot
+delay it. The client declares the controller lost only when two successful
+reads, a poll interval apart, show a heartbeat unchanged for longer than
+``heartbeat_timeout`` on the client's monotonic clock while Slurm still
+reports the allocation running; the runs then fail. Timestamps written on the
+compute node are never compared with the client's clock, so clock skew does
+not matter, and failed status reads are not counted as evidence of loss. The
+default ``heartbeat_timeout="auto"`` uses the site's
+``run_config.scheduler_heartbeat_timeout`` but never less than 300 seconds,
+because shared scratch filesystems can stall metadata operations for minutes
+during large writes; pass seconds to choose a window or ``None`` to disable the
+check. ``PersistentAllocation`` accepts the same ``heartbeat_timeout`` and
+``cleanup_timeout`` options. Processed requests and commands move to
+``processed/`` subdirectories of the session directory, so the controller
+lists only new work.
+
+Clients renew leases from a background thread while connected, including
+during long uploads and project synchronization. The controller times each
+renewal with its own monotonic clock, so client clock skew does not expire a
+lease. If every client disappears, the controller cancels unfinished work and
+exits after ``lease_timeout`` (default 300 seconds) without a renewal; the
+hard Slurm walltime still bounds the allocation. A warning signal 120 seconds
+before walltime stops admission and marks unfinished runs timed out. Resume an
+inversion from its last accepted checkpoint in a new session. Automatic
+allocation rollover is not supported.
 
 Quick Start
 -----------

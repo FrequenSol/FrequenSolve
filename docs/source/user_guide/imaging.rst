@@ -36,6 +36,17 @@ writing. It releases the allocation on completion, error or interruption.
 The caller's site and problem views return to their original executor when the
 run exits.
 
+Before releasing an owned allocation, ``FWI.run`` saves the final result
+(``FWIResult.save``) under ``<workdir>/fwi_results/session_<session_id>``,
+even without a ``checkpoint``; ``fwi.result_path`` names the directory and
+``FWIResult.load(fwi.result_path, problem)`` reads it back. If releasing the
+allocation fails after a successful inversion, the result is still returned
+and a ``RuntimeWarning`` names the session and Slurm allocation. A drain that
+outlasts ``cleanup_timeout`` or loses the controller heartbeat also warns and
+leaves the allocation to its lease and walltime instead of cancelling work
+mid-write. ``PersistentAllocation(heartbeat_timeout=..., cleanup_timeout=...)``
+tunes both; see :ref:`site-configuration`.
+
 To reuse a session across workflows, enter ``problem.site.session(...)`` and
 pass that open session as ``fwi.run(execution=session)``. FWI borrows it and
 leaves teardown to the outer context. Alternatively, construct an
