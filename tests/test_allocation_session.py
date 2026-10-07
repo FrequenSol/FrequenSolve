@@ -613,27 +613,95 @@ def beat(site, sequence, *, updated_at, state="ready"):
     )
 
 
-def test_heartbeat_window_defaults_and_overrides(monkeypatch):
+def test_heartbeat_window_defaults_and_overrides(monkeypatch, caplog):
     session, _, _ = scripted_session(monkeypatch)
-    # The site's 60 s batch-scheduler window is floored for sessions.
+    assert SlurmRunConfig().scheduler_heartbeat_timeout == 300
     assert session.heartbeat_timeout == session_module.DEFAULT_HEARTBEAT_TIMEOUT
     assert session.cleanup_timeout is None
-    longer = SlurmRunConfig(scheduler_heartbeat_timeout=900)
-    assert scripted_session(monkeypatch, run_config=longer)[0].heartbeat_timeout == 900
+    # An explicitly configured site window is honoured as-is.
+    for configured in (60, 900):
+        run_config = SlurmRunConfig(scheduler_heartbeat_timeout=configured)
+        window = scripted_session(monkeypatch, run_config=run_config)[0]
+        assert window.heartbeat_timeout == configured
     disabled = SlurmRunConfig(scheduler_heartbeat_timeout=None)
     assert (
         scripted_session(monkeypatch, run_config=disabled)[0].heartbeat_timeout is None
     )
-    explicit = scripted_session(monkeypatch, heartbeat_timeout=45)[0]
-    assert explicit.heartbeat_timeout == 45
+    # A direct heartbeat_timeout overrides the site's window; None disables it.
+    short = SlurmRunConfig(scheduler_heartbeat_timeout=60)
+    explicit = scripted_session(monkeypatch, run_config=short, heartbeat_timeout=900)[0]
+    assert explicit.heartbeat_timeout == 900
+    off = scripted_session(monkeypatch, run_config=short, heartbeat_timeout=None)[0]
+    assert off.heartbeat_timeout is None
     assert (
-        scripted_session(monkeypatch, heartbeat_timeout=None)[0].heartbeat_timeout
-        is None
+        scripted_session(monkeypatch, heartbeat_timeout=45)[0].heartbeat_timeout == 45
     )
     with pytest.raises(ValueError, match="heartbeat_timeout"):
         scripted_session(monkeypatch, heartbeat_timeout=0)
     with pytest.raises(ValueError, match="heartbeat_timeout"):
         scripted_session(monkeypatch, heartbeat_timeout="never")
+
+
+def test_starter_site_config_writes_the_300_second_heartbeat_window():
+    from frequensolve.orchestrator.sites.config_file import (
+        STARTER_SITE_CONFIG,
+        tomllib,
+    )
+
+    config = tomllib.loads(STARTER_SITE_CONFIG)
+    windows = [
+        table["run_config"]["scheduler_heartbeat_timeout"]
+        for table in config["sites"].values()
+        if "scheduler_heartbeat_timeout" in table.get("run_config", {})
+    ]
+    assert windows == [300]
+
+
+def short_window_warnings(caplog):
+    return [
+        record
+        for record in caplog.records
+        if record.name == session_module.__name__
+        and "heartbeat window" in record.getMessage()
+    ]
+
+
+def test_configured_60_second_window_is_honoured_with_one_warning(
+    cluster, monkeypatch, caplog
+):
+    monkeypatch.setattr(
+        cluster.site,
+        "run_config",
+        SlurmRunConfig(
+            nodes=1, ranks_per_node=4, poll_interval=0, scheduler_heartbeat_timeout=60
+        ),
+    )
+    with caplog.at_level("WARNING", logger=session_module.__name__):
+        with cluster.site.session() as session:
+            assert session.heartbeat_timeout == 60
+            config = json.loads((session.root / "config.json").read_text())
+            assert config["heartbeat_timeout"] == 60
+            session.start()  # starting again does not repeat the warning
+            assert session.run(Job(cluster.root, "short-window")).successful
+    (warning,) = short_window_warnings(caplog)
+    assert "60 s" in warning.getMessage()
+    assert "heartbeat_timeout" in warning.getMessage()
+
+
+def test_direct_heartbeat_timeout_overrides_site_window(cluster, monkeypatch, caplog):
+    monkeypatch.setattr(
+        cluster.site,
+        "run_config",
+        SlurmRunConfig(
+            nodes=1, ranks_per_node=4, poll_interval=0, scheduler_heartbeat_timeout=60
+        ),
+    )
+    with caplog.at_level("WARNING", logger=session_module.__name__):
+        with cluster.site.session(heartbeat_timeout=600) as session:
+            assert session.heartbeat_timeout == 600
+            config = json.loads((session.root / "config.json").read_text())
+            assert config["heartbeat_timeout"] == 600
+    assert not short_window_warnings(caplog)
 
 
 @pytest.mark.parametrize("skew", [600.0, -600.0])

@@ -707,7 +707,7 @@ def test_slurm_run_config_normalizes_rank_aliases():
 
 
 def test_slurm_run_config_validates_scheduler_heartbeat_timeout():
-    assert SlurmRunConfig().scheduler_heartbeat_timeout == 60.0
+    assert SlurmRunConfig().scheduler_heartbeat_timeout == 300.0
     assert (
         SlurmRunConfig(scheduler_heartbeat_timeout=None).scheduler_heartbeat_timeout
         is None

@@ -115,7 +115,7 @@ duration = "00:30:00"
 ranks_per_node = 4
 ranks_per_task = 1
 poll_interval = 10
-scheduler_heartbeat_timeout = 60
+scheduler_heartbeat_timeout = 300
 # Optional full-rank solver MPI check before sizing, using a Slurm step limit.
 # mpi_health_check_timeout = "00:02:00"
 

@@ -36,12 +36,15 @@ logger = logging.getLogger(__name__)
 
 # The controller heartbeat lives on the same shared work filesystem as the
 # solvers' output. Metadata stalls of one to several minutes occur on busy
-# Lustre/GPFS scratch during large checkpoint and trace writes, so 60 s (the
-# per-batch scheduler default) declares healthy allocations dead. Five minutes
-# rides out such stalls while still detecting a hung controller long before a
-# typical multi-hour walltime ends. Loss also requires the heartbeat to stop
-# *changing* (client monotonic clock) while Slurm reports the job running.
+# Lustre/GPFS scratch during large checkpoint and trace writes, so a 60 s
+# window declares healthy allocations dead. Five minutes (also the
+# ``scheduler_heartbeat_timeout`` default) rides out such stalls while still
+# detecting a hung controller long before a typical multi-hour walltime ends.
+# Loss also requires the heartbeat to stop *changing* (client monotonic clock)
+# while Slurm reports the job running. Used when the site has no run config.
 DEFAULT_HEARTBEAT_TIMEOUT = 300.0
+# Windows below this misfire on slow shared filesystems; warn at start.
+_SHORT_HEARTBEAT_WINDOW = 120.0
 # Bound on waiting for the controller to cancel work before ``scancel``.
 _CANCEL_TIMEOUT = 120.0
 # After the controller reports closed, let the batch job end by itself (so it
@@ -87,8 +90,9 @@ class AllocationSession(BaseSite):
     ``heartbeat_timeout`` is how long the controller heartbeat may stop
     advancing, measured on this client's monotonic clock while Slurm reports
     the allocation running, before the controller is declared lost. ``"auto"``
-    uses ``run_config.scheduler_heartbeat_timeout`` but never less than
-    :data:`DEFAULT_HEARTBEAT_TIMEOUT` (300 s); ``None`` disables the check.
+    uses the site's ``run_config.scheduler_heartbeat_timeout`` as configured
+    (default 300 s); seconds override it and ``None`` disables the check.
+    Windows below 120 s log a warning when the session starts.
     ``cleanup_timeout`` caps an owned session's drain on normal exit; ``None``
     (default) waits while the controller is alive. A drain that reaches the
     cap or loses the heartbeat warns and leaves the allocation to its lease
@@ -185,10 +189,21 @@ class AllocationSession(BaseSite):
             )
             if configured is None:
                 return None
-            # The site's batch-scheduler window (60 s by default) is too short
-            # for a long-lived controller on a busy shared filesystem.
-            return max(DEFAULT_HEARTBEAT_TIMEOUT, float(configured))
+            return self._seconds(configured, "scheduler_heartbeat_timeout")
         return None if value is None else self._seconds(value, "heartbeat_timeout")
+
+    def _warn_if_short_window(self):
+        window = self.heartbeat_timeout
+        if window is not None and window < _SHORT_HEARTBEAT_WINDOW:
+            logger.warning(
+                "Allocation session %s uses a %g s controller heartbeat window. "
+                "Windows below %g s misfire when the shared work filesystem "
+                "stalls and fail healthy runs; raise heartbeat_timeout (or the "
+                "site's run_config.scheduler_heartbeat_timeout, default 300 s).",
+                self.session_id,
+                window,
+                _SHORT_HEARTBEAT_WINDOW,
+            )
 
     def _identity(self):
         return f"session {self.session_id} (Slurm allocation {self.allocation_id})"
@@ -274,6 +289,7 @@ class AllocationSession(BaseSite):
                 raise RuntimeError("allocation session is closed")
             if self.allocation_id is not None:
                 return self
+            self._warn_if_short_window()
             if not self.owned:
                 self._config = self._read(self.root / "config.json")
                 metadata = self._read(self.root / "allocation.json")

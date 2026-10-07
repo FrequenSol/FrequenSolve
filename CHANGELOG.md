@@ -32,12 +32,17 @@ prepared.
   through the complete inversion and releases it on exit; an open session may
   also be borrowed. Controller liveness is judged by an advancing heartbeat
   sequence on the client's monotonic clock (`heartbeat_timeout`, default the
-  site's `scheduler_heartbeat_timeout` with a 300 s floor), never by comparing
-  hosts' clocks; leases renew during uploads and tolerate clock skew. Owned
-  sessions drain without `scancel` while the controller is alive
-  (`cleanup_timeout=None` by default), and cleanup failures after successful
-  work warn instead of discarding results. `FWI.run` saves the final result
-  before releasing its allocation.
+  site's `scheduler_heartbeat_timeout`), never by comparing hosts' clocks;
+  leases renew during uploads and tolerate clock skew. Owned sessions drain
+  without `scancel` while the controller is alive (`cleanup_timeout=None` by
+  default), and cleanup failures after successful work warn instead of
+  discarding results. `FWI.run` saves the final result before releasing its
+  allocation.
+- `scheduler_heartbeat_timeout` now defaults to 300 seconds (was 60) for
+  adaptive-scheduler batch runs and persistent sessions, and the starter site
+  configuration writes 300: shared scratch filesystems can stall heartbeat
+  writes for minutes. Explicitly configured values are honoured; a session
+  whose window is below 120 seconds logs a warning when it starts.
 
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five

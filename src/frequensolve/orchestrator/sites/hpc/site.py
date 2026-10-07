@@ -170,7 +170,10 @@ _HPC_RUNTIME_DEFAULTS = {
     "KMP_STACKSIZE": "20M",
 }
 
-_ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 60.0
+# Scheduler heartbeats are files on the shared work filesystem, whose metadata
+# operations can stall for minutes during large writes; shorter windows report
+# healthy jobs as failed.
+_ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 300.0
 
 # Quoted paths per removal command; well below Linux's 128 KiB argument cap.
 _REMOVE_COMMAND_BYTES = 64 * 1024
@@ -469,8 +472,9 @@ class SlurmRunConfig:
         notify_email: Optional notification email address.
         poll_interval: Polling interval in seconds.
         scheduler_heartbeat_timeout: Maximum seconds without a new adaptive
-            scheduler heartbeat before the run is reported failed. ``None``
-            disables heartbeat enforcement.
+            scheduler (or persistent-session controller) heartbeat before the
+            run is reported failed. Defaults to 300. ``None`` disables
+            heartbeat enforcement.
         mpi_health_check_timeout: Optional Slurm time limit for a full-rank MPI
             health check before solver initialization. ``None`` disables it.
         run_path: Remote run directory override.

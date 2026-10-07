@@ -38,7 +38,8 @@ class PersistentAllocation:
     ``heartbeat_timeout`` is how long the allocation controller's heartbeat
     may stop advancing (client monotonic clock, while Slurm reports the job
     running) before its runs fail. ``"auto"`` uses the site's
-    ``scheduler_heartbeat_timeout`` with a 300 s floor; ``None`` disables it.
+    ``scheduler_heartbeat_timeout`` (default 300 s) as configured; seconds
+    override it and ``None`` disables it.
     ``cleanup_timeout`` caps draining on normal exit; ``None`` waits while the
     controller is alive. A drain that reaches the cap is left to the lease and
     walltime with a warning rather than cancelled mid-write.

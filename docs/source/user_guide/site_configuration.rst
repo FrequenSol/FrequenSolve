@@ -85,10 +85,11 @@ reports the allocation running; the runs then fail. Timestamps written on the
 compute node are never compared with the client's clock, so clock skew does
 not matter, and failed status reads are not counted as evidence of loss. The
 default ``heartbeat_timeout="auto"`` uses the site's
-``run_config.scheduler_heartbeat_timeout`` but never less than 300 seconds,
-because shared scratch filesystems can stall metadata operations for minutes
-during large writes; pass seconds to choose a window or ``None`` to disable the
-check. ``PersistentAllocation`` accepts the same ``heartbeat_timeout`` and
+``run_config.scheduler_heartbeat_timeout`` (default 300 seconds) as configured;
+pass seconds to choose a window for one session or ``None`` to disable the
+check. Shared scratch filesystems can stall metadata operations for minutes
+during large writes, so a session whose window is below 120 seconds logs a
+warning when it starts. ``PersistentAllocation`` accepts the same ``heartbeat_timeout`` and
 ``cleanup_timeout`` options. Processed requests and commands move to
 ``processed/`` subdirectories of the session directory, so the controller
 lists only new work.
@@ -502,7 +503,7 @@ extra.
    duration = "00:30:00"
    ranks_per_node = 4
    ranks_per_task = 1
-   scheduler_heartbeat_timeout = 60
+   scheduler_heartbeat_timeout = 300
    # Optional controller-enforced deadline for a full-rank MPI check before sizing.
    # mpi_health_check_timeout = "00:02:00"
 
@@ -613,9 +614,11 @@ The generated profile is equivalent to this minimal configuration:
    * - ``poll_interval``
      - Seconds between scheduler status polls.
    * - ``scheduler_heartbeat_timeout``
-     - Maximum seconds without a new adaptive-scheduler heartbeat before a
-       running SLURM job is reported failed. Defaults to 60. Set it to
-       ``None`` through ``SlurmRunConfig`` to disable the check.
+     - Maximum seconds without a new adaptive-scheduler or persistent-session
+       controller heartbeat before a running SLURM job is reported failed.
+       Defaults to 300; shorter windows misfire when the shared work
+       filesystem stalls. Set it to ``None`` through ``SlurmRunConfig`` to
+       disable the check.
    * - ``mpi_health_check_timeout``
      - Optional SLURM step time limit for a full-rank solver MPI health check
        before sizing. The solver must support ``--mpi-health-check``. Disabled
