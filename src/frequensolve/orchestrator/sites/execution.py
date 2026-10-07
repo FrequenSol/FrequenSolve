@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Union
 
 _EXECUTORS: ContextVar[dict[int, Any]] = ContextVar(
     "frequensolve_executors", default={}
@@ -34,6 +34,14 @@ class PersistentAllocation:
     Resource defaults come from the problem's SLURM site. ``workers`` may be
     an ``AdaptiveWorkers`` configuration. Construction requires no HPC extras;
     opening it requires a site with persistent-session support.
+
+    ``heartbeat_timeout`` is how long the allocation controller's heartbeat
+    may stop advancing (client monotonic clock, while Slurm reports the job
+    running) before its runs fail. ``"auto"`` uses the site's
+    ``scheduler_heartbeat_timeout`` with a 300 s floor; ``None`` disables it.
+    ``cleanup_timeout`` caps draining on normal exit; ``None`` waits while the
+    controller is alive. A drain that reaches the cap is left to the lease and
+    walltime with a warning rather than cancelled mid-write.
     """
 
     nodes: Optional[int] = None
@@ -43,7 +51,8 @@ class PersistentAllocation:
     workers: Any = None
     lease_timeout: float = 300.0
     startup_timeout: float = 1800.0
-    cleanup_timeout: float = 30.0
+    cleanup_timeout: Optional[float] = None
+    heartbeat_timeout: Union[float, str, None] = "auto"
 
     def open(self, site: Any) -> Any:
         factory = getattr(site, "session", None)
@@ -66,5 +75,6 @@ class PersistentAllocation:
             lease_timeout=self.lease_timeout,
             startup_timeout=self.startup_timeout,
             cleanup_timeout=self.cleanup_timeout,
+            heartbeat_timeout=self.heartbeat_timeout,
             **resources,
         )

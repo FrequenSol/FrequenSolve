@@ -16,6 +16,7 @@ import pytest
 
 from frequensolve.orchestrator.sites.base import RunFailedError
 from frequensolve.orchestrator.sites.hpc import AdaptiveWorkers, SlurmRunConfig
+from frequensolve.orchestrator.sites.hpc import session as session_module
 from frequensolve.orchestrator.sites.hpc import site as hpc
 from tests.test_slurm_site_refactor import DummySlurmSite, DummySSHClientClass
 
@@ -372,11 +373,7 @@ def test_controller_loss_fails_handles_without_new_batch_job(cluster):
         handle = session.submit(Job(cluster.root, "never", sleep=5))
         cluster.processes[0].kill()
         cluster.processes[0].wait()
-        # A stale heartbeat forces the Slurm liveness check.
-        status_file = session.root / "status.json"
-        payload = json.loads(status_file.read_text())
-        payload["updated_at"] = 0
-        status_file.write_text(json.dumps(payload))
+        # Slurm's terminal state is authoritative regardless of the heartbeat.
         assert handle.wait(check=False).status.state == "failed"
         assert len(cluster.processes) == 1
 
@@ -518,26 +515,6 @@ def test_run_record_keeps_allocation_and_session_ids(cluster, monkeypatch):
         assert job.latest_run(site=cluster.site.site_name).status == "cancelled"
 
 
-def test_transient_status_read_keeps_fresh_heartbeat_but_expires(cluster, monkeypatch):
-    with cluster.site.session() as session:
-        assert session.status()["state"] == "ready"
-        original = cluster.site._read_remote_json
-        monkeypatch.setattr(
-            cluster.site,
-            "_read_remote_json",
-            lambda path: (
-                None if path == session.root / "status.json" else original(path)
-            ),
-        )
-        session._require_ready()
-        session._controller_state = dict(
-            session._controller_state, updated_at=time.time() - 61
-        )
-        with pytest.raises(RuntimeError, match="heartbeat expired"):
-            session._require_ready()
-        monkeypatch.setattr(cluster.site, "_read_remote_json", original)
-
-
 def test_attach_preserves_worker_policy(cluster):
     workers = AdaptiveWorkers(min_ranks=2, max_ranks_per_task=3, mem_cushion=2)
     with cluster.site.session(workers=workers) as session:
@@ -574,6 +551,176 @@ def test_single_rank_preparation_limit_applies_to_postprocess(cluster):
         result = session.run(job, check=True, pack=False)
         assert result.status.raw["steps"][0]["step"] == "smooth"
         assert result.status.raw["steps"][0]["ranks"] == 1
+
+
+# -- liveness, lease and teardown -------------------------------------------
+
+
+class Clock:
+    """Controllable monotonic and wall clocks for the session module."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def time(self):
+        return 1.7e9 + self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class Heartbeats:
+    """A fake site whose controller heartbeat and Slurm state are scripted."""
+
+    def __init__(self, run_config=None):
+        self.work_dir = Path("/remote/work")
+        self.run_config = run_config or SlurmRunConfig()
+        self.payload = None
+        self.slurm = "running"
+        self.cancelled = []
+
+    def _read_remote_json(self, path):
+        return None if self.payload is None else dict(self.payload)
+
+    def update_status(self, job_id):
+        return self.slurm
+
+    def cancel_job(self, job_id):
+        self.cancelled.append(job_id)
+
+
+def runtime_warning(caught):
+    return next(str(w.message) for w in caught if w.category is RuntimeWarning)
+
+
+def scripted_session(monkeypatch, **options):
+    clock = Clock()
+    monkeypatch.setattr(session_module, "time", clock)
+    site = Heartbeats(options.pop("run_config", None))
+    session = session_module.AllocationSession(site, **options)
+    session.allocation_id = "100"
+    session.generation = "g"
+    return session, site, clock
+
+
+def beat(site, sequence, *, updated_at, state="ready"):
+    site.payload = dict(
+        generation="g", state=state, sequence=sequence, updated_at=updated_at
+    )
+
+
+def test_heartbeat_window_defaults_and_overrides(monkeypatch):
+    session, _, _ = scripted_session(monkeypatch)
+    # The site's 60 s batch-scheduler window is floored for sessions.
+    assert session.heartbeat_timeout == session_module.DEFAULT_HEARTBEAT_TIMEOUT
+    assert session.cleanup_timeout is None
+    longer = SlurmRunConfig(scheduler_heartbeat_timeout=900)
+    assert scripted_session(monkeypatch, run_config=longer)[0].heartbeat_timeout == 900
+    disabled = SlurmRunConfig(scheduler_heartbeat_timeout=None)
+    assert (
+        scripted_session(monkeypatch, run_config=disabled)[0].heartbeat_timeout is None
+    )
+    explicit = scripted_session(monkeypatch, heartbeat_timeout=45)[0]
+    assert explicit.heartbeat_timeout == 45
+    assert (
+        scripted_session(monkeypatch, heartbeat_timeout=None)[0].heartbeat_timeout
+        is None
+    )
+    with pytest.raises(ValueError, match="heartbeat_timeout"):
+        scripted_session(monkeypatch, heartbeat_timeout=0)
+    with pytest.raises(ValueError, match="heartbeat_timeout"):
+        scripted_session(monkeypatch, heartbeat_timeout="never")
+
+
+@pytest.mark.parametrize("skew", [600.0, -600.0])
+def test_skewed_controller_clock_counts_as_fresh_while_advancing(monkeypatch, skew):
+    session, site, clock = scripted_session(monkeypatch)
+    for sequence in range(1, 8):
+        # The controller's wall clock is ten minutes ahead of or behind ours.
+        beat(site, sequence, updated_at=clock.time() + skew)
+        assert session.status()["state"] == "ready"
+        clock.now += 250  # long client-side gaps between polls are harmless
+
+
+def test_heartbeat_gaps_of_61_to_120_seconds_do_not_fail(monkeypatch):
+    session, site, clock = scripted_session(monkeypatch)
+    beat(site, 1, updated_at=clock.time())
+    assert session.status()["state"] == "ready"
+    for _ in range(60):  # one unchanged heartbeat observed for 120 s
+        clock.now += 2
+        assert session.status()["state"] == "ready"
+    beat(site, 2, updated_at=clock.time() - 120)
+    for _ in range(60):
+        clock.now += 2
+        assert session.status()["state"] == "ready"
+
+
+def test_unchanged_heartbeat_with_running_allocation_means_controller_lost(
+    monkeypatch,
+):
+    session, site, clock = scripted_session(monkeypatch, heartbeat_timeout=100)
+    beat(site, 7, updated_at=clock.time() + 3600)
+    assert session.status()["state"] == "ready"
+    clock.now += 99
+    assert session.status()["state"] == "ready"
+    clock.now += 2
+    # One stale reading is not enough; a second one a poll interval later is.
+    assert session.status()["state"] == "ready"
+    assert session.status()["state"] == "ready"  # no time has passed
+    clock.now += 0.2
+    lost = session.status()
+    assert lost["state"] == "failed" and lost["heartbeat_expired"]
+    assert "heartbeat expired" in lost["reason"] and "100" in lost["reason"]
+    with pytest.raises(RuntimeError, match="heartbeat expired"):
+        session._ready = True
+        session._require_ready()
+    # A new heartbeat revives it.
+    beat(site, 8, updated_at=0)
+    assert session.status()["state"] == "ready"
+
+
+def test_stale_heartbeat_requires_running_allocation_and_successful_reads(
+    monkeypatch,
+):
+    session, site, clock = scripted_session(monkeypatch, heartbeat_timeout=10)
+    beat(site, 1, updated_at=clock.time())
+    assert session.status()["state"] == "ready"
+    payload = site.payload
+    site.payload = None  # transport failures are not evidence of loss
+    for _ in range(5):
+        clock.now += 6
+        assert session.status()["state"] == "ready"
+    site.payload = payload
+    site.slurm = "unknown"  # nor is a heartbeat Slurm cannot corroborate
+    for _ in range(3):
+        clock.now += 6
+        assert session.status()["state"] == "ready"
+    site.slurm = "running"
+    clock.now += 6  # the cached Slurm state is refreshed every 5 s
+    session.status()
+    clock.now += 1
+    assert session.status()["state"] == "failed"
+
+
+def test_disabled_heartbeat_timeout_never_expires(monkeypatch):
+    session, site, clock = scripted_session(monkeypatch, heartbeat_timeout=None)
+    beat(site, 1, updated_at=0)
+    for _ in range(5):
+        clock.now += 10_000
+        assert session.status()["state"] == "ready"
+
+
+def test_wait_ready_applies_the_same_liveness_rule(monkeypatch):
+    session, site, clock = scripted_session(monkeypatch, heartbeat_timeout=5)
+    monkeypatch.setattr(session, "start", lambda: session)
+    beat(site, 1, updated_at=clock.time(), state="starting")
+    with pytest.raises(RuntimeError, match="heartbeat expired"):
+        session.wait_ready(timeout=60)
+    beat(site, 2, updated_at=clock.time(), state="ready")
+    assert session.wait_ready(timeout=60) is session
 
 
 def load_controller(monkeypatch):
@@ -663,3 +810,129 @@ def test_controller_archives_processed_requests_and_commands(cluster):
         assert (session.root / "requests" / "processed" / f"{handle.id}.json").is_file()
         heartbeat = cluster.site._read_remote_json(session.root / "status.json")
         assert heartbeat["sequence"] >= 1
+
+
+def test_drain_waits_for_in_flight_work_without_scancel(cluster, monkeypatch):
+    states_at_cancel = []
+    cancel = cluster.site.cancel_job
+
+    def observed_cancel(job_id):
+        states_at_cancel.append(
+            cluster.site._read_remote_json(session.root / "status.json")["state"]
+        )
+        cancel(job_id)
+
+    monkeypatch.setattr(cluster.site, "cancel_job", observed_cancel)
+    with cluster.site.session() as session:
+        handle = session.submit(Job(cluster.root, "in-flight", tasks=1, sleep=0.6))
+        wait_until(lambda: handle.status().is_running)
+    # The context exited while the run was in flight: it finished first.
+    status = json.loads((session.root / "runs" / handle.id / "status.json").read_text())
+    assert status["state"] == "complete"
+    assert states_at_cancel == ["closed"]
+
+
+def test_drain_cap_warns_and_leaves_allocation_running(cluster):
+    with pytest.warns(RuntimeWarning, match="cleanup_timeout") as caught:
+        with cluster.site.session(cleanup_timeout=0.3) as session:
+            handle = session.submit(Job(cluster.root, "slow-drain", tasks=1, sleep=1))
+            wait_until(lambda: handle.status().is_running)
+    message = runtime_warning(caught)
+    assert session.session_id in message and session.allocation_id in message
+    assert not cluster.cancellations
+    # The controller finishes the drain by itself instead of being killed.
+    wait_until(lambda: cluster.processes[0].poll() is not None)
+    status = json.loads((session.root / "runs" / handle.id / "status.json").read_text())
+    assert status["state"] == "complete"
+
+
+def test_stale_heartbeat_during_drain_warns_instead_of_cancelling(cluster, monkeypatch):
+    with pytest.warns(RuntimeWarning, match="lost its controller heartbeat"):
+        with cluster.site.session(heartbeat_timeout=0.5) as session:
+            handle = session.submit(Job(cluster.root, "hung-drain", sleep=3))
+            wait_until(lambda: handle.status().is_running)
+            frozen = cluster.site._read_remote_json(session.root / "status.json")
+            original = cluster.site._read_remote_json
+            monkeypatch.setattr(
+                cluster.site,
+                "_read_remote_json",
+                lambda path: (
+                    dict(frozen)
+                    if Path(path) == session.root / "status.json"
+                    else original(path)
+                ),
+            )
+    assert not cluster.cancellations
+
+
+def test_close_failure_after_successful_work_warns_and_keeps_results(
+    cluster, monkeypatch
+):
+    login = cluster.site._run_login_checked
+
+    def failing_close(command, **kwargs):
+        if "/commands/" in command and "ln " in command:
+            raise RuntimeError("ssh connection reset")
+        return login(command, **kwargs)
+
+    with pytest.warns(RuntimeWarning, match="attach_session") as caught:
+        with cluster.site.session() as session:
+            result = session.run(Job(cluster.root, "kept"), check=True)
+            monkeypatch.setattr(cluster.site, "_run_login_checked", failing_close)
+    assert result.successful
+    assert "ssh connection reset" in runtime_warning(caught)
+    assert session.session_id in runtime_warning(caught)
+    assert not cluster.cancellations  # an unconfirmed drain is not cancelled
+
+
+def test_failed_body_still_cancels_and_reports_original_error(cluster, monkeypatch):
+    monkeypatch.setattr(
+        cluster.site,
+        "cancel_job",
+        lambda job_id: (_ for _ in ()).throw(RuntimeError("scancel failed")),
+    )
+    with pytest.raises(KeyError, match="original"):
+        with cluster.site.session():
+            raise KeyError("original")
+
+
+def test_enter_reports_readiness_error_not_cleanup_error(cluster, monkeypatch):
+    monkeypatch.setattr(cluster.site, "update_status", lambda job_id: "pending")
+    original = cluster.site._submit_sbatch
+
+    def pending(command):
+        result = original(command)
+        cluster.processes[-1].kill()
+        cluster.processes[-1].wait()
+        (Path(shlex.split(command)[-1]).parent / "status.json").unlink(missing_ok=True)
+        return result
+
+    def broken_cancel(job_id):
+        raise RuntimeError("scancel unavailable")
+
+    monkeypatch.setattr(cluster.site, "_submit_sbatch", pending)
+    monkeypatch.setattr(cluster.site, "cancel_job", broken_cancel)
+    with pytest.raises(TimeoutError, match="readiness"):
+        with cluster.site.session(startup_timeout=0.1, cleanup_timeout=0.1):
+            pytest.fail("controller never became ready")
+
+
+def test_lease_renews_while_submit_uploads(cluster, monkeypatch):
+    session = cluster.site.session(lease_timeout=1.0)
+    lease = None
+    sequences = []
+
+    def slow_upload(job):
+        # Longer than the lease: renewal must not wait for the submit lock.
+        for _ in range(12):
+            sequences.append(json.loads(lease.read_text())["sequence"])
+            time.sleep(0.25)
+
+    monkeypatch.setattr(cluster.site, "_transfer_remote_simulation_inputs", slow_upload)
+    with session:
+        lease = session.root / "leases" / f"{session._client_id}.json"
+        result = session.run(Job(cluster.root, "slow-upload"), check=True)
+        assert result.successful
+        assert sequences[-1] > sequences[0] + 3
+        assert session.status()["state"] == "ready"
+    assert cluster.processes[0].poll() == 0
