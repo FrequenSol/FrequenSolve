@@ -147,10 +147,19 @@ class AllocationSession(BaseSite):
             if immutable:
                 # Hard-link publication is atomic and never replaces a request
                 # already acknowledged after an uncertain transport outcome.
+                # The controller moves processed files to ``processed/``; an
+                # id archived there is never published again and the archived
+                # copy is authoritative.
+                processed = path.parent / "processed" / path.name
                 self._login(
-                    f"ln {shlex.quote(str(temporary))} {shlex.quote(str(path))} 2>/dev/null || test -f {shlex.quote(str(path))}; rm -f -- {shlex.quote(str(temporary))}"
+                    f"test -e {shlex.quote(str(processed))} || ln {shlex.quote(str(temporary))} {shlex.quote(str(path))} 2>/dev/null || test -f {shlex.quote(str(path))}; rm -f -- {shlex.quote(str(temporary))}"
                 )
-                if self._read(path) != payload:
+                existing = (
+                    self._read(processed) or self._read(path) or self._read(processed)
+                )
+                if existing is None:
+                    raise RuntimeError(f"could not confirm publication of {path.name}")
+                if existing != payload:
                     raise ValueError("request id already belongs to different work")
             else:
                 self._login(

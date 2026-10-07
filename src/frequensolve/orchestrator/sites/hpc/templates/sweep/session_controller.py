@@ -4,6 +4,13 @@
 Requests and commands are immutable JSON files, published by atomic rename.
 One controller owns the entire allocation. Solver processes are disposable;
 completed requests and their status survive client disconnections.
+
+Liveness is a monotonically increasing ``sequence`` in ``status.json``, written
+by a dedicated thread so per-run status I/O on a slow work filesystem cannot
+delay it. Clients judge liveness by whether the sequence advances (on their own
+monotonic clock), never by comparing wall clocks across hosts. Client leases
+are judged the same way on this side. Processed requests and commands move to
+``processed/`` subdirectories so each tick lists only new work.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from adaptive_scheduler import (
 )
 
 TERMINAL = {"complete", "failed", "cancelled", "timeout"}
+PROCESSED = "processed"
 
 
 class SessionController:
@@ -48,8 +56,22 @@ class SessionController:
         self.started = time.monotonic()
         self.interval = float(config.get("poll_interval", 0.2))
         self.progress_at = time.monotonic()
-        for name in ("requests", "commands", "leases", "runs"):
+        # Heartbeat state is shared with the heartbeat thread; the main loop
+        # publishes plain values so that thread never iterates ``runs``.
+        self.state = "ready"
+        self.sequence = 0
+        self.active_runs = 0
+        self.heartbeat_interval = float(config.get("heartbeat_interval", 1.0))
+        self._heartbeat_lock = threading.Lock()
+        self._heartbeat_stop = threading.Event()
+        # Lease file -> (renewal token, local monotonic time it was first
+        # seen, revoked, timeout).
+        self.leases = {}
+        self.lease_checked_at = None
+        for name in ("leases", "runs"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
+        for name in ("requests", "commands"):
+            (self.root / name / PROCESSED).mkdir(parents=True, exist_ok=True)
 
     def _status(self, run, state=None, reason=None):
         if state is not None:
@@ -64,7 +86,6 @@ class SessionController:
             "run_id": run["id"],
             "state": run["state"],
             "reason": run.get("reason", ""),
-            "updated_at": time.time(),
             "tasks": tasks,
             "steps": rows,
             "worker_seconds": sum(row["duration_seconds"] for row in rows),
@@ -78,25 +99,61 @@ class SessionController:
         payload["pending"] = max(
             0, payload["total"] - payload["complete"] - payload["running"]
         )
+        # Rewriting unchanged status every tick costs two metadata-heavy
+        # atomic writes per active run on the solvers' filesystem.
+        content = json.dumps(payload, sort_keys=True)
+        if run.get("_published") == content:
+            return
+        payload["updated_at"] = time.time()
         _write_json_atomic(self.root / "runs" / run["id"] / "status.json", payload)
         if run.get("logs"):
             _write_json_atomic(Path(run["logs"]) / "scheduler_status.json", payload)
+        run["_published"] = content
 
-    def _controller_status(self, state):
-        _write_json_atomic(
-            self.root / "status.json",
-            {
-                "schema": "fs-allocation-session-1",
-                "generation": self.generation,
-                "allocation_id": os.environ.get("SLURM_JOB_ID"),
-                "state": state,
-                "updated_at": time.time(),
-                "reason": self.stop_reason or "",
-                "active_runs": sum(
-                    run["state"] not in TERMINAL for run in self.runs.values()
-                ),
-            },
-        )
+    def _controller_status(self, state=None):
+        """Publish one heartbeat; ``sequence`` advances on every write."""
+        with self._heartbeat_lock:
+            if state is not None:
+                self.state = state
+            self.sequence += 1
+            _write_json_atomic(
+                self.root / "status.json",
+                {
+                    "schema": "fs-allocation-session-1",
+                    "generation": self.generation,
+                    "allocation_id": os.environ.get("SLURM_JOB_ID"),
+                    "state": self.state,
+                    "sequence": self.sequence,
+                    # Informational only: clients never compare this with
+                    # their own clock.
+                    "updated_at": time.time(),
+                    "progress_age_seconds": round(
+                        time.monotonic() - self.progress_at, 3
+                    ),
+                    "reason": self.stop_reason or "",
+                    "active_runs": self.active_runs,
+                },
+            )
+
+    def _beat(self):
+        while not self._heartbeat_stop.wait(self.heartbeat_interval):
+            try:
+                self._controller_status()
+            except Exception as error:  # a slow or full filesystem is not fatal
+                print(f"Controller heartbeat write failed: {error}", flush=True)
+
+    def _archive(self, path):
+        """Move a processed request/command out of the polled directory."""
+        target = path.parent / PROCESSED / path.name
+        try:
+            if target.exists():
+                # A republished duplicate; the client verifies against the
+                # archived original.
+                path.unlink(missing_ok=True)
+            else:
+                os.replace(path, target)
+        except OSError:
+            pass  # retried on the next tick
 
     def _admit(self, path):
         request = json.loads(path.read_text())
@@ -216,25 +273,31 @@ class SessionController:
                     self.runs[path.stem] = run
                     (self.root / "runs" / path.stem).mkdir(exist_ok=True)
                     self._status(run, reason="invalid request JSON")
+            self._archive(path)
         for path in sorted((self.root / "commands").glob("*.json")):
             if path.name in self.seen_commands:
+                self._archive(path)
                 continue
             self.seen_commands.add(path.name)
-            try:
-                command = json.loads(path.read_text())
-                if command.get("generation") != self.generation:
-                    continue
-                if command["kind"] == "cancel":
-                    run = self.runs.get(command["run_id"])
-                    if run is not None:
+            self._process_command(path)
+            self._archive(path)
+
+    def _process_command(self, path):
+        try:
+            command = json.loads(path.read_text())
+            if command.get("generation") != self.generation:
+                return
+            if command["kind"] == "cancel":
+                run = self.runs.get(command["run_id"])
+                if run is not None:
+                    self._cancel(run)
+            elif command["kind"] == "close":
+                self.closing = True
+                if not command.get("drain", True):
+                    for run in self.runs.values():
                         self._cancel(run)
-                elif command["kind"] == "close":
-                    self.closing = True
-                    if not command.get("drain", True):
-                        for run in self.runs.values():
-                            self._cancel(run)
-            except (ValueError, KeyError, OSError):
-                continue
+        except (ValueError, KeyError, OSError):
+            return
 
     def _prefix(self, ranks, offset):
         options = self.config["scheduler"]
@@ -522,25 +585,63 @@ class SessionController:
                     self._status(run, "complete")
             if run["state"] not in TERMINAL:
                 self._status(run)
-        self._controller_status("draining" if self.closing else "ready")
+        self.active_runs = sum(
+            run["state"] not in TERMINAL for run in self.runs.values()
+        )
+        state = "draining" if self.closing else "ready"
+        if state != self.state:
+            self._controller_status(state)  # publish transitions immediately
 
     def _lease_alive(self):
+        """Return whether any client renewed its lease within its timeout.
+
+        A renewal is any change of the lease's ``sequence`` (or, for older
+        clients, its ``expires_at``), timed with this host's monotonic clock,
+        so client/controller clock skew cannot expire a live lease. A lease
+        with ``revoked`` (or ``expires_at`` 0) ends immediately. Unreadable
+        lease files keep their last observation.
+        """
+        now = time.monotonic()
+        default = float(self.config["lease_timeout"])
         for path in (self.root / "leases").glob("*.json"):
             try:
                 lease = json.loads(path.read_text())
-                if (
-                    lease.get("generation") == self.generation
-                    and float(lease["expires_at"]) > time.time()
-                ):
-                    return True
-            except (ValueError, KeyError, OSError):
+                if lease.get("generation") != self.generation:
+                    continue
+                token = (lease.get("sequence"), lease.get("expires_at"))
+                revoked = (
+                    bool(lease.get("revoked")) or float(lease.get("expires_at", 1)) <= 0
+                )
+                timeout = float(lease.get("timeout", default))
+            except (ValueError, KeyError, TypeError, OSError):
                 continue
-        return False
+            previous = self.leases.get(path.name)
+            seen = now if previous is None or previous[0] != token else previous[1]
+            self.leases[path.name] = (token, seen, revoked, timeout)
+        return any(
+            not revoked and now - seen <= timeout
+            for _token, seen, revoked, timeout in self.leases.values()
+        )
+
+    def _lease_check_due(self):
+        # Leases renew every few seconds; listing them every tick only adds
+        # metadata load on a shared filesystem.
+        now = time.monotonic()
+        interval = min(2.0, float(self.config["lease_timeout"]) / 4)
+        if self.lease_checked_at is not None and now - self.lease_checked_at < interval:
+            return False
+        self.lease_checked_at = now
+        return True
 
     def run(self):
         # A second controller cannot accidentally execute the same requests.
         with (self.root / "controller.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._controller_status("ready")
+            heartbeat = threading.Thread(
+                target=self._beat, name="session-heartbeat", daemon=True
+            )
+            heartbeat.start()
             try:
                 while True:
                     self.tick()
@@ -564,6 +665,7 @@ class SessionController:
                     if (
                         time.monotonic() - self.started
                         > float(self.config["lease_timeout"])
+                        and self._lease_check_due()
                         and not self._lease_alive()
                     ):
                         self.stop_reason = "client lease expired"
@@ -572,8 +674,11 @@ class SessionController:
                 self.stop_reason = "controller failed"
                 for run in self.runs.values():
                     self._cancel(run, "failed", self.stop_reason)
+                self._heartbeat_stop.set()
                 self._controller_status("failed")
                 raise
+            self._heartbeat_stop.set()
+            # Any heartbeat racing with this write repeats the terminal state.
             self._controller_status("closed")
 
 
@@ -599,11 +704,15 @@ def main():
             os.environ.setdefault("PRTE_MCA_hwloc_default_binding_policy", "none")
     controller = SessionController(root, config)
 
+    # Diagnostics only: report a stalled main loop once per stall, using the
+    # client's liveness window (slow shared filesystems stall for minutes).
+    stall_seconds = float(config.get("heartbeat_timeout") or 300.0)
+
     def diagnose_stall():
         reported = False
         while True:
             time.sleep(5)
-            stalled = time.monotonic() - controller.progress_at > 60
+            stalled = time.monotonic() - controller.progress_at > stall_seconds
             if stalled and not reported:
                 print(
                     "Controller progress stalled; Python traceback follows", flush=True

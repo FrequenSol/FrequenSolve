@@ -1,5 +1,6 @@
 """Persistent sessions exercised with a local, asynchronous fake cluster."""
 
+import importlib
 import json
 import os
 import shlex
@@ -29,6 +30,22 @@ def wait_until(predicate, timeout=10):
             return value
         time.sleep(0.02)
     raise AssertionError("timed out waiting for fake cluster")
+
+
+def published_request(session, run_id):
+    """Read a request whether or not the controller archived it yet."""
+    pending = session.root / "requests" / f"{run_id}.json"
+    processed = session.root / "requests" / "processed" / f"{run_id}.json"
+
+    def read():
+        for path in (processed, pending, processed):
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+        return None
+
+    return wait_until(read)
 
 
 class Job:
@@ -283,9 +300,7 @@ def test_requests_are_idempotent_and_conflicting_ids_fail(cluster):
     with cluster.site.session() as session:
         job = Job(cluster.root, "dedup")
         first = session.submit(job, request_id="a" * 32)
-        payload = json.loads(
-            (session.root / "requests" / ("a" * 32 + ".json")).read_text()
-        )
+        payload = published_request(session, "a" * 32)
         # Repeat publication as would happen after losing an acknowledgment.
         session._publish(
             session.root / "requests" / ("a" * 32 + ".json"), payload, immutable=True
@@ -303,6 +318,25 @@ def test_requests_are_idempotent_and_conflicting_ids_fail(cluster):
             for line in (cluster.root / "events.jsonl").read_text().splitlines()
         ]
         assert sum(row["step"] == 1 and row["event"] == "start" for row in events) == 1
+        # Republishing after the controller archived the request is still
+        # idempotent and still rejects different work.
+        wait_until(
+            lambda: (
+                session.root / "requests" / "processed" / ("a" * 32 + ".json")
+            ).is_file()
+        )
+        payload["pack"] = True
+        session._publish(
+            session.root / "requests" / ("a" * 32 + ".json"), payload, immutable=True
+        )
+        payload["pack"] = False
+        with pytest.raises(ValueError, match="different work"):
+            session._publish(
+                session.root / "requests" / ("a" * 32 + ".json"),
+                payload,
+                immutable=True,
+            )
+        assert not (session.root / "requests" / ("a" * 32 + ".json")).exists()
 
 
 def test_curvature_uses_the_session(cluster):
@@ -434,9 +468,7 @@ def test_same_output_directory_cannot_run_twice_concurrently(cluster):
         job = Job(cluster.root, "same-job", sleep=1)
         first = session.submit(job)
         wait_until(lambda: first.status().is_running)
-        payload = json.loads(
-            (session.root / "requests" / f"{first.id}.json").read_text()
-        )
+        payload = published_request(session, first.id)
         second = session._submit_request(
             {
                 key: value
@@ -542,3 +574,92 @@ def test_single_rank_preparation_limit_applies_to_postprocess(cluster):
         result = session.run(job, check=True, pack=False)
         assert result.status.raw["steps"][0]["step"] == "smooth"
         assert result.status.raw["steps"][0]["ranks"] == 1
+
+
+def load_controller(monkeypatch):
+    directory = Path(hpc.__file__).parent / "templates" / "sweep"
+    monkeypatch.syspath_prepend(str(directory))
+    return importlib.import_module("session_controller")
+
+
+def test_controller_heartbeat_is_independent_of_slow_run_status_writes(
+    tmp_path, monkeypatch
+):
+    controller_module = load_controller(monkeypatch)
+    controller = controller_module.SessionController(
+        tmp_path,
+        dict(generation="g", total_ranks=1, lease_timeout=5, heartbeat_interval=0.02),
+    )
+    original = controller_module._write_json_atomic
+    run_writes = []
+
+    def slow(path, payload):
+        if "runs" in Path(path).parts:
+            run_writes.append(path)
+            time.sleep(0.5)  # a stalled shared filesystem
+        original(path, payload)
+
+    monkeypatch.setattr(controller_module, "_write_json_atomic", slow)
+    controller._controller_status("ready")
+    heartbeat = controller_module.threading.Thread(target=controller._beat)
+    heartbeat.start()
+    try:
+        run = dict(id="a" * 32, state="running", rows=[])
+        (tmp_path / "runs" / run["id"]).mkdir()
+        before = json.loads((tmp_path / "status.json").read_text())["sequence"]
+        controller._status(run)
+        after = json.loads((tmp_path / "status.json").read_text())["sequence"]
+        assert after - before >= 5
+        # Unchanged run status is not rewritten every tick.
+        controller._status(run)
+        controller._status(run)
+        assert len(run_writes) == 1
+        controller._status(run, "complete")
+        assert len(run_writes) == 2
+    finally:
+        controller._heartbeat_stop.set()
+        heartbeat.join()
+
+
+def test_controller_lease_ignores_clock_skew_and_honors_revocation(
+    tmp_path, monkeypatch
+):
+    controller_module = load_controller(monkeypatch)
+    controller = controller_module.SessionController(
+        tmp_path, dict(generation="g", total_ranks=1, lease_timeout=30)
+    )
+    now = [500.0]
+    clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time)
+    monkeypatch.setattr(controller_module, "time", clock)
+    lease = tmp_path / "leases" / "client.json"
+
+    def renew(sequence, **extra):
+        payload = dict(generation="g", sequence=sequence, timeout=30)
+        # The client's clock is a day behind: its expiry is long past here.
+        payload["expires_at"] = time.time() - 86400
+        lease.write_text(json.dumps(dict(payload, **extra)))
+
+    for sequence in range(1, 5):
+        renew(sequence)
+        assert controller._lease_alive()
+        now[0] += 25
+    now[0] += 6  # 31 s without a renewal
+    assert not controller._lease_alive()
+    renew(9)
+    assert controller._lease_alive()
+    renew(10, revoked=True, expires_at=0)
+    assert not controller._lease_alive()
+
+
+def test_controller_archives_processed_requests_and_commands(cluster):
+    with cluster.site.session() as session:
+        handle = session.submit(Job(cluster.root, "archived"))
+        assert handle.wait(check=True).successful
+        handle.cancel()  # a no-op command for a finished run
+        processed = session.root / "commands" / "processed"
+        wait_until(lambda: any(processed.glob("*.json")))
+        assert not list((session.root / "requests").glob("*.json"))
+        assert not list((session.root / "commands").glob("*.json"))
+        assert (session.root / "requests" / "processed" / f"{handle.id}.json").is_file()
+        heartbeat = cluster.site._read_remote_json(session.root / "status.json")
+        assert heartbeat["sequence"] >= 1
