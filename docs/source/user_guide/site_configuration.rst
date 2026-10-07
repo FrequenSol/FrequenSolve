@@ -57,8 +57,9 @@ To reconnect to a running session, use its ``session.session_id``::
 
 A borrowed context only detaches on exit. The context that created the
 allocation owns its lifetime. On normal exit it drains work: runs already in
-flight finish, including their packing and output writes, and the allocation
-is cancelled only after the controller reports that it has closed.
+flight finish, including their packing and output writes, and the controller
+then exits, ending the batch job; ``scancel`` is used only if the job is still
+listed ten seconds after the controller reported that it closed.
 ``cleanup_timeout`` caps the drain; the default ``None`` waits as long as the
 controller heartbeat keeps advancing (the walltime still bounds it). If the
 cap is reached, or the heartbeat stops advancing during the drain, exit emits

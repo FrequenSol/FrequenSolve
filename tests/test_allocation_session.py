@@ -235,10 +235,11 @@ def test_one_allocation_runs_multiple_jobs_and_postprocessing(cluster):
         assert [row["step"] for row in result.status.raw["steps"]] == ["smooth", "pack"]
         assert session.status()["state"] == "ready"
         assert len(cluster.processes) == 1
+    # The drained controller ends its batch job; no scancel is needed.
     assert cluster.processes[0].poll() == 0
-    assert cluster.cancellations == ["100"]
+    assert cluster.cancellations == []
     session.close()
-    assert cluster.cancellations == ["100"]
+    assert cluster.cancellations == []
 
 
 def test_parallel_jobs_share_rank_offsets(cluster):
@@ -283,8 +284,8 @@ def test_failure_is_reported_and_owned_allocation_is_released(cluster):
     with pytest.raises(RunFailedError, match="requested solver failure"):
         with cluster.site.session() as session:
             session.run(Job(cluster.root, "failure", fail=1), check=True)
+    # The cancelled controller ended its batch job before close() returned.
     assert cluster.processes[0].poll() is not None
-    assert cluster.cancellations == ["100"]
 
 
 def test_borrowed_session_reconnect_does_not_release_allocation(cluster):
@@ -826,10 +827,12 @@ def test_drain_waits_for_in_flight_work_without_scancel(cluster, monkeypatch):
     with cluster.site.session() as session:
         handle = session.submit(Job(cluster.root, "in-flight", tasks=1, sleep=0.6))
         wait_until(lambda: handle.status().is_running)
-    # The context exited while the run was in flight: it finished first.
+    # The context exited while the run was in flight: it finished first, and
+    # the allocation was never cancelled while the controller was draining.
     status = json.loads((session.root / "runs" / handle.id / "status.json").read_text())
     assert status["state"] == "complete"
-    assert states_at_cancel == ["closed"]
+    assert all(state == "closed" for state in states_at_cancel)
+    assert cluster.processes[0].poll() == 0
 
 
 def test_drain_cap_warns_and_leaves_allocation_running(cluster):

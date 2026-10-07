@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_HEARTBEAT_TIMEOUT = 300.0
 # Bound on waiting for the controller to cancel work before ``scancel``.
 _CANCEL_TIMEOUT = 120.0
+# After the controller reports closed, let the batch job end by itself (so it
+# is accounted COMPLETED, not CANCELLED) before falling back to ``scancel``.
+_EXIT_GRACE = 10.0
+_SLURM_ENDED = {"complete", "failed", "cancelled", "timeout"}
 _POLL_INTERVAL = 0.2
 _PROCESSED = "processed"
 _ENDED = {"closed", "failed", "complete", "cancelled", "timeout"}
@@ -529,7 +533,7 @@ class AllocationSession(BaseSite):
             self._slurm_state = self.base_site.update_status(self.allocation_id)
             self._slurm_checked_at = time.monotonic()
         state = self._slurm_state
-        if state in {"complete", "failed", "cancelled", "timeout"}:
+        if state in _SLURM_ENDED:
             return {"state": state}
         if not payload:
             return {"state": "starting" if state == "running" else state}
@@ -903,11 +907,13 @@ class AllocationSession(BaseSite):
             # Interrupted while waiting: the caller asked to stop now.
             self._cancel_allocation(best_effort=True)
             raise
-        if outcome == "closed" or not drain:
+        if outcome in {"closed", "unstarted"} or not drain:
             # A closed controller leaves nothing to protect; a cancellation
             # (drain=False) must not leave the allocation running.
+            if outcome == "closed" and error is None and self._allocation_ended():
+                return False
             self._cancel_allocation(
-                best_effort=error is not None or outcome == "closed"
+                best_effort=error is not None or outcome in {"closed", "unstarted"}
             )
             if error is not None:
                 raise error
@@ -946,7 +952,7 @@ class AllocationSession(BaseSite):
         return True
 
     def _await_close(self, drain):
-        """Wait for the controller to close: ``closed``, ``cap`` or ``lost``."""
+        """Wait for the controller: ``closed``, ``unstarted``, ``cap`` or ``lost``."""
         cap = self.cleanup_timeout
         if cap is None and not drain:
             # Cancellation is quick unless the controller is stuck; then the
@@ -960,8 +966,9 @@ class AllocationSession(BaseSite):
             self._last_close_status = status
             if status.get("heartbeat_expired"):
                 return "lost"
-            if status.get("state") in _ENDED or self._controller_state is None:
-                # Ended, or a controller that never started has nothing to drain.
+            if self._controller_state is None:
+                return "unstarted"  # nothing was submitted, nothing to drain
+            if status.get("state") in _ENDED:
                 return "closed"
             elapsed = time.monotonic() - started
             if cap is not None and elapsed >= cap:
@@ -975,6 +982,20 @@ class AllocationSession(BaseSite):
                 announced = True
             # Long drains poll gently; each poll is a remote read.
             time.sleep(min(2.0, _POLL_INTERVAL + elapsed / 30))
+
+    def _allocation_ended(self):
+        """Wait briefly for Slurm to report the closed controller's job ended."""
+        deadline = time.monotonic() + _EXIT_GRACE
+        while True:
+            try:
+                if self.base_site.update_status(self.allocation_id) in _SLURM_ENDED:
+                    return True
+            except Exception as error:
+                logger.debug("Could not query %s: %s", self._identity(), error)
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.5)
 
     def _cancel_allocation(self, *, best_effort):
         """``scancel``; ``best_effort`` logs failures instead of raising."""
