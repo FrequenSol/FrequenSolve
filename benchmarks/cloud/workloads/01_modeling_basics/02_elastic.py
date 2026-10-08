@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 01_modeling_basics/02_elastic.ipynb
-Source SHA-256: 0d19c1d172b87424905303c0b08b9555f6539a8d203cb20c7127ee6715c4f525
+Source SHA-256: 641542ac61a22fdb29fce609dc04d22bb3bd02d83875fc323d6537789b41ebc8
 """
 
 # %% source cell 2
@@ -115,7 +115,7 @@ site_fd = fs.Site()
 elastic_pv_output = fs.VtkOutput.domain(
     name="pv_elastic",
     path="paraview",
-    fields=["displacement_z"],
+    fields=["velocity_z"],
     properties=["vp", "vs"],
     show_pml=True,
     upscale=1,
