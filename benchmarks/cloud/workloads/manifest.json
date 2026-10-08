@@ -11,13 +11,13 @@
       "sourceSha256": "de9e0bc6b8db64d5cfbfc809b9f1a6f6459e96d1c132db1f2e6175d838727792"
     },
     {
-      "behaviorSha256": "5e4ffbc1a7049acb6e19361804e096c7ff1980b6a800ba6c989e1b8cb2cbad57",
+      "behaviorSha256": "c013f9c26dc25c066a39691959b9147d43965dc178f79ab54dffa8d012ed4ae3",
       "expectedSubmissions": 3,
       "id": "01_modeling_basics/02_elastic",
       "script": "01_modeling_basics/02_elastic.py",
-      "scriptSha256": "c4a214f70fe5a4c754a3ac77cd497df538fd818895fe88907ee7d966e63e58c3",
+      "scriptSha256": "b42fb64c4f1147dc441df98bcb28accf656a8bb38d1aab9d57850f56f6600126",
       "source": "01_modeling_basics/02_elastic.ipynb",
-      "sourceSha256": "0d19c1d172b87424905303c0b08b9555f6539a8d203cb20c7127ee6715c4f525"
+      "sourceSha256": "641542ac61a22fdb29fce609dc04d22bb3bd02d83875fc323d6537789b41ebc8"
     },
     {
       "behaviorSha256": "a8fd24d96ece49c54af806ee193927615f6ef5ae6be2629cf9a60043c13e3061",
