@@ -189,12 +189,19 @@ def _regularization_jobs(fake):
     return [job for job in fake.jobs if isinstance(job, RegularizationJob)]
 
 
-def test_native_tikhonov_hessian_folds_into_the_normal_job(tmp_path):
+@pytest.mark.parametrize("fractional_scales", [None, {"vp": 2.5}])
+def test_native_tikhonov_hessian_folds_into_the_normal_job(tmp_path, fractional_scales):
     fake = FakeImagingSite(seed=7, support_masks={"model.vp": [1, 0, 1, 1]})
     problem = _problem(tmp_path, fake)
     lin = problem.linearize()
     _, native = bind_workflow_regularization(
-        2 * im.Tikhonov(0.3), lin.space, problem, lin
+        2
+        * im.NativeRegularization(
+            im.Smoothing(alpha=0.3), fractional_scales=fractional_scales
+        ),
+        lin.space,
+        problem,
+        lin,
     )
     directions = [lin.space.random(seed) for seed in (1, 2, 3)]
     prepared = len(_regularization_jobs(fake))
@@ -203,6 +210,7 @@ def test_native_tikhonov_hessian_folds_into_the_normal_job(tmp_path):
 
     (job,) = _normal_jobs(fake)  # tasks and regularization postprocess together
     assert len(job.directions) == 3 and len(job.regularization["inputs"]) == 3
+    assert job.regularization.get("fractional_scales", {}) == (fractional_scales or {})
     assert len(_regularization_jobs(fake)) == prepared
     assert lin.apply_normal(directions[0], regularization=native) == regularized[0]
     plain = lin.apply_normal_batch(directions)
@@ -356,3 +364,28 @@ def test_batched_regularized_normal_job_round_trips_and_validates(tmp_path):
     assert loaded.regularization == job.regularization
     staged = {pair[0] for pair in loaded.remote_input_files("/remote/project")}
     assert {*map(str, job.regularization["inputs"])} <= {*map(str, staged)}
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_uncached_setup_batch_does_not_retain_normal_columns(tmp_path, native):
+    fake = FakeImagingSite(seed=11)
+    problem = _problem(tmp_path, fake)
+    lin = problem.linearize()
+    bound = None
+    if native:
+        _, bound = bind_workflow_regularization(
+            im.NativeRegularization(im.Smoothing(kind="tikhonov", alpha=0.3)),
+            lin.space,
+            problem,
+            lin,
+        )
+    rows = np.stack([lin.space.random(i).values for i in range(5)])
+    lin.max_normal_directions = 2
+    before = dict(lin._ops)
+    uncached = lin.apply_normal_batch(rows, regularization=bound, cache=False)
+    assert lin._ops == before
+    assert len(_normal_jobs(fake)) == 3
+    cached = lin.apply_normal_batch(rows, regularization=bound)
+    for a, b in zip(uncached, cached):
+        np.testing.assert_allclose(a.values, b.values)
+    assert len(_normal_jobs(fake)) == 6

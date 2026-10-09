@@ -1145,6 +1145,17 @@ class _StageObjective:
         history: Optional[OptimizationHistory],
         metrics: Mapping[str, Any],
     ) -> None:
+        if isinstance(view, ImagingProblem) and any(
+            t.comparison.reliability is not None
+            for t in view.misfit.objective_terms([g.name for g in view.observed_groups])
+        ):
+            raise ValueError(
+                "predicted reliability currently requires an explicit outer loop: "
+                "use problem.freeze_reliability(model) for a native FWI stage, or "
+                "prepare problem.linearize(model), evaluate candidates with "
+                "reference.trial(candidate), then refresh at the accepted model; "
+                "automatic FWI-stage reliability refresh is not supported yet"
+            )
         self.view = view
         self.space = space
         self.regularization = regularization
@@ -3405,6 +3416,9 @@ def _receiver_probe_request(preconditioner: Any) -> Optional[Dict[str, Any]]:
 
     from .regularization import Diagonal
 
+    request = getattr(preconditioner, "receiver_probe_request", None)
+    if callable(request):
+        return request()
     if isinstance(preconditioner, Diagonal) and preconditioner.probes == "receiver":
         return {"probes": preconditioner.probe_count, "seed": preconditioner.seed or 0}
     return None
@@ -3470,6 +3484,7 @@ def _preconditioned_cg(
         "residual_norm": b_norm,
         "rhs_norm": b_norm,
         "message": "zero right-hand side",
+        "relative_residual_history": [0.0 if b_norm == 0 else 1.0],
     }
     if b_norm == 0.0:
         return x, info
@@ -3513,6 +3528,7 @@ def _preconditioned_cg(
         del q
         done = k
         residual_norm = float(np.linalg.norm(r))
+        info["relative_residual_history"].append(residual_norm / b_norm)
         if callback is not None:
             callback(x)
         if residual_norm <= tolerance * b_norm:
@@ -4071,7 +4087,7 @@ class LSRTM:
                 from scipy.sparse import eye
 
                 parts.append(Quadratic(eye(size), weight=damping).bind(space))
-            # The metric only reads the terms' curvature diagonals.
+            # Include the complete solve curvature for coarse-space corrections.
             metric_regularization = (
                 None
                 if not parts
@@ -4111,6 +4127,7 @@ class LSRTM:
             "requested_method": self.method,
             "preconditioned": precondition is not None,
             "fused_regularization": fused is not None,
+            "preconditioner": getattr(self.bound_preconditioner, "info", {}),
             **info,
         }
         return ControlVector(solution, space)
