@@ -290,24 +290,73 @@
         "FieldExport": {
           "type": "object",
           "description": "Postprocess one explicit mesh-control vector into a field. Dual inputs are divided by physical constrained lumped mass before sampling; primal inputs are unchanged. No wave solves.",
-          "required": ["control"],
+          "required": [
+            "control"
+          ],
           "properties": {
-            "control": {"type": "string", "minLength": 1},
-            "input_role": {"enum": ["dual", "primal"], "default": "dual"},
-            "sampling_map": {"type": "boolean", "default": false, "description": "One-rank local operation: emit zero-based constrained CSR offsets/indices/weights for reuse without further solver calls."},
-            "output": {"type": "string", "minLength": 1},
+            "control": {
+              "type": "string",
+              "minLength": 1
+            },
+            "input_role": {
+              "enum": [
+                "dual",
+                "primal"
+              ],
+              "default": "dual"
+            },
+            "sampling_map": {
+              "type": "boolean",
+              "default": false,
+              "description": "One-rank local operation: emit zero-based constrained CSR offsets/indices/weights for reuse without further solver calls."
+            },
+            "output": {
+              "type": "string",
+              "minLength": 1
+            },
             "grid": {
               "type": "object",
-              "required": ["origin_km", "spacing_km", "counts"],
+              "required": [
+                "origin_km",
+                "spacing_km",
+                "counts"
+              ],
               "properties": {
-                "origin_km": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "number"}},
-                "spacing_km": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "number", "minimum": 0}},
-                "counts": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "integer", "minimum": 1}}
+                "origin_km": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 3,
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                "spacing_km": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 3,
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "counts": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 3,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
               },
               "additionalProperties": false
             }
           },
-          "dependentRequired": {"grid": ["output"]},
+          "dependentRequired": {
+            "grid": [
+              "output"
+            ]
+          },
           "additionalProperties": false
         },
         "receiver_diagonal": {
@@ -661,6 +710,14 @@
                 "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
               },
               "description": "One output vector path per inputs entry, resolved like gradient."
+            },
+            "fractional_scales": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "description": "Optional fixed positive reference scales keyed by active unqualified material control IDs. Each named block evaluates R(input/scale), overriding amplitude normalization for that block; omitted blocks retain existing behavior. Scales use native control-vector units, are frozen into the prepared context, and apply consistently to value, gradient, diagonal and proximal callbacks. Mass callbacks are unchanged."
             }
           },
           "dependentRequired": {
@@ -1012,8 +1069,13 @@
         "receiver_diagonal": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Shared globally encoded receiver GN diagonal alongside material linearize or spectral derivative RTM. Requires DPG, frozen Gram, common dense receivers, source-independent quadratic weights and no preprocessing. Spectral orders 0-4 share one probe hierarchy when receiver weights differ only by an order scalar; frequency/material-dependent channels are excluded. All mixed terms are assembled in constrained controls and MPI-reduced before per-source squaring. Default probes is min(16, encoded source RHS count).",
+          "description": "Shared globally encoded receiver GN diagonal alongside material linearize or spectral derivative RTM. Requires DPG, frozen Gram and common dense receivers. Waveform/full-complex spectral comparisons reuse source-independent probes with quadratic weights and no preprocessing. Phase-derivative comparisons use source-dependent batched probes with the frozen robust IRLS metric; residual preprocessing and synthetic arrays are supported. Optional source_samples selects stratified source sampling with inverse-probability weighting. Spectral orders 0-4 share one probe hierarchy when receiver weights differ only by an order scalar; frequency/material-dependent channels are excluded. All mixed terms are assembled in constrained controls and MPI-reduced before per-source squaring. Default probes is min(16, encoded source RHS count).",
           "properties": {
+            "source_samples": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "For phase-derivative comparisons, randomly sample one source per equal contiguous stratum, with inverse-probability weighting. Omit to use every source."
+            },
             "probes": {
               "type": "integer",
               "minimum": 1
@@ -1026,6 +1088,30 @@
               "type": "string",
               "pattern": "\\.h5$",
               "default": "receiver_diagonal.h5"
+            },
+            "blocks": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "controls"
+              ],
+              "description": "Optional collocated cross-parameter products from the same receiver probes. Material linearize with waveform or phase-derivative comparison only; controls must share the identical meshed material basis, transform and coefficient ownership. Writes fs-receiver-blocks-1 in native parameter units. Adds no PDE solves.",
+              "properties": {
+                "controls": {
+                  "type": "array",
+                  "minItems": 2,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "output": {
+                  "type": "string",
+                  "pattern": "\\.h5$",
+                  "default": "receiver_blocks.h5"
+                }
+              }
             }
           }
         },
@@ -1039,7 +1125,10 @@
         },
         "background_layout": {
           "type": "string",
-          "enum": ["rank", "shared"],
+          "enum": [
+            "rank",
+            "shared"
+          ],
           "default": "rank",
           "description": "Files of a background capture: one HDF5 file per rank and task, written independently without collective I/O (rank), or one HDF5 file per task written by every rank through parallel HDF5 where available (shared). The environment variable FS_BACKGROUND_LAYOUT overrides it. Readers take the layout from the manifest."
         },
@@ -2621,6 +2710,14 @@
           }
         }
       ]
+    },
+    "source_derivative": {
+      "enum": [
+        "total",
+        "frozen"
+      ],
+      "default": "total",
+      "description": "Source frequency dependence in forward_df/forward_ds: total differentiates the source load, frozen holds it fixed. Recorded in derivative trace metadata."
     }
   },
   "allOf": [
@@ -2842,7 +2939,35 @@
               "forward",
               "born",
               "rtm",
-              "fwi_operator"
+              "fwi_operator",
+              "lsrtm_gradient"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "lsrtm_gradient"
+          }
+        },
+        "required": [
+          "workflow",
+          "control_sensitivities"
+        ]
+      },
+      "then": {
+        "description": "A material-control LSRTM gradient is available for spectral series objectives only.",
+        "required": [
+          "kernel_derivative"
+        ],
+        "properties": {
+          "control_sensitivities": {
+            "required": [
+              "direction",
+              "gradient"
             ]
           }
         }
@@ -2973,14 +3098,15 @@
       },
       "then": {
         "required": [
-          "workflow",
-          "Image"
+          "workflow"
         ],
         "properties": {
           "workflow": {
             "enum": [
               "rtm",
-              "fwi_operator"
+              "fwi_operator",
+              "born",
+              "lsrtm_gradient"
             ]
           }
         },
@@ -2988,6 +3114,65 @@
           "required": [
             "derivative_order"
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kernel_derivative",
+          "workflow"
+        ],
+        "properties": {
+          "workflow": {
+            "enum": [
+              "rtm",
+              "fwi_operator",
+              "lsrtm_gradient"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "Image"
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kernel_derivative",
+          "workflow"
+        ],
+        "properties": {
+          "workflow": {
+            "enum": [
+              "born",
+              "lsrtm_gradient"
+            ]
+          }
+        }
+      },
+      "then": {
+        "description": "Spectral Born traces and LSRTM gradients follow a material-control direction and one summed series objective; Cartesian image directions and jets are rejected.",
+        "required": [
+          "control_sensitivities"
+        ],
+        "properties": {
+          "kernel_derivative": {
+            "required": [
+              "residual"
+            ],
+            "properties": {
+              "residual": {
+                "enum": [
+                  "derivative",
+                  "window"
+                ]
+              }
+            }
+          }
         }
       }
     },
