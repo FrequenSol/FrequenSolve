@@ -99,7 +99,12 @@ pass seconds to choose a window for one session or ``None`` to disable the
 check. Shared scratch filesystems can stall metadata operations for minutes
 during large writes, so a session whose window is below 120 seconds logs a
 warning when it starts. ``PersistentAllocation`` accepts the same ``heartbeat_timeout`` and
-``cleanup_timeout`` options. Processed requests and commands move to
+``cleanup_timeout`` options. The controller writes its output, the Python
+traceback of an unhandled error, and, on a fatal signal such as a
+segmentation fault, every thread's traceback to
+``<work_dir>/.fs_sessions/<session_id>/controller.log``. A lost heartbeat, a
+controller that reported ``failed``, or a job Slurm ended names that file
+(``session.controller_log``) in the reported status. Processed requests and commands move to
 ``processed/`` subdirectories of the session directory, so the controller
 lists only new work.
 

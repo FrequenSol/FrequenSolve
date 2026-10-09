@@ -231,6 +231,11 @@ class AllocationSession(BaseSite):
     def _identity(self):
         return f"session {self.session_id} (Slurm allocation {self.allocation_id})"
 
+    @property
+    def controller_log(self):
+        """Remote path of the allocation controller's log (stdout and stderr)."""
+        return self.root / "controller.log"
+
     def _login(self, command, *, action, path):
         return self.base_site._run_session_command(
             command, timeout=self.command_timeout, action=action, path=path
@@ -569,7 +574,9 @@ class AllocationSession(BaseSite):
                 if self._stale_observations >= 2
                 else None
             )
-        if payload and payload.get("state") in {"closed", "failed"}:
+        if payload and payload.get("state") == "failed":
+            return dict(payload, controller_log=str(self.controller_log))
+        if payload and payload.get("state") == "closed":
             return payload
         if (
             self._slurm_checked_at is None
@@ -579,7 +586,7 @@ class AllocationSession(BaseSite):
             self._slurm_checked_at = time.monotonic()
         state = self._slurm_state
         if state in _SLURM_ENDED:
-            return {"state": state}
+            return {"state": state, "controller_log": str(self.controller_log)}
         if not payload:
             return {"state": "starting" if state == "running" else state}
         if stale is not None and state == "running":
@@ -589,8 +596,10 @@ class AllocationSession(BaseSite):
                 "reason": (
                     f"allocation controller heartbeat expired: unchanged for "
                     f"{stale:.0f} s (heartbeat_timeout {self.heartbeat_timeout:g} s) "
-                    f"while Slurm reports allocation {self.allocation_id} running"
+                    f"while Slurm reports allocation {self.allocation_id} running; "
+                    f"see the controller log {self.controller_log} on the login node"
                 ),
+                "controller_log": str(self.controller_log),
                 "last_heartbeat": payload,
             }
         return payload

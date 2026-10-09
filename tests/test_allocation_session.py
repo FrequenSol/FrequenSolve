@@ -1080,3 +1080,75 @@ def test_failed_session_publication_names_command_and_path(cluster, monkeypatch)
     message = str(caught.value)
     assert "publication (mv)" in message and str(target) in message
     assert "Input/output error" in message and "exit status 1" in message
+
+
+def test_lost_controller_reports_its_remote_log(monkeypatch):
+    session, site, clock = scripted_session(monkeypatch, heartbeat_timeout=10)
+    log = str(Path("/remote/work/.fs_sessions") / session.session_id / "controller.log")
+    assert str(session.controller_log) == log
+    beat(site, 1, updated_at=0)
+    session.status()
+    clock.now += 11
+    session.status()
+    clock.now += 1
+    lost = session.status()
+    assert lost["heartbeat_expired"] and lost["controller_log"] == log
+    assert log in lost["reason"]
+    # A controller that published "failed", or a job Slurm ended, names it too.
+    beat(site, 2, updated_at=0, state="failed")
+    assert session.status()["controller_log"] == log
+    site.payload, site.slurm = None, "failed"
+    session._controller_state = None
+    clock.now += 6
+    assert session.status() == {"state": "failed", "controller_log": log}
+
+
+def test_controller_logs_its_failure_before_a_failing_status_write(
+    tmp_path, monkeypatch, capsys
+):
+    controller_module = load_controller(monkeypatch)
+    controller = controller_module.SessionController(
+        tmp_path,
+        dict(generation="g", total_ranks=1, lease_timeout=30, heartbeat_interval=60),
+    )
+    publish = controller._controller_status
+
+    def status(state=None):
+        if state == "failed":
+            raise OSError("work filesystem unavailable")
+        publish(state)
+
+    def tick():
+        raise RuntimeError("original failure")
+
+    run = dict(id="b" * 32, state="running", rows=[])
+    controller.runs[run["id"]] = run
+    monkeypatch.setattr(controller, "_controller_status", status)
+    monkeypatch.setattr(controller, "tick", tick)
+    monkeypatch.setattr(
+        controller,
+        "_cancel",
+        lambda *args: (_ for _ in ()).throw(OSError("cannot write run status")),
+    )
+    with pytest.raises(RuntimeError, match="original failure"):
+        controller.run()
+    log = capsys.readouterr().out
+    assert log.index("Controller failed: RuntimeError('original failure')") < (
+        log.index("Could not publish the failed controller status")
+    )
+    assert "Traceback" in log and "cannot write run status" in log
+    assert controller.stop_reason == "controller failed: RuntimeError"
+
+
+def test_controller_enables_faulthandler_before_anything_else(monkeypatch):
+    controller_module = load_controller(monkeypatch)
+    enabled = []
+    monkeypatch.setattr(
+        controller_module.faulthandler,
+        "enable",
+        lambda **kwargs: enabled.append(kwargs),
+    )
+    monkeypatch.setattr(controller_module.sys, "argv", ["session_controller.py"])
+    with pytest.raises(SystemExit):
+        controller_module.main()  # --root is missing
+    assert enabled == [{"all_threads": True}]

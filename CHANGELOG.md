@@ -69,6 +69,12 @@ prepared.
   default stays `"work"`. `work_dir`, `scratch_dir` and `tmp_dir` may start
   with a remote variable such as `$SCRATCH` or `${WORK}`, resolved once in the
   login shell, cached and logged; a `$` elsewhere in these paths is rejected.
+- A dying session controller leaves a trace: it enables `faulthandler`, so
+  fatal signals dump every thread's traceback to `controller.log`, and it logs
+  an unhandled error's traceback before cleanup, so a failing final status
+  write no longer hides the cause. Client statuses for a lost heartbeat, a
+  failed controller or an ended Slurm job include the remote `controller.log`
+  path (`session.controller_log`).
 
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five

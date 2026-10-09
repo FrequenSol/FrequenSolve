@@ -24,8 +24,10 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 from adaptive_scheduler import (
@@ -670,12 +672,29 @@ class SessionController:
                     ):
                         self.stop_reason = "client lease expired"
                     time.sleep(self.interval)
-            except BaseException:
-                self.stop_reason = "controller failed"
-                for run in self.runs.values():
-                    self._cancel(run, "failed", self.stop_reason)
+            except BaseException as error:
+                # Log the cause first: cleanup below may fail on the same
+                # filesystem and must not hide it.
+                print(f"Controller failed: {error!r}", flush=True)
+                traceback.print_exc(file=sys.stdout)
+                sys.stdout.flush()
+                self.stop_reason = f"controller failed: {type(error).__name__}"
+                for run in list(self.runs.values()):
+                    try:
+                        self._cancel(run, "failed", self.stop_reason)
+                    except Exception as cleanup:
+                        print(
+                            f"Could not cancel run {run.get('id')}: {cleanup!r}",
+                            flush=True,
+                        )
                 self._heartbeat_stop.set()
-                self._controller_status("failed")
+                try:
+                    self._controller_status("failed")
+                except Exception as cleanup:
+                    print(
+                        f"Could not publish the failed controller status: {cleanup!r}",
+                        flush=True,
+                    )
                 raise
             self._heartbeat_stop.set()
             # Any heartbeat racing with this write repeats the terminal state.
@@ -683,6 +702,9 @@ class SessionController:
 
 
 def main():
+    # Fatal signals (SIGSEGV, SIGABRT, SIGBUS, ...) dump every thread's Python
+    # traceback to stderr, which Slurm writes to controller.log.
+    faulthandler.enable(all_threads=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
     args = parser.parse_args()
