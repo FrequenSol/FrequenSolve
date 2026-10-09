@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -1300,16 +1301,28 @@ sys.exit(1)
 """
 
 
+def _fake_slurm_allocation(monkeypatch, tmp_path, ranks):
+    controller = tmp_path / "scontrol"
+    controller.write_text('#!/bin/sh\nprintf "node0\\n"\n')
+    controller.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("SLURM_JOB_NODELIST", "node0")
+    monkeypatch.setenv("SLURM_TASKS_PER_NODE", str(ranks))
+    monkeypatch.delenv("SLURM_JOB_CPUS_PER_NODE", raising=False)
+
+
 def _run_adaptive_sweep(
     monkeypatch, tmp_path, *, fail_step, postprocess_job, n_tasks=1, sizing_json=None
 ):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    _fake_slurm_allocation(monkeypatch, tmp_path, 1)
     solver = tmp_path / "fake-solver"
     solver.write_text(_SWEEP_SOLVER.format(python=sys.executable), encoding="utf-8")
     solver.chmod(0o755)
     launcher = tmp_path / "srun"
     launcher.write_text(
-        '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != "$FAKE_SOLVER" ]; do shift; done\n'
+        "#!/bin/sh\nexport SLURM_PROCID=0 SLURM_STEP_ID=1\n"
+        'while [ "$#" -gt 0 ] && [ "$1" != "$FAKE_SOLVER" ] && [ "$1" != /bin/sh ]; do shift; done\n'
         'exec "$@"\n',
         encoding="utf-8",
     )
@@ -2555,6 +2568,7 @@ def test_attached_initialization_respects_job_rank_limit(
 
 
 def test_eikonal_batch_caps_initialization_and_task_launches(monkeypatch, tmp_path):
+    _fake_slurm_allocation(monkeypatch, tmp_path, 8)
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     launcher = tmp_path / "srun"
     calls = tmp_path / "launches.txt"

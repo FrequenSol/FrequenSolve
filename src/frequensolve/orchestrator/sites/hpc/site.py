@@ -3016,13 +3016,20 @@ class SlurmSite(BaseSite):
         successful = int(payload.get("successful") or payload.get("succeeded") or 0)
         failed = int(payload.get("failed") or 0)
         running = int(payload.get("running") or 0)
+        launching = int(payload.get("launching") or 0)
         pending = int(
-            payload.get("pending") or max(0, total - successful - failed - running)
+            payload.get(
+                "pending", max(0, total - successful - failed - running - launching)
+            )
         )
+        launch_text = f"{launching} launching, " if launching else ""
+        waiting = len(payload.get("waiting_for_step_tasks") or [])
+        if waiting:
+            launch_text = f"{launching} launching ({waiting} waiting for Slurm step), "
         return (
             "tasks: "
             f"{successful} successful, {failed} failed, {running} running, "
-            f"{pending} pending, {total} total"
+            f"{launch_text}{pending} pending, {total} total"
         )
 
     def _allocation_handle(self, job_id: str) -> RunHandle:

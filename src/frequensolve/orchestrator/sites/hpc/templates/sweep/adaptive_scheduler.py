@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Union
@@ -33,6 +34,29 @@ _MPIRUN_LAUNCHERS = frozenset({"mpiexec", "mpirun"})
 # "cores": map each mpirun/mpiexec rank onto its OpenMP threads' cores (Open MPI
 # on Linux); "none": ranks stay unbound; "launcher"/"explicit": add nothing.
 RANK_BINDINGS = ("launcher", "cores", "none", "explicit")
+# Rank zero signals that Slurm has actually started the step, before exec.
+# No Python interpreter or controller query is needed on the worker ranks.
+_SLURM_START = (
+    'if [ "${SLURM_PROCID:-}" = 0 ]; then '
+    'printf \'%s\\n\' "${SLURM_STEP_ID:-unknown}" > "$1.tmp" '
+    '&& mv "$1.tmp" "$1" || exit 1; fi; shift; exec "$@"'
+)
+
+
+def _slurm_counts(value: str, nodes: int) -> list[int]:
+    """Expand Slurm's per-node counts, e.g. ``8(x3),4``; never guess a layout."""
+    counts = []
+    for item in value.split(","):
+        match = re.fullmatch(r"\s*(\d+)(?:\(x(\d+)\))?\s*", item)
+        if match is None:
+            raise ValueError(f"Invalid Slurm per-node counts: {value!r}")
+        count, repeat = int(match[1]), int(match[2] or 1)
+        if repeat < 1 or len(counts) + repeat > nodes:
+            raise ValueError("Slurm per-node counts do not match the node list")
+        counts.extend([count] * repeat)
+    if len(counts) != nodes:
+        raise ValueError("Slurm per-node counts do not match the node list")
+    return counts
 
 
 def _parse_args() -> argparse.Namespace:
@@ -396,6 +420,11 @@ class AdaptiveScheduler:
         self.failed_reasons: Dict[int, str] = {}
         self.launched_at: Dict[int, float] = {}
         self.launched_ranks: Dict[int, int] = {}
+        self._slurm_hosts: Optional[list[str]] = None
+        self._start_files: Dict[int, Path] = {}
+        self._started_steps: Dict[int, str] = {}
+        self._launch_clocks: Dict[int, float] = {}
+        self._wait_warnings: Dict[int, float] = {}
         self.free_intervals = [(0, self.total_ranks)]
         if self.mpi_launcher in _MPIRUN_LAUNCHERS:
             self.free_intervals = [(0, self.max_ranks_per_task)]
@@ -522,7 +551,30 @@ class AdaptiveScheduler:
         aborted: Optional[Iterable[int]] = None,
         reason: Optional[str] = None,
     ) -> None:
-        running = [entry[3] for entry in self.running]
+        active = [entry[3] for entry in self.running]
+        launching = []
+        waiting = []
+        now = time.monotonic()
+        for task in active:
+            if self.mpi_launcher != "srun" or task in self._started_steps:
+                continue
+            try:
+                self._started_steps[task] = self._start_files[task].read_text().strip()
+                continue
+            except FileNotFoundError:
+                pass
+            launching.append(task)
+            elapsed = now - self._launch_clocks[task]
+            if elapsed >= 60:
+                waiting.append(task)
+                if now - self._wait_warnings.get(task, self._launch_clocks[task]) >= 60:
+                    print(
+                        f"[scheduler] task={task} waiting for Slurm step startup "
+                        f"for {elapsed:.0f}s; see task_{task}.log",
+                        flush=True,
+                    )
+                    self._wait_warnings[task] = now
+        running = [task for task in active if task not in launching]
         complete = len(self.successful_tasks) + len(self.failed_tasks)
         payload = {
             "state": state,
@@ -530,7 +582,11 @@ class AdaptiveScheduler:
             "successful": len(self.successful_tasks),
             "failed": len(self.failed_tasks),
             "running": len(running),
-            "pending": max(0, len(self.task_indices) - complete - len(running)),
+            "pending": max(0, len(self.task_indices) - complete - len(active)),
+            "launching": len(launching),
+            "launching_tasks": launching,
+            "waiting_for_step_tasks": waiting,
+            "step_ids": {str(task): step for task, step in self._started_steps.items()},
             "complete": complete,
             "running_tasks": running,
             "successful_tasks": self.successful_tasks,
@@ -563,13 +619,108 @@ class AdaptiveScheduler:
             return min(ranks, self.task_ranks.get(task_id, ranks))
         return ranks
 
+    def _slurm_rank_hosts(self, offset: int, ranks: int) -> list[str]:
+        """Map logical slots to allocation hosts once, including unequal capacities.
+
+        Pending launches retain their slots. Slurm assigns disjoint CPUs within
+        each host with --exclusive --exact; completed steps release the same slots.
+        """
+        if self._slurm_hosts is None:
+            if int(os.environ.get("SLURM_HET_SIZE", "1")) > 1:
+                raise ValueError("Adaptive scheduling requires one Slurm job component")
+            nodelist = os.environ.get("SLURM_JOB_NODELIST")
+            if not nodelist:
+                raise ValueError("srun adaptive scheduling requires SLURM_JOB_NODELIST")
+            hosts = subprocess.check_output(
+                ["scontrol", "show", "hostnames", nodelist], text=True, timeout=30
+            ).split()
+            if not hosts or len(set(hosts)) != len(hosts):
+                raise ValueError("Slurm allocation has an empty or duplicate node list")
+            if os.environ.get("SLURM_TASKS_PER_NODE"):
+                counts = _slurm_counts(os.environ["SLURM_TASKS_PER_NODE"], len(hosts))
+            elif os.environ.get("SLURM_NTASKS_PER_NODE"):
+                counts = [int(os.environ["SLURM_NTASKS_PER_NODE"])] * len(hosts)
+            else:
+                raise ValueError("Slurm allocation is missing per-node task counts")
+            if any(count < 0 for count in counts) or sum(counts) != self.total_ranks:
+                raise ValueError("Slurm allocation does not match scheduler rank slots")
+            if os.environ.get("SLURM_JOB_CPUS_PER_NODE"):
+                cpus = _slurm_counts(os.environ["SLURM_JOB_CPUS_PER_NODE"], len(hosts))
+                if any(n * self.omp_threads > c for n, c in zip(counts, cpus)):
+                    raise ValueError(
+                        "Slurm allocation has insufficient CPUs for task threads"
+                    )
+            self._slurm_hosts = [
+                host for host, n in zip(hosts, counts) for _ in range(n)
+            ]
+        if offset < 0 or ranks < 1 or offset + ranks > len(self._slurm_hosts):
+            raise ValueError("Task rank interval is outside the Slurm allocation")
+        return self._slurm_hosts[offset : offset + ranks]
+
+    def _launch_environment(self):
+        env = os.environ.copy()
+        if self.mpi_launcher == "srun":
+            # Do not inherit allocation-wide constraints into a sub-allocation.
+            # Keep job identity, CPU binding, MPI transport and memory settings.
+            for name in (
+                "SLURM_NNODES",
+                "SLURM_JOB_NUM_NODES",
+                "SLURM_NODELIST",
+                "SLURM_NTASKS",
+                "SLURM_NPROCS",
+                "SLURM_NTASKS_PER_NODE",
+                "SLURM_TASKS_PER_NODE",
+                "SLURM_NTASKS_PER_SOCKET",
+                "SLURM_NTASKS_PER_CORE",
+                "SLURM_HOSTFILE",
+                "SLURM_DISTRIBUTION",
+                "SLURM_DIST_PLANESIZE",
+                "SLURM_RELATIVE",
+                "SLURM_EXCLUDE",
+                "SLURM_OVERLAP",
+                "SLURM_NODEFILE",
+            ):
+                env.pop(name, None)
+        return env
+
     def _launch_command(self, task_id: int, offset: int, ranks: int) -> list[str]:
         if self.mpi_launcher == "ibrun":
             prefix = [self.mpi, "-n", str(ranks), "-o", str(offset), "task_affinity"]
         elif self.mpi_launcher == "srun":
+            for arg in self.mpi_args:
+                if (
+                    arg.split("=", 1)[0]
+                    in {
+                        "--nodes",
+                        "--nodelist",
+                        "--nodefile",
+                        "--exclude",
+                        "--relative",
+                        "--ntasks-per-node",
+                        "--ntasks-per-socket",
+                        "--ntasks-per-core",
+                        "--overlap",
+                        "--overcommit",
+                    }
+                    or arg.startswith(("-N", "-w", "-x", "-r"))
+                    or arg == "-O"
+                ):
+                    raise ValueError(
+                        f"mpi_args conflicts with adaptive Slurm placement: {arg}"
+                    )
+            hosts = self._slurm_rank_hosts(offset, ranks)
+            hostfile = (self.output / f"task_{task_id}.hosts").resolve()
+            hostfile.write_text("\n".join(hosts) + "\n")
+            self._start_files.setdefault(
+                task_id,
+                (self.output / f"task_{task_id}.{uuid.uuid4().hex}.started").resolve(),
+            )
             prefix = [
                 self.mpi,
                 "--exclusive",
+                "--exact",
+                "--distribution=arbitrary",
+                "--nodelist=" + str(hostfile),
                 "--ntasks",
                 str(ranks),
                 "--cpus-per-task",
@@ -592,10 +743,22 @@ class AdaptiveScheduler:
                 ]
         else:
             raise SystemExit(f"unsupported MPI launcher: {self.mpi_launcher}")
+        startup = (
+            [
+                "/bin/sh",
+                "-c",
+                _SLURM_START,
+                "fs-task-start",
+                str(self._start_files[task_id]),
+            ]
+            if self.mpi_launcher == "srun"
+            else []
+        )
         return [
             prefix[0],
             *self.mpi_args,
             *prefix[1:],
+            *startup,
             self.executable,
             "-nthreads",
             str(self.omp_threads),
@@ -620,10 +783,16 @@ class AdaptiveScheduler:
 
     def _launch(self, task_id: int, offset: int, ranks: int, memory: float):
         self.launched_at[task_id] = time.time()
-        output = open(self.output / f"task_{task_id}.log", "ab", buffering=0)
+        self._launch_clocks[task_id] = time.monotonic()
         command = self._launch_command(task_id, offset, ranks)
+        output = open(self.output / f"task_{task_id}.log", "ab", buffering=0)
         try:
-            process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(
+                command,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                env=self._launch_environment(),
+            )
         except Exception:
             output.close()
             raise
@@ -733,7 +902,10 @@ class AdaptiveScheduler:
                 )
                 if offset is None:
                     raise RuntimeError("Adaptive scheduler allocation mismatch")
-                self._launch(task, offset, ranks, task_memory)
+                try:
+                    self._launch(task, offset, ranks, task_memory)
+                except Exception as exc:
+                    self._abort(f"task {task} launch failed: {exc}")
                 launched = True
 
             if self.running:

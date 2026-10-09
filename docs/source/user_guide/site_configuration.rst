@@ -576,6 +576,35 @@ flat as shown above, or grouped under nested ``config`` and ``run_config``
 tables. Preset values are loaded first, nested profile tables are merged over
 them, and explicit construction-time overrides are applied last.
 
+Adaptive Slurm Task Placement
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Adaptive ``srun`` sweeps map reserved rank slots onto the allocation's ordered
+hosts and per-node task counts, including unequal capacities. Each step uses
+an explicit repeated-host file with ``--distribution=arbitrary --exclusive
+--exact``. Tasks can share a node on disjoint CPUs; they do not use
+``--overlap``. Allocation-wide node and task placement variables are removed
+from the step environment. Thread counts, CPU binding and memory settings are
+preserved. Conflicting explicit placement options in ``launcher_args`` are
+rejected. Multi-component heterogeneous Slurm jobs are not supported.
+
+This applies to both observation and imaging tasks. A launched ``srun`` is
+reported as ``launching`` until rank zero starts on a worker and records its
+Slurm step ID. Startup waits longer than 60 seconds appear in the status and
+scheduler log; reserved slots remain held until the launcher exits. This
+signal confirms step startup, not completion of solver MPI initialization.
+
+Developers can run a bounded, solver-free placement check inside an explicitly
+approved, otherwise idle allocation with at least three rank slots. It starts
+two concurrent steps using one and two ranks, checks actual hosts against their
+host files, and terminates pending launchers on timeout. The working directory
+must be shared by all allocated nodes; it does not submit a batch job:
+
+.. code-block:: bash
+
+   FS_SLURM_PLACEMENT_PROBE=1 FS_SLURM_PROBE_DIR=/approved/shared/scratch \
+     python -m pytest -m hpc tests/test_adaptive_scheduler_slurm_live.py
+
 Partitioned Solver Inputs
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
