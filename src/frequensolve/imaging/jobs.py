@@ -52,6 +52,7 @@ from frequensolve.imaging._artifacts import (
     ControlVectorFile,
     ImageSet,
     SmoothingConfig,
+    _fractional_scales,
     control_smoothing,
     qualified_block_name,
     unqualified_block_name,
@@ -95,10 +96,12 @@ _STATE_ACTIONS = frozenset({"linearize", "jvp", "vjp", "normal", "solve"})
 _SOURCE_CONTROL_ACTIONS = frozenset({"linearize", "jvp", "vjp", "normal"})
 _KERNEL_RESIDUALS_FWI = ("derivative", "window")
 _KERNEL_RESIDUALS_CONTROL = ("derivative", "window", "jet")
+# Cartesian image kernels also accept the frozen base-data dual of the physical kernel.
+_KERNEL_RESIDUALS_IMAGE = ("base", "derivative", "window", "jet")
 _REFLECTIVITY_PARAMETERIZATIONS = ("vp_ip", "vp_vs_ip", "ip_is_rho")
 _FIELD_RETENTION = ("none", "forward", "adjoint", "all")
 _IMAGE_WORKFLOWS = ("rtm", "born", "lsrtm_gradient")
-_CONTROL_KINDS = ("rtm", "born")
+_CONTROL_KINDS = ("rtm", "born", "lsrtm_gradient")
 _DEFAULT_MISFIT: Dict[str, Any] = {"objective": {"kind": "l2"}}
 
 
@@ -708,21 +711,34 @@ class _ImagingJobBase(BaseJob):
 
 
 def _validate_receiver_diagonal(value: Mapping[str, Any]) -> Dict[str, Any]:
-    """Validate shared probes; an omitted count uses min(16, source RHS)."""
+    """Validate probe count, seed and optional stratified shot sample count."""
     if not isinstance(value, Mapping):
         raise TypeError("receiver_diagonal must be a mapping")
-    unknown = set(value) - {"probes", "seed", "output"}
+    unknown = set(value) - {"probes", "seed", "output", "source_samples", "blocks"}
     if unknown:
         raise ValueError(f"unsupported receiver_diagonal options: {sorted(unknown)}")
     payload = dict(value)
-    for key in ("probes", "seed"):
+    if "blocks" in payload:
+        blocks = payload["blocks"]
+        if not isinstance(blocks, Mapping) or set(blocks) - {"controls", "output"}:
+            raise ValueError("receiver blocks require controls and an optional output")
+        names = blocks.get("controls")
+        if not isinstance(names, (list, tuple)) or len(names) < 2:
+            raise ValueError("receiver blocks require at least two controls")
+        if any(not isinstance(n, str) or not n.strip() for n in names):
+            raise ValueError("receiver block controls must be nonempty names")
+        names = [n.removeprefix("model.") for n in names]
+        if len(set(names)) != len(names):
+            raise ValueError("receiver block controls must be distinct")
+        payload["blocks"] = {**blocks, "controls": names}
+    for key in ("probes", "seed", "source_samples"):
         if key not in payload:
             continue
         number = payload[key]
         if isinstance(number, bool) or not isinstance(number, (int, np.integer)):
             raise ValueError(f"receiver_diagonal {key} must be an integer")
-        if key == "probes" and number <= 0:
-            raise ValueError("receiver_diagonal probes must be positive")
+        if key in {"probes", "source_samples"} and number <= 0:
+            raise ValueError(f"receiver_diagonal {key} must be positive")
         if not -(2**31) <= number < 2**31:
             raise ValueError(
                 f"receiver_diagonal {key} exceeds the native integer range"
@@ -1448,6 +1464,13 @@ class FWIOperatorJob(_ImagingJobBase):
             self.receiver_diagonal["output"] = _output_path(
                 self.receiver_diagonal.get("output", "receiver_diagonal.h5"), result_dir
             )
+            if "blocks" in self.receiver_diagonal:
+                blocks = self.receiver_diagonal["blocks"]
+                blocks["output"] = _output_path(
+                    blocks.get("output", "receiver_blocks.h5"), result_dir
+                )
+                if Path(blocks["output"]).suffix != ".h5":
+                    raise ValueError("receiver blocks output must have .h5 extension")
         self.extension = (
             None
             if extension is None
@@ -1611,6 +1634,13 @@ class FWIOperatorJob(_ImagingJobBase):
                 raise ValueError("receiver_diagonal requires material linearize")
             if self.gram_derivative == "total":
                 raise ValueError("receiver_diagonal requires frozen Gram derivatives")
+            if (
+                "blocks" in self.receiver_diagonal
+                and self.kernel_derivative is not None
+            ):
+                raise ValueError(
+                    "receiver blocks currently support waveform and phase-derivative comparisons"
+                )
         for path in (
             (
                 None
@@ -2029,6 +2059,13 @@ class FWIOperatorJob(_ImagingJobBase):
             raise ValueError("this job has no curvature diagonal output")
         return _task_path(path, task)
 
+    def receiver_blocks_file(self, task: Optional[int] = None) -> Path:
+        """Return one task's collocated receiver-probe curvature blocks."""
+        blocks = (self.receiver_diagonal or {}).get("blocks")
+        if blocks is None:
+            raise ValueError("this job has no receiver-block output")
+        return _task_path(blocks["output"], task)
+
     def wri_reduction_weights(self, weights: Any = None) -> np.ndarray:
         """Combine task-normalized WRI products using one full-survey energy."""
         import h5py
@@ -2395,6 +2432,10 @@ class FWIOperatorJob(_ImagingJobBase):
             op["receiver_diagonal"]["output"] = _job_path(
                 self.receiver_diagonal["output"], ctx, False
             )
+            if "blocks" in self.receiver_diagonal:
+                blocks = dict(self.receiver_diagonal["blocks"])
+                blocks["output"] = _job_path(blocks["output"], ctx, False)
+                op["receiver_diagonal"]["blocks"] = blocks
         if self.model_gradient:
             op["model_gradient"] = True
         if not self.cache_receiver_state:
@@ -2673,19 +2714,23 @@ class FWIOperatorJob(_ImagingJobBase):
 
 @register_class
 class ControlGradientJob(_ImagingJobBase):
-    """Native control sensitivities: ``rtm`` VJP or ``born`` JVP.
+    """Native control sensitivities: ``rtm`` VJP, ``born`` JVP or spectral ``lsrtm_gradient``.
 
     Args:
         name: Job name.
         simulation: Simulation owning the parameterized material controls.
         f_list: One frequency per task.
-        kind: ``"rtm"`` or ``"born"``.
+        kind: ``"rtm"``, ``"born"`` or ``"lsrtm_gradient"``.
         observed: Observed data path (all receiver groups) or
-            ``group -> path`` mapping. Required for ``rtm``.
-        gradient: Aggregate control-gradient output (``rtm``).
-        direction: Native control direction input (``born``).
+            ``group -> path`` mapping. Required for ``rtm`` and
+            ``lsrtm_gradient``.
+        gradient: Aggregate control-gradient output (``rtm``,
+            ``lsrtm_gradient``).
+        direction: Native control direction input (``born``,
+            ``lsrtm_gradient``).
         objective_file: Scalar objective output
-            (``control_sensitivities.objective``; ``rtm`` only).
+            (``control_sensitivities.objective``; ``rtm`` and
+            ``lsrtm_gradient``, where it is the linearized objective).
         sensitivity_quadrature: Defaults to ``"auto"`` for tensor-node RTM sensitivities,
             including receiver-probe diagonals. Explicit ``"material_intersections"``
             selects approximate continuous RTM pullbacks.
@@ -2699,9 +2744,13 @@ class ControlGradientJob(_ImagingJobBase):
         weights: Optional per-frequency postprocess weights.
         smoothing: Optional :class:`SmoothingConfig` Riesz map.
         raw_gradient: Optional exact aggregate output before smoothing.
-        kernel_derivative: Optional spectral kernel derivative (``rtm`` only).
+        kernel_derivative: Optional spectral kernel derivative. ``rtm`` takes
+            ``derivative``, ``window`` or ``jet`` residuals;
             ``export_lower_orders=True`` with a derivative residual also exports
             every lower-order objective and gradient from the shared forward jet.
+            ``born`` (Born traces of every nonzero series order) and
+            ``lsrtm_gradient`` (required there: the exact gradient of the
+            linearized series objective) take ``derivative`` or ``window``.
         receiver_diagonal: Shared receiver probes for spectral derivatives.
             Defaults to min(16, encoded source count); ``probes`` and ``seed``
             are configurable. Each exported order gets a matching GN diagonal.
@@ -2786,7 +2835,16 @@ class ControlGradientJob(_ImagingJobBase):
         self.smoothing = control_smoothing(smoothing)
         self.raw_gradient = _output_path(raw_gradient, result_dir)
         self.kernel_derivative = _map_kernel_window(
-            _kernel_derivative(kernel_derivative, residuals=_KERNEL_RESIDUALS_CONTROL),
+            _kernel_derivative(
+                kernel_derivative,
+                # One Born trace set and one LSRTM residual represent one summed
+                # trace; per-order jet objectives are an RTM gradient only.
+                residuals=(
+                    _KERNEL_RESIDUALS_CONTROL
+                    if kind == "rtm"
+                    else _KERNEL_RESIDUALS_FWI
+                ),
+            ),
             lambda path: _input_path(path, simulation),
         )
         self.receiver_diagonal = (
@@ -2800,6 +2858,10 @@ class ControlGradientJob(_ImagingJobBase):
             )
             if Path(self.receiver_diagonal["output"]).suffix != ".h5":
                 raise ValueError("curvature diagonal output must have .h5 extension")
+            if "blocks" in self.receiver_diagonal:
+                raise ValueError(
+                    "receiver blocks require an FWIOperatorJob material linearize"
+                )
         self._validate()
 
     def _validate(self) -> None:
@@ -2821,6 +2883,8 @@ class ControlGradientJob(_ImagingJobBase):
                 raise ValueError(
                     "receiver_diagonal requires frozen Gram and unwindowed sensitivities"
                 )
+        if kind != "rtm" and self.kernel_derivative is not None:
+            self._validate_spectral_born()
         if kind == "born":
             if self.direction is None:
                 raise ValueError("born control sensitivities require a direction")
@@ -2831,12 +2895,29 @@ class ControlGradientJob(_ImagingJobBase):
                 "weights": self.weights,
                 "smoothing": self.smoothing,
                 "raw_gradient": self.raw_gradient,
-                "kernel_derivative": self.kernel_derivative,
             }
             present = [key for key, value in forbidden.items() if value is not None]
             if present:
                 raise ValueError(
                     f"born control sensitivities do not take {', '.join(present)}"
+                )
+        elif kind == "lsrtm_gradient":
+            if self.kernel_derivative is None:
+                raise ValueError(
+                    "lsrtm_gradient control sensitivities require kernel_derivative; "
+                    "use FWIOperatorJob linearize and normal for an ordinary waveform"
+                )
+            if self.direction is None:
+                raise ValueError(
+                    "lsrtm_gradient control sensitivities require a direction"
+                )
+            if not self.observed:
+                raise ValueError(
+                    "lsrtm_gradient control sensitivities require observed data"
+                )
+            if self.gradient is None:
+                raise ValueError(
+                    "lsrtm_gradient control sensitivities require a gradient output"
                 )
         else:
             if self.direction is not None:
@@ -2862,6 +2943,37 @@ class ControlGradientJob(_ImagingJobBase):
                 raise ValueError(
                     "total Gram derivatives do not support phase_derivative or spectral_derivative comparisons"
                 )
+
+    def _validate_spectral_born(self) -> None:
+        """Accept what the native spectral Born / LSRTM hierarchy supports."""
+        kernel = self.kernel_derivative or {}
+        if kernel.get("export_lower_orders"):
+            raise ValueError("export_lower_orders requires an rtm control gradient")
+        if self.gram_derivative != "frozen":
+            raise ValueError(f"spectral {self.kind} requires frozen Gram derivatives")
+        order = kernel.get("order", len(kernel.get("window") or [0, 0]) - 1)
+        if kernel.get("source_derivative") == "total" and order > 1:
+            raise ValueError(
+                "total-source spectral Born jets currently support order one"
+            )
+        if {"phase_derivative", "spectral_derivative"}.intersection(
+            _misfit_comparison_kinds(
+                _misfit_to_fs(self.misfit, None, project_relative=False)
+            )
+        ):
+            raise ValueError(f"spectral {self.kind} requires waveform comparisons")
+
+    def _spectral_planes(self) -> List[int]:
+        """Return the trace orders the spectral Born series weights."""
+        kernel = self.kernel_derivative or {}
+        if kernel.get("residual") == "window" and isinstance(
+            kernel.get("window"), list
+        ):
+            return [k for k, w in enumerate(kernel["window"]) if w != 0.0]
+        order = kernel.get("order", 1)
+        if kernel.get("residual") == "window":
+            return list(range(order + 1))
+        return [order]
 
     # -- output paths ---------------------------------------------------------
 
@@ -2955,6 +3067,30 @@ class ControlGradientJob(_ImagingJobBase):
         """Describe receiver traces; Born jobs write incremental groups only."""
 
         baseline = super().trace_outputs
+        if self.kind != "rtm" and self.kernel_derivative is not None:
+            # Spectral Born planes are stored per order beside the base series.
+            axis = "s" if self.kernel_derivative.get("axis") == "laplace" else "f"
+
+            def suffix(k: int) -> str:
+                return "" if k == 0 else f"_d{'' if k == 1 else k}{axis}"
+
+            planes = self._spectral_planes()
+            orders = [("_inc", k) for k in planes]
+            if self.kind == "lsrtm_gradient":
+                orders = [("", k) for k in sorted({0, *planes})] + orders
+            return replace(
+                baseline,
+                groups=[
+                    f"{group}{kind}{suffix(k)}"
+                    for kind, k in orders
+                    for group in baseline.groups
+                ],
+                components=[
+                    f"{component.partition(':')[0]}{kind}{suffix(k)}:{component.partition(':')[2]}"
+                    for kind, k in orders
+                    for component in baseline.components
+                ],
+            )
         if self.kind == "born":
             return _incremental_trace_outputs(baseline, keep_baseline=False)
         if self.kernel_derivative and self.kernel_derivative.get("export_lower_orders"):
@@ -3083,13 +3219,13 @@ class ControlGradientJob(_ImagingJobBase):
 
         payload = super().to_fs(ctx, project_relative=project_relative)
         sensitivities: Dict[str, Any] = {}
-        if self.kind == "born":
+        if self.kind in ("born", "lsrtm_gradient"):
             sensitivities["direction"] = _job_path(self.direction, ctx, False)
-        else:
+        if self.kind != "born":
             sensitivities["gradient"] = _job_path(self.gradient, ctx, False)
         if self.gram_derivative != "frozen":
             sensitivities["gram_derivative"] = self.gram_derivative
-        if self.kind == "rtm" and self._objective_file is not None:
+        if self.kind != "born" and self._objective_file is not None:
             sensitivities["objective"] = _job_path(self._objective_file, ctx, False)
         if self.active is not None:
             sensitivities["active"] = list(self.active)
@@ -3125,6 +3261,12 @@ class ControlGradientJob(_ImagingJobBase):
                     lambda path: _job_path(path, ctx, project_relative),
                 )
                 payload["Image"] = copy.deepcopy(imaging)
+        elif self.kernel_derivative is not None:
+            # Material-control Born planes need no comparison block.
+            payload["kernel_derivative"] = _map_kernel_window(
+                self.kernel_derivative,
+                lambda path: _job_path(path, ctx, project_relative),
+            )
         return payload
 
     def _input_fingerprint_payload(self) -> Dict[str, Any]:
@@ -3307,7 +3449,11 @@ class ImageKernelJob(_ImagingJobBase):
         born_traces_only: Stop a Born workflow after incremental traces.
         workflow: ``"rtm"``, ``"born"`` or ``"lsrtm_gradient"``.
         save_path: Image output directory (default ``<results>/imaging``).
-        kernel_derivative: Optional spectral kernel derivative (``rtm`` only).
+        kernel_derivative: Optional spectral kernel derivative (``rtm`` only,
+            any residual including ``base``). Spectral Born traces and LSRTM
+            gradients follow native material controls: use
+            :class:`ControlGradientJob` with ``kind="born"`` or
+            ``kind="lsrtm_gradient"``.
         outputs: Optional output requests.
         **extra: Additional ``Imaging`` fields passed through verbatim.
     """
@@ -3404,8 +3550,14 @@ class ImageKernelJob(_ImagingJobBase):
             if save_path is not None
             else self._result_path / "imaging"
         )
+        if kernel_derivative is not None and workflow != "rtm":
+            raise ValueError(
+                "Cartesian image kernels take kernel_derivative only with workflow = rtm; "
+                "spectral born and lsrtm_gradient follow native material controls "
+                "(ControlGradientJob kind='born' or 'lsrtm_gradient')"
+            )
         self.kernel_derivative = _map_kernel_window(
-            _kernel_derivative(kernel_derivative, residuals=_KERNEL_RESIDUALS_CONTROL),
+            _kernel_derivative(kernel_derivative, residuals=_KERNEL_RESIDUALS_IMAGE),
             lambda path: _input_path(path, simulation),
         )
         self.extra = dict(extra)
@@ -3432,8 +3584,6 @@ class ImageKernelJob(_ImagingJobBase):
                 raise ValueError(
                     f"{workflow} requires direction or zero_direction=True"
                 )
-            if self.kernel_derivative is not None:
-                raise ValueError("kernel_derivative requires workflow = rtm")
         if workflow == "lsrtm_gradient":
             if self.born_traces_only:
                 raise ValueError("lsrtm_gradient cannot be trace-only")
@@ -4204,6 +4354,7 @@ class RegularizationJob(SmoothJob):
         *,
         smoothing: Union[SmoothingConfig, Mapping[str, Any]],
         input_vector: Union[str, Path, ControlVectorFile],
+        fractional_scales: Optional[Mapping[str, float]] = None,
         operation: str = "value",
         context: Optional[Union[str, Path]] = None,
         metric: Optional[Union[str, Path, ControlVectorFile]] = None,
@@ -4239,6 +4390,7 @@ class RegularizationJob(SmoothJob):
         if operation != "prepare" and context is None:
             raise ValueError("regularization requires a prepared context")
         self.operation = operation
+        self.fractional_scales = _fractional_scales(fractional_scales)
         self.context: Path = (
             self._result_path / "regularization_context.json"
             if context is None
@@ -4347,6 +4499,8 @@ class RegularizationJob(SmoothJob):
             {k: _job_path(v, ctx, False) for k, v in self.regularization_inputs.items()}
         )
         controls["Regularization"] = request
+        if self.fractional_scales:
+            request["fractional_scales"] = dict(self.fractional_scales)
         return payload
 
     def postprocess_fetch_files(self) -> List[Path]:
@@ -4378,6 +4532,7 @@ class RegularizationJob(SmoothJob):
         )
         controls = data["control_sensitivities"]
         request = dict(controls["Regularization"])
+        fractional_scales = request.pop("fractional_scales", None)
 
         def resolve(value: Union[str, Path]) -> Path:
             path = _resolve_saved_job_path(
@@ -4406,6 +4561,7 @@ class RegularizationJob(SmoothJob):
         job = cls(
             source,
             smoothing=request,
+            fractional_scales=fractional_scales,
             input_vector=resolve(controls["input"]),
             gradient=resolve(controls["gradient"]),
             name=data["name"],

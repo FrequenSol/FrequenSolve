@@ -1393,12 +1393,14 @@ class FakeImagingSite(BaseSite):
         if job.operation == "prepare":
             context = {
                 name: {
+                    "fractional_scale": job.fractional_scales.get(name, 1.0),
                     "identity": source.control_spaces.get(
                         name, f"fake-native-{name}-{len(v)}"
                     ),
                     "amplitude": (
                         max(1.0, float(np.max(np.abs(v))))
                         if job.smoothing.normalize_amplitude
+                        and name not in job.fractional_scales
                         else 1.0
                     ),
                 }
@@ -1428,6 +1430,8 @@ class FakeImagingSite(BaseSite):
                 continue
             a = context[name]["amplitude"]
             weight = np.sqrt(alpha) * a if job.smoothing.kind == "tv" else alpha
+            scale = context[name].get("fractional_scale", 1.0)
+            weight /= scale if job.smoothing.kind == "tv" else scale**2
             if job.operation == "proximal":
                 metric, lower, upper = (
                     ControlVectorFile.read(job.regularization_inputs[k], native=True)[
@@ -1468,13 +1472,18 @@ class FakeImagingSite(BaseSite):
 
         request = job.regularization
         assert request is not None and request["operation"] == "gradient"
-        json.loads(Path(request["context"]).read_text())  # a prepared context
+        context = json.loads(Path(request["context"]).read_text())
         alpha = request.get("alpha", 0.1)
         value = 0.0
         for source, output in zip(request["inputs"], request["outputs"]):
             vector = ControlVectorFile.read(source, native=True)
-            blocks = {name: alpha * v for name, v in vector.blocks.items()}
-            value += sum(0.5 * alpha * float(v @ v) for v in vector.blocks.values())
+            blocks = {
+                name: alpha * v / context[name].get("fractional_scale", 1.0) ** 2
+                for name, v in vector.blocks.items()
+            }
+            value += sum(
+                0.5 * float(v @ blocks[name]) for name, v in vector.blocks.items()
+            )
             ControlVectorFile(blocks, native=True).write(output)
         Path(request["result"]).write_text(
             json.dumps(
@@ -1805,9 +1814,9 @@ class FakeImagingSite(BaseSite):
                     )
                     # The surrogate's residual is simulated - observed (Sauce's
                     # contract is the opposite); record it so readers adapt.
-                    group["objective_residual"].attrs[
-                        "convention"
-                    ] = "simulated_minus_observed"
+                    group["objective_residual"].attrs["convention"] = (
+                        "simulated_minus_observed"
+                    )
                     modeled = simulated[layout.indices[select]]
                     group["simulated"] = np.column_stack((modeled.real, modeled.imag))
                     terms.append(
@@ -1882,9 +1891,9 @@ class FakeImagingSite(BaseSite):
                     group[name] = data
                 # The surrogate's residual is simulated - observed (Sauce's
                 # contract is the opposite); record it so readers adapt.
-                group["objective_residual"].attrs[
-                    "convention"
-                ] = "simulated_minus_observed"
+                group["objective_residual"].attrs["convention"] = (
+                    "simulated_minus_observed"
+                )
                 digests = {
                     name: flat_block_digest(data) for name, data in datasets.items()
                 }

@@ -141,6 +141,56 @@ def test_native_callbacks_keep_frozen_values_and_scaled_metric(tmp_path):
     np.testing.assert_array_equal(full["vp"][[1, 4]], lin.state["model.vp"][[1, 4]])
 
 
+@pytest.mark.parametrize("kind", ["tikhonov", "tv"])
+def test_fractional_regularization_preserves_physical_proximal_metric(tmp_path, kind):
+    site = FakeImagingSite(seed=7)
+    problem = _problem(tmp_path, site)
+    problem.state = problem.state_from(np.arange(1.0, 9.0))
+    lin = problem.linearize()
+    spec = im.NativeRegularization(
+        im.Smoothing(kind=kind, alpha=0.04, normalize_amplitude=True),
+        fractional_scales={"model.vp": 4.0, "rho": 0.5},
+    )
+    _, native = bind_workflow_regularization(spec, lin.space, problem, lin)
+    x = lin.point.values
+    scales = np.ones(lin.space.size)
+    for name, scale in (("model.vp", 4.0), ("model.rho", 0.5)):
+        scales[lin.space.slices[name]] = scale
+    metric = np.linspace(1.0, 2.0, lin.space.size)
+    weight = 0.04 / scales**2 if kind == "tikhonov" else 0.2 / scales
+    expected = (
+        x / (1 + 0.3 * weight / metric)
+        if kind == "tikhonov"
+        else np.sign(x) * np.maximum(abs(x) - 0.3 * weight / metric, 0)
+    )
+    expected = np.clip(expected, *lin.space.bounds)
+    np.testing.assert_allclose(native.prox(x, 0.3, metric, lin.space.bounds), expected)
+    energy = np.sum(
+        0.5 * weight * expected**2 if kind == "tikhonov" else weight * abs(expected)
+    )
+    assert native.value(expected) == pytest.approx(energy)
+    checkpoint = native.checkpoint()
+    checkpoint["fractional_scales"]["vp"] = 8.0
+    with pytest.raises(ValueError, match="fractional"):
+        native.restore(checkpoint)
+
+
+@pytest.mark.parametrize(
+    "scales",
+    [
+        {"vp": 0},
+        {"vp": -1},
+        {"vp": float("nan")},
+        {"vp": float("inf")},
+        {"vp": True},
+        {"vp": 1, "model.vp": 2},
+    ],
+)
+def test_fractional_regularization_rejects_invalid_scales(scales):
+    with pytest.raises(ValueError):
+        im.NativeRegularization(fractional_scales=scales)
+
+
 def test_native_checkpoint_reuses_frozen_normalization(tmp_path):
     site = FakeImagingSite(seed=7)
     problem = _problem(tmp_path, site)

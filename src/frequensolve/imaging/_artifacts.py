@@ -122,6 +122,28 @@ def _is_qualified(name: str) -> bool:
     return name.startswith(_QUALIFIED_PREFIXES)
 
 
+def _fractional_scales(value: Optional[Mapping[str, float]]) -> Dict[str, float]:
+    """Validate fixed positive native control scales and normalize block names."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "fractional_scales must map material block names to reference scales"
+        )
+    result = {}
+    for name, scale in value.items():
+        name = unqualified_block_name(name)
+        if name in result:
+            raise ValueError(f"duplicate fractional scale for {name!r}")
+        if isinstance(scale, (bool, np.bool_)):
+            raise ValueError("fractional reference scales must be finite and positive")
+        scale = float(scale)
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError("fractional reference scales must be finite and positive")
+        result[name] = scale
+    return result
+
+
 # ---------------------------------------------------------------------------
 # HDF5 helpers
 # ---------------------------------------------------------------------------
