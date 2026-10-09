@@ -26,6 +26,7 @@ except ModuleNotFoundError as exc:
 __all__ = [
     "SSHProxy",
     "SSHClientClass",
+    "SSHTransportError",
     "SSH_COMMAND_TIMEOUT_SECONDS",
     "SSH_CONNECT_TIMEOUT_SECONDS",
     "control_socket_ssh_options",
@@ -41,6 +42,24 @@ _TRANSFER_POLL_SECONDS = 5.0
 _TRANSFER_PROBE_SECONDS = 30.0
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
+
+# OpenSSH ``sftp`` exits 255 when its SSH connection fails; these diagnostics
+# also mean the connection, not the requested file operation, failed.
+_SFTP_CONNECTION_FAILURES = (
+    "Connection closed",
+    "Connection reset",
+    "Connection timed out",
+    "Broken pipe",
+    "mux_client",
+    "Control socket connect",
+)
+
+
+class SSHTransportError(RuntimeError):
+    """The SSH connection failed (status 255), not the remote command.
+
+    A retry over a live connection may succeed.
+    """
 
 
 class _CommandResult(Protocol):
@@ -371,7 +390,9 @@ class SSHProxy:
             result.returncode,
         )
         if result.returncode == 255:
-            raise RuntimeError(f"SSH connection to {target} failed with status 255")
+            raise SSHTransportError(
+                f"SSH connection to {target} failed with status 255"
+            )
         return result
 
     def close(self) -> None:
@@ -388,14 +409,20 @@ class SSHProxy:
 
         return None  # No transport for proxy
 
-    def open_sftp(self) -> "_OpenSSHControlSFTP":
-        """Open an SFTP adapter that reuses this verified control socket."""
+    def open_sftp(self, *, stall_timeout: float | None = None) -> "_OpenSSHControlSFTP":
+        """Open an SFTP adapter that reuses this verified control socket.
+
+        Args:
+            stall_timeout: Seconds a data transfer may make no progress before
+                it is killed. Defaults to this proxy's command timeout.
+        """
 
         return _OpenSSHControlSFTP(
             control_path=self.control_path,
             username=self.username,
             host=self.host,
             command_timeout=self.command_timeout,
+            stall_timeout=stall_timeout,
         )
 
 
@@ -465,11 +492,13 @@ class _OpenSSHControlSFTP:
         username: str,
         host: str,
         command_timeout: float,
+        stall_timeout: float | None = None,
     ) -> None:
         self.control_path = control_path
         self.username = username
         self.host = host
         self.command_timeout = command_timeout
+        self.stall_timeout = command_timeout if stall_timeout is None else stall_timeout
 
     @staticmethod
     def _quote_path(value: str) -> str:
@@ -503,13 +532,13 @@ class _OpenSSHControlSFTP:
             returncode, stderr = result.returncode, result.stderr
         else:
             # A data transfer takes as long as its size requires; it fails only
-            # when the transferred size stops changing for the command timeout.
+            # when the transferred size stops changing for the stall timeout.
             returncode, stderr = _run_with_progress(
                 argv,
                 f"{command}\n",
                 progress,
-                idle_timeout=self.command_timeout,
-                poll_interval=min(_TRANSFER_POLL_SECONDS, self.command_timeout / 4),
+                idle_timeout=self.stall_timeout,
+                poll_interval=min(_TRANSFER_POLL_SECONDS, self.stall_timeout / 4),
             )
         if returncode != 0:
             detail = stderr.strip() or "SFTP operation failed"
@@ -523,6 +552,10 @@ class _OpenSSHControlSFTP:
                 for line in detail.splitlines()
             ):
                 raise FileNotFoundError(detail)
+            if returncode == 255 or any(
+                marker in detail for marker in _SFTP_CONNECTION_FAILURES
+            ):
+                raise ConnectionError(detail)
             raise OSError(detail)
 
     def _run_ssh(self, command: str, *, timeout: float | None = None) -> str:

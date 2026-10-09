@@ -116,6 +116,8 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     validate_slurm_job_id as _validate_slurm_job_id,
 )
 from frequensolve.orchestrator.sites.hpc.transfer import (
+    DEFAULT_TRANSFER_ATTEMPTS,
+    DEFAULT_TRANSFER_STALL_TIMEOUT,
     SlurmTransferManager,
     _remote_command_failed,
 )
@@ -274,6 +276,11 @@ class SlurmSiteConfig(BaseSiteConfig):
 
     Site-specific config classes can expose the same attributes and do not need
     to inherit from this class.
+
+    ``transfer_stall_timeout`` is how many seconds an rsync or SFTP transfer
+    may make no progress before it is stopped (default 120), and
+    ``transfer_attempts`` how many times an upload or download is attempted
+    after a stall or SSH connection failure (default 3).
     """
 
     hostname: str
@@ -297,6 +304,10 @@ class SlurmSiteConfig(BaseSiteConfig):
     partitions: Mapping[str, Union[SlurmPartitionConfig, Mapping[str, Any]]] = field(
         default_factory=dict
     )
+    transfer_stall_timeout: float = field(
+        default=DEFAULT_TRANSFER_STALL_TIMEOUT, kw_only=True
+    )
+    transfer_attempts: int = field(default=DEFAULT_TRANSFER_ATTEMPTS, kw_only=True)
 
     def __post_init__(self) -> None:
         try:
@@ -314,6 +325,20 @@ class SlurmSiteConfig(BaseSiteConfig):
         ):
             raise ValueError("launcher_args must be an array of strings")
         self.launcher_args = tuple(self.launcher_args)
+        try:
+            stall = float(self.transfer_stall_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("transfer_stall_timeout must be seconds") from exc
+        if isinstance(self.transfer_stall_timeout, bool) or not (
+            math.isfinite(stall) and stall > 0
+        ):
+            raise ValueError(
+                "transfer_stall_timeout must be finite and greater than zero"
+            )
+        self.transfer_stall_timeout = stall
+        attempts = self.transfer_attempts
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("transfer_attempts must be a positive integer")
         normalized: Dict[str, SlurmPartitionConfig] = {}
         for name, value in self.partitions.items():
             if isinstance(value, SlurmPartitionConfig):
@@ -1922,6 +1947,47 @@ class SlurmSite(BaseSite):
                 close_channel()
             suffix = f" after {timeout} seconds" if timeout is not None else ""
             raise TimeoutError(f"SSH login command timed out{suffix}") from exc
+
+    def _recover_login_connection(self) -> bool:
+        """Check the login connection before a transfer retry.
+
+        A control-socket client whose master no longer completes a round trip
+        switches to another live socket under ``~/.ssh/control`` (for example
+        one reopened with ``frequensolve site connect``). The user's control
+        master is never closed, since reopening it needs MFA. Returns ``False``
+        when no live connection is available, so retrying is pointless.
+        """
+
+        client = self._login_client
+        if client.is_proxy():
+            control_path, _ = client.get_proxy_details()
+            host = getattr(client.client, "host", None) or self.config.hostname
+            if control_path and self._authenticator.control_socket_works(
+                control_path, host
+            ):
+                return True
+            replacement = self._authenticator.find_control_socket(
+                host, exclude=(control_path,) if control_path else ()
+            )
+            if replacement is None:
+                logger.warning(
+                    "SSH control connection %s to %s is no longer live and no "
+                    "other live control socket was found",
+                    control_path,
+                    host,
+                )
+                return False
+            logger.warning(
+                "SSH control connection %s to %s is no longer live; using %s",
+                control_path,
+                host,
+                replacement.control_path,
+            )
+            self._login_client = SSHClientClass(replacement)
+            return True
+        transport = client.get_transport()
+        is_active = getattr(transport, "is_active", None)
+        return not callable(is_active) or bool(is_active())
 
     def is_run_current(self, job: BaseJob) -> bool:
         """Return True when this site has current successful results for a job."""

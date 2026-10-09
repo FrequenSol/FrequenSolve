@@ -90,6 +90,10 @@ tmp_dir = "/remote/tmp/directory"
 default_partition = "debug"
 account = "allocation"
 transfer_method = "rsync"
+# Stop a transfer after this many seconds without progress, and attempt each
+# upload/download this many times after a stall or SSH connection failure.
+# transfer_stall_timeout = 120
+# transfer_attempts = 3
 modules = []
 launcher_args = []
 verbose = true

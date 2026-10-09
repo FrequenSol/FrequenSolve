@@ -1167,8 +1167,9 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
         ('File "/remote/optional.json" not found.\n', FileNotFoundError),
         ("stat remote: No such file or directory\n", FileNotFoundError),
         ("remote open: Permission denied\n", OSError),
-        ("Connection closed\n", OSError),
-        ("Control socket connect: No such file or directory\n", OSError),
+        # Connection failures stay OSErrors but are retryable ConnectionErrors.
+        ("Connection closed\n", ConnectionError),
+        ("Control socket connect: No such file or directory\n", ConnectionError),
     ],
 )
 def test_ssh_proxy_sftp_preserves_transfer_errors(monkeypatch, tmp_path, stderr, error):

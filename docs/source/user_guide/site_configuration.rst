@@ -594,6 +594,23 @@ The generated profile is equivalent to this minimal configuration:
        high-I/O storage. Sauce curvature postprocessing stages its HDF5 inputs
        and results below ``curvature/`` here, or below ``work_dir`` when unset,
        until ``site.remove_curvature_files()`` deletes them.
+   * - ``transfer_stall_timeout``
+     - Seconds an upload or download may make no progress before it is
+       stopped: rsync's ``--timeout``, the SFTP size watchdog for OpenSSH
+       control-socket transfers, or the Paramiko channel timeout. Defaults to
+       120. Slow transfers that keep moving are never cut off.
+   * - ``transfer_attempts``
+     - Attempts per upload or download after a stall or SSH connection
+       failure (default 3; ``1`` disables retries), with a 2, 4, ... second
+       backoff. Before retrying, FrequenSolve checks that the login connection
+       still completes a round trip; if a shared OpenSSH control connection no
+       longer answers, it switches to another live one under
+       ``~/.ssh/control`` (for example one reopened with ``frequensolve site
+       connect``) and stops retrying when none is found. It never closes your
+       control connection, which would need MFA to reopen. rsync retries
+       resume from the partially transferred file (``--partial``); SFTP
+       retries restart the file. Missing files, permission errors and failed
+       size verification are not retried.
    * - ``tmp_dir``
      - Optional remote directory for transient transfer tarballs and
        provisioning scripts. Use a concrete absolute path on the login

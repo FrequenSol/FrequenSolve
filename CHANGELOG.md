@@ -52,6 +52,16 @@ prepared.
   filesystems. A timeout or failure names the command and remote path instead
   of reporting "Enterprise HPC preflight could not verify operate allocation
   session".
+- SLURM uploads and downloads retry stalls and SSH connection failures:
+  `transfer_attempts` (site profile, default 3) attempts with a short backoff,
+  after checking that the login connection still answers and switching to
+  another live `~/.ssh/control` socket if it does not (the user's control
+  master is never closed). `transfer_stall_timeout` (default 120 s) sets how
+  long a transfer may make no progress; rsync now also passes it as
+  `--timeout`, and rsync retries resume partial files. OpenSSH SFTP
+  connection failures raise `ConnectionError` and control-socket status 255
+  raises `SSHTransportError` (both subclasses of the previous `OSError` and
+  `RuntimeError`).
 
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five
