@@ -117,18 +117,35 @@ guide <../../guides/ssh-connection-sharing.md>`.
 Test The Site Configuration
 ---------------------------
 
-Verify access, ``$WORK`` resolution, the solver path, and preset modules without
-submitting a Slurm job:
+Verify access, work-directory (``$WORK`` or ``$SCRATCH``) resolution, the solver
+path, and preset modules without submitting a Slurm job:
 
 .. code-block:: bash
 
    frequensolve site check
 
-The default remote work directory is ``$WORK/frequensolve``. An advanced
-profile may instead set a concrete absolute ``work_dir``. TOML does not expand
-remote shell variables, so do not write ``work_dir = "$WORK/frequensolve"``.
+The default remote work directory is ``$WORK/frequensolve``. When the work
+filesystem is slow or overloaded, run on ``$SCRATCH`` instead by adding one
+line to the profile:
+
+.. code-block:: toml
+
+   [sites.stampede3]
+   # ...
+   storage = "scratch"
+
+``storage = "scratch"`` moves the work directory to ``$SCRATCH/frequensolve``,
+and with it the project, simulation and job files, persistent-session
+directories, scheduler heartbeat and status files, and curvature mirrors.
+``frequensolve site check`` prints the resolved directory. For another
+location, set ``work_dir`` (without ``storage``); it may start with ``$WORK``
+or ``$SCRATCH``, which FrequenSolve resolves once on the login node, for
+example ``work_dir = "$SCRATCH/frequensolve-runs"``. ``scratch_dir`` and
+``tmp_dir`` accept the same form.
+
 Stampede3 ``$SCRATCH`` is not backed up and is subject to purge; consult TACC's
-current storage policy before configuring alternate job storage.
+current storage policy, fetch the results you need to keep, and do not leave
+inputs there that you cannot regenerate.
 
 Solver Router And Precision
 ---------------------------

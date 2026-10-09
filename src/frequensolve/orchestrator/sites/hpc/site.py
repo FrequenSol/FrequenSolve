@@ -204,6 +204,14 @@ for name in ("fs2d", "fs2d_s", "fs3d", "fs3d_s"):
 """
 
 _SHELL_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+# A remote directory setting may start with one ``$NAME`` or ``${NAME}``,
+# resolved once in the remote login shell (for example ``$SCRATCH/fs``).
+_REMOTE_DIR_VARIABLE = re.compile(
+    r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(?=/|$)"
+)
+# ``storage`` selects the remote variable below which work_dir defaults to
+# ``frequensolve``.
+_STORAGE_VARIABLES = {"work": "WORK", "scratch": "SCRATCH"}
 
 
 def _job_requires_postprocess(job: Any) -> bool:
@@ -734,9 +742,22 @@ class SlurmSite(BaseSite):
         solver: Remote path to the ``FS_seismic`` solver router executable.
         work_dir: Remote base directory used to resolve relative FrequenSolve
             project, simulation, and job paths. It may be on any writable
-            remote filesystem and defaults to ``$WORK/frequensolve``.
+            remote filesystem and defaults to ``$WORK/frequensolve`` (see
+            ``storage``). Persistent-session directories, curvature mirrors
+            without ``scratch_dir``, and scheduler heartbeat and status files
+            live below it.
         scratch_dir: Optional remote scratch directory reserved for future
-            model and high-I/O storage.
+            model and high-I/O storage; curvature inputs are mirrored below
+            it when set.
+        storage: ``"work"`` (default) or ``"scratch"``: the remote filesystem
+            variable (``$WORK`` or ``$SCRATCH``) below which ``work_dir``
+            defaults to ``frequensolve``. Cannot be combined with
+            ``work_dir``.
+
+        ``work_dir``, ``scratch_dir`` and ``config.tmp_dir`` may start with a
+        remote environment variable such as ``$SCRATCH`` or ``${WORK}``. It is
+        resolved once in the remote login shell and the absolute result is
+        cached and logged.
         modules: Environment modules loaded before remote solver execution.
         environment: Non-secret environment values exported before remote
             solver execution.
@@ -812,6 +833,7 @@ class SlurmSite(BaseSite):
         verbose: bool = False,
         solver_policy: Optional[str] = None,
         curvature_run_config: Optional[Union[SlurmRunConfig, Mapping[str, Any]]] = None,
+        storage: Optional[str] = None,
     ):
         if (
             default_partition is not None
@@ -884,12 +906,25 @@ class SlurmSite(BaseSite):
             if not getattr(self.config, "known_hosts_file", None):
                 raise ValueError("Enterprise HPC requires an explicit known-hosts file")
         self.solver = solver
+        if storage is not None and storage not in _STORAGE_VARIABLES:
+            raise ValueError("storage must be 'work' or 'scratch', got " f"{storage!r}")
+        if storage is not None and work_dir not in {None, ""}:
+            raise ValueError(
+                "storage selects the default work_dir; remove work_dir, or set "
+                'work_dir = "$SCRATCH/frequensolve" (or another path) without '
+                "storage"
+            )
+        self.storage = storage or "work"
+        # Reject malformed paths before authenticating; resolve them after.
+        for name, value in (
+            ("work_dir", work_dir),
+            ("scratch_dir", scratch_dir),
+        ):
+            self._remote_dir_variable(value, name=name)
         self._configured_work_dir = work_dir
+        self._configured_scratch_dir = scratch_dir
         self._rel_proj_path = Path(rel_path) if rel_path not in {None, ""} else None
-        self._scratch_dir = self._normalize_optional_remote_dir(
-            scratch_dir,
-            name="scratch_dir",
-        )
+        self._scratch_dir = None
         if isinstance(modules, str):
             raise ValueError("modules must be an array of module names")
         self.modules = [str(module) for module in (modules or [])]
@@ -910,6 +945,9 @@ class SlurmSite(BaseSite):
         self._login_client = SSHClientClass(self.authenticate())
         logger.info("SSH client authenticated successfully")
 
+        self._scratch_dir = self._resolve_remote_dir(
+            self._configured_scratch_dir, name="scratch_dir"
+        )
         self._work_dir = self._get_work_dir()
         self._executable = self._get_solver_path()
 
@@ -991,10 +1029,7 @@ class SlurmSite(BaseSite):
         tmp_dir = getattr(self.config, "tmp_dir", None)
         if tmp_dir is None or str(tmp_dir).strip() == "":
             return Path("/tmp")
-        path = Path(str(tmp_dir))
-        if not path.is_absolute():
-            raise ValueError("SLURM tmp_dir must be an absolute remote path")
-        return path
+        return self._resolve_remote_dir(tmp_dir, name="tmp_dir")
 
     @property
     def provisioned(self):
@@ -4330,24 +4365,78 @@ class SlurmSite(BaseSite):
         print(f"\n{'=' * 60}\n{header}\n{path}\n{'=' * 60}\n{text}\n")
 
     @staticmethod
-    def _normalize_optional_remote_dir(
-        value: Optional[Union[str, Path]],
-        *,
-        name: str,
-    ) -> Optional[Path]:
-        """Normalize an optional absolute directory on the remote system."""
+    def _remote_dir_variable(
+        value: Optional[Union[str, Path]], *, name: str
+    ) -> Optional[Tuple[Optional[str], str]]:
+        """Split a remote directory setting into ``(variable, remainder)``.
+
+        Returns ``None`` when unset. ``variable`` is the leading ``$NAME`` (or
+        ``None`` for an absolute path); other ``$`` references are rejected.
+        """
 
         if value is None or str(value).strip() == "":
             return None
+        text = str(value)
+        if text.startswith("$"):
+            match = _REMOTE_DIR_VARIABLE.match(text)
+            remainder = text[match.end() :].lstrip("/") if match else ""
+            if match is None or "$" in remainder:
+                raise ValueError(
+                    f"SLURM {name} may start with one remote variable such as "
+                    f"$SCRATCH or ${{WORK}} followed by /path; got {text!r}"
+                )
+            return match.group(1) or match.group(2), remainder
+        if "$" in text:
+            raise ValueError(
+                f"SLURM {name} may reference a remote variable only at its "
+                f"start (for example $SCRATCH/frequensolve); got {text!r}"
+            )
+        if not Path(text).is_absolute():
+            raise ValueError(f"SLURM {name} must be an absolute remote path")
+        return None, text
+
+    def _remote_variable(self, variable: str) -> Path:
+        """Resolve a remote environment variable once in the login shell."""
+
+        cache = self.__dict__.setdefault("_remote_variables", {})
+        if variable in cache:
+            return cache[variable]
+        # The name was validated as a shell identifier, so this is not an
+        # injection point.
+        _, stdout, _ = self._login_client.client.exec_command(f"echo ${variable}")
+        value = stdout.read().decode().strip()
+        if not value:
+            raise RuntimeError(
+                f"Failed to determine ${variable} for {self.site_name}; configure "
+                "an absolute path in site.toml or pass it explicitly"
+            )
         path = Path(value)
         if not path.is_absolute():
-            raise ValueError(f"SLURM {name} must be an absolute remote path")
+            raise ValueError(
+                f"${variable} on {self.site_name} is not an absolute path: {value!r}"
+            )
+        cache[variable] = path
+        logger.info("Resolved $%s on %s to %s", variable, self.site_name, path)
         return path
+
+    def _resolve_remote_dir(
+        self, value: Optional[Union[str, Path]], *, name: str
+    ) -> Optional[Path]:
+        """Return an absolute remote directory, expanding a leading ``$NAME``."""
+
+        parts = self._remote_dir_variable(value, name=name)
+        if parts is None:
+            return None
+        variable, remainder = parts
+        if variable is None:
+            return Path(remainder)
+        base = self._remote_variable(variable)
+        return base / remainder if remainder else base
 
     def _get_work_dir(self) -> Path:
         """Resolve the remote base directory for relative FrequenSolve paths."""
 
-        configured = self._normalize_optional_remote_dir(
+        configured = self._resolve_remote_dir(
             self._configured_work_dir,
             name="work_dir",
         )
@@ -4358,14 +4447,9 @@ class SlurmSite(BaseSite):
             if legacy_rel_path is not None:
                 work_dir = work_dir / legacy_rel_path
         else:
-            _, stdout, stderr = self._login_client.client.exec_command("echo $WORK")
-            work_root = stdout.read().decode().strip()
-            if not work_root:
-                raise RuntimeError(
-                    f"Failed to determine $WORK for {self.site_name}; configure "
-                    "an absolute work_dir base in site.toml or pass work_dir= explicitly"
-                )
-            work_dir = Path(work_root) / (legacy_rel_path or "frequensolve")
+            storage = getattr(self, "storage", None) or "work"
+            work_root = self._remote_variable(_STORAGE_VARIABLES[storage])
+            work_dir = work_root / (legacy_rel_path or "frequensolve")
 
         self._work_dir = Path(work_dir)
         logger.info("Work directory: %s", self._work_dir)

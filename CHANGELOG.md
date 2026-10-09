@@ -62,6 +62,13 @@ prepared.
   connection failures raise `ConnectionError` and control-socket status 255
   raises `SSHTransportError` (both subclasses of the previous `OSError` and
   `RuntimeError`).
+- SLURM profiles can run on the scratch filesystem: `storage = "scratch"`
+  (site profile or `SlurmSite(storage=...)`) moves the default `work_dir` from
+  `$WORK/frequensolve` to `$SCRATCH/frequensolve`, and with it persistent
+  session directories, heartbeat/status files and curvature mirrors. The
+  default stays `"work"`. `work_dir`, `scratch_dir` and `tmp_dir` may start
+  with a remote variable such as `$SCRATCH` or `${WORK}`, resolved once in the
+  login shell, cached and logged; a `$` elsewhere in these paths is rejected.
 
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five

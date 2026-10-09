@@ -83,6 +83,8 @@ ssh_key = "~/.ssh/id_ed25519"
 solver = "/remote/path/to/solver-installation/FS_seismic"
 # Compatibility policy: "warn" (default), "strict", or "off".
 solver_policy = "warn"
+# Remote paths may be absolute or start with one remote variable such as
+# $WORK or $SCRATCH, resolved once in the login shell.
 work_dir = "/remote/writable/directory/frequensolve"
 # Optional future location for models and other high-I/O data.
 scratch_dir = "/remote/scratch/directory/frequensolve"
@@ -131,13 +133,17 @@ username = "your-tacc-username"
 account = "your-tacc-allocation"
 # HPC launches route every solver phase through this executable.
 solver = "/remote/path/to/solver-installation/FS_seismic"
-# work_dir defaults to $WORK/frequensolve. It may point to any writable remote
-# filesystem; TOML does not expand $WORK or $SCRATCH.
-# work_dir = "/another/remote/path/frequensolve"
+# work_dir defaults to $WORK/frequensolve. If the work filesystem is slow,
+# storage = "scratch" moves it, with session, heartbeat, status and curvature
+# files, to $SCRATCH/frequensolve. $SCRATCH is not backed up and is purged:
+# fetch results you need to keep.
+# storage = "scratch"
+# Paths may also start with $WORK or $SCRATCH (resolved on the login node):
+# work_dir = "$SCRATCH/frequensolve"
 # Optional future location for models and other high-I/O data.
-# scratch_dir = "/scratch/your-tacc-username/frequensolve"
-# Remote transfer/provision staging. Use a concrete absolute path.
-# tmp_dir = "/scratch/your-tacc-username/frequensolve/tmp"
+# scratch_dir = "$SCRATCH/frequensolve"
+# Remote transfer/provision staging; defaults to /tmp on the login node.
+# tmp_dir = "$SCRATCH/frequensolve/tmp"
 default_partition = "skx-dev"
 transfer_method = "rsync"
 verbose = true

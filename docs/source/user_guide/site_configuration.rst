@@ -546,11 +546,15 @@ The generated profile is equivalent to this minimal configuration:
    preset = "stampede3"
    username = "username"
    solver = "/work/shared/frequensol/FS_seismic"
-   # Omit work_dir to use $WORK/frequensolve, or choose another writable base:
-   # work_dir = "/shared/username/frequensolve"
+   # Omit work_dir to use $WORK/frequensolve. Move it to $SCRATCH/frequensolve
+   # when the work filesystem is slow (purged; fetch results to keep):
+   # storage = "scratch"
+   # Or choose another writable base; a leading $WORK or $SCRATCH is resolved
+   # on the login node:
+   # work_dir = "$SCRATCH/frequensolve-runs"
    # Optional future location for models and other high-I/O data:
-   # scratch_dir = "/scratch/username/frequensolve"
-   # tmp_dir = "/scratch/username/frequensolve/tmp"
+   # scratch_dir = "$SCRATCH/frequensolve"
+   # tmp_dir = "$SCRATCH/frequensolve/tmp"
 
    [sites.stampede3.run_config]
    account = "your-tacc-project-id"
@@ -585,12 +589,24 @@ The generated profile is equivalent to this minimal configuration:
        frequency tasks, imaging postprocessing, packing, and curvature
        postprocessing.
    * - ``work_dir``
-     - Absolute remote base directory for relative project, simulation, and job
+     - Remote base directory for relative project, simulation, and job
        paths. It may be on any writable remote filesystem. Absolute paths in
-       those definitions are not rebased. When omitted, FrequenSolve uses
-       ``$WORK/frequensolve``.
+       those definitions are not rebased. Persistent-session directories,
+       scheduler heartbeat and status files, and curvature mirrors without
+       ``scratch_dir`` live below it. When omitted, FrequenSolve uses
+       ``$WORK/frequensolve``, or ``$SCRATCH/frequensolve`` with
+       ``storage = "scratch"``. ``work_dir``, ``scratch_dir`` and ``tmp_dir``
+       are absolute paths or start with one remote variable, such as
+       ``"$SCRATCH/frequensolve"`` or ``"${WORK}/runs"``, which FrequenSolve
+       resolves once in the login shell and logs.
+   * - ``storage``
+     - ``"work"`` (default) or ``"scratch"``: the remote filesystem variable,
+       ``$WORK`` or ``$SCRATCH``, below which ``work_dir`` defaults to
+       ``frequensolve``. Use ``"scratch"`` when the work filesystem is slow;
+       scratch filesystems are usually purged and not backed up. It cannot be
+       combined with ``work_dir``.
    * - ``scratch_dir``
-     - Optional absolute remote scratch directory reserved for future model and
+     - Optional remote scratch directory reserved for future model and
        high-I/O storage. Sauce curvature postprocessing stages its HDF5 inputs
        and results below ``curvature/`` here, or below ``work_dir`` when unset,
        until ``site.remove_curvature_files()`` deletes them.
@@ -613,8 +629,8 @@ The generated profile is equivalent to this minimal configuration:
        size verification are not retried.
    * - ``tmp_dir``
      - Optional remote directory for transient transfer tarballs and
-       provisioning scripts. Use a concrete absolute path on the login
-       filesystem. Defaults to ``/tmp``.
+       provisioning scripts on the login node. Defaults to ``/tmp``, which
+       ``storage`` does not change.
    * - ``modules``
      - Environment modules loaded from left to right before the solver starts.
        A preset may supply a runtime stack; an explicit profile array replaces
