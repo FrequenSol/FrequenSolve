@@ -189,7 +189,7 @@ print('solver success')
     monkeypatch.setattr(site, "put", put)
     monkeypatch.setattr(site, "get", get)
     monkeypatch.setattr(site, "_read_remote_json", read)
-    monkeypatch.setattr(site, "_run_login_checked", login)
+    monkeypatch.setattr(site, "_run_session_command", login)
     monkeypatch.setattr(site, "_submit_sbatch", submit)
     monkeypatch.setattr(site, "cancel_job", cancel)
     monkeypatch.setattr(
@@ -939,7 +939,7 @@ def test_stale_heartbeat_during_drain_warns_instead_of_cancelling(cluster, monke
 def test_close_failure_after_successful_work_warns_and_keeps_results(
     cluster, monkeypatch
 ):
-    login = cluster.site._run_login_checked
+    login = cluster.site._run_session_command
 
     def failing_close(command, **kwargs):
         if "/commands/" in command and "ln " in command:
@@ -949,7 +949,7 @@ def test_close_failure_after_successful_work_warns_and_keeps_results(
     with pytest.warns(RuntimeWarning, match="attach_session") as caught:
         with cluster.site.session() as session:
             result = session.run(Job(cluster.root, "kept"), check=True)
-            monkeypatch.setattr(cluster.site, "_run_login_checked", failing_close)
+            monkeypatch.setattr(cluster.site, "_run_session_command", failing_close)
     assert result.successful
     assert "ssh connection reset" in runtime_warning(caught)
     assert session.session_id in runtime_warning(caught)
@@ -1007,3 +1007,76 @@ def test_lease_renews_while_submit_uploads(cluster, monkeypatch):
         assert sequences[-1] > sequences[0] + 3
         assert session.status()["state"] == "ready"
     assert cluster.processes[0].poll() == 0
+
+
+def test_session_command_timeout_defaults_and_overrides(monkeypatch):
+    assert SlurmRunConfig().session_command_timeout == 120.0
+    session, _, _ = scripted_session(monkeypatch)
+    assert session.command_timeout == session_module.DEFAULT_SESSION_COMMAND_TIMEOUT
+    configured = SlurmRunConfig(session_command_timeout=300)
+    assert (
+        scripted_session(monkeypatch, run_config=configured)[0].command_timeout == 300
+    )
+    explicit = scripted_session(
+        monkeypatch, run_config=configured, session_command_timeout=45
+    )[0]
+    assert explicit.command_timeout == 45
+    with pytest.raises(ValueError, match="session_command_timeout"):
+        scripted_session(monkeypatch, session_command_timeout=0)
+    with pytest.raises(ValueError, match="session_command_timeout"):
+        SlurmRunConfig(session_command_timeout=float("inf"))
+    # The flat site.toml key reaches the run config.
+    assert (
+        SlurmRunConfig().merged(session_command_timeout=90).session_command_timeout
+        == 90
+    )
+
+
+def test_slow_session_mkdir_names_command_path_and_timeout(cluster, monkeypatch):
+    site = cluster.site
+    monkeypatch.setattr(
+        site,
+        "_run_session_command",
+        hpc.SlurmSite._run_session_command.__get__(site),
+    )
+    timeouts = []
+
+    def slow_login(command, *, timeout=None):
+        timeouts.append(timeout)
+        raise TimeoutError("SSH command to login timed out")
+
+    monkeypatch.setattr(site, "run_login_cmd", slow_login)
+    session = site.session(session_command_timeout=200)
+    with pytest.raises(TimeoutError) as caught:
+        session.start()
+    message = str(caught.value)
+    assert "mkdir" in message
+    assert str(session.root) in message
+    assert "200 s" in message and "session_command_timeout" in message
+    assert "Enterprise HPC" not in message
+    # Session commands use their own bound, not the 15 s identity-query bound.
+    assert timeouts == [200]
+    assert cluster.processes == []  # nothing was submitted
+
+
+def test_failed_session_publication_names_command_and_path(cluster, monkeypatch):
+    site = cluster.site
+    helper = hpc.SlurmSite._run_session_command.__get__(site)
+
+    def failing_login(command, *, timeout=None):
+        return (
+            None,
+            SimpleNamespace(
+                read=lambda: b"",
+                channel=SimpleNamespace(recv_exit_status=lambda: 1),
+            ),
+            SimpleNamespace(read=lambda: b"mv: Input/output error"),
+        )
+
+    monkeypatch.setattr(site, "run_login_cmd", failing_login)
+    target = Path("/remote/work/.fs_sessions/x/leases/client.json")
+    with pytest.raises(RuntimeError) as caught:
+        helper("mv -f -- a b", timeout=120.0, action="publication (mv)", path=target)
+    message = str(caught.value)
+    assert "publication (mv)" in message and str(target) in message
+    assert "Input/output error" in message and "exit status 1" in message

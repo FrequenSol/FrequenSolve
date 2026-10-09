@@ -43,6 +43,9 @@ class PersistentAllocation:
     ``cleanup_timeout`` caps draining on normal exit; ``None`` waits while the
     controller is alive. A drain that reaches the cap is left to the lease and
     walltime with a warning rather than cancelled mid-write.
+    ``session_command_timeout`` bounds each session filesystem command on the
+    login node; ``"auto"`` uses the site's ``session_command_timeout``
+    (default 120 s).
     """
 
     nodes: Optional[int] = None
@@ -54,6 +57,7 @@ class PersistentAllocation:
     startup_timeout: float = 1800.0
     cleanup_timeout: Optional[float] = None
     heartbeat_timeout: Union[float, str, None] = "auto"
+    session_command_timeout: Union[float, str] = "auto"
 
     def open(self, site: Any) -> Any:
         factory = getattr(site, "session", None)
@@ -77,5 +81,6 @@ class PersistentAllocation:
             startup_timeout=self.startup_timeout,
             cleanup_timeout=self.cleanup_timeout,
             heartbeat_timeout=self.heartbeat_timeout,
+            session_command_timeout=self.session_command_timeout,
             **resources,
         )

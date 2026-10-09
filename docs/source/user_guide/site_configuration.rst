@@ -49,6 +49,15 @@ republication with the same id and payload does not execute the request twice.
 An id cannot be reused for different work. Durable session records remain under
 ``<work_dir>/.fs_sessions/<session_id>`` after the allocation ends.
 
+Creating the session directory and publishing each lease renewal, request and
+command are login-node filesystem commands (``mkdir``, ``mv`` and ``ln``).
+Each may take up to ``session_command_timeout`` seconds (default 120), set in
+the profile's ``run_config`` or per session with
+``site.session(session_command_timeout=...)`` or
+``PersistentAllocation(session_command_timeout=...)``. A timeout or failure
+names the command and remote path. The 15-second bound on solver identity
+queries does not apply to these commands.
+
 To reconnect to a running session, use its ``session.session_id``::
 
    with site.attach_session(session_id) as borrowed:
@@ -619,6 +628,11 @@ The generated profile is equivalent to this minimal configuration:
        Defaults to 300; shorter windows misfire when the shared work
        filesystem stalls. Set it to ``None`` through ``SlurmRunConfig`` to
        disable the check.
+   * - ``session_command_timeout``
+     - Seconds one persistent-session filesystem command on the login node
+       (session directory creation and lease, request and command publication)
+       may take before it fails with the command and path named. Defaults to
+       120. Raise it when the work filesystem is slow.
    * - ``mpi_health_check_timeout``
      - Optional SLURM step time limit for a full-rank solver MPI health check
        before sizing. The solver must support ``--mpi-health-check``. Disabled

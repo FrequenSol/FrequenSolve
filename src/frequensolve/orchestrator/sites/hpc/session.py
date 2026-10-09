@@ -30,7 +30,12 @@ from frequensolve.orchestrator.sites.hpc.site import (
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import temporary_text_file
 from frequensolve.simulation.jobs.run_state import SkipPolicy
 
-__all__ = ["AdaptiveWorkers", "AllocationSession", "DEFAULT_HEARTBEAT_TIMEOUT"]
+__all__ = [
+    "AdaptiveWorkers",
+    "AllocationSession",
+    "DEFAULT_HEARTBEAT_TIMEOUT",
+    "DEFAULT_SESSION_COMMAND_TIMEOUT",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,9 @@ logger = logging.getLogger(__name__)
 # Loss also requires the heartbeat to stop *changing* (client monotonic clock)
 # while Slurm reports the job running. Used when the site has no run config.
 DEFAULT_HEARTBEAT_TIMEOUT = 300.0
+# Bound on one session filesystem command on the login node (directory
+# creation, lease/request/command publication). Used without a run config.
+DEFAULT_SESSION_COMMAND_TIMEOUT = 120.0
 # Windows below this misfire on slow shared filesystems; warn at start.
 _SHORT_HEARTBEAT_WINDOW = 120.0
 # Bound on waiting for the controller to cancel work before ``scancel``.
@@ -97,6 +105,11 @@ class AllocationSession(BaseSite):
     (default) waits while the controller is alive. A drain that reaches the
     cap or loses the heartbeat warns and leaves the allocation to its lease
     and walltime instead of cancelling work mid-write.
+    ``session_command_timeout`` bounds each login-node filesystem command the
+    session runs (directory creation and the ``mv``/``ln`` that publish lease
+    renewals, requests and commands); ``"auto"`` uses the site's
+    ``run_config.session_command_timeout`` (default 120 s). A timeout names
+    the command and remote path.
     """
 
     supports_curvature = True
@@ -112,6 +125,7 @@ class AllocationSession(BaseSite):
         startup_timeout=1800.0,
         cleanup_timeout=None,
         heartbeat_timeout="auto",
+        session_command_timeout="auto",
         session_id=None,
         **resources,
     ):
@@ -130,6 +144,15 @@ class AllocationSession(BaseSite):
             else self._seconds(cleanup_timeout, "cleanup_timeout")
         )
         self.heartbeat_timeout = self._heartbeat_window(heartbeat_timeout)
+        if session_command_timeout == "auto":
+            session_command_timeout = getattr(
+                getattr(site, "run_config", None),
+                "session_command_timeout",
+                DEFAULT_SESSION_COMMAND_TIMEOUT,
+            )
+        self.command_timeout = self._seconds(
+            session_command_timeout, "session_command_timeout"
+        )
         self.resources = resources
         self.generation = None
         self.allocation_id = None
@@ -208,9 +231,9 @@ class AllocationSession(BaseSite):
     def _identity(self):
         return f"session {self.session_id} (Slurm allocation {self.allocation_id})"
 
-    def _login(self, command):
-        return self.base_site._run_login_checked(
-            command, purpose="operate allocation session"
+    def _login(self, command, *, action, path):
+        return self.base_site._run_session_command(
+            command, timeout=self.command_timeout, action=action, path=path
         )
 
     def _read(self, path):
@@ -226,7 +249,9 @@ class AllocationSession(BaseSite):
         self._text(text, temporary)
         if not immutable:
             self._login(
-                f"mv -f -- {shlex.quote(str(temporary))} {shlex.quote(str(path))}"
+                f"mv -f -- {shlex.quote(str(temporary))} {shlex.quote(str(path))}",
+                action="publication (mv)",
+                path=path,
             )
             return
         # Hard-link publication is atomic and never replaces a request already
@@ -235,7 +260,9 @@ class AllocationSession(BaseSite):
         # never published again and the archived copy is authoritative.
         processed = path.parent / _PROCESSED / path.name
         self._login(
-            f"test -e {shlex.quote(str(processed))} || ln {shlex.quote(str(temporary))} {shlex.quote(str(path))} 2>/dev/null || test -f {shlex.quote(str(path))}; rm -f -- {shlex.quote(str(temporary))}"
+            f"test -e {shlex.quote(str(processed))} || ln {shlex.quote(str(temporary))} {shlex.quote(str(path))} 2>/dev/null || test -f {shlex.quote(str(path))}; rm -f -- {shlex.quote(str(temporary))}",
+            action="publication (ln)",
+            path=path,
         )
         existing = self._read(processed) or self._read(path) or self._read(processed)
         if existing is None:
@@ -375,7 +402,9 @@ class AllocationSession(BaseSite):
                 + " ".join(
                     shlex.quote(str(self.root / name))
                     for name in ("requests", "commands", "runs", "leases")
-                )
+                ),
+                action="session directory creation (mkdir)",
+                path=self.root,
             )
             self._text(json.dumps(self._config), self.root / "config.json")
             directory = files("frequensolve.orchestrator.sites.hpc").joinpath(

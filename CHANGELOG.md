@@ -43,6 +43,15 @@ prepared.
   configuration writes 300: shared scratch filesystems can stall heartbeat
   writes for minutes. Explicitly configured values are honoured; a session
   whose window is below 120 seconds logs a warning when it starts.
+- Persistent-session filesystem commands on the login node (session directory
+  creation and the `mv`/`ln` that publish lease renewals, requests and
+  commands) are bounded by the new `run_config.session_command_timeout`
+  (default 120 s; also `site.session(session_command_timeout=...)` and
+  `PersistentAllocation(session_command_timeout=...)`) instead of the 15 s
+  solver identity-query bound, which failed sessions on slow work
+  filesystems. A timeout or failure names the command and remote path instead
+  of reporting "Enterprise HPC preflight could not verify operate allocation
+  session".
 
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five

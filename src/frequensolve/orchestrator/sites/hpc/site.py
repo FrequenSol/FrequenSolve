@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import posixpath
 import re
@@ -174,6 +175,11 @@ _HPC_RUNTIME_DEFAULTS = {
 # operations can stall for minutes during large writes; shorter windows report
 # healthy jobs as failed.
 _ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 300.0
+# Persistent-session directory creation and the ``mv``/``ln`` publishing every
+# lease renewal, request and command are metadata operations on the shared
+# work filesystem, which stalls for tens of seconds on busy Lustre. The 15 s
+# identity-query bound is far too short for them.
+_SESSION_COMMAND_TIMEOUT = 120.0
 
 # Quoted paths per removal command; well below Linux's 128 KiB argument cap.
 _REMOVE_COMMAND_BYTES = 64 * 1024
@@ -477,6 +483,10 @@ class SlurmRunConfig:
             heartbeat enforcement.
         mpi_health_check_timeout: Optional Slurm time limit for a full-rank MPI
             health check before solver initialization. ``None`` disables it.
+        session_command_timeout: Seconds one persistent-session filesystem
+            command on the login node (session directory creation, lease,
+            request and command publication) may take before it fails with
+            the command and path named. Defaults to 120.
         run_path: Remote run directory override.
         slurm_args: Additional raw ``sbatch`` arguments.
     """
@@ -496,6 +506,7 @@ class SlurmRunConfig:
     mpi_health_check_timeout: Optional[str] = None
     run_path: Optional[Union[str, Path]] = None
     slurm_args: List[str] = field(default_factory=list)
+    session_command_timeout: float = _SESSION_COMMAND_TIMEOUT
 
     def __init__(
         self,
@@ -517,6 +528,7 @@ class SlurmRunConfig:
         slurm_args: Optional[List[str]] = None,
         *,
         mpi_health_check_timeout: Optional[str] = None,
+        session_command_timeout: float = _SESSION_COMMAND_TIMEOUT,
         **aliases,
     ):
         values = _normalize_rank_aliases(
@@ -574,6 +586,15 @@ class SlurmRunConfig:
                 raise ValueError("mpi_health_check_timeout must be greater than zero")
             mpi_health_check_timeout = _seconds_to_hms(timeout_seconds)
         self.mpi_health_check_timeout = mpi_health_check_timeout
+        try:
+            session_command_timeout = float(session_command_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("session_command_timeout must be seconds") from exc
+        if not math.isfinite(session_command_timeout) or session_command_timeout <= 0:
+            raise ValueError(
+                "session_command_timeout must be finite and greater than zero"
+            )
+        self.session_command_timeout = session_command_timeout
         self.run_path = run_path
         self.slurm_args = list(slurm_args or [])
 
@@ -628,6 +649,7 @@ class SlurmRunConfig:
             "poll_interval": self.poll_interval,
             "scheduler_heartbeat_timeout": self.scheduler_heartbeat_timeout,
             "mpi_health_check_timeout": self.mpi_health_check_timeout,
+            "session_command_timeout": self.session_command_timeout,
             "run_path": self.run_path,
             "slurm_args": list(self.slurm_args),
         }
@@ -1443,6 +1465,38 @@ class SlurmSite(BaseSite):
             raise EnterpriseHPCPreflightError(
                 f"Enterprise HPC preflight could not verify {purpose} "
                 f"(remote exit status {status})"
+            )
+        return output
+
+    def _run_session_command(
+        self, command: str, *, timeout: float, action: str, path: Any
+    ) -> str:
+        """Run one bounded login-node filesystem command for a session.
+
+        Failures name the action, the remote path and, for a timeout, the
+        ``session_command_timeout`` that bounded it.
+        """
+
+        stdout = None
+        try:
+            _, stdout, stderr = self.run_login_cmd(command, timeout=timeout)
+            output = _read_stream(stdout)
+            error = _read_stream(stderr)
+            status = _ssh_exit_status(stdout, stderr)
+        except TimeoutError as exc:
+            close_channel = getattr(getattr(stdout, "channel", None), "close", None)
+            if callable(close_channel):
+                close_channel()
+            raise TimeoutError(
+                f"Remote {action} of {path} on {self.site_name} timed out after "
+                f"{timeout:g} s (session_command_timeout); the remote filesystem "
+                "may be slow. Raise run_config.session_command_timeout or pass "
+                "session_command_timeout= to site.session() if this recurs."
+            ) from exc
+        if _remote_command_failed(error, status):
+            raise RuntimeError(
+                f"Remote {action} of {path} on {self.site_name} failed "
+                f"(remote exit status {status}): {error or 'no error output'}"
             )
         return output
 

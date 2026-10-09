@@ -45,7 +45,8 @@ and a ``RuntimeWarning`` names the session and Slurm allocation. A drain that
 outlasts ``cleanup_timeout`` or loses the controller heartbeat also warns and
 leaves the allocation to its lease and walltime instead of cancelling work
 mid-write. ``PersistentAllocation(heartbeat_timeout=..., cleanup_timeout=...)``
-tunes both; see :ref:`site-configuration`.
+tunes both, and ``session_command_timeout`` bounds each session filesystem
+command on the login node; see :ref:`site-configuration`.
 
 To reuse a session across workflows, enter ``problem.site.session(...)`` and
 pass that open session as ``fwi.run(execution=session)``. FWI borrows it and

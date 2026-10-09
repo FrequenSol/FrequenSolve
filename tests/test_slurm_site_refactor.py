@@ -734,6 +734,7 @@ def test_existing_slurm_run_config_public_call_shape_is_unchanged():
         "run_path",
         "slurm_args",
         "mpi_health_check_timeout",
+        "session_command_timeout",
         "aliases",
     )
     config = SlurmRunConfig(
