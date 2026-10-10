@@ -95,6 +95,12 @@ def partitioned_inputs(job: Any) -> List[_Input]:
     n_tasks = int(getattr(job, "n_tasks", 1) or 1)
     inputs = []
     for name, writers, required in _INPUTS:
+        if (
+            name == "state"
+            and action == "solve"
+            and getattr(job, "reflectivity", None) is not None
+        ):
+            continue
         value = getattr(job, name, None)
         if action in writers or not isinstance(value, (str, os.PathLike)):
             continue

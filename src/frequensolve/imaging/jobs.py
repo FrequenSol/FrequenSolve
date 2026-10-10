@@ -1079,10 +1079,12 @@ def _validate_extension(
     return payload
 
 
-def _validate_reflectivity(value: Mapping[str, Any]) -> Dict[str, Any]:
+def _validate_reflectivity(
+    value: Mapping[str, Any], result_dir: Path
+) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError("reflectivity must be a mapping")
-    allowed = {"parameterization", "workspace_mb", "fields"}
+    allowed = {"parameterization", "workspace_mb", "fields", "solver"}
     unknown = sorted(set(value).difference(allowed))
     if unknown:
         raise ValueError(f"unsupported reflectivity option(s): {', '.join(unknown)}")
@@ -1142,6 +1144,17 @@ def _validate_reflectivity(value: Mapping[str, Any]) -> Dict[str, Any]:
     }
     if "workspace_mb" in value:
         warnings.warn(WORKSPACE_DEPRECATION, DeprecationWarning, stacklevel=3)
+    if "solver" in value:
+        from .rwi import _solver_options
+
+        payload["solver"] = _solver_options(value["solver"])
+        for key, suffix in (("solution", ".h5"), ("report", ".json")):
+            output = _output_path(payload["solver"][key], result_dir)
+            if output is None or output.suffix != suffix:
+                raise ValueError(
+                    f"reflectivity solver {key} must have {suffix} extension"
+                )
+            payload["solver"][key] = output
     return payload
 
 
@@ -1191,7 +1204,7 @@ class FWIOperatorJob(_ImagingJobBase):
             IDs are qualified as ``model.<id>``). Required (may be empty) for
             state actions; must be ``None`` for ``calibrate`` and ``wri``.
         state: ``fs-objective-linearization-5`` stem: an output for
-            ``linearize`` (result-relative), an input otherwise.
+            ``linearize`` and reflectivity ``solve`` (result-relative), an input otherwise.
         background: Optional native background checkpoint manifest; output
             for linearize, input for ordinary material JVP/VJP/normal.
         background_layout: Files of a linearize ``background`` capture,
@@ -1336,7 +1349,9 @@ class FWIOperatorJob(_ImagingJobBase):
         self.source_derivative = source_derivative
         self.field_retention = field_retention
         self.field_reuse = field_reuse
-        state_is_output = action == "linearize"
+        state_is_output = action == "linearize" or (
+            action == "solve" and reflectivity is not None
+        )
         self.background = (
             _output_path(background, result_dir)
             if state_is_output
@@ -1477,7 +1492,9 @@ class FWIOperatorJob(_ImagingJobBase):
             else _validate_extension(extension, simulation, result_dir)
         )
         self.reflectivity = (
-            None if reflectivity is None else _validate_reflectivity(reflectivity)
+            None
+            if reflectivity is None
+            else _validate_reflectivity(reflectivity, result_dir)
         )
         self.reduced_normal = (
             None if reduced_normal is None else _validate_reduced_normal(reduced_normal)
@@ -1681,10 +1698,17 @@ class FWIOperatorJob(_ImagingJobBase):
                 "extension jobs cannot carry control_sensitivities "
                 "(smoothing, weights, control_active, gram_derivative)"
             )
-        if self.reflectivity is not None and action not in _STATE_ACTIONS - {"solve"}:
+        if self.reflectivity is not None and action not in _STATE_ACTIONS:
             raise ValueError(
-                "reflectivity supports linearize, jvp, vjp and normal only"
+                "reflectivity supports linearize, jvp, vjp, normal and solve only"
             )
+
+        if (
+            self.reflectivity is not None
+            and self.reflectivity.get("solver") is not None
+            and action != "solve"
+        ):
+            raise ValueError("reflectivity.solver requires action = solve")
 
         if action in _STATE_ACTIONS:
             if self.active is None:
@@ -1811,6 +1835,23 @@ class FWIOperatorJob(_ImagingJobBase):
                     raise ValueError("normal requires direction and covector")
                 if not self.active:
                     raise ValueError("normal requires a nonempty active subspace")
+        elif action == "solve" and self.reflectivity is not None:
+            if self.reflectivity.get("solver") is None:
+                raise ValueError("reflectivity solve requires reflectivity.solver")
+            if self.reflectivity["parameterization"] != "vp_ip":
+                raise ValueError("RWI currently supports acoustic vp_ip reflectivity")
+            if self.covector is None or not self.active:
+                raise ValueError("RWI requires active controls and a covector output")
+            if self.direction is not None or self.objective_vector is not None:
+                raise ValueError("RWI fits observed data without an external direction")
+            if (
+                self.reduced_normal is not None
+                or self.source_controls is not None
+                or self.model_gradient
+            ):
+                raise ValueError(
+                    "RWI requires fixed sources and has no reduced normal or model_gradient flag"
+                )
         elif action == "solve":
             if not has_extension:
                 raise ValueError("solve requires an extension")
@@ -2155,13 +2196,15 @@ class FWIOperatorJob(_ImagingJobBase):
     @property
     def frequency_groups(self) -> int:
         """Number of retained frequency workers participating in one shared fit."""
-        weights = (self.extension or {}).get("solver", {}).get("frequency_weights")
+        weights = (
+            (self.extension or self.reflectivity or {})
+            .get("solver", {})
+            .get("frequency_weights")
+        )
         if weights is None:
             return 1
         if self.action != "solve" or len(weights) != self.n_tasks:
-            raise ValueError(
-                "shared extension weights must match every solve frequency"
-            )
+            raise ValueError("shared solve weights must match every frequency")
         return self.n_tasks
 
     def objective_value(self) -> float:
@@ -2256,6 +2299,18 @@ class FWIOperatorJob(_ImagingJobBase):
         if value is None:
             raise ValueError(f"this job has no extension.{'.'.join(keys)} path")
         return Path(value)
+
+    def reflectivity_solution_file(self, task: Optional[int] = None) -> Path:
+        """Return the complete fitted control state for one RWI task."""
+        if self.reflectivity is None or "solver" not in self.reflectivity:
+            raise ValueError("this job has no reflectivity solver")
+        return _task_path(Path(self.reflectivity["solver"]["solution"]), task)
+
+    def reflectivity_report_file(self, task: Optional[int] = None) -> Path:
+        """Return the stationarity report for one RWI task."""
+        if self.reflectivity is None or "solver" not in self.reflectivity:
+            raise ValueError("this job has no reflectivity solver")
+        return _task_path(Path(self.reflectivity["solver"]["report"]), task)
 
     def extension_solution_file(self, task: Optional[int] = None) -> Path:
         """Return the solved-taps stem or one task's ``fs-extension-vector-1``."""
@@ -2446,6 +2501,11 @@ class FWIOperatorJob(_ImagingJobBase):
             op["extension"] = self._extension_to_fs(ctx)
         if self.reflectivity is not None:
             op["reflectivity"] = copy.deepcopy(self.reflectivity)
+            if "solver" in op["reflectivity"]:
+                for key in ("solution", "report"):
+                    op["reflectivity"]["solver"][key] = _job_path(
+                        self.reflectivity["solver"][key], ctx, False
+                    )
         if self.reduced_normal is not None:
             op["reduced_normal"] = dict(self.reduced_normal)
         payload["fwi_operator"] = op
@@ -2631,6 +2691,10 @@ class FWIOperatorJob(_ImagingJobBase):
                 offsets = field.get("offsets")
                 if offsets and offsets.get("artifact") is not None:
                     offsets["artifact"] = resolve(offsets["artifact"])
+        reflectivity = copy.deepcopy(op.get("reflectivity"))
+        if reflectivity is not None and "solver" in reflectivity:
+            for key in ("solution", "report"):
+                reflectivity["solver"][key] = resolve(reflectivity["solver"][key])
         job = cls(
             data["name"],
             simulation,
@@ -2687,7 +2751,7 @@ class FWIOperatorJob(_ImagingJobBase):
             wri=op.get("wri"),
             receiver_diagonal=op.get("receiver_diagonal"),
             extension=extension,
-            reflectivity=op.get("reflectivity"),
+            reflectivity=reflectivity,
             reduced_normal=op.get("reduced_normal"),
             misfit=imaging.get("misfit"),
             kernel_derivative=_map_kernel_window(

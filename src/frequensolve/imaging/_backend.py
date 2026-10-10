@@ -889,7 +889,11 @@ class Backend:
                 value = getattr(job, label)
                 if value is None:
                     continue
-                if label == "state" and job.action != "linearize":
+                if (
+                    label == "state"
+                    and job.action != "linearize"
+                    and not (job.action == "solve" and job.reflectivity is not None)
+                ):
                     continue
                 if label == "objective_vector" and job.action != "jvp":
                     continue

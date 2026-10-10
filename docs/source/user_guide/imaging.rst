@@ -2315,6 +2315,21 @@ background-reflectivity cross terms) and stages like any other block. A
 Extension and reflectivity are mutually exclusive in one problem and the
 combination is rejected at construction.
 
+Restricting active controls freezes coefficients; it does not remove fields
+from the physical prediction. A background-only stage retains every reflectivity
+field at its current value and still uses the joint operator. Likewise, selecting
+one reflectivity field retains the other fields. Joint-workflow restrictions
+continue to apply when all reflectivity controls are inactive. At the same full
+state, restrictions preserve predicted data and objective values and select only
+the corresponding Jacobian columns and gradient entries.
+
+Reflectivity scattering excludes PML cells. Independent synthetic recovery tests
+must keep the absorbing-layer properties at the background values, rather than
+extend the truth contrast into that excluded region.
+Scattering also holds physical boundary coefficients fixed. A nonlinear truth
+comparison must preserve material-dependent boundary impedances; keep contrasts
+away from those boundaries when testing reflectivity accuracy.
+
 .. code-block:: python
 
    space = im.ControlSpace(
@@ -2325,6 +2340,70 @@ combination is rejected at construction.
        im.Stage([3, 5], iterations=10, active=["vp"]),
        im.Stage([5, 8], iterations=15, active=["vp", "refl"]),
    ]
+
+RWI fits one shared acoustic or elastic reflectivity at each trial background before
+returning its reduced objective and gradient. Select the inner contrast blocks
+explicitly when other reflectivity fields should stay frozen::
+
+   rwi = problem.rwi(reflectivity=["refl.ip"], damping=1e-4)
+   fit = rwi.linearize()
+   curvature = fit.normal
+   product = fit.apply_normal(direction)
+   result = im.FWI(rwi, stages=[im.Stage(problem.frequencies, iterations=10)],
+                   optimizer=im.NewtonCG(), scaling="curvature").run()
+
+``fit.state`` and the final result include the fitted reflectivity. FrequenSolve
+coordinates the fit and reduced Gauss-Newton response using ordinary frequency
+tasks. Frequencies can run concurrently or in waves through the configured site;
+they share physical coefficients and a common supported basis. Frequency weights
+belong on the problem. The coefficient penalty ``damping / 2 * ||r||²`` is added
+once after frequency reduction. The shared response inverts the summed
+reflectivity normal; summing separately reduced frequency operators would give
+a different result.
+
+``relative_tolerance`` (default ``1e-4``), ``absolute_tolerance`` (default zero),
+and ``max_iterations`` (default 50) control both inner fits and curvature
+responses. Fit tolerances use the zero-reflectivity right-hand side as their
+reference, independent of the warm start; response tolerances use the response
+right-hand side. Fits require independently recomputed stationarity; responses require
+a true residual check. An unconverged solve raises before publishing a reduced
+result, including when ``require_convergence=False``. ``fit.reports`` records
+fit diagnostics; ``fit.response_reports`` records curvature solve diagnostics.
+If CG's recurrence residual passes but its recomputed residual does not, the
+SDK automatically restarts from the recomputed residual within the remaining
+iteration budget. This correction preserves the requested tolerance and is
+separate from iterative refinement of the native wave solves.
+Near stationarity, finite-difference checks can require more accurate wave
+solves; tightening the inner tolerance alone does not reduce native wave-solve
+error. ``apply_normal_batch`` accepts multiple directions with independent response
+solves. Existing unit/Rademacher ``Diagonal`` preconditioning, explicit scaling,
+curvature scaling and outer regularization work through these reduced actions.
+Receiver-probe preconditioners remain unsupported.
+
+The portable path launches fresh native actions and does not retain factors
+between those processes. With ``LocalSite``, its existing
+``shutdown_on_completion=False`` option keeps the scheduler alive between
+actions; close the site when the workflow finishes. For retained native fitting, select
+``problem.rwi(..., execution="native", cache_mb=512)``. That fit requires native
+frequency groups; ``cache_mb`` controls resident incident fields and overflow
+spills to disk. Reduced curvature still uses SDK coordination in this mode.
+
+The default SDK path accepts acoustic ``vp_ip`` and elastic ``vp_vs_ip`` or
+``ip_is_rho`` reflectivity, including isotropic, TI and TTI material evaluators.
+Elastic impedances use reference-axis velocities; anisotropy and orientation
+remain background properties, which may be fixed or selected as outer controls.
+Use existing ``DepthProfile``/grid/mesh controls to select those properties;
+no separate TTI RWI interface is needed. ``execution="native"`` currently
+supports acoustic ``vp_ip`` only. Elastic recovery and reduced-derivative
+acceptance coverage currently targets 2D CPU; other dimensions and backends
+require separate qualification.
+
+RWI requires full-dimensional first-order DPG, fixed sources, waveform L2
+objectives and positive damping. Outer frequency and active-block stages are
+supported; changing control bases, patches and predicted reliability refresh
+are not supported. The normal is reduced Gauss-Newton,
+not the exact reduced Hessian at nonzero residual. Damping uses physical
+coefficient units; its default is not a noise-calibrated prior.
 
 Low-level jobs
 --------------

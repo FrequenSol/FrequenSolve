@@ -1446,7 +1446,7 @@ class ImagingProblem:
             manifest="registry.json" if discover or not gradient else None,
             min_support=self.min_support,
             misfit=self._misfit_payload,
-            reflectivity=self._reflectivity(space),
+            reflectivity=self._reflectivity(),
             receiver_diagonal=receiver_diagonal,
             kernel_derivative=self.kernel_derivative,
             source_controls=self._source_controls(space),
@@ -1495,13 +1495,15 @@ class ImagingProblem:
             return {"location_method": "analytic"}
         return None
 
-    def _reflectivity(self, space: ControlSpace) -> Optional[Dict[str, Any]]:
-        """Return ``fwi_operator.reflectivity`` for the active blocks, if any."""
+    def _reflectivity(self) -> Optional[Dict[str, Any]]:
+        """Preserve the physical scattering model independently of active controls.
 
-        if not any(b.kind == "reflectivity" for b in space.resolved_blocks):
-            return None
-        restricted = self._shared.space.restrict(list(space.blocks))
-        payload = getattr(restricted, "reflectivity_payload", None)
+        ``controls.active`` selects derivative columns, not which fields
+        contribute to the prediction. Frozen contrasts still need their
+        definitions so Sauce registers and restores their baseline values.
+        """
+
+        payload = getattr(self._shared.space, "reflectivity_payload", None)
         return None if payload is None else payload()
 
     def _operator_job(
@@ -1522,7 +1524,7 @@ class ImagingProblem:
             action=action,
             active=list(space.blocks),
             misfit=self._misfit_payload,
-            reflectivity=self._reflectivity(space),
+            reflectivity=self._reflectivity(),
             source_controls=self._source_controls(space),
             kernel_derivative=self.kernel_derivative,
             **kwargs,
@@ -1916,6 +1918,7 @@ class ImagingProblem:
         return (
             self.patches is None
             and self.kernel_derivative is None
+            and self._reflectivity() is None
             and not any(
                 block.kind in {"source", "reflectivity", "interface"}
                 for block in self.space.resolved_blocks
@@ -2343,6 +2346,7 @@ class ImagingProblem:
         space = self.space
         blocks = list(space.resolved_blocks)
         kinds = {block.kind for block in blocks}
+        has_reflectivity = self._reflectivity() is not None
         errors: List[str] = []
         warnings: List[str] = []
         misfit = self.misfit
@@ -2354,9 +2358,9 @@ class ImagingProblem:
         if self.kernel_derivative is not None:
             if comparisons - {"waveform"}:
                 errors.append("kernel_derivative requires waveform comparisons")
-            if kinds.intersection({"source", "reflectivity"}) or extension is not None:
+            if "source" in kinds or has_reflectivity or extension is not None:
                 errors.append(
-                    "kernel_derivative requires fixed sources and no model extension"
+                    "kernel_derivative requires fixed sources and no extension or reflectivity"
                 )
             discretization = getattr(self.simulation, "discretization", None)
             method = str(
@@ -2369,7 +2373,7 @@ class ImagingProblem:
                 "source controls require waveform comparisons "
                 f"(misfit uses {sorted(comparisons)})"
             )
-        if "reflectivity" in kinds:
+        if has_reflectivity:
             rejected, limited = self._reflectivity_rules(blocks, comparisons, extension)
             errors.extend(rejected)
             warnings.extend(limited)
@@ -2404,6 +2408,22 @@ class ImagingProblem:
         self._shared.linearizations.clear()
         if self._patch_runtime is not None:
             self._patch_runtime.cache.clear()
+
+    def rwi(self, *, reflectivity=None, execution="sdk", **solver):
+        """Return a shared-frequency acoustic or elastic RWI view with reduced GN curvature.
+
+        Select inner blocks with ``reflectivity``; other contrasts stay frozen.
+        Solver options include ``damping``, ``relative_tolerance`` (1e-4),
+        ``max_iterations`` and ``absolute_tolerance``. SDK coordination is the
+        default; ``execution="native"`` retains acoustic native grouped fitting, where
+        ``cache_mb`` controls incident-field storage. Reduced normal actions
+        use SDK coordination in either mode.
+        """
+        from .rwi import RWIProblem
+
+        return RWIProblem(
+            self, reflectivity=reflectivity, execution=execution, **solver
+        )
 
     def extend(self, extension: Any) -> Any:
         """Return an :class:`~frequensolve.imaging.extension.ExtendedProblem`.
@@ -3475,6 +3495,7 @@ class Linearization:
 
         if len(directions) > 1 and (
             self.problem.kernel_derivative is not None
+            or self.problem._reflectivity() is not None
             or any(
                 block.kind in {"source", "reflectivity"}
                 for block in self.space.resolved_blocks

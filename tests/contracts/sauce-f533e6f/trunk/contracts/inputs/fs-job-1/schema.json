@@ -74,6 +74,14 @@
       },
       "description": "Frequency/task list required by frequency workflows and prohibited for raytrace and transient workflows."
     },
+    "source_derivative": {
+      "enum": [
+        "total",
+        "frozen"
+      ],
+      "default": "total",
+      "description": "Source frequency dependence in forward_df/forward_ds: total differentiates the source load, frozen holds it fixed. Recorded in derivative trace metadata."
+    },
     "derivative_order": {
       "enum": [
         1,
@@ -503,7 +511,7 @@
               "type": "number",
               "minimum": 0,
               "default": 1,
-              "description": "Fraction of the owning material layer's conservative P wavelength used as the smoothing length."
+              "description": "Number of local wavelengths in the smoothing length: length(x)=lambda*v(x)/f with the layer's local sizing wavespeed v(x) at every quadrature point (no 2*pi) and f the largest f_list frequency, so the smoothing strength varies with velocity. With reference_wavelength the uniform length is lambda*reference_wavelength. B-spline/hat and tensor_hat bases sample v at their own regularization quadrature points; frame axes a basis does not span use the slowness mean over an 8-point Gauss sample across the physical domain, and points outside the domain are clamped to it."
             },
             "alpha": {
               "type": "number",
@@ -524,12 +532,12 @@
               "type": "number",
               "exclusiveMinimum": 0,
               "default": 1,
-              "description": "Dimensionless second-order TGV balance; wavelength scaling gives alpha1=length and alpha2=tgv_ratio*length^2."
+              "description": "Dimensionless second-order TGV balance; wavelength scaling gives alpha1(x)=length(x) and alpha2(x)=tgv_ratio*length(x)^2."
             },
             "reference_wavelength": {
               "type": "number",
               "exclusiveMinimum": 0,
-              "description": "Optional reference wavelength used with lambda instead of deriving one from the material model and f_list."
+              "description": "Optional uniform reference wavelength (km): the smoothing length is lambda*reference_wavelength everywhere instead of the local lambda*v(x)/f from the material model and f_list."
             },
             "derivative_order": {
               "enum": [
@@ -589,7 +597,7 @@
               "type": "number",
               "minimum": 0,
               "default": 1,
-              "description": "Multiplier of wavelength/(2*pi) for the native regularization length; alpha=length^(2*derivative_order) for Tikhonov/TV."
+              "description": "Number of local wavelengths in the native regularization length: length(x)=lambda*v(x)/f with the layer's local sizing wavespeed at every native quadrature point of the prepared stage model (no 2*pi); alpha(x)=length(x)^(2*derivative_order) for Tikhonov/TV. With reference_wavelength the uniform length is lambda*reference_wavelength. B-spline/hat and tensor_hat bases sample v at their own regularization quadrature points; frame axes a basis does not span use the slowness mean over an 8-point Gauss sample across the physical domain, and points outside the domain are clamped to it."
             },
             "alpha": {
               "type": "number",
@@ -610,12 +618,12 @@
               "type": "number",
               "exclusiveMinimum": 0,
               "default": 1,
-              "description": "Dimensionless second-order TGV balance; wavelength scaling gives alpha1=length and alpha2=tgv_ratio*length^2."
+              "description": "Dimensionless second-order TGV balance; wavelength scaling gives alpha1(x)=length(x) and alpha2(x)=tgv_ratio*length(x)^2."
             },
             "reference_wavelength": {
               "type": "number",
               "exclusiveMinimum": 0,
-              "description": "Optional reference wavelength used with lambda instead of deriving one from the material model and f_list."
+              "description": "Optional uniform reference wavelength (km): the smoothing length is lambda*reference_wavelength everywhere instead of the local lambda*v(x)/f from the material model and f_list."
             },
             "derivative_order": {
               "enum": [
@@ -647,6 +655,14 @@
             "normalize_amplitude": {
               "type": "boolean",
               "description": "Freeze scale a=max(abs(input)) per block during prepare (a=1 for a zero block), then evaluate a^2*R(input/a). Defaults to true for wavelength-derived weights and false for explicit alpha or alpha1/alpha2."
+            },
+            "fractional_scales": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "description": "Optional fixed positive reference scales keyed by active unqualified material control IDs. Each named block evaluates R(input/scale), overriding amplitude normalization for that block; omitted blocks retain existing behavior. Scales use native control-vector units, are frozen into the prepared context, and apply consistently to value, gradient, diagonal and proximal callbacks. Mass callbacks are unchanged."
             },
             "operation": {
               "enum": [
@@ -710,14 +726,6 @@
                 "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
               },
               "description": "One output vector path per inputs entry, resolved like gradient."
-            },
-            "fractional_scales": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "number",
-                "exclusiveMinimum": 0
-              },
-              "description": "Optional fixed positive reference scales keyed by active unqualified material control IDs. Each named block evaluates R(input/scale), overriding amplitude normalization for that block; omitted blocks retain existing behavior. Scales use native control-vector units, are frozen into the prepared context, and apply consistently to value, gradient, diagonal and proximal callbacks. Mass callbacks are unchanged."
             }
           },
           "dependentRequired": {
@@ -1117,7 +1125,7 @@
         },
         "state": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
-          "description": "Required output fs-objective-linearization-3 path for linearize (task-suffixed), or saved state input for jvp, vjp and normal. With several f_list entries the input first tries <stem>_<task><ext>, then the exact path; the saved task index must match. Reuse requires the same realized mesh partition."
+          "description": "Required output fs-objective-linearization-5 path for linearize (task-suffixed), or saved state input for jvp, vjp and normal. With several f_list entries the input first tries <stem>_<task><ext>, then the exact path; the saved task index must match. Any MPI rank count reuses it when the realized mesh, model, controls and observations match."
         },
         "background": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
@@ -1901,6 +1909,65 @@
                   }
                 ]
               }
+            },
+            "solver": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "solution",
+                "report"
+              ],
+              "properties": {
+                "damping": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 0.0001,
+                  "description": "Positive physical reflectivity coefficient penalty, lambda/2 times squared Euclidean norm."
+                },
+                "relative_tolerance": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 0.0001
+                },
+                "absolute_tolerance": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "max_iterations": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 50
+                },
+                "cache_mb": {
+                  "type": "number",
+                  "minimum": 0,
+                  "default": 512
+                },
+                "require_convergence": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "frequency_weights": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "description": "One weight per persistent MPI frequency group. At least one must be positive."
+                },
+                "solution": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Complete fs-control-state-1 output stem, task suffixed."
+                },
+                "report": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "fs-reflectivity-solve-1 output stem, task suffixed."
+                }
+              }
             }
           },
           "allOf": [
@@ -2228,7 +2295,8 @@
                     "linearize",
                     "vjp",
                     "normal",
-                    "receiver_vjp"
+                    "receiver_vjp",
+                    "solve"
                   ]
                 }
               }
@@ -2342,22 +2410,75 @@
           },
           "then": {
             "required": [
-              "extension",
               "state",
               "controls"
             ],
-            "properties": {
-              "extension": {
+            "oneOf": [
+              {
                 "required": [
-                  "solver"
+                  "extension"
                 ],
+                "properties": {
+                  "extension": {
+                    "required": [
+                      "solver"
+                    ],
+                    "not": {
+                      "required": [
+                        "covector"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "required": [
+                  "reflectivity",
+                  "covector"
+                ],
+                "properties": {
+                  "reflectivity": {
+                    "required": [
+                      "solver"
+                    ],
+                    "properties": {
+                      "parameterization": {
+                        "const": "vp_ip"
+                      }
+                    }
+                  }
+                },
                 "not": {
-                  "required": [
-                    "covector"
+                  "anyOf": [
+                    {
+                      "required": [
+                        "direction"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "objective_vector"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "model_gradient"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "reduced_normal"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "source_controls"
+                      ]
+                    }
                   ]
                 }
               }
-            }
+            ]
           }
         },
         {
@@ -2456,7 +2577,8 @@
                   "linearize",
                   "jvp",
                   "vjp",
-                  "normal"
+                  "normal",
+                  "solve"
                 ]
               }
             },
@@ -2566,6 +2688,27 @@
                   ]
                 }
               ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "reflectivity"
+            ],
+            "properties": {
+              "reflectivity": {
+                "required": [
+                  "solver"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "const": "solve"
+              }
             }
           }
         }
@@ -2710,14 +2853,6 @@
           }
         }
       ]
-    },
-    "source_derivative": {
-      "enum": [
-        "total",
-        "frozen"
-      ],
-      "default": "total",
-      "description": "Source frequency dependence in forward_df/forward_ds: total differentiates the source load, frozen holds it fixed. Recorded in derivative trace metadata."
     }
   },
   "allOf": [

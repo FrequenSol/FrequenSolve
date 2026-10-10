@@ -951,7 +951,9 @@ class JobRemoteMixin:
             operator = value.get("fwi_operator")
             if isinstance(operator, Mapping):
                 keys = ["model_direction"]
-                if operator.get("action") != "linearize":
+                if operator.get("action") != "linearize" and not (
+                    operator.get("action") == "solve" and "reflectivity" in operator
+                ):
                     keys.append("state")
                     keys.append("background")
                 if operator.get("action") in {"jvp", "normal", "solve", "wri"}:
