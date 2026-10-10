@@ -98,6 +98,7 @@ from frequensolve.imaging.misfit import Loss, Misfit, Normalization
 from frequensolve.imaging.problem import ImagingProblem, Linearization, _MisfitPayload
 from frequensolve.imaging.results import FWIResult, StageResult
 from frequensolve.imaging.transfer import Transfer, resolve_transfer
+from frequensolve.inversion._krylov import _preconditioned_cg, _real_vector
 from frequensolve.inversion.continuation import (
     ContinuationSchedule,
     ContinuationStage,
@@ -201,16 +202,6 @@ def _state_epoch(state: ControlState) -> str:
     ).removeprefix("sha256:")
 
 
-def _real_vector(value: Any, *, size: Optional[int] = None, name: str) -> np.ndarray:
-    array = np.asarray(value)
-    if np.iscomplexobj(array):
-        raise ValueError(f"{name} must be real-valued")
-    array = np.asarray(array, dtype=np.float64).reshape(-1)
-    if size is not None and array.size != size:
-        raise ValueError(f"{name} has size {array.size}; expected {size}")
-    return array
-
-
 def rms_step_limit(
     direction: Any, block_slices: Sequence[slice], maximum_rms: float
 ) -> float:
@@ -249,7 +240,8 @@ def block_curvatures(
     ``z_b`` supported on the block, ``c_b = <J z_b, W J z_b> / n_b``
     approximates the mean diagonal of ``J^H W J`` over the block (TCCS
     ``estimate_block_curvatures``).  Blocks not listed in ``blocks`` receive
-    a tiny positive curvature.  Returns ``qualified block -> curvature``.
+    a tiny positive curvature. Reduced objectives use ``z_b.T H_reduced z_b``
+    instead, without constructing a data Jacobian. Returns ``qualified block -> curvature``.
     """
 
     space = linearization.space
@@ -264,9 +256,15 @@ def block_curvatures(
             continue
         direction = np.zeros(space.size, dtype=np.float64)
         direction[block_slice] = rng.choice((-1.0, 1.0), size=size)
-        increment = linearization.jacobian @ ControlVector(direction, space)
-        weighted = linearization.weight_data(increment)
-        curvature = float(np.real(np.vdot(increment.values, weighted.values))) / size
+        if getattr(linearization, "_reduced_curvature", False):
+            product = linearization.apply_normal(ControlVector(direction, space))
+            curvature = float(direction @ product.values) / size
+        else:
+            increment = linearization.jacobian @ ControlVector(direction, space)
+            weighted = linearization.weight_data(increment)
+            curvature = (
+                float(np.real(np.vdot(increment.values, weighted.values))) / size
+            )
         estimates[name] = max(curvature, tiny)
     return estimates
 
@@ -3451,103 +3449,6 @@ def _normal_with_regularization(
         return _real_vector(values, size=space.size, name="normal product")
 
     return action
-
-
-def _preconditioned_cg(
-    matvec: Callable[[np.ndarray], np.ndarray],
-    rhs: np.ndarray,
-    *,
-    iterations: int,
-    tolerance: float,
-    precondition: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-    callback: Optional[Callable[[np.ndarray], None]] = None,
-) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Solve ``A x = b`` from ``x = 0`` by safeguarded preconditioned CG.
-
-    Each iteration applies ``A`` once and nothing else does: convergence is
-    tested on the recurrence residual after every update (a solve converging
-    on its last allowed iteration succeeds), and the final residual is
-    reported from the recurrence rather than recomputed. ``r^T M r <= 0``
-    raises because the preconditioner is not SPD. ``p^T A p <= 0`` (an
-    indefinite operator, or an FP32 normal that is only approximately
-    symmetric) stops with status ``-1`` and returns the previous iterate.
-    Status is ``0`` when converged and ``iterations`` at the limit.
-    """
-
-    b = _real_vector(rhs, name="right-hand side")
-    x = np.zeros_like(b)
-    b_norm = float(np.linalg.norm(b))
-    info: Dict[str, Any] = {
-        "iterations": 0,
-        "status": 0,
-        "converged": True,
-        "residual_norm": b_norm,
-        "rhs_norm": b_norm,
-        "message": "zero right-hand side",
-        "relative_residual_history": [0.0 if b_norm == 0 else 1.0],
-    }
-    if b_norm == 0.0:
-        return x, info
-    if not math.isfinite(b_norm):
-        raise ValueError("CG right-hand side must be finite")
-
-    def preconditioned(r: np.ndarray) -> Tuple[np.ndarray, float]:
-        z = (
-            r
-            if precondition is None
-            else _real_vector(precondition(r), size=r.size, name="preconditioner")
-        )
-        rho = float(r @ z)
-        if not math.isfinite(rho) or rho <= 0.0:
-            raise ValueError(
-                f"LSRTM preconditioner is not SPD: r^T M r = {rho:.6g} for a "
-                "nonzero residual"
-            )
-        return z, rho
-
-    r = b.copy()
-    z, rho = preconditioned(r)
-    p = np.array(z, copy=True)
-    residual_norm = b_norm
-    status, message, done = iterations, "iteration limit reached", 0
-    for k in range(1, iterations + 1):
-        q = _real_vector(matvec(p), size=b.size, name="operator product")
-        curvature = float(p @ q)
-        if not math.isfinite(curvature):
-            raise ValueError("CG operator product is not finite")
-        if curvature <= 0.0:
-            status = -1
-            message = (
-                f"nonpositive curvature p^T A p = {curvature:.6g} at iteration {k}; "
-                "the operator is indefinite or inaccurate along this direction"
-            )
-            break
-        alpha = rho / curvature
-        x += alpha * p
-        r -= alpha * q
-        del q
-        done = k
-        residual_norm = float(np.linalg.norm(r))
-        info["relative_residual_history"].append(residual_norm / b_norm)
-        if callback is not None:
-            callback(x)
-        if residual_norm <= tolerance * b_norm:
-            status, message = 0, "relative residual tolerance reached"
-            break
-        if k == iterations:
-            break
-        z, rho_next = preconditioned(r)
-        p *= rho_next / rho
-        p += z
-        rho = rho_next
-    info.update(
-        iterations=done,
-        status=status,
-        converged=status == 0,
-        residual_norm=residual_norm,
-        message=message,
-    )
-    return x, info
 
 
 def _task_counters(job: Any) -> Optional[Dict[str, int]]:
