@@ -44,6 +44,13 @@ cd {{run_path_shell}}
 dir_out={{dir_out_shell}}
 mkdir -p "$dir_out/batch"
 find "$dir_out" -mindepth 1 -maxdepth 1 ! -name batch -exec rm -rf -- {} +
+{% if gpus_per_node %}
+# Ranks select the GPU under their allocation slot through this wrapper; the
+# launcher gets only words, since ibrun re-splits its arguments.
+gpu_place_script="$dir_out/fs-gpu-place"
+printf '#!/bin/sh\n%s\n' {{ gpu_place_shell }} > "$gpu_place_script"
+chmod 755 "$gpu_place_script"
+{% endif %}
 
 {% for line in runtime_setup %}
 {{ line }}
@@ -80,7 +87,7 @@ for i in $(seq 1 $n_tasks); do
 {% if gpus_per_node %}
    # Each rank selects the GPU under its allocation slot (FS_GPU_DEVICE); the
    # concurrent tasks' ranks would otherwise all start on device 0.
-   gpu_place=(/bin/sh -c {{ gpu_place_shell }} fs-gpu-place "$off" {{ gpu_ranks_per_node }} {{ gpus_per_node }})
+   gpu_place=("$gpu_place_script" "$off" {{ gpu_ranks_per_node }} {{ gpus_per_node }})
 {% endif %}
    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i"
    "$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n $procs_per_task -o $off task_affinity ${gpu_place[@]+"${gpu_place[@]}"} $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i >> $dir_out/task_${i}.log 2>&1 &

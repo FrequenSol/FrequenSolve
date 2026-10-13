@@ -54,6 +54,27 @@ _GPU_PLACE = (
 )
 
 
+def write_gpu_place_script(directory: Union[str, Path]) -> str:
+    """Write the executable ``fs-gpu-place`` wrapper and return its path.
+
+    Launch commands carry only words: TACC's ibrun re-splits its arguments,
+    so an inline ``sh -c`` script would reach the shell broken.
+    """
+
+    path = Path(directory) / "fs-gpu-place"
+    text = f"#!/bin/sh\n{_GPU_PLACE}\n"
+    try:
+        if path.read_text() == text and os.access(path, os.X_OK):
+            return str(path)
+    except OSError:
+        pass
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text)
+    temporary.chmod(0o755)
+    os.replace(temporary, path)
+    return str(path)
+
+
 def _slurm_counts(value: str, nodes: int) -> list[int]:
     """Expand Slurm's per-node counts, e.g. ``8(x3),4``; never guess a layout."""
     counts = []
@@ -773,10 +794,7 @@ class AdaptiveScheduler:
         # map onto distinct GPUs.
         placement = (
             [
-                "/bin/sh",
-                "-c",
-                _GPU_PLACE,
-                "fs-gpu-place",
+                write_gpu_place_script(self.output),
                 str(offset),
                 str(self.ranks_per_node),
                 str(self.gpus_per_node),

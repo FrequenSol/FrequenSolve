@@ -88,7 +88,8 @@ def cluster(tmp_path, monkeypatch):
     mpi.write_text(
         f"""#!{sys.executable}
 import os, sys
-args = sys.argv[1:]
+# Like TACC's ibrun, re-split arguments on whitespace: shell code breaks.
+args = ' '.join(sys.argv[1:]).split()
 ranks, offset = '1', '0'
 while args and args[0].startswith('-'):
     option = args.pop(0)
@@ -652,18 +653,12 @@ def test_controller_places_gpu_ranks_only_for_ibrun_slots(monkeypatch, tmp_path)
         }
         return controller.SessionController(tmp_path, config)._prefix(4, 6)
 
-    assert prefix("/opt/ibrun", 8)[6:] == [
-        "/bin/sh",
-        "-c",
-        controller._GPU_PLACE,
-        "fs-gpu-place",
-        "6",
-        "8",
-        "8",
-    ]
-    assert "fs-gpu-place" not in prefix("/opt/ibrun", 0)
+    place = str(tmp_path / "fs-gpu-place")
+    assert prefix("/opt/ibrun", 8)[6:] == [place, "6", "8", "8"]
+    assert os.access(place, os.X_OK)
+    assert place not in prefix("/opt/ibrun", 0)
     # Session srun steps let Slurm choose nodes, so a slot names no device.
-    assert "fs-gpu-place" not in prefix("/opt/srun", 8)
+    assert place not in prefix("/opt/srun", 8)
 
 
 def runtime_warning(caught):

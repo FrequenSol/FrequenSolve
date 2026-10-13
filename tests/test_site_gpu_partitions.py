@@ -240,18 +240,14 @@ def test_gpu_tasks_select_the_device_under_their_slots(tmp_path):
 
     command = instance._launch_command(task_id=1, offset=6, ranks=4)
 
-    start = command.index("/bin/sh")
+    place = str(tmp_path / "fs-gpu-place")
+    start = command.index(place)
     assert command[:start] == ["ibrun", "-n", "4", "-o", "6", "task_affinity"]
-    assert command[start : start + 7] == [
-        "/bin/sh",
-        "-c",
-        scheduler._GPU_PLACE,
-        "fs-gpu-place",
-        "6",
-        "8",
-        "8",
-    ]
-    assert command[start + 7] == "/remote/bin/solver"
+    assert command[start : start + 5] == [place, "6", "8", "8", "/remote/bin/solver"]
+    assert Path(place).read_text() == f"#!/bin/sh\n{scheduler._GPU_PLACE}\n"
+    assert os.access(place, os.X_OK)
+    # TACC's ibrun re-splits its arguments, so the launch must be words only.
+    assert " ".join(command).split() == command
     assert scheduler._GPU_PLACE == hpc.GPU_PLACE_SNIPPET
 
 
@@ -262,10 +258,12 @@ def test_cpu_and_whole_allocation_tasks_keep_the_solver_device_choice(
     gpu = _scheduler(tmp_path, launcher, ranks_per_node=8, gpus_per_node=8)
     cpu = _scheduler(tmp_path, "ibrun", ranks_per_node=8, gpus_per_node=0)
 
-    assert "fs-gpu-place" not in cpu._launch_command(task_id=1, offset=6, ranks=4)
+    def placed(command):
+        return any(arg.endswith("fs-gpu-place") for arg in command)
+
+    assert not placed(cpu._launch_command(task_id=1, offset=6, ranks=4))
     if launcher == "mpirun":
-        command = gpu._launch_command(task_id=1, offset=0, ranks=16)
-        assert "fs-gpu-place" not in command
+        assert not placed(gpu._launch_command(task_id=1, offset=0, ranks=16))
 
 
 @pytest.mark.parametrize(
@@ -277,8 +275,9 @@ def test_cpu_and_whole_allocation_tasks_keep_the_solver_device_choice(
     ],
 )
 def test_gpu_placement_maps_slots_to_node_devices(
-    offset, ranks_per_node, gpus, expected
+    tmp_path, offset, ranks_per_node, gpus, expected
 ):
+    place = _scheduler_module().write_gpu_place_script(tmp_path)
     devices = []
     for rank in range(4):
         env = {
@@ -289,10 +288,7 @@ def test_gpu_placement_maps_slots_to_node_devices(
         env["PMI_RANK"] = str(rank)
         completed = subprocess.run(
             [
-                "/bin/sh",
-                "-c",
-                hpc.GPU_PLACE_SNIPPET,
-                "fs-gpu-place",
+                place,
                 str(offset),
                 str(ranks_per_node),
                 str(gpus),
@@ -322,7 +318,7 @@ def test_attached_gpu_sweep_places_every_task_rank(monkeypatch, tmp_path):
 
     script = site._sweep_script(job, procs_per_task=4, pack=False)
 
-    assert 'fs-gpu-place "$off" 8 8' in script
+    assert 'gpu_place=("$gpu_place_script" "$off" 8 8)' in script
     assert 'task_affinity ${gpu_place[@]+"${gpu_place[@]}"} $executable' in script
 
     site.config = hpc.SlurmSiteConfig(hostname="login.example.edu", queue="cpu")
@@ -370,7 +366,7 @@ def test_attached_sweep_uses_the_allocation_partition(monkeypatch, tmp_path):
     # The site default is a CPU partition; the allocation runs on GPU nodes.
     assert site.pool.partition == "gpu"
     script = site._sweep_script(job, procs_per_task=4, pack=False)
-    assert 'fs-gpu-place "$off" 8 8' in script
+    assert 'gpu_place=("$gpu_place_script" "$off" 8 8)' in script
     assert "export I_MPI_OFFLOAD=1" in script.splitlines()
 
     site.pool.partition = "unlisted"

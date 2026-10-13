@@ -31,13 +31,13 @@ import traceback
 from pathlib import Path
 
 from adaptive_scheduler import (
-    _GPU_PLACE,
     AdaptiveScheduler,
     _allocate_interval,
     _free_interval,
     _write_json_atomic,
     step_failure_reason,
     validate_sizing_checkpoint,
+    write_gpu_place_script,
 )
 
 TERMINAL = {"complete", "failed", "cancelled", "timeout"}
@@ -310,10 +310,7 @@ class SessionController:
             # the device under its ibrun -o slot instead. Session srun steps
             # let Slurm choose their nodes, so a slot names no device.
             prefix += [
-                "/bin/sh",
-                "-c",
-                _GPU_PLACE,
-                "fs-gpu-place",
+                write_gpu_place_script(self.root),
                 str(offset),
                 str(self.config["ranks_per_node"]),
                 str(gpus),
