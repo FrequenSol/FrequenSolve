@@ -1165,7 +1165,7 @@ class SlurmSite(BaseSite):
         """
 
         if getattr(job, "workflow", None) == "transient":
-            if overrides.get("tolerate_failures", 0) != 0:
+            if _normalize_failure_tolerance(overrides.get("tolerate_failures", 0)) != 0:
                 raise ValueError(
                     "TransientJob requires tolerate_failures=0; incomplete trajectories are failures"
                 )
@@ -3839,20 +3839,27 @@ class SlurmSite(BaseSite):
         """Return safely quoted module and environment setup commands.
 
         Jobs pass their partition's environment, which the site environment
-        overrides; login-node commands use the site environment only.
+        overrides; login-node commands use the site environment only. A site
+        value that references its own variable, such as
+        ``LD_LIBRARY_PATH = "/lib:${LD_LIBRARY_PATH}"``, extends the
+        partition's value instead of replacing it.
         """
 
         lines = [f"module load {shlex.quote(module)}" for module in self.modules]
         if self.modules:
             lines.append("module list")
-        runtime_environment = {
-            **_HPC_RUNTIME_DEFAULTS,
-            **dict(partition_environment or {}),
-            **solver_environment(self._get_solver_path(), self.environment),
+        site_environment = solver_environment(self._get_solver_path(), self.environment)
+        inherited = {
+            name: value
+            for name, value in {
+                **_HPC_RUNTIME_DEFAULTS,
+                **dict(partition_environment or {}),
+            }.items()
+            if name not in site_environment or f"${{{name}}}" in site_environment[name]
         }
         lines.extend(
             f"export {name}={_quote_runtime_environment_value(value)}"
-            for name, value in runtime_environment.items()
+            for name, value in (*inherited.items(), *site_environment.items())
         )
         return lines
 
@@ -3935,6 +3942,7 @@ class SlurmSite(BaseSite):
         self.pool.ncore = ncore
         self.pool.start_time = start_time
         self.pool.end_time = end_time
+        self.pool.partition = deets.get("Partition", "")
         logger.info("Current status of pool %s: %s", self.pool.id, self.pool.status)
 
     def _list_jobs(self):
@@ -4159,9 +4167,7 @@ class SlurmSite(BaseSite):
                 cores_per_node=self.pool.ncore // nodes,
                 ranks_per_node=self.pool.nproc // nodes,
             )
-        gpus_per_node = partition_gpus_per_node(
-            self.config, getattr(self.config, "queue", None)
-        )
+        gpus_per_node, partition_environment = self._allocation_partition_shape()
         return self._render_template(
             "sweep/sweep_SLURM.sh",
             batch_job=False,
@@ -4181,11 +4187,35 @@ class SlurmSite(BaseSite):
             postprocess_job=_job_requires_postprocess(job),
             mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
             pack_job=bool(pack_job),
-            runtime_setup=self._runtime_setup_lines(
-                getattr(self.config, "partition_environment", None)
-            ),
+            runtime_setup=self._runtime_setup_lines(partition_environment),
             mpi_async_progress_setup=mpi_async_progress_setup,
             **kwargs,
+        )
+
+    def _allocation_partition_shape(
+        self,
+    ) -> tuple[int, Optional[Mapping[str, str]]]:
+        """Return the attached allocation's GPUs per node and partition environment.
+
+        The allocation may run on a partition other than the site default, so
+        the partition recorded from the scheduler takes precedence.
+        """
+
+        partition = getattr(self.pool, "partition", "") or getattr(
+            self.config, "queue", None
+        )
+        partitions = getattr(self.config, "partitions", None) or {}
+        if not partition or (partitions and partition not in partitions):
+            logger.warning(
+                "Allocation partition %r is not described by this site; "
+                "running without partition GPU settings",
+                partition,
+            )
+            return 0, None
+        config = self.config_for_partition(partition)
+        return (
+            partition_gpus_per_node(config, partition),
+            getattr(config, "partition_environment", None),
         )
 
     def _sweep_SLURM_script(
@@ -4289,8 +4319,10 @@ class SlurmSite(BaseSite):
         if gpus_per_node and gpu_memory:
             # GPU solves hold their operators in device memory: size tasks by
             # each rank's share of the node's GPUs when that is the tighter limit.
+            # Each rank binds one device, so spare devices add no rank memory.
+            used_gpus = min(gpus_per_node, ranks_per_node)
             proc_memory = min(
-                proc_memory, gpu_memory * gpus_per_node / ranks_per_node / 1024.0
+                proc_memory, gpu_memory * used_gpus / ranks_per_node / 1024.0
             )
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
         n_threads = config.cores_per_node // ranks_per_node

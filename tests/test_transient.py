@@ -160,7 +160,7 @@ def _text(h5, name, value):
     h5.create_dataset(name, data=value, dtype=h5py.string_dtype())
 
 
-def commit(job, *, sparse=False):
+def commit(job, *, sparse=False, first_step=0):
     root = job._result_path
     root.mkdir(parents=True, exist_ok=True)
     meta = root / "metadata.h5"
@@ -194,6 +194,8 @@ def commit(job, *, sparse=False):
         )
     ]
     for step in job.output_schedule.steps(job.time):
+        if step < first_step:
+            continue
         name = f"step_{step:012d}.h5"
         p = root / name
         with h5py.File(p, "w") as h5:
@@ -364,6 +366,8 @@ def test_preflight_allows_coupled_displacement_and_native_velocity(tmp_path):
         grid=fs.CartesianGrid(x0=[0, 0], x1=[1, 1], n=[3, 3]),
     )
     job.validate_outputs()
+    # Site preflight must agree with the job: Sauce samples native velocity.
+    assert not any(e.code == "field.unsupported" for e in job.validate().errors)
 
 
 def test_remote_restart_stages_complete_directory(tmp_path):
@@ -578,3 +582,113 @@ def test_cased_borehole_transient_example(tmp_path):
         restored.output_schedule.steps(restored.time),
         job.output_schedule.steps(job.time),
     )
+
+
+def test_acoustic_native_velocity_passes_preflight(tmp_path):
+    job = job_at(tmp_path)
+    job += fs.WavefieldOutput(
+        name="v",
+        field="velocity",
+        grid=fs.CartesianGrid(x0=[0, 0], x1=[1, 1], n=[3, 3]),
+    )
+    job.validate_outputs()
+    assert not any(e.code == "field.unsupported" for e in job.validate().errors)
+
+
+def test_unsupported_transient_field_names_the_request(tmp_path):
+    job = job_at(tmp_path)
+    job.simulation.physics = "elastic"
+    job.simulation.extra["helmholtz_projection"] = {
+        "enabled": True,
+        "field": "displacement",
+        "parts": ["p", "s"],
+    }
+    job.outputs.vtk = [fs.VtkOutput(fields=["pressure"])]
+    messages = [
+        e.message for e in job.validate().errors if e.code == "field.unsupported"
+    ]
+    assert messages and all("'pressure'" in message for message in messages)
+
+
+def test_elastic_moment_sources_accept_step_functions(tmp_path):
+    job = job_at(tmp_path)
+    job.simulation.physics = "elastic_axisym"
+    job.simulation.axisymmetric = True
+    job.simulation.acquisition.add_sources(kind="monopole", coords=[[0.5, 0.5]])
+    job.source = fs.TimeFunction.step(delay=0.5)
+    job.validate_outputs()
+    job.simulation.physics = "acoustic_axisym"
+    with pytest.raises(ValueError, match="smooth time functions"):
+        job.validate_outputs()
+
+
+def test_receiver_names_do_not_trip_harmonic_field_checks(tmp_path):
+    job = job_at(tmp_path)
+    job.simulation.acquisition.add_receiver_group(
+        "array",
+        fs.ReceiverNode(
+            name="low_frequency_array",
+            components=[
+                fs.ReceiverComponent(name="acceleration_proxy", field="pressure")
+            ],
+        ),
+        coords=[[0.5, 0.5]],
+    )
+    job.validate_outputs()
+    job.simulation.acquisition.add_receiver_group(
+        "accelerometer",
+        fs.ReceiverNode(
+            name="sensor",
+            components=[fs.ReceiverComponent(name="a", field="acceleration")],
+        ),
+        coords=[[0.5, 0.5]],
+    )
+    with pytest.raises(ValueError, match="primary or constitutive"):
+        job.validate_outputs()
+
+
+def test_restarted_results_stay_readable_after_checkpoint_removal(tmp_path):
+    import shutil
+
+    job = job_at(tmp_path, outputs=fs.TraceOutput())
+    path = tmp_path / "checkpoint"
+    path.mkdir()
+    with h5py.File(path / "newmark_manifest_R00000.h5", "w") as h5:
+        h5["layout"] = [2, 0, 2, 5]
+        h5["scheme"] = [0.5, 0, 1, 0.1, 0.25, 0.5]
+    resumed = job.with_restart(path, name="resume")
+    resumed.save()
+    commit(resumed, first_step=5)
+    resumed.write_run_state()
+    assert resumed.is_run_current()
+
+    shutil.rmtree(path)
+    for current in (resumed, fs.BaseJob.load(resumed.job_file)):
+        assert current.is_run_current()
+        np.testing.assert_array_equal(current.traces.open().steps, range(5, 11))
+    # Saving again keeps the recorded restart identity.
+    resumed.save()
+    assert resumed.is_run_current()
+
+
+@pytest.mark.parametrize("value", [0, False, "off", "0"])
+def test_slurm_transient_accepts_every_spelling_of_zero_tolerance(
+    monkeypatch, tmp_path, value
+):
+    from types import SimpleNamespace
+
+    from tests.test_site_gpu_partitions import _site
+
+    class Submitted(Exception):
+        pass
+
+    def stop(**kwargs):
+        raise Submitted
+
+    site = _site(monkeypatch, tmp_path)
+    monkeypatch.setattr(site, "check_solver_compatibility", stop)
+    job = SimpleNamespace(workflow="transient")
+    with pytest.raises(Submitted):
+        site.run(job, tolerate_failures=value)
+    with pytest.raises(ValueError, match="tolerate_failures=0"):
+        site.run(job, tolerate_failures=1)

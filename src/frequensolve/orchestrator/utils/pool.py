@@ -59,6 +59,7 @@ class PoolInfo:
         ncore: Number of CPU cores.
         start_time: Provider-reported start time.
         end_time: Provider-reported end time.
+        partition: Scheduler partition running the pool, or ``""`` if unknown.
     """
 
     id: int = 0
@@ -68,6 +69,7 @@ class PoolInfo:
     ncore: int = 0
     start_time: str = ""
     end_time: str = ""
+    partition: str = ""
     _status: PoolStatus = field(default_factory=PoolStatus)
 
     @property

@@ -103,11 +103,18 @@ def _scheduler_config(script):
 
 
 @pytest.mark.parametrize(
-    ("gpus", "gpu_memory", "memory_per_rank"),
-    [(8, 65536, 64.0), (8, 0, 1031000 / 8 / 1024), (0, 65536, 1031000 / 8 / 1024)],
+    ("gpus", "gpu_memory", "ranks_per_node", "memory_per_rank"),
+    [
+        (8, 65536, 8, 64.0),
+        (8, 0, 8, 1031000 / 8 / 1024),
+        (0, 65536, 8, 1031000 / 8 / 1024),
+        # Each rank binds one device; the four unused stacks add no memory.
+        (8, 65536, 4, 64.0),
+        (8, 65536, 16, 32.0),
+    ],
 )
 def test_batch_sweep_sizes_tasks_by_device_memory_and_passes_the_gpu_layout(
-    monkeypatch, tmp_path, gpus, gpu_memory, memory_per_rank
+    monkeypatch, tmp_path, gpus, gpu_memory, ranks_per_node, memory_per_rank
 ):
     site = _site(
         monkeypatch, tmp_path, gpus_per_node=gpus, gpu_memory_per_gpu=gpu_memory
@@ -116,16 +123,16 @@ def test_batch_sweep_sizes_tasks_by_device_memory_and_passes_the_gpu_layout(
     script = site._sweep_SLURM_script(
         n_tasks=2,
         n_nodes=1,
-        ranks_per_node=8,
+        ranks_per_node=ranks_per_node,
         stdout=str(tmp_path / "logs"),
         queue="debug",
     )
 
     config = _scheduler_config(script)
     assert config["mem_per_rank_gib"] == pytest.approx(memory_per_rank)
-    assert config["ranks_per_node"] == 8
+    assert config["ranks_per_node"] == ranks_per_node
     assert config["gpus_per_node"] == gpus
-    assert config["omp_threads"] == 12
+    assert config["omp_threads"] == 96 // ranks_per_node
 
 
 def test_batch_sweep_exports_the_partition_environment_under_site_overrides(
@@ -156,6 +163,39 @@ def test_batch_sweep_exports_the_partition_environment_under_site_overrides(
     # The site environment opts this run out of GPU-aware MPI.
     assert "export FS_CUDA_AWARE_MPI=0" in lines
     assert "export FS_CUDA_AWARE_MPI=1" not in lines
+
+
+def test_site_search_paths_extend_the_partition_runtime(monkeypatch, tmp_path):
+    site = _site(
+        monkeypatch,
+        tmp_path,
+        site_environment={
+            "LD_LIBRARY_PATH": "/site/lib:${LD_LIBRARY_PATH}",
+            "PATH": "/site/bin",
+        },
+        gpus_per_node=8,
+        environment={
+            "LD_LIBRARY_PATH": "/mpi/lib:${LD_LIBRARY_PATH}",
+            "PATH": "/mpi/bin:${PATH}",
+        },
+    )
+
+    lines = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        ranks_per_node=8,
+        stdout=str(tmp_path / "logs"),
+        queue="debug",
+    ).splitlines()
+
+    # A self-referencing site value composes on top of the partition runtime.
+    partition = lines.index('export LD_LIBRARY_PATH="/mpi/lib:${LD_LIBRARY_PATH}"')
+    assert (
+        lines.index('export LD_LIBRARY_PATH="/site/lib:${LD_LIBRARY_PATH}"') > partition
+    )
+    # A plain site value still replaces the partition value.
+    assert "export PATH=/site/bin" in lines
+    assert 'export PATH="/mpi/bin:${PATH}"' not in lines
 
 
 def test_cpu_partition_jobs_export_no_gpu_mpi_environment(monkeypatch, tmp_path):
@@ -284,3 +324,53 @@ def test_attached_gpu_sweep_places_every_task_rank(monkeypatch, tmp_path):
 
     site.config = hpc.SlurmSiteConfig(hostname="login.example.edu", queue="cpu")
     assert "fs-gpu-place" not in site._sweep_script(job, procs_per_task=4, pack=False)
+
+
+def test_attached_sweep_uses_the_allocation_partition(monkeypatch, tmp_path):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    shape = {"max_nodes": 4, "cores_per_node": 96, "memory_per_node": 1031000}
+    site = FakeSlurmSite(
+        config=hpc.SlurmSiteConfig(
+            hostname="login.example.edu",
+            queue="debug",
+            mpi_wrapper="ibrun",
+            partitions={
+                "debug": shape,
+                "gpu": {
+                    **shape,
+                    "gpus_per_node": 8,
+                    "environment": {"I_MPI_OFFLOAD": "1"},
+                },
+            },
+        ),
+        solver="/remote/FS_seismic",
+        work_dir=str(tmp_path / "work"),
+        solver_policy="off",
+    )
+    monkeypatch.setattr(
+        site,
+        "run_login",
+        lambda cmd, **kwargs: (
+            "JobId=42 Partition=gpu BatchHost=c001 NumNodes=2 NumCPUs=192 "
+            "NumTasks=16 StartTime=2026-10-13T08:00:00 "
+            "EndTime=2026-10-13T10:00:00 TimeLimit=02:00:00 RunTime=00:10:00"
+        ),
+    )
+    site.pool.id = 42
+    site._set_pool_info()
+    job = SimpleNamespace(
+        n_tasks=4,
+        _remote_path=lambda work_dir: tmp_path,
+        requires_postprocess=lambda: False,
+    )
+
+    # The site default is a CPU partition; the allocation runs on GPU nodes.
+    assert site.pool.partition == "gpu"
+    script = site._sweep_script(job, procs_per_task=4, pack=False)
+    assert 'fs-gpu-place "$off" 8 8' in script
+    assert "export I_MPI_OFFLOAD=1" in script.splitlines()
+
+    site.pool.partition = "unlisted"
+    script = site._sweep_script(job, procs_per_task=4, pack=False)
+    assert "fs-gpu-place" not in script
+    assert "I_MPI_OFFLOAD" not in script

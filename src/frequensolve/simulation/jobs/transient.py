@@ -232,7 +232,7 @@ class TransientJob(BaseJob):
                     pass  # External source catalogs are checked by Sauce after loading.
             if self.source.kind == "step" and (
                 "volume_injection" in kinds
-                or (sim.physics != "elastic" and kinds & {"scalar", "monopole"})
+                or (physics != "elastic" and kinds & {"scalar", "monopole"})
             ):
                 raise ValueError(
                     "Acoustic moment and volume-injection sources require smooth time functions"
@@ -295,7 +295,21 @@ class TransientJob(BaseJob):
         return step
 
     def _external_input_fingerprint(self):
-        return self._refresh_external_input_fingerprint(require_inputs=True)
+        try:
+            return self._refresh_external_input_fingerprint(require_inputs=True)
+        except FileNotFoundError:
+            # A removed checkpoint copy cannot change committed output, so the
+            # digest recorded at save keeps identifying the resumed run.
+            recorded = getattr(self, "_external_input_fingerprint_cache", None)
+            if recorded is None:
+                raise
+            return dict(recorded)
+
+    def _refresh_external_input_fingerprint_for_save(self) -> None:
+        try:
+            self._external_input_fingerprint()
+        except FileNotFoundError:
+            self._external_input_fingerprint_cache = None
 
     def _input_fingerprint_payload(self) -> dict:
         path = self._restart_path()
@@ -372,7 +386,7 @@ class TransientJob(BaseJob):
             .get("artifact_contract", {})
             .get("external_inputs")
         )
-        if saved_inputs != self._compute_external_input_fingerprint():
+        if saved_inputs != self._external_input_fingerprint():
             raise ValueError("Restart inputs changed since the job was saved")
         result = load_operation_result(
             self._result_path if result_path is None else result_path, "transient"
@@ -588,6 +602,11 @@ class TransientJob(BaseJob):
         ]
 
 
+_FIELD_NAME_KEYS = frozenset(
+    {"field", "quantity", "component", "components", "operator", "expression"}
+)
+
+
 def _validate_fields(value, *, projection=None):
     """Reject harmonic-only receiver operations, including nested expressions."""
     if isinstance(value, Mapping):
@@ -610,30 +629,42 @@ def _validate_fields(value, *, projection=None):
                     )
         if any(value.get(key) is not None for key in ("transfer", "response")):
             raise ValueError("Transient receiver transfer functions are unsupported")
+        # Only field-name strings are checked; nested mappings are reached by
+        # recursion, so component names and units never match. Receiver
+        # expression field nodes carry their field under "name"; ParaView
+        # items use "name" as a label beside "field".
+        names = (
+            [value["name"]]
+            if value.get("kind") == "field"
+            and "field" not in value
+            and isinstance(value.get("name"), str)
+            else []
+        )
         for key, child in value.items():
-            if key in {
-                "field",
-                "quantity",
-                "component",
-                "components",
-                "operator",
-                "expression",
-            }:
-                text = str(child).lower()
-                if key == "field" and isinstance(child, str) and projection:
-                    name = child.removeprefix("elastic:")
-                    allowed = {projection, f"p_{projection}", f"s_{projection}"}
-                    if not any(name == f or name.startswith(f + "_") for f in allowed):
-                        raise ValueError(
-                            "Transient Helmholtz outputs must match helmholtz_projection.field"
-                        )
-                if any(
-                    word in text for word in ("acceleration", "frequency", "helmholtz")
-                ) or (any(word in text for word in ("p_velocity", "s_velocity")) and projection != "velocity"):
-
+            if key not in _FIELD_NAME_KEYS:
+                continue
+            if key == "field" and isinstance(child, str) and projection:
+                name = child.removeprefix("elastic:")
+                allowed = {projection, f"p_{projection}", f"s_{projection}"}
+                if not any(name == f or name.startswith(f + "_") for f in allowed):
                     raise ValueError(
-                        "Transient receivers require primary or constitutive fields; harmonic velocity/acceleration and spectral recovery are unsupported"
+                        "Transient Helmholtz outputs must match helmholtz_projection.field"
                     )
+            if isinstance(child, str):
+                names.append(child)
+            elif isinstance(child, (list, tuple)):
+                names.extend(item for item in child if isinstance(item, str))
+        for text in (name.lower() for name in names):
+            if any(
+                word in text for word in ("acceleration", "frequency", "helmholtz")
+            ) or (
+                any(word in text for word in ("p_velocity", "s_velocity"))
+                and projection != "velocity"
+            ):
+                raise ValueError(
+                    "Transient receivers require primary or constitutive fields; harmonic velocity/acceleration and spectral recovery are unsupported"
+                )
+        for child in value.values():
             _validate_fields(child, projection=projection)
     elif isinstance(value, (list, tuple)):
         for child in value:

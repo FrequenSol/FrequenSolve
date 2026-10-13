@@ -397,19 +397,23 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
         physics = str(ctx.simulation.physics).strip().lower()
         if physics in {"acoustic", "acoustic_axisym"}:
             allowed &= {"pressure", "velocity", "p_velocity", "s_velocity"}
-        elif physics == "elastic":
+        elif physics in {"elastic", "elastic_axisym"}:
             allowed &= {"velocity", "p_velocity", "s_velocity"}
+        elif physics == "coupled_axisym":
+            allowed &= {"pressure", "velocity", "p_velocity", "s_velocity"}
     if ctx.workflow == "transient":
+        # Velocity samples the Newmark rate (solids) or the accumulated
+        # pressure integral (fluids); harmonic recovery is not used.
         allowed = {
-            "acoustic": {"pressure"},
-            "elastic": {"displacement", "stress", "strain"},
-            "coupled": {"pressure", "displacement", "stress", "strain"},
+            "acoustic": {"pressure", "velocity"},
+            "elastic": {"displacement", "velocity", "stress", "strain"},
+            "coupled": {"pressure", "displacement", "velocity", "stress", "strain"},
         }.get(str(ctx.simulation.physics).removesuffix("_axisym"), set())
         projection = ctx.simulation.extra.get("helmholtz_projection", {})
         if isinstance(projection, Mapping):
             if projection.get("enabled", False) or projection.get("parts"):
-                field = projection.get("field", "displacement")
-                allowed |= {field, f"p_{field}", f"s_{field}"}
+                projected = projection.get("field", "displacement")
+                allowed |= {projected, f"p_{projected}", f"s_{projected}"}
     if value not in allowed and not _is_component_selector(value, allowed):
         ctx.report.error(
             "field.unsupported",

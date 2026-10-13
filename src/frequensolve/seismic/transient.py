@@ -85,7 +85,15 @@ class TransientDataset:
                 raise ValueError("Duplicate output for a completed time step")
             rows["steps"][step] = artifact.path
         expected_steps = set(job.output_schedule.steps(job.time))
-        first_step = job.restart_step()
+        try:
+            first_step = job.restart_step()
+        except FileNotFoundError:
+            # Without the removed checkpoint copy, the committed series starts
+            # at the restart step; coverage from there on is still required.
+            first_step = min(
+                (step for family in families.values() for step in family["steps"]),
+                default=0,
+            )
         expected_steps = {s for s in expected_steps if s >= first_step}
         for family in families.values():
             if set(family["steps"]) != expected_steps:
