@@ -645,6 +645,65 @@ class AWSSite(BaseSite):
             error_code == "400" and error.operation_name == "HeadObject"
         )
 
+    @staticmethod
+    def _upload_error_category(error: Exception) -> str:
+        """Classify structured provider errors without exposing their payloads.
+
+        boto3's managed uploader wraps ClientError in S3UploadFailedError.
+        Inspect the bounded exception chain, never its private message text.
+        """
+        seen = set()
+        current: Optional[BaseException] = error
+        for _ in range(8):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            if isinstance(current, ClientError):
+                code = current.response.get("Error", {}).get("Code")
+                if code in ("ExpiredToken", "InvalidToken"):
+                    return "credentials_expired"
+                if code in ("AccessDenied", "AccessDeniedException"):
+                    return "storage_access_denied"
+                return "upload_failed"
+            current = current.__cause__ or current.__context__
+        return "upload_failed"
+
+    def _upload_file(self, local_path: Path, s3_key: str) -> None:
+        """Retry only an expired upload once with this site's Cognito identity.
+
+        Already staged files and submission mutations are never replayed. A
+        non-Cognito site's own credential provider remains responsible for auth.
+        """
+        refreshed = False
+        while True:
+            refresh_needed = False
+            try:
+                self.s3_client.upload_file(
+                    str(local_path), self.config.s3_bucket, s3_key
+                )
+                return
+            except Exception as error:
+                category = self._upload_error_category(error)
+                refresh_needed = (
+                    category == "credentials_expired"
+                    and not refreshed
+                    and getattr(self, "cognito_auth", None) is not None
+                )
+            # Leave the provider exception handler before refreshing or raising:
+            # telemetry must not retain its private implicit exception context.
+            if refresh_needed:
+                refreshed = True
+                try:
+                    self._refresh_s3_credentials()
+                except Exception:
+                    category = "credential_refresh_failed"
+                else:
+                    continue
+            raise RuntimeError(
+                f"Cloud file upload failed ({category}). "
+                "Check your storage access and retry."
+            )
+
     def _aws_cli_env(self) -> Dict[str, str]:
         """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
 
@@ -841,40 +900,15 @@ class AWSSite(BaseSite):
         if not local_path.exists():
             raise FileNotFoundError(f"Path {local_path} does not exist")
 
-        try:
-            if local_path.is_file():
-                # Upload single file
-                self.s3_client.upload_file(
-                    str(local_path), self.config.s3_bucket, str(s3_key)
-                )
-            else:
-                # TODO: Would be nice to use s3 sync here, but then have to use CLI
-                #       and it doesn't have user temporary credentials
-
-                # Upload directory recursively using boto3
-                for file_path in local_path.rglob("*"):
-                    if file_path.is_file():
-                        relative_path = file_path.relative_to(local_path)
-                        file_s3_key = f"{s3_key}/{relative_path}"
-                        file_s3_key = file_s3_key.replace("\\", "/")
-
-                        self.s3_client.upload_file(
-                            str(file_path),
-                            self.config.s3_bucket,
-                            str(file_s3_key),
-                        )
-            return s3_key
-
-        except Exception:
-            # Managed boto3 uploads can wrap ClientError in S3UploadFailedError.
-            # Neither form is safe to expose: provider messages include private
-            # bucket/object identities and may contain credential material.
-            pass
-        # Raise outside the handler so telemetry cannot inspect a sensitive
-        # implicit __context__, even when normal traceback display suppresses it.
-        raise RuntimeError(
-            "Cloud file upload failed. Check your storage access and retry."
-        )
+        if local_path.is_file():
+            self._upload_file(local_path, str(s3_key))
+        else:
+            for file_path in local_path.rglob("*"):
+                if file_path.is_file():
+                    relative_path = file_path.relative_to(local_path)
+                    file_s3_key = f"{s3_key}/{relative_path}".replace("\\", "/")
+                    self._upload_file(file_path, file_s3_key)
+        return s3_key
 
     def _ensure_storage_bucket(self) -> None:
         """Load or create the authenticated user's Cloud storage bucket."""
@@ -1813,27 +1847,14 @@ class AWSSite(BaseSite):
 
         logger.debug("Uploading files to Cloud storage")
 
-        try:
-            if local_path.is_file():
-                # Upload single file
-                self.s3_client.upload_file(
-                    str(local_path), self.config.s3_bucket, s3_key
-                )
-            else:
-                # Upload directory recursively
-                for file_path in local_path.rglob("*"):
-                    if file_path.is_file():
-                        relative_path = file_path.relative_to(local_path)
-                        file_s3_key = f"{s3_key}/{relative_path}".replace("\\", "/")
-                        self.s3_client.upload_file(
-                            str(file_path), self.config.s3_bucket, file_s3_key
-                        )
-            return
-        except Exception:
-            pass
-        raise RuntimeError(
-            "Cloud file upload failed. Check your storage access and retry."
-        )
+        if local_path.is_file():
+            self._upload_file(local_path, s3_key)
+        else:
+            for file_path in local_path.rglob("*"):
+                if file_path.is_file():
+                    relative_path = file_path.relative_to(local_path)
+                    file_s3_key = f"{s3_key}/{relative_path}".replace("\\", "/")
+                    self._upload_file(file_path, file_s3_key)
 
     def get(
         self,

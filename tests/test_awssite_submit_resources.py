@@ -89,6 +89,38 @@ def make_graphql_site():
     return site
 
 
+def test_expired_staging_failure_never_admits_or_resubmits(tmp_path):
+    from unittest.mock import Mock
+
+    from botocore.exceptions import ClientError
+
+    site = make_graphql_site()
+    job = FakeJob()
+    source = tmp_path / "job.json"
+    source.write_text("{}")
+    job.save_for_remote = lambda *args, **kwargs: (source, "project-a/jobs/job.json")
+    site._prepare_run_snapshot = lambda job: None
+    site.sync_s3 = AWSSite.sync_s3.__get__(site)
+    site.cognito_auth = object()
+    site.s3_client = SimpleNamespace(
+        upload_file=Mock(
+            side_effect=ClientError(
+                {"Error": {"Code": "ExpiredToken", "Message": "synthetic-private"}},
+                "PutObject",
+            )
+        )
+    )
+    site._refresh_s3_credentials = Mock()
+
+    with pytest.raises(RuntimeError):
+        site.submit(job)
+
+    assert site.s3_client.upload_file.call_count == 2
+    site._refresh_s3_credentials.assert_called_once_with()
+    assert site.graphql_client.submit_calls == []
+    assert job._job_id is None
+
+
 def test_aws_cli_environment_replaces_credentials_and_removes_profiles(
     monkeypatch,
 ):
