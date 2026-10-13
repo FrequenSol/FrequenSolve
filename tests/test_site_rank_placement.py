@@ -17,7 +17,11 @@ import pytest
 from frequensolve.orchestrator.sites.curvature import OPEN_MPI_UNBOUND
 from frequensolve.orchestrator.sites.hpc import site as hpc
 from frequensolve.orchestrator.sites.local import site as local_site
-from tests.test_site_curvature_slurm import FakeCluster, FakeSlurmSite
+from tests.test_site_curvature_slurm import (
+    FakeCluster,
+    FakeSlurmSite,
+    slurm_allocation_environment,
+)
 from tests.test_slurm_site_refactor import DummySSHClientClass
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
@@ -209,6 +213,15 @@ def _run_sweep(
         FAKE_SWEEP_CALLS=str(calls),
         FAKE_SWEEP_TASKS=str(n_tasks),
     )
+    if not attached:
+        env.update(
+            slurm_allocation_environment(
+                fake.bin,
+                nodes=nodes,
+                ranks_per_node=ranks_per_node,
+                cores_per_node=cores_per_node,
+            )
+        )
     completed = subprocess.run(
         [bash, str(sweep), str(job)],
         cwd=tmp_path,

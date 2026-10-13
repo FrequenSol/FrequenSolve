@@ -466,6 +466,23 @@ GPU_PLACE_SNIPPET = (
 )
 
 
+def rank_memory_gib(shape: Any, ranks_per_node: int) -> float:
+    """Return each rank's memory budget in GiB on a partition's nodes.
+
+    GPU solves hold their operators in device memory, so a GPU partition with
+    ``gpu_memory_per_gpu`` also bounds a rank by its share of the devices.
+    Each rank binds one device, so spare devices add no rank memory.
+    """
+
+    memory = shape.memory_per_node / ranks_per_node / 1024.0
+    gpus = max(0, int(getattr(shape, "gpus_per_node", 0) or 0))
+    gpu_memory = max(0, int(getattr(shape, "gpu_memory_per_gpu", 0) or 0))
+    if gpus and gpu_memory:
+        used = min(gpus, ranks_per_node)
+        memory = min(memory, gpu_memory * used / ranks_per_node / 1024.0)
+    return memory
+
+
 def partition_gpus_per_node(site_config: Any, partition: Optional[str]) -> int:
     """Return the GPU devices per node of a site partition (0 for CPU partitions)."""
 
@@ -4313,17 +4330,8 @@ class SlurmSite(BaseSite):
         skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1)) or (
             bool(task_indices) and set(task_indices) <= set(task_ranks)
         )
-        proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
+        proc_memory = rank_memory_gib(config, ranks_per_node)
         gpus_per_node = max(0, int(getattr(config, "gpus_per_node", 0) or 0))
-        gpu_memory = max(0, int(getattr(config, "gpu_memory_per_gpu", 0) or 0))
-        if gpus_per_node and gpu_memory:
-            # GPU solves hold their operators in device memory: size tasks by
-            # each rank's share of the node's GPUs when that is the tighter limit.
-            # Each rank binds one device, so spare devices add no rank memory.
-            used_gpus = min(gpus_per_node, ranks_per_node)
-            proc_memory = min(
-                proc_memory, gpu_memory * used_gpus / ranks_per_node / 1024.0
-            )
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
         n_threads = config.cores_per_node // ranks_per_node
         mpi_async_progress_setup: List[str] = []

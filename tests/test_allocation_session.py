@@ -118,7 +118,7 @@ step = next((s for s in ('init', 'init-no-size', 'smooth', 'pack') if '--'+s in 
 if '--task' in args: step = int(args[args.index('--task')+1])
 if '--sizing' in args:
     json.dump({{'schema':'fs-sizing-2','task':[{{'memory':job.get('memory','32 MB')}}]*job['tasks']}}, open(args[args.index('--sizing')+1],'w'))
-row = dict(step=step, pid=os.getpid(), ranks=int(os.environ['FAKE_RANKS']), offset=int(os.environ['FAKE_OFFSET']), job=args[args.index('--job')+1], event='start', at=time.time())
+row = dict(step=step, pid=os.getpid(), ranks=int(os.environ['FAKE_RANKS']), offset=int(os.environ['FAKE_OFFSET']), gpu=os.environ.get('FS_GPU_DEVICE'), job=args[args.index('--job')+1], event='start', at=time.time())
 with open(job['events'], 'a') as f: f.write(json.dumps(row)+'\\n')
 time.sleep(job.get('sleep', 0.03))
 row.update(event='end', at=time.time())
@@ -591,6 +591,79 @@ class Heartbeats:
 
     def cancel_job(self, job_id):
         self.cancelled.append(job_id)
+
+
+def test_gpu_partition_session_exports_environment_and_places_devices(
+    cluster, monkeypatch
+):
+    shape = hpc.SlurmSiteConfig(
+        hostname="login.example.edu",
+        queue="debug",
+        mpi_wrapper=cluster.site.config.mpi_wrapper,
+        partitions={
+            "debug": {
+                "max_nodes": 4,
+                "cores_per_node": 8,
+                "memory_per_node": 65536,
+                "gpus_per_node": 4,
+                "gpu_memory_per_gpu": 2048,
+                "environment": {"I_MPI_OFFLOAD": "1"},
+            }
+        },
+    )
+    monkeypatch.setattr(cluster.site, "config", shape)
+    monkeypatch.setattr(cluster.site, "config_for_partition", lambda queue: shape)
+
+    with cluster.site.session(workers=AdaptiveWorkers(max_ranks_per_task=2)) as session:
+        config = json.loads((session.root / "config.json").read_text())
+        script = (session.root / "allocation.sh").read_text().splitlines()
+        handles = [
+            session.submit(Job(cluster.root, f"gpu-{i}", sleep=0.2)) for i in range(2)
+        ]
+        assert all(
+            result.successful for result in session.wait_all(handles, check=True)
+        )
+
+    # GPU partitions default to one rank per device; device memory bounds ranks.
+    assert config["ranks_per_node"] == 4 and config["gpus_per_node"] == 4
+    assert config["scheduler"]["mem_per_rank_gib"] == pytest.approx(2.0)
+    assert "export I_MPI_OFFLOAD=1" in script
+    starts = [
+        json.loads(line)
+        for line in (cluster.root / "events.jsonl").read_text().splitlines()
+        if '"start"' in line
+    ]
+    # Rank 0 of each step selects the device under its ibrun -o slot.
+    assert starts and all(row["gpu"] == str(row["offset"]) for row in starts)
+    assert len({row["gpu"] for row in starts if isinstance(row["step"], int)}) > 1
+
+
+def test_controller_places_gpu_ranks_only_for_ibrun_slots(monkeypatch, tmp_path):
+    controller = load_controller(monkeypatch)
+
+    def prefix(mpi, gpus):
+        config = {
+            "generation": "g",
+            "total_ranks": 16,
+            "nodes": 2,
+            "ranks_per_node": 8,
+            "gpus_per_node": gpus,
+            "scheduler": {"mpi": mpi, "mpi_args": [], "omp_threads": 2},
+        }
+        return controller.SessionController(tmp_path, config)._prefix(4, 6)
+
+    assert prefix("/opt/ibrun", 8)[6:] == [
+        "/bin/sh",
+        "-c",
+        controller._GPU_PLACE,
+        "fs-gpu-place",
+        "6",
+        "8",
+        "8",
+    ]
+    assert "fs-gpu-place" not in prefix("/opt/ibrun", 0)
+    # Session srun steps let Slurm choose nodes, so a slot names no device.
+    assert "fs-gpu-place" not in prefix("/opt/srun", 8)
 
 
 def runtime_warning(caught):

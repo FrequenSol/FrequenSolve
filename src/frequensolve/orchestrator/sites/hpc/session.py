@@ -26,6 +26,8 @@ from frequensolve.orchestrator.sites.hpc.curvature import SlurmCurvatureRunner
 from frequensolve.orchestrator.sites.hpc.site import (
     _job_requires_postprocess,
     _safe_slurm_directive,
+    partition_gpus_per_node,
+    rank_memory_gib,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import temporary_text_file
 from frequensolve.simulation.jobs.run_state import SkipPolicy
@@ -389,13 +391,15 @@ class AllocationSession(BaseSite):
                     else min(1.0, self.heartbeat_timeout / 10)
                 ),
                 "rank_binding": "explicit",
+                # Ranks of concurrent steps select the GPU under their slot.
+                "gpus_per_node": partition_gpus_per_node(shape, config.queue),
                 "scheduler": {
                     "executable": str(site.executable),
                     "mpi": str(site.mpi_cmd),
                     "mpi_args": list(site.mpi_args),
                     "total_ranks": nodes * per_node,
                     "omp_threads": threads,
-                    "mem_per_rank_gib": shape.memory_per_node / per_node / 1024.0,
+                    "mem_per_rank_gib": rank_memory_gib(shape, per_node),
                     "min_ranks": self.workers.min_ranks,
                     "max_ranks_per_task": limit,
                     "mem_cushion": self.workers.mem_cushion,
@@ -436,7 +440,9 @@ class AllocationSession(BaseSite):
                 log_path=_safe_slurm_directive(
                     str(self.root / "controller.log"), "log_path"
                 ),
-                runtime_setup=site._runtime_setup_lines(),
+                runtime_setup=site._runtime_setup_lines(
+                    getattr(shape, "partition_environment", None)
+                ),
             )
             self._text(script, self.root / "allocation.sh")
             self._renew()

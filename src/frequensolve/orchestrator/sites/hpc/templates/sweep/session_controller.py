@@ -31,6 +31,7 @@ import traceback
 from pathlib import Path
 
 from adaptive_scheduler import (
+    _GPU_PLACE,
     AdaptiveScheduler,
     _allocate_interval,
     _free_interval,
@@ -302,6 +303,24 @@ class SessionController:
             return
 
     def _prefix(self, ranks, offset):
+        prefix = self._launcher(ranks, offset)
+        gpus = int(self.config.get("gpus_per_node", 0))
+        if gpus > 0 and Path(prefix[0]).name == "ibrun":
+            # Concurrent steps' ranks all start at local rank 0; each selects
+            # the device under its ibrun -o slot instead. Session srun steps
+            # let Slurm choose their nodes, so a slot names no device.
+            prefix += [
+                "/bin/sh",
+                "-c",
+                _GPU_PLACE,
+                "fs-gpu-place",
+                str(offset),
+                str(self.config["ranks_per_node"]),
+                str(gpus),
+            ]
+        return prefix
+
+    def _launcher(self, ranks, offset):
         options = self.config["scheduler"]
         mpi = options["mpi"]
         name = Path(mpi).name

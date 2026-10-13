@@ -454,7 +454,10 @@ def test_adaptive_sweep_breaks_unpinned_consumers_and_pinning_fixes_them(
 ):
     """Sizing gives a consumer other ranks than its linearize task; pins match."""
 
-    from tests.test_site_curvature_slurm import FakeSlurmSite
+    from tests.test_site_curvature_slurm import (
+        FakeSlurmSite,
+        slurm_allocation_environment,
+    )
     from tests.test_slurm_site_refactor import DummySSHClientClass
 
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
@@ -482,7 +485,11 @@ def test_adaptive_sweep_breaks_unpinned_consumers_and_pinning_fixes_them(
         Path(hpc.__file__).parent / "templates" / "sweep" / "adaptive_scheduler.py"
     )
     monkeypatch.setattr(site, "_adaptive_scheduler_remote_path", lambda: scheduler)
-    env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    env = dict(
+        os.environ,
+        PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        **slurm_allocation_environment(bin_dir, ranks_per_node=4, cores_per_node=8),
+    )
 
     def sweep(label, action, memory_gib, task_ranks=None):
         job = tmp_path / f"{label}.json"

@@ -74,6 +74,30 @@ def _streams(stdout, stderr, status):
     return None, _Stream(stdout, status), _Stream(stderr, status)
 
 
+def slurm_allocation_environment(
+    bin_dir, *, nodes=1, ranks_per_node=4, cores_per_node=8, job_id="4242"
+):
+    """Return the allocation variables sbatch gives a job, with a fake scontrol.
+
+    Batch scripts run inside an allocation, so srun sweeps can map rank slots
+    onto ``SLURM_JOB_NODELIST`` hosts and ``SLURM_TASKS_PER_NODE`` counts.
+    """
+
+    scontrol = Path(bin_dir) / "scontrol"
+    scontrol.write_text(
+        "#!/bin/bash\n"
+        '[ "${1:-} ${2:-}" = "show hostnames" ] || exit 1\n'
+        "printf '%s\\n' ${3//,/ }\n"
+    )
+    scontrol.chmod(0o755)
+    return {
+        "SLURM_JOB_ID": str(job_id),
+        "SLURM_JOB_NODELIST": ",".join(f"node{index:02d}" for index in range(nodes)),
+        "SLURM_TASKS_PER_NODE": f"{ranks_per_node}(x{nodes})",
+        "SLURM_JOB_CPUS_PER_NODE": f"{cores_per_node}(x{nodes})",
+    }
+
+
 class FakeCluster:
     """Login node, scheduler and compute nodes backed by local directories."""
 

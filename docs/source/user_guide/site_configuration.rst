@@ -33,7 +33,10 @@ memory estimates when needed and retain MPI rank counts required by saved
 partitioned artifacts. Initialization, smoothing, packing and curvature also
 reserve resources through the same scheduler. Stampede3 uses ``ibrun`` offsets
 and ``task_affinity``; generic ``srun`` sites use exclusive job steps. Generic
-``mpirun``/``mpiexec`` launchers execute one process group at a time.
+``mpirun``/``mpiexec`` launchers execute one process group at a time. On a GPU
+partition the allocation exports the partition's ``environment``, sizes
+workers by device memory, and each ``ibrun`` step's ranks select the device
+under their slot, as in batch sweeps.
 
 ``session.submit`` returns the usual ``RunHandle``. Its ``id`` identifies this
 run; ``handle.backend["allocation_id"]`` identifies the enclosing Slurm job.
