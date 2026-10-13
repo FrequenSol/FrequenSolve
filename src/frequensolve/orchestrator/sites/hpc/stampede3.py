@@ -66,7 +66,6 @@ class Stampede3Site(SlurmSite):
     pool: PoolInfo
     transfer_method: Literal["rsync", "sftp"] = "rsync"
     _login_client: SSHClientClass
-    _compute_client: SSHClientClass
     _work_dir: Path
     _executable: str
 

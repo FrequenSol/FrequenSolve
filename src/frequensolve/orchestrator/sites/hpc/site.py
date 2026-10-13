@@ -15,19 +15,16 @@ import posixpath
 import re
 import shlex
 import shutil
-import signal
 import socket
-import subprocess
 import tempfile
 import time
-from asyncio import Future
+import warnings
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.resources import as_file, files
 from pathlib import Path, PurePosixPath
-from select import select
 from typing import (
     Any,
     Dict,
@@ -64,7 +61,6 @@ from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
     RunHandle,
-    RunResult,
     _background_layout,
     _check_if_notebook,
     _merge_task_status_with_plan,
@@ -457,15 +453,6 @@ _RANK_ALIASES = {
 }
 
 
-# Same per-rank GPU selection as adaptive_scheduler._GPU_PLACE, for attached
-# allocations: arguments are the task offset, ranks per node and GPUs per node.
-GPU_PLACE_SNIPPET = (
-    "slot=$(($1 + ${PMI_RANK:-${SLURM_PROCID:-0}})); "
-    "FS_GPU_DEVICE=$((slot % $2 * $3 / $2)); export FS_GPU_DEVICE; "
-    'shift 3; exec "$@"'
-)
-
-
 def rank_memory_gib(shape: Any, ranks_per_node: int) -> float:
     """Return each rank's memory budget in GiB on a partition's nodes.
 
@@ -847,7 +834,7 @@ class SlurmSite(BaseSite):
     transfer_method: Literal["rsync", "sftp"] = "rsync"
     _executable: str
     _login_client: SSHClientClass
-    _compute_client: Optional[SSHClientClass] = None
+    _provision_session: Any = None
     _work_dir: Path
     solver: Optional[Union[str, Path]]
     _configured_work_dir: Optional[Union[str, Path]]
@@ -1018,7 +1005,7 @@ class SlurmSite(BaseSite):
 
         self.pool = PoolInfo()
         self._is_notebook = _check_if_notebook()
-        self._compute_client = None
+        self._provision_session = None
 
         self._emit(f"{self.site_name} initialized with work_dir: {self._work_dir}")
 
@@ -1032,24 +1019,6 @@ class SlurmSite(BaseSite):
                 "site.toml or pass solver= explicitly."
             )
         return self._executable
-
-    @property
-    def compute_client(self) -> SSHClient:
-        """Get the compute client."""
-        if self._compute_client is None:
-            raise RuntimeError(
-                "No compute client is attached; call provision/attach first"
-            )
-        return self._compute_client.client
-
-    @property
-    def compute_host(self) -> str:
-        """Get the compute host."""
-        if self._compute_client is None:
-            raise RuntimeError(
-                "No compute client is attached; call provision/attach first"
-            )
-        return self._compute_client.hostname
 
     @property
     def login_client(self) -> SSHClient:
@@ -1098,9 +1067,15 @@ class SlurmSite(BaseSite):
 
     @property
     def provisioned(self):
-        """Check if the site is provisioned."""
-        self.update_status()
-        return self.pool.is_running
+        """Whether a persistent session started by :meth:`provision` is active."""
+
+        return self._active_session() is not None
+
+    def _active_session(self):
+        """Return the session behind :meth:`provision`, if it is still open."""
+
+        session = getattr(self, "_provision_session", None)
+        return session if session is not None and not session._closed else None
 
     def __enter__(self):
         """Enter a context manager without changing site state."""
@@ -1116,9 +1091,11 @@ class SlurmSite(BaseSite):
     def close(self) -> None:
         """Close active SSH clients held by the site."""
 
-        if getattr(self, "_compute_client", None):
-            self._compute_client.close()
-            self._compute_client = None
+        session = getattr(self, "_provision_session", None)
+        if session is not None and not session._closed:
+            # An owned provisioned allocation drains and ends with this site;
+            # a reattached one only detaches.
+            session.close()
         if getattr(self, "_login_client", None):
             self._login_client.close()
             self._login_client = None
@@ -1181,6 +1158,35 @@ class SlurmSite(BaseSite):
             ``RunHandle`` for the submitted or attached run.
         """
 
+        if mode not in {"auto", "attached", "batch"}:
+            raise ValueError("mode must be 'auto', 'attached', or 'batch'")
+        session = self._active_session() if mode != "batch" else None
+        if session is not None:
+            # provision() is a deprecated front for a persistent session.
+            if mpi_async_progress:
+                raise NotImplementedError(
+                    "persistent sessions do not support MPI async progress"
+                )
+            session.wait_ready()
+            resources = {
+                name: value
+                for name, value in {
+                    "queue": queue,
+                    "nodes": nodes,
+                    "ranks_per_node": ranks_per_node,
+                    "duration": duration,
+                }.items()
+                if value is not None
+            }
+            return session.submit(
+                job, force=force, fetch=fetch, check=check, **resources, **overrides
+            )
+        if mode == "attached":
+            raise RuntimeError(
+                "No persistent allocation is active; start one with "
+                "site.session(...) or submit with mode='batch'."
+            )
+
         if getattr(job, "workflow", None) == "transient":
             if _normalize_failure_tolerance(overrides.get("tolerate_failures", 0)) != 0:
                 raise ValueError(
@@ -1234,8 +1240,6 @@ class SlurmSite(BaseSite):
         if enterprise_hpc is None:
             self.check_solver_compatibility(policy=solver_policy)
         self.prepare_job(job, validate=validate)
-        if mode not in {"auto", "attached", "batch"}:
-            raise ValueError("mode must be 'auto', 'attached', or 'batch'")
 
         run_config, extra_kwargs = self.run_config.resolved(self.config, **overrides)
         if enterprise_hpc is not None:
@@ -1260,100 +1264,14 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        if postprocess_only and mode == "attached":
-            raise ValueError(
-                "postprocess-only submissions run as batch jobs; use mode='batch' "
-                "or mode='auto'"
-            )
-        active_allocation = (
-            self.provisioned
-            if mode in {"auto", "attached"} and not postprocess_only
-            else False
-        )
-        use_attached = mode == "attached" or (mode == "auto" and active_allocation)
         if run_config.mpi_health_check_timeout is not None:
-            if use_attached or Path(self.mpi_cmd).name != "srun":
+            if Path(self.mpi_cmd).name != "srun":
                 raise ValueError(
                     "mpi_health_check_timeout requires batch mode with the srun launcher; "
                     "use mode='batch' with mpi_wrapper='srun', or disable the check "
                     "with mpi_health_check_timeout=None"
                 )
         self.prepare_job(job, sync_project=True, validate=False)
-        if use_attached:
-            if not active_allocation:
-                raise RuntimeError(
-                    "No active compute allocation is attached; use mode='batch' "
-                    "or allow mode='auto' to submit a batch job."
-                )
-            pool_id = self.pool.id
-            if not pool_id:
-                raise RuntimeError(
-                    "Active SLURM allocation is missing a valid scheduler job id"
-                )
-            try:
-                allocation_id = _validate_slurm_job_id(pool_id)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    "Active SLURM allocation is missing a valid scheduler job id"
-                ) from exc
-            if enterprise_hpc is not None:
-                if self._enterprise_hpc_limits is None:
-                    raise RuntimeError(
-                        "Enterprise HPC preflight limits are unavailable"
-                    )
-                self._enterprise_hpc_limits.validate_allocation(
-                    nodes=int(self.pool.nhost),
-                    ranks=int(self.pool.nproc),
-                    cores=int(self.pool.ncore),
-                )
-            pack = bool(extra_kwargs.pop("pack", True)) and bool(
-                getattr(job, "supports_trace_packing", True)
-            )
-            ranks_per_task = run_config.ranks_per_task
-            max_ranks = getattr(job, "max_ranks_per_task", None)
-            if ranks_per_task is None:
-                ranks_per_task = max_ranks or 2
-            if max_ranks is not None and ranks_per_task > max_ranks:
-                raise ValueError(
-                    f"{type(job).__name__} supports at most {max_ranks} MPI rank "
-                    f"per task; received {ranks_per_task}"
-                )
-            future = self._submit_attached(
-                job,
-                ranks_per_task=ranks_per_task,
-                mpi_async_progress=run_config.mpi_async_progress,
-                fresh=fresh_run,
-                **({"pack": pack} if not pack else {}),
-            )
-            job._job_id = allocation_id
-            self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
-            if enterprise_hpc is not None:
-                self._record_site_run(
-                    job,
-                    scheduler_id=allocation_id,
-                    status="running",
-                )
-            else:
-                self._record_site_run(job, status="running")
-            handle = RunHandle(
-                site=self,
-                job=job,
-                id=allocation_id,
-                mode="attached",
-                poll_interval=run_config.poll_interval,
-                check=check,
-                _status_fn=self._poll_attached_run,
-                _wait_fn=self._wait_attached_run,
-                _wait_async_fn=self._wait_attached_run_async,
-                _generic_wait=False,
-                _cancel_fn=self._cancel_attached_run,
-                _pending_fetch_fn=(
-                    (lambda run: self.fetch_outputs(run.job)) if fetch else None
-                ),
-            )
-            handle.backend["future"] = future
-            handle.backend["mpi_async_progress"] = run_config.mpi_async_progress
-            return handle
 
         task_plan = None
         if hasattr(job, "task_run_plan"):
@@ -1948,83 +1866,130 @@ class SlurmSite(BaseSite):
     def provision(
         self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs
     ) -> RunHandle:
-        """Submit an interactive SLURM allocation and return a run handle.
+        """Deprecated: start a persistent session; use :meth:`session` instead.
 
-        The returned handle completes when the allocation is running and the
-        compute client is attached.
+        ``tasks`` MPI ranks are spread evenly over ``nodes``. The allocation
+        runs FrequenSolve's allocation-resident controller, so later
+        ``submit``/``run`` calls in ``"auto"`` or ``"attached"`` mode and
+        attached curvature run inside it with the batch job's environment. The
+        returned handle completes when the controller is ready, and
+        :meth:`deprovision` releases the allocation. As with any session, the
+        allocation also ends when this client stops renewing its lease.
         """
 
-        nhost = nodes
-        nproc = tasks
-        logger.info(
-            "Provisioning SLURM job with nhost=%d, nproc=%d, duration=%s",
-            nhost,
-            nproc,
-            duration,
+        warnings.warn(
+            "SlurmSite.provision() is deprecated; use `with site.session("
+            "nodes=..., ranks_per_node=..., duration=...) as session: "
+            "session.submit(job)`. provision() now starts such a session, "
+            "which site.run() and attached curvature use until deprovision().",
+            DeprecationWarning,
+            stacklevel=2,
         )
-        duration = duration or getattr(self.config, "max_duration", "00-02:00:00")
-        provision_config = None
-        if self.enterprise_hpc is not None:
-            provision_config = SlurmRunConfig(
-                queue=kwargs.get("queue", self.run_config.queue or self.config.queue),
-                nodes=nhost,
-                ranks_per_node=nproc,
-                duration=duration,
-                account=kwargs.get(
-                    "account",
-                    self.run_config.account or getattr(self.config, "account", None),
-                ),
+        if self._active_session() is not None:
+            raise RuntimeError(
+                "An allocation is already provisioned; call deprovision() first"
             )
-            self._enterprise_hpc_preflight(run_config=provision_config)
-        self._emit(
-            f"Submitting {self.site_name} allocation: nodes={nhost}, "
-            f"tasks={nproc}, duration={duration}"
-        )
-        duration = self.config.validate_request(nhost, nproc, duration)
-        script = self._generate_provision_script(nhost, nproc, duration, **kwargs)
-
-        with _temporary_text_file(
-            script,
-            suffix=".sh",
-            prefix="slurm_",
-            directory=_host_tmp_path_for_config(
-                getattr(self, "_site_config_path", None)
-            ),
-        ) as script_path:
-            logger.debug("Temporary SLURM script created at %s", script_path)
-            remote_path = self.remote_tmp_dir / os.path.basename(script_path)
-            try:
-                self.put(script_path, remote_path)
-
-                if provision_config is not None:
-                    self._enterprise_hpc_preflight(run_config=provision_config)
-
-                self.pool.id = self._submit_sbatch(
-                    f"sbatch {shlex.quote(str(remote_path))}"
-                )
-                logger.debug("Job submitted successfully with job ID: %s", self.pool.id)
-                self.pool._status.status = "pending"
-                self._emit(f"Allocation submitted: {self.pool.id}")
-
-            except Exception as e:
-                logger.exception("Exception occurred during provisioning: %s", str(e))
-                self.pool._status.status = "failed"
-                self.pool._status.stderr = str(e)
-                raise
-
-        return self._allocation_handle(self.pool.id)
+        if isinstance(nodes, bool) or isinstance(tasks, bool):
+            raise TypeError("nodes and tasks must be integers")
+        nodes, tasks = int(nodes), int(tasks)
+        if nodes < 1 or tasks < nodes or tasks % nodes:
+            raise ValueError(
+                "tasks must be a positive multiple of nodes; persistent sessions "
+                "run the same number of ranks on every node"
+            )
+        # Sessions name their batch job; the old allocation name has no effect.
+        kwargs.pop("name", None)
+        resources = {
+            "nodes": nodes,
+            "ranks_per_node": tasks // nodes,
+            **({"duration": duration} if duration is not None else {}),
+            **kwargs,
+        }
+        session = self.session(**resources)
+        session.start()
+        self._adopt_session(session)
+        return self._session_handle(session)
 
     def attach_allocation(self, job_id: Optional[str] = None) -> RunHandle:
-        """Create a handle for an existing SLURM allocation.
+        """Deprecated: reconnect to a provisioned allocation by Slurm job id.
 
-        If job_id is not provided, queued jobs will be listed and the user will
-        be prompted to select a job.
+        Only allocations running FrequenSolve's persistent-session controller
+        (started by :meth:`provision` or :meth:`session`) can take attached
+        work; reconnect to one with :meth:`attach_session` instead. Without
+        ``job_id``, the single queued job is used.
         """
+
+        warnings.warn(
+            "SlurmSite.attach_allocation() is deprecated; use "
+            "site.attach_session(session_id).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if job_id is None:
             job_id = self._select_job()
-        self.pool.id = job_id
-        self._emit(f"Tracking existing allocation: {self.pool.id}")
-        return self._allocation_handle(str(job_id))
+        job_id = _validate_slurm_job_id(job_id)
+        needle = f'"allocation_id": "{job_id}"'
+        sessions = self.work_dir / ".fs_sessions"
+        found = self.run_login(
+            f"grep -l -F -- {shlex.quote(needle)} "
+            f"{shlex.quote(str(sessions))}/*/allocation.json 2>/dev/null || true"
+        ).split()
+        if len(found) != 1:
+            raise RuntimeError(
+                f"Slurm job {job_id} is not a FrequenSolve persistent session, so "
+                "work cannot be launched inside it: an SSH shell on its nodes "
+                "lacks the job's Slurm and module environment. Start one with "
+                "site.session(...) or submit with mode='batch'."
+            )
+        session = self.attach_session(PurePosixPath(found[0]).parent.name)
+        session.start()
+        self._adopt_session(session)
+        self._emit(f"Attached to allocation {job_id} (session {session.session_id})")
+        return self._session_handle(session)
+
+    def _adopt_session(self, session) -> None:
+        """Route auto/attached submissions and curvature through ``session``."""
+
+        self._provision_session = session
+        self.pool.id = str(session.allocation_id)
+        config = session._config or {}
+        self.pool.nhost = int(config.get("nodes") or 0)
+        self.pool.nproc = int(config.get("total_ranks") or 0)
+
+    def _session_handle(self, session) -> RunHandle:
+        """Return an allocation handle that completes when the controller is ready."""
+
+        def status(run: RunHandle) -> JobStatus:
+            state = str(session.status().get("state"))
+            if state == "ready":
+                return JobStatus(
+                    state="completed",
+                    return_code=0,
+                    job_id=str(run.id),
+                    message="Persistent allocation is ready",
+                )
+            if state in {"failed", "cancelled", "timeout", "complete", "closed"}:
+                return JobStatus(
+                    state="failed" if state in {"complete", "closed"} else state,
+                    return_code=1,
+                    job_id=str(run.id),
+                    message=f"Persistent allocation ended ({state})",
+                )
+            return JobStatus(
+                state="pending" if state in {"new", "pending"} else "running",
+                return_code=-1,
+                job_id=str(run.id),
+            )
+
+        return RunHandle(
+            site=self,
+            job=None,
+            id=str(session.allocation_id),
+            mode="allocation",
+            poll_interval=self.config.poll_interval,
+            _status_fn=status,
+            _cancel_fn=lambda run: self.deprovision(),
+        )
 
     def run_cmd(self, client, cmd: str, *, timeout: Optional[float] = None):
         """Run a command using the connected SSH client."""
@@ -2035,18 +2000,9 @@ class SlurmSite(BaseSite):
             return client.exec_command(cmd, timeout=timeout)
         return client.client.exec_command(cmd)
 
-    def run_compute_cmd(self, cmd: str):
-        """Run a command on compute node using exec_command."""
-        return self.run_cmd(self._compute_client, cmd)
-
     def run_login_cmd(self, cmd: str, *, timeout: Optional[float] = None):
         """Run a command on login node using exec_command."""
         return self.run_cmd(self._login_client, cmd, timeout=timeout)
-
-    def run_compute(self, cmd: str) -> str:
-        """Run a command on compute node and return its stdout as a stripped string."""
-        _, stdout, _ = self.run_compute_cmd(cmd)
-        return stdout.read().decode().strip()
 
     def run_login(self, cmd: str, *, timeout: Optional[float] = None) -> str:
         """Run a command on login node and return its stdout as a stripped string."""
@@ -2850,8 +2806,22 @@ class SlurmSite(BaseSite):
         return True
 
     def deprovision(self, **kwargs):
-        """Release HPC resources."""
-        return self.cancel_job(self.pool.id)
+        """Release the allocation started by :meth:`provision` (deprecated).
+
+        Outstanding work is cancelled. Returns whether an allocation was
+        released.
+        """
+
+        session = self._active_session()
+        if session is None:
+            return False
+        allocation = session.allocation_id
+        session.close(drain=False)
+        if not session.owned:
+            # A reattached session only detaches on close; release it too.
+            self.cancel_job(allocation)
+        self._provision_session = None
+        return True
 
     def sync(self, project):
         """Sync the project to the site."""
@@ -3302,103 +3272,6 @@ class SlurmSite(BaseSite):
             f"{launch_text}{pending} pending, {total} total"
         )
 
-    def _allocation_handle(self, job_id: str) -> RunHandle:
-        return RunHandle(
-            site=self,
-            job=None,
-            id=str(job_id),
-            mode="allocation",
-            poll_interval=self.config.poll_interval,
-            _status_fn=self._poll_allocation,
-            _wait_fn=self._wait_allocation,
-            _wait_async_fn=self._wait_allocation_async,
-            _finalize_fn=self._finalize_allocation,
-            _cancel_fn=lambda run: self.cancel_job(str(run.id)),
-        )
-
-    def _poll_allocation(self, run: RunHandle) -> JobStatus:
-        status = self.update_status(str(run.id))
-        if status == "running":
-            return JobStatus(
-                state="completed",
-                return_code=0,
-                job_id=str(run.id),
-                message="Allocation is running",
-                raw={"scheduler_state": status},
-            )
-        return_code = (
-            1 if status in {"failed", "cancelled", "timeout", "complete"} else -1
-        )
-        return JobStatus(
-            state=status,
-            return_code=return_code,
-            job_id=str(run.id),
-            raw={"scheduler_state": status},
-        )
-
-    def _finalize_allocation(self, run: RunHandle, status: JobStatus) -> RunResult:
-        if status.is_successful:
-            self._attach_compute_client()
-        return run._make_result(status)
-
-    def _wait_allocation(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        interval = self.config.poll_interval if poll_interval is None else poll_interval
-        start = time.monotonic()
-        last_state = object()
-        while True:
-            status = self._poll_allocation(run)
-            if status.state != last_state:
-                self._emit_status(status)
-                last_state = status.state
-            if status.is_successful:
-                self._attach_compute_client()
-                return run._make_result(status)
-            if status.is_complete:
-                return run._make_result(status)
-            if timeout is not None and time.monotonic() - start > timeout:
-                return run._make_result(
-                    JobStatus(
-                        state="timeout",
-                        job_id=str(run.id),
-                        message=f"Timed out waiting for allocation after {timeout} seconds",
-                    )
-                )
-            time.sleep(interval)
-
-    async def _wait_allocation_async(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        interval = self.config.poll_interval if poll_interval is None else poll_interval
-        start = time.monotonic()
-        last_state = object()
-        while True:
-            status = await asyncio.to_thread(self._poll_allocation, run)
-            if status.state != last_state:
-                self._emit_status(status)
-                last_state = status.state
-            if status.is_successful:
-                await asyncio.to_thread(self._attach_compute_client)
-                return run._make_result(status)
-            if status.is_complete:
-                return run._make_result(status)
-            if timeout is not None and time.monotonic() - start > timeout:
-                return run._make_result(
-                    JobStatus(
-                        state="timeout",
-                        job_id=str(run.id),
-                        message=f"Timed out waiting for allocation after {timeout} seconds",
-                    )
-                )
-            await asyncio.sleep(interval)
-
     def _sync_project(self, project):
         """Sync the project to the site."""
         project._transfer(self)
@@ -3647,175 +3520,6 @@ class SlurmSite(BaseSite):
             )
         return fitting
 
-    def _poll_attached_run(self, run: RunHandle) -> JobStatus:
-        future = run.backend.get("future")
-        if future is None:
-            return JobStatus(state="unknown", job_id=run.id)
-        if future.done():
-            if future.exception() is not None:
-                return JobStatus(
-                    state="failed",
-                    return_code=1,
-                    job_id=run.id,
-                    message=str(future.exception()),
-                )
-            return JobStatus(state="completed", return_code=0, job_id=run.id)
-        return JobStatus(state="running", job_id=run.id)
-
-    def _cancel_attached_run(self, _run: RunHandle) -> None:
-        raise NotImplementedError(
-            "Cancelling one attached run without cancelling its shared allocation "
-            "is not supported; wait for the run or cancel the allocation explicitly."
-        )
-
-    def _wait_attached_run(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        future = run.backend.get("future")
-        if future is None:
-            status = JobStatus(state="unknown", job_id=run.id)
-            return RunResult(job=run.job, status=status, site=self)
-
-        if self._is_notebook:
-            import nest_asyncio
-
-            nest_asyncio.apply()
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = self._get_or_create_event_loop()
-        else:
-            if loop.is_running():
-                raise RuntimeError(
-                    "Cannot call run.wait() for an attached SLURM run while an "
-                    "asyncio loop is already running; use 'await run' instead."
-                )
-        if timeout is not None:
-            loop.run_until_complete(asyncio.wait_for(future, timeout=timeout))
-        else:
-            loop.run_until_complete(future)
-        status = self._poll_attached_run(run)
-        self._emit_status(status)
-        return run._make_result(status)
-
-    async def _wait_attached_run_async(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        future = run.backend.get("future")
-        if future is None:
-            status = JobStatus(state="unknown", job_id=run.id)
-            return RunResult(job=run.job, status=status, site=self)
-
-        if timeout is not None:
-            await asyncio.wait_for(future, timeout=timeout)
-        else:
-            await future
-        status = self._poll_attached_run(run)
-        self._emit_status(status)
-        return run._make_result(status)
-
-    def _submit_attached(
-        self,
-        job: BaseJob,
-        ranks_per_task: int = 2,
-        *,
-        pack: bool = True,
-        fresh: bool = False,
-        mpi_async_progress: bool = False,
-        **aliases,
-    ) -> Future:
-        """Submit a job into an already attached compute allocation."""
-
-        alias_values = _normalize_rank_aliases(
-            {"ranks_per_task": ranks_per_task, **aliases}
-        )
-        ranks_per_task = int(alias_values.get("ranks_per_task") or 2)
-
-        loop = self._get_or_create_event_loop()
-        future = loop.create_future()
-        if self._compute_client is None:
-            self._attach_compute_client()
-
-        remote_script, remote_job = self._transfer_job(
-            job,
-            pack=pack,
-            fresh=fresh,
-            mpi_async_progress=mpi_async_progress,
-        )
-        ntasks_per_item = self._attached_task_ranks(job, ranks_per_task)
-
-        if self._compute_client.is_proxy():
-            interactive = self.compute_client.invoke_shell()
-            cmd = (
-                f"cd {shlex.quote(str(self.work_dir))} && "
-                f"{shlex.quote(str(remote_script))} "
-                f"{shlex.quote(str(remote_job))} {ntasks_per_item}\n"
-            )
-            interactive.stdin.write(cmd.encode())
-            interactive.stdin.flush()
-            monitor = self._monitor_command_output(future, job, interactive)
-        else:
-            cmd = (
-                f"cd {shlex.quote(str(self.work_dir))} && "
-                f"{shlex.quote(str(remote_script))} "
-                f"{shlex.quote(str(remote_job))} {ntasks_per_item}"
-            )
-            interactive = self.login_client.invoke_shell()
-            interactive.send(f"ssh {self.compute_host}\n")
-            time.sleep(1)
-            interactive.send(cmd)
-            monitor = self._monitor_command_output(future, job, interactive)
-
-        loop.create_task(monitor)
-        return future
-
-    def _attached_task_ranks(self, job: BaseJob, ranks_per_task: int) -> int:
-        """Return the rank count an attached sweep gives every task of ``job``.
-
-        A job reading partitioned inputs (a saved linearization, objective
-        vectors, receiver states or backgrounds) gets the producer's count,
-        which is uniform when the producer also ran attached.
-
-        Raises:
-            ValueError: If required counts differ between tasks or exceed the
-                allocation; a batch sweep pins each task separately.
-        """
-
-        nproc = int(self.pool.nproc)
-        ranks = max(ranks_per_task, nproc // job.n_tasks)
-        max_ranks = getattr(job, "max_ranks_per_task", None)
-        if max_ranks is not None:
-            ranks = min(ranks, max_ranks)
-        tasks = range(1, job.n_tasks + 1)
-        partitions = self._task_partitions(job, tasks)
-        pinned = self._fitting_task_ranks(
-            partitions, tasks, limit=min(nproc, max_ranks or nproc)
-        )
-        counts = sorted(set(pinned.values()))
-        if len(counts) == 1:
-            return counts[0]
-        if counts:
-            message = (
-                f"{job.name} reads inputs written on different MPI rank counts "
-                f"({', '.join(map(str, counts))}); an attached sweep runs every "
-                "task on one count, so submit it with mode='batch'"
-            )
-            if any(pin.required for pin in partitions.values()):
-                raise ValueError(message)
-            self._emit(
-                f"{message} to keep background reuse.",
-                level=logging.WARNING,
-                force=True,
-            )
-        return ranks
-
     @staticmethod
     def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
         """Return the current event loop, creating one for sync contexts if needed."""
@@ -3880,13 +3584,6 @@ class SlurmSite(BaseSite):
         )
         return lines
 
-    def _attach_compute_client(self):
-        """Connect to the current pool's compute host and populate pool metadata."""
-
-        compute_client = self._authenticator.connect_to_job_host(self.pool.id)
-        self._compute_client = SSHClientClass(compute_client)
-        self._set_pool_info()
-
     def _submit_sbatch(self, cmd: str) -> str:
         """Run an sbatch command and return the submitted job id."""
 
@@ -3915,52 +3612,6 @@ class SlurmSite(BaseSite):
                 "site.toml or pass solver= explicitly."
             )
         return executable
-
-    def _set_pool_info(self):
-        """Get information about the pool."""
-        logger.debug("Getting pool info for job %s", self.pool.id)
-
-        # Get SLURM job details using scontrol
-        stdout = self.run_login(f"scontrol show job {self.pool.id}")
-        entries = stdout.split()
-
-        deets = {}
-        for entry in entries:
-            try:
-                key, value = entry.split("=")
-                deets[key] = value
-            except ValueError:
-                continue
-
-        host = deets["BatchHost"]
-        nproc = int(deets["NumTasks"])
-        nhost = int(deets["NumNodes"])
-        ncore = int(deets["NumCPUs"])
-        start_time = deets["StartTime"]
-        end_time = deets["EndTime"]
-        time_limit = deets["TimeLimit"]
-        run_time = deets["RunTime"]
-        seconds = _hms_to_seconds(time_limit) - _hms_to_seconds(run_time)
-        _seconds_to_hms(seconds)
-
-        logger.info(
-            "Pool info - host: %s, nodes: %d, tasks: %d, cores: %d, start: %s, end: %s",
-            host,
-            nhost,
-            nproc,
-            ncore,
-            start_time,
-            end_time,
-        )
-
-        self.pool.hostnode = host
-        self.pool.nhost = nhost
-        self.pool.nproc = nproc
-        self.pool.ncore = ncore
-        self.pool.start_time = start_time
-        self.pool.end_time = end_time
-        self.pool.partition = deets.get("Partition", "")
-        logger.info("Current status of pool %s: %s", self.pool.id, self.pool.status)
 
     def _list_jobs(self):
         """List all queued jobs."""
@@ -4053,55 +3704,6 @@ class SlurmSite(BaseSite):
             return path
         return self.work_dir / relative
 
-    def _transfer_job(
-        self,
-        job: BaseJob,
-        *,
-        pack: bool = True,
-        fresh: bool = False,
-        mpi_async_progress: bool = False,
-    ):
-        """Submit a simulation job to the remote site.
-
-        Args:
-            job (BaseJob): The simulation job to submit
-        """
-        if self._compute_client is None:
-            raise NotImplementedError("Batch sweep job not implemented yet.")
-
-        # Note: job must be saved for remote **before** script is generated
-        local_job, remote_job = job.save_for_remote(
-            self.__class__.__name__, self.work_dir
-        )
-        script = self._sweep_script(
-            job,
-            pack=pack,
-            fresh=fresh,
-            mpi_async_progress=mpi_async_progress,
-        )
-
-        self._transfer_remote_simulation_inputs(job)
-        logger.debug("Transferring job file to remote path: %s", remote_job)
-        self.put(Path(local_job), Path(remote_job))
-
-        remote_script = (
-            Path(remote_job).parent / "logs" / "batch" / f"sweep-{uuid4().hex}.sh"
-        )
-        with _temporary_text_file(
-            script,
-            suffix=".sh",
-            prefix="sweep",
-            directory=_host_tmp_path_for_config(
-                getattr(self, "_site_config_path", None)
-            ),
-        ) as script_path:
-            logger.debug("Temporary sweep script created at %s", script_path)
-            self.put(script_path, remote_script)
-
-        self.run_login(f"chmod 700 {shlex.quote(str(remote_script))}")
-
-        return remote_script, remote_job
-
     def _transfer_remote_simulation_inputs(self, job: BaseJob) -> None:
         """Transfer the simulation JSON and direct file inputs for a staged job."""
 
@@ -4158,82 +3760,6 @@ class SlurmSite(BaseSite):
             "export I_MPI_ASYNC_PROGRESS_THREADS=1",
             f"export I_MPI_ASYNC_PROGRESS_PIN={progress_pins}",
         ]
-
-    def _sweep_script(self, job: BaseJob, **kwargs) -> str:
-        """Generate a script for sweeping through tasks on pre-provisioned resources."""
-
-        n_tasks = job.n_tasks
-        dir_out = str(job._remote_path(self.work_dir) / "logs")
-        pack_job = kwargs.pop("pack", None)
-        if pack_job is None:
-            pack_job = kwargs.pop("pack_job", True)
-        mpi_async_progress = kwargs.pop("mpi_async_progress", False)
-        kwargs.pop("executable", None)
-        if "run_path" in kwargs:
-            kwargs.setdefault("run_path_shell", shlex.quote(str(kwargs["run_path"])))
-        n_threads = self.pool.ncore // self.pool.nproc
-        mpi_async_progress_setup: List[str] = []
-        if mpi_async_progress:
-            nodes = int(self.pool.nhost or 1)
-            if self.pool.ncore % nodes or self.pool.nproc % nodes:
-                raise ValueError(
-                    "mpi_async_progress requires allocation cores and ranks to "
-                    "divide evenly across nodes"
-                )
-            n_threads, mpi_async_progress_setup = self._mpi_async_progress_layout(
-                cores_per_node=self.pool.ncore // nodes,
-                ranks_per_node=self.pool.nproc // nodes,
-            )
-        gpus_per_node, partition_environment = self._allocation_partition_shape()
-        return self._render_template(
-            "sweep/sweep_SLURM.sh",
-            batch_job=False,
-            gpus_per_node=gpus_per_node,
-            gpu_ranks_per_node=max(1, self.pool.nproc // int(self.pool.nhost or 1)),
-            gpu_place_shell=shlex.quote(GPU_PLACE_SNIPPET),
-            n_tasks=n_tasks,
-            n_procs=self.pool.nproc,
-            init_ranks=min(
-                self.pool.nproc,
-                getattr(job, "max_ranks_per_task", None) or self.pool.nproc,
-            ),
-            n_threads=n_threads,
-            mpi_shell=shlex.quote(str(self.mpi_cmd)),
-            dir_out_shell=shlex.quote(dir_out),
-            executable_shell=shlex.quote(str(self.executable)),
-            postprocess_job=_job_requires_postprocess(job),
-            mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
-            pack_job=bool(pack_job),
-            runtime_setup=self._runtime_setup_lines(partition_environment),
-            mpi_async_progress_setup=mpi_async_progress_setup,
-            **kwargs,
-        )
-
-    def _allocation_partition_shape(
-        self,
-    ) -> tuple[int, Optional[Mapping[str, str]]]:
-        """Return the attached allocation's GPUs per node and partition environment.
-
-        The allocation may run on a partition other than the site default, so
-        the partition recorded from the scheduler takes precedence.
-        """
-
-        partition = getattr(self.pool, "partition", "") or getattr(
-            self.config, "queue", None
-        )
-        partitions = getattr(self.config, "partitions", None) or {}
-        if not partition or (partitions and partition not in partitions):
-            logger.warning(
-                "Allocation partition %r is not described by this site; "
-                "running without partition GPU settings",
-                partition,
-            )
-            return 0, None
-        config = self.config_for_partition(partition)
-        return (
-            partition_gpus_per_node(config, partition),
-            getattr(config, "partition_environment", None),
-        )
 
     def _sweep_SLURM_script(
         self,
@@ -4433,59 +3959,6 @@ class SlurmSite(BaseSite):
             **kwargs,
         )
 
-    def _generate_provision_script(
-        self,
-        n_nodes: int,
-        ranks_per_node: int,
-        duration: str = "00-02:00:00",
-        queue: Optional[str] = None,
-        account: Optional[str] = None,
-        notify_email: Optional[str] = None,
-        **kwargs,
-    ) -> str:
-        """Generate a script for provisioning a SLURM allocation.
-
-        Args:
-            n_nodes:        Number of nodes to provision
-            ranks_per_node: Number of MPI ranks per node
-            duration:       Duration of the job (DD-HH:MM:SS)
-            queue:          Queue/partition to run on (optional, defaults to site queue)
-            account:        Account/allocation to run on
-            notify_email:   Email address to notify (optional)
-        """
-        if "procs_per_node" in kwargs:
-            values = _normalize_rank_aliases(
-                {
-                    "ranks_per_node": ranks_per_node,
-                    "procs_per_node": kwargs.pop("procs_per_node"),
-                }
-            )
-            ranks_per_node = int(values["ranks_per_node"])
-        name = _safe_slurm_directive(kwargs.get("name", "FS_cluster"), "name")
-        queue = _safe_slurm_directive(queue or self.config.queue, "queue")
-        account = _safe_slurm_directive(
-            account or self.run_config.account or self.config.account,
-            "account",
-        )
-        duration = _safe_slurm_directive(duration, "duration") or duration
-        notify_email = _safe_slurm_directive(notify_email, "notify_email")
-
-        return self._render_template(
-            "provision/provision_SLURM.sh",
-            keep_trailing_newline=True,
-            name=name,
-            n_nodes=n_nodes,
-            nhost=n_nodes,
-            nproc=n_nodes * ranks_per_node,
-            ranks_per_node=ranks_per_node,
-            queue=queue,
-            account=account,
-            duration=duration,
-            work_dir_shell=shlex.quote(str(self.work_dir)),
-            mpi=self.config.mpi_wrapper,
-            **({"notify_email": notify_email} if notify_email is not None else {}),
-        )
-
     def _print_batch_logs(
         self,
         job_name: str,
@@ -4627,93 +4100,3 @@ class SlurmSite(BaseSite):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("localhost", 0))
             return s.getsockname()[1]
-
-    async def _monitor_command_output(self, future, job, interactive=None):
-        """Monitor command output and update future accordingly."""
-        try:
-            output_buffer = ""
-            error_buffer = ""
-
-            while True:
-                # Handle subprocess case
-                if isinstance(interactive, subprocess.Popen):
-                    # Check if process has ended
-                    if interactive.poll() is not None:
-                        if not future.done():
-                            future.set_exception(
-                                RuntimeError("Process ended unexpectedly")
-                            )
-                        return
-
-                    # Read from stdout/stderr
-                    reads, _, _ = select(
-                        [interactive.stdout, interactive.stderr], [], [], 0.1
-                    )
-                    for fd in reads:
-                        data = fd.read(4096).decode("utf-8", errors="replace")
-                        if fd == interactive.stdout:
-                            output_buffer += data
-                        else:
-                            error_buffer += data
-
-                # Process output buffer
-                while "\n" in output_buffer:
-                    line, output_buffer = output_buffer.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        self._emit(line)
-                    if "Sweep Complete" in line:
-                        future.set_result(job.traces)
-                        logger.info("Sweep job completed successfully")
-                        if interactive:
-                            if isinstance(interactive, subprocess.Popen):
-                                try:
-                                    pgid = os.getpgid(interactive.pid)
-                                    os.killpg(pgid, signal.SIGKILL)
-                                except Exception:
-                                    try:
-                                        interactive.kill()
-                                    except Exception:
-                                        pass
-                            else:
-                                interactive.close()
-                        return
-
-                # Process error buffer
-                while "\n" in error_buffer:
-                    line, error_buffer = error_buffer.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        self._emit(line, level=logging.ERROR)
-                        future.set_exception(RuntimeError(f"Sweep job failed: {line}"))
-                        if interactive:
-                            if isinstance(interactive, subprocess.Popen):
-                                try:
-                                    pgid = os.getpgid(interactive.pid)
-                                    os.killpg(pgid, signal.SIGKILL)
-                                except Exception:
-                                    try:
-                                        interactive.kill()
-                                    except Exception:
-                                        pass
-                            else:
-                                interactive.close()
-                        return
-
-                await asyncio.sleep(0.2)
-
-        except Exception as e:
-            logger.exception("Error in monitor task")
-            future.set_exception(e)
-            if interactive:
-                if isinstance(interactive, subprocess.Popen):
-                    try:
-                        pgid = os.getpgid(interactive.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except Exception:
-                        try:
-                            interactive.kill()
-                        except Exception:
-                            pass
-                else:
-                    interactive.close()

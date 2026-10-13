@@ -38,6 +38,17 @@ partition the allocation exports the partition's ``environment``, sizes
 workers by device memory, and each ``ibrun`` step's ranks select the device
 under their slot, as in batch sweeps.
 
+``site.provision(nodes, tasks, duration)`` and
+``site.attach_allocation(job_id)`` are deprecated. ``provision`` now starts
+a persistent session with ``tasks`` ranks spread evenly over ``nodes``;
+``site.run``/``site.submit`` in ``"auto"`` or ``"attached"`` mode and attached
+curvature use it until ``site.deprovision()`` or ``site.close()``.
+``attach_allocation`` reconnects only to an allocation running a FrequenSolve
+session. Earlier versions launched attached work over SSH on the allocation's
+batch host, where the shell lacks the job's Slurm and module environment, so
+launchers such as TACC's ``ibrun`` could not start there. Prefer
+``site.session(...)`` directly.
+
 ``session.submit`` returns the usual ``RunHandle``. Its ``id`` identifies this
 run; ``handle.backend["allocation_id"]`` identifies the enclosing Slurm job.
 ``handle.cancel()`` cancels the run without releasing the allocation. Explicit
@@ -640,9 +651,8 @@ The generated profile is equivalent to this minimal configuration:
        retries restart the file. Missing files, permission errors and failed
        size verification are not retried.
    * - ``tmp_dir``
-     - Optional remote directory for transient transfer tarballs and
-       provisioning scripts on the login node. Defaults to ``/tmp``, which
-       ``storage`` does not change.
+     - Optional remote directory for transient transfer tarballs on the
+       login node. Defaults to ``/tmp``, which ``storage`` does not change.
    * - ``modules``
      - Environment modules loaded from left to right before the solver starts.
        A preset may supply a runtime stack; an explicit profile array replaces
@@ -682,7 +692,7 @@ The generated profile is equivalent to this minimal configuration:
      - Optional SLURM step time limit for a full-rank solver MPI health check
        before sizing. The solver must support ``--mpi-health-check``. Disabled
        by default for compatibility with older solver installations. Requires
-       batch mode with ``srun``; attached allocations and other MPI launchers
+       batch mode with ``srun``; persistent sessions and other MPI launchers
        reject this option before input upload or launch.
    * - ``account``
      - HPC allocation/account name.
@@ -711,9 +721,10 @@ The generated profile is equivalent to this minimal configuration:
      - Requested wall time, such as ``"00:30:00"``.
    * - ``ranks_per_node`` / ``ranks_per_task``
      - MPI rank layout for solver runs. ``procs_per_node`` and
-       ``procs_per_task`` remain compatibility aliases. Batch jobs size each
-       task's ranks from its memory estimate; ``ranks_per_task`` applies to
-       attached allocations. Tasks that read a linearization's saved inputs
+       ``procs_per_task`` remain compatibility aliases. Batch jobs and
+       persistent sessions size each task's ranks from its memory estimate;
+       ``ranks_per_task`` passed to ``session.submit`` sets each task's
+       minimum. Tasks that read a linearization's saved inputs
        run on the rank count that wrote them; a job whose tasks all do so
        skips sizing (see `Partitioned Solver Inputs`_).
    * - ``notify_on`` / ``notify_email``
@@ -780,8 +791,7 @@ the rank count recorded in its producer's manifest, read from the fetched
 copy or, when absent, from the remote project in one login command; all other
 tasks keep their adaptive sizing. A batch job whose tasks all have recorded
 counts skips the sizing pass. A required count larger than the job's ranks per
-task fails before submission; an attached allocation needs one count for
-every task, so jobs with differing counts use ``mode="batch"``.
+task fails before submission. Persistent sessions pin each task the same way.
 
 ``site.supports_background_reuse`` is ``True`` for local and SLURM sites,
 which keep result directories in place for later actions. FrequenSol Cloud

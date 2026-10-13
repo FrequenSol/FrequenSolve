@@ -5,6 +5,19 @@ prepared.
 
 ## Unreleased
 
+- `SlurmSite.provision()` and `attach_allocation()` are deprecated in favor of
+  `site.session(...)`. `provision()` now starts a persistent session (`tasks`
+  ranks spread evenly over `nodes`) that `site.run`/`site.submit` in `"auto"`
+  or `"attached"` mode and attached curvature use until `deprovision()` or
+  `close()`; `attach_allocation(job_id)` reconnects only to a FrequenSolve
+  session's allocation. The SSH-launched attached sweep is removed: on
+  Stampede3 an SSH shell on a held node lacks the job's Slurm and module
+  environment, so `ibrun` could not launch there. `compute_client`,
+  `compute_host` and `run_compute`/`run_compute_cmd` are removed with it.
+- Persistent sessions on GPU partitions export the partition environment, size
+  workers by device memory and give each `ibrun` step's ranks the device under
+  their slot. GPU placement runs through an `fs-gpu-place` wrapper file
+  because TACC's `ibrun` re-splits launch arguments.
 - Background checkpoints follow Sauce's `fs-background-state-2`: one HDF5 file
   per MPI rank (`"rank"`) or one file per task written by every rank
   (`"shared"`). The new site option and `site.toml` key `background_layout`

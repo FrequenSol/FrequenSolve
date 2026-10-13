@@ -13,7 +13,6 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -248,7 +247,6 @@ def test_gpu_tasks_select_the_device_under_their_slots(tmp_path):
     assert os.access(place, os.X_OK)
     # TACC's ibrun re-splits its arguments, so the launch must be words only.
     assert " ".join(command).split() == command
-    assert scheduler._GPU_PLACE == hpc.GPU_PLACE_SNIPPET
 
 
 @pytest.mark.parametrize("launcher", ["ibrun", "mpirun"])
@@ -303,73 +301,3 @@ def test_gpu_placement_maps_slots_to_node_devices(
         )
         devices.append(completed.stdout)
     assert devices == expected
-
-
-def test_attached_gpu_sweep_places_every_task_rank(monkeypatch, tmp_path):
-    site = _site(monkeypatch, tmp_path, gpus_per_node=8)
-    site.pool.nproc = 16
-    site.pool.ncore = 192
-    site.pool.nhost = 2
-    job = SimpleNamespace(
-        n_tasks=4,
-        _remote_path=lambda work_dir: tmp_path,
-        requires_postprocess=lambda: False,
-    )
-
-    script = site._sweep_script(job, procs_per_task=4, pack=False)
-
-    assert 'gpu_place=("$gpu_place_script" "$off" 8 8)' in script
-    assert 'task_affinity ${gpu_place[@]+"${gpu_place[@]}"} $executable' in script
-
-    site.config = hpc.SlurmSiteConfig(hostname="login.example.edu", queue="cpu")
-    assert "fs-gpu-place" not in site._sweep_script(job, procs_per_task=4, pack=False)
-
-
-def test_attached_sweep_uses_the_allocation_partition(monkeypatch, tmp_path):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    shape = {"max_nodes": 4, "cores_per_node": 96, "memory_per_node": 1031000}
-    site = FakeSlurmSite(
-        config=hpc.SlurmSiteConfig(
-            hostname="login.example.edu",
-            queue="debug",
-            mpi_wrapper="ibrun",
-            partitions={
-                "debug": shape,
-                "gpu": {
-                    **shape,
-                    "gpus_per_node": 8,
-                    "environment": {"I_MPI_OFFLOAD": "1"},
-                },
-            },
-        ),
-        solver="/remote/FS_seismic",
-        work_dir=str(tmp_path / "work"),
-        solver_policy="off",
-    )
-    monkeypatch.setattr(
-        site,
-        "run_login",
-        lambda cmd, **kwargs: (
-            "JobId=42 Partition=gpu BatchHost=c001 NumNodes=2 NumCPUs=192 "
-            "NumTasks=16 StartTime=2026-10-13T08:00:00 "
-            "EndTime=2026-10-13T10:00:00 TimeLimit=02:00:00 RunTime=00:10:00"
-        ),
-    )
-    site.pool.id = 42
-    site._set_pool_info()
-    job = SimpleNamespace(
-        n_tasks=4,
-        _remote_path=lambda work_dir: tmp_path,
-        requires_postprocess=lambda: False,
-    )
-
-    # The site default is a CPU partition; the allocation runs on GPU nodes.
-    assert site.pool.partition == "gpu"
-    script = site._sweep_script(job, procs_per_task=4, pack=False)
-    assert 'gpu_place=("$gpu_place_script" "$off" 8 8)' in script
-    assert "export I_MPI_OFFLOAD=1" in script.splitlines()
-
-    site.pool.partition = "unlisted"
-    script = site._sweep_script(job, procs_per_task=4, pack=False)
-    assert "fs-gpu-place" not in script
-    assert "I_MPI_OFFLOAD" not in script

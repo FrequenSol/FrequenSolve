@@ -10,7 +10,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -138,7 +137,6 @@ def _run_sweep(
     task_ranks=None,
     bash="bash",
     environment=None,
-    attached=False,
     cores_per_node=8,
     ranks_per_node=4,
     nodes=1,
@@ -187,17 +185,6 @@ def _run_sweep(
         launch_delay_seconds=0,
         **({"task_ranks": task_ranks} if task_ranks else {}),
     )
-    if attached:
-        site.pool.nproc = nodes * ranks_per_node
-        site.pool.ncore = nodes * cores_per_node
-        job_stub = SimpleNamespace(
-            n_tasks=n_tasks,
-            _remote_path=lambda work_dir: tmp_path,
-            requires_postprocess=lambda: True,
-        )
-        script = site._sweep_script(
-            job_stub, procs_per_task=ranks_per_node, run_path=str(tmp_path), pack=False
-        )
     sweep = tmp_path / "sweep.sh"
     sweep.write_text(script)
     job = tmp_path / "job.json"
@@ -213,15 +200,14 @@ def _run_sweep(
         FAKE_SWEEP_CALLS=str(calls),
         FAKE_SWEEP_TASKS=str(n_tasks),
     )
-    if not attached:
-        env.update(
-            slurm_allocation_environment(
-                fake.bin,
-                nodes=nodes,
-                ranks_per_node=ranks_per_node,
-                cores_per_node=cores_per_node,
-            )
+    env.update(
+        slurm_allocation_environment(
+            fake.bin,
+            nodes=nodes,
+            ranks_per_node=ranks_per_node,
+            cores_per_node=cores_per_node,
         )
+    )
     completed = subprocess.run(
         [bash, str(sweep), str(job)],
         cwd=tmp_path,
@@ -307,13 +293,11 @@ def test_srun_sweep_gives_every_step_its_threads_cores(tmp_path, monkeypatch):
     assert "#SBATCH --cpus-per-task=2" in script
 
 
-@pytest.mark.parametrize("attached", [False, True])
-def test_srun_initialization_reserves_all_hybrid_cores(tmp_path, monkeypatch, attached):
+def test_srun_initialization_reserves_all_hybrid_cores(tmp_path, monkeypatch):
     _, lines, records = _run_sweep(
         tmp_path,
         monkeypatch,
         "srun",
-        attached=attached,
         cores_per_node=112,
         ranks_per_node=8,
         nodes=8,

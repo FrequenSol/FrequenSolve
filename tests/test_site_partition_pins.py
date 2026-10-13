@@ -323,26 +323,6 @@ def test_required_pins_that_do_not_fit_fail_before_submission(
     ) == {1: 2}
 
 
-def test_attached_sweeps_need_one_producer_rank_count(slurm, tmp_path, capsys):
-    site, _ = slurm
-    site.pool.nproc = 8
-    job = _Consumer(tmp_path / "project", n_tasks=2, state="lin/state.json")
-
-    assert site._attached_task_ranks(job, 2) == 4  # nproc // n_tasks.
-    _task_files(job.project, "lin/state", {1: 3, 2: 3})
-    assert site._attached_task_ranks(job, 2) == 3
-    _task_files(job.project, "lin/state", {2: 2})
-    with pytest.raises(ValueError, match="mode='batch'"):
-        site._attached_task_ranks(job, 2)
-
-    reuse = _Consumer(tmp_path / "other", n_tasks=2, background="lin/background.json")
-    _task_files(
-        reuse.project, "lin/background", {1: 3, 2: 2}, schema="fs-background-state-1"
-    )
-    assert site._attached_task_ranks(reuse, 2) == 4
-    assert "keep background reuse" in capsys.readouterr().out
-
-
 # -- LocalSite -------------------------------------------------------------------------
 
 

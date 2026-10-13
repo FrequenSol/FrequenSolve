@@ -2810,8 +2810,8 @@ contiguous coefficient rows; mesh transfer and sampling always run on one rank
 with the whole thread budget. ``LocalSite`` launches ``curvature_ranks`` MPI
 ranks (default one) that share its worker thread budget, disables Open MPI's
 default one-core rank binding and honors explicit thread environment overrides.
-SLURM sites run each operation on compute nodes: inside an attached running
-allocation, or as a batch job sized by ``curvature_run_config`` (default
+SLURM sites run each operation on compute nodes: inside a persistent session
+(``site.session(...)``), or as a batch job sized by ``curvature_run_config`` (default
 ``run_config``; one rank per socket unless ``ranks_per_node`` is set, one node
 for mesh operations). Every rank gets its own cores (``srun --cpus-per-task``,
 TACC ``task_affinity`` or Open MPI ``slot:PE`` mapping) with

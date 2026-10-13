@@ -11,8 +11,8 @@ derived from their local path, size and modification time.
 A file is uploaded only when no remote copy of the same size exists, and
 factors that Sauce wrote remotely as an earlier operation's ``pending.h5`` are
 read in place. Sauce runs on compute nodes only, as a batch job or inside the
-site's attached allocation; the login node only prepares directories,
-submits, polls and transfers. On success the output and ``solver.log`` are
+persistent session behind the site's (deprecated) provisioned allocation; the
+login node only prepares directories, submits, polls and transfers. On success the output and ``solver.log`` are
 fetched beside the local request, whose caller verifies them. Mirrors persist
 for reuse until :meth:`SlurmSite.remove_curvature_files` deletes them.
 """
@@ -381,50 +381,6 @@ class SlurmCurvatureRunner:
         )
         return job_id
 
-    def _launch_attached(
-        self, request: Dict[str, Any], directory: PurePosixPath, single: bool
-    ) -> str:
-        """Start the request on the allocation's batch host and return its id."""
-
-        site = self.site
-        if site._compute_client is None:
-            site._attach_compute_client()
-        pool = site.pool
-        nodes, processes, cores = (
-            max(1, int(pool.nhost or 1)),
-            max(1, int(pool.nproc or 1)),
-            max(1, int(pool.ncore or 1)),
-        )
-        ranks, threads = (
-            (1, max(1, cores // nodes))
-            if single
-            else (processes, max(1, cores // processes))
-        )
-        script = directory / "curvature.sh"
-        self._put_text(
-            self._script(directory, ranks=ranks, threads=threads),
-            script,
-            ".sh",
-        )
-        launch = (
-            f"cd {_quote(directory)} && "
-            "if command -v setsid >/dev/null 2>&1; then detach=setsid; "
-            "else detach=; fi; "
-            f"$detach nohup bash {_quote(script)} > launch.log 2>&1 < /dev/null &"
-        )
-        _, stdout, stderr = site.run_compute_cmd(launch)
-        error = read_stream(stderr)
-        read_stream(stdout)
-        if _remote_command_failed(error, ssh_exit_status(stdout, stderr)):
-            raise RuntimeError(
-                f"Could not start curvature in allocation {pool.id}: {error}"
-            )
-        site._emit(
-            f"Started curvature {request.get('method')} in {site.site_name} "
-            f"allocation {pool.id} ({ranks} rank(s) x {threads} thread(s))"
-        )
-        return str(pool.id)
-
     def _exit_status(self, directory: PurePosixPath) -> Optional[int]:
         status = _quote(directory / _STATUS)
         text = self.site.run_login(
@@ -457,19 +413,11 @@ class SlurmCurvatureRunner:
                 return self._exit_status(directory), state
             time.sleep(interval)
 
-    def _stop(self, directory: PurePosixPath, job_id: str, *, attached: bool) -> None:
+    def _stop(self, job_id: str) -> None:
         """Best-effort cancellation when waiting is interrupted."""
 
         try:
-            if attached:
-                pid = _quote(directory / _PID)
-                self.site.run_compute_cmd(
-                    f"if [ -f {pid} ]; then p=$(cat -- {pid}); "
-                    'kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; '
-                    "fi; true"
-                )
-            else:
-                self.site.cancel_job(job_id)
+            self.site.cancel_job(job_id)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("Could not stop curvature run %s (%s)", job_id, exc)
 
@@ -515,23 +463,31 @@ class SlurmCurvatureRunner:
             raise ValueError(
                 "Enterprise HPC curvature runs are validated batch jobs; use mode='batch'"
             )
-        active = bool(site.pool.id) and site.provisioned
-        if mode == "attached" and not active:
+        session = site._active_session()
+        if mode == "attached" and session is None:
             raise RuntimeError(
-                "No active compute allocation is attached; use mode='batch' or "
-                "mode='auto'"
+                "No persistent allocation is active; use mode='batch' or "
+                "mode='auto', or run curvature inside site.session(...)"
             )
-        attached = mode == "attached" or (mode == "auto" and not enterprise and active)
+        attached = mode == "attached" or (
+            mode == "auto" and not enterprise and session is not None
+        )
         if attached and set(overrides) - {"poll_interval"}:
             raise ValueError(
                 "Resource overrides apply to batch curvature jobs; an attached "
                 "allocation keeps its own resources (pass mode='batch')"
             )
+        if attached:
+            # The provisioned allocation is a persistent session; it stages,
+            # runs and fetches the request in its own resource ledger.
+            session.wait_ready()
+            session.run_curvature(request)
+            return
         # Resolve and validate resources before transferring any data.
-        resources = None if attached else self._batch_resources(single, overrides)
-        if resources is not None and enterprise:
+        resources = self._batch_resources(single, overrides)
+        if enterprise:
             site._enterprise_hpc_preflight(run_config=resources[0])
-        elif not enterprise:
+        else:
             site.check_solver_compatibility()
 
         self.workdir = request.parent.parent
@@ -558,23 +514,14 @@ class SlurmCurvatureRunner:
             json.dumps(remote, indent=2) + "\n", directory / "request.json", ".json"
         )
 
-        if attached:
-            run_config, _ = (site.curvature_run_config or site.run_config).resolved(
-                site.config, **overrides
-            )
-            interval = _interval(run_config, site)
-            job_id = self._launch_attached(local, directory, single)
-            label = "curvature in allocation"
-        else:
-            assert resources is not None
-            run_config, threads = resources
-            interval = _interval(run_config, site)
-            job_id = self._submit_batch(local, directory, run_config, threads)
-            label = "curvature job"
+        run_config, threads = resources
+        interval = _interval(run_config, site)
+        job_id = self._submit_batch(local, directory, run_config, threads)
+        label = "curvature job"
         try:
             code, state = self._wait(directory, job_id, interval=interval, label=label)
         except BaseException:
-            self._stop(directory, job_id, attached=attached)
+            self._stop(job_id)
             raise
         log = request.parent / "solver.log"
         if code != 0:

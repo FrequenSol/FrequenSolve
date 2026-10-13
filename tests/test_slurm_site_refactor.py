@@ -251,9 +251,9 @@ def test_slurm_site_uses_configured_paths_and_runtime(monkeypatch):
         "export KMP_STACKSIZE=20M",
         "export OMP_NUM_THREADS=2",
     } <= set(runtime_setup)
-    assert site._render_template("sweep/sweep_SLURM.sh", runtime_setup=[]).startswith(
-        "#!/bin/bash"
-    )
+    assert site._render_template(
+        "sweep/adaptive_sweep.sh", runtime_setup=[]
+    ).startswith("#!/bin/bash")
     assert site.credentials.username == "configured-user"
 
 
@@ -525,23 +525,6 @@ def test_slurm_site_accepts_run_config(monkeypatch):
 
     assert site.run_config is run_config
     assert site.run_config.nodes == 2
-
-
-def test_slurm_provision_uses_profile_account(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite(
-        "project/run",
-        run_config=SlurmRunConfig(account="allocation-from-profile"),
-    )
-
-    script = site._generate_provision_script(
-        n_nodes=1,
-        ranks_per_node=2,
-        duration="00-00:30:00",
-        queue="debug",
-    )
-
-    assert "#SBATCH -A allocation-from-profile" in script
 
 
 def test_existing_slurm_directive_formats_remain_supported(monkeypatch):
@@ -977,19 +960,6 @@ def test_slurm_batch_maps_local_project_run_path_to_remote(
     assert record.job_file == site.work_dir / "jobs" / "simple" / "freq" / "freq.json"
 
 
-def test_attached_hpc_script_uses_fs_seismic_router(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-    site.pool.nhost = 1
-    site.pool.nproc = 2
-    site.pool.ncore = 8
-
-    script = site._sweep_script(DummyJob(), executable="/remote/bin/fs3d")
-
-    assert "executable=/remote/bin/FS_seismic\n" in script
-    assert "executable=/remote/bin/fs3d\n" not in script
-
-
 def test_batch_hpc_script_uses_fs_seismic_router_in_scheduler_config(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
@@ -1151,20 +1121,6 @@ def test_slurm_batch_mpi_async_progress_reserves_one_core_per_rank(monkeypatch):
     assert "export I_MPI_ASYNC_PROGRESS_PIN=13,27,41,55,69,83,97,111" in script
     assert '"omp_threads": 13' in script
     assert '-nthreads "$n_threads"' in script
-
-
-def test_slurm_attached_mpi_async_progress_uses_per_node_topology(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-    site.pool.nhost = 2
-    site.pool.nproc = 16
-    site.pool.ncore = 224
-
-    script = site._sweep_script(DummyJob(), mpi_async_progress=True)
-
-    assert "n_threads=13" in script
-    assert "export I_MPI_ASYNC_PROGRESS_PIN=13,27,41,55,69,83,97,111" in script
-    assert "$executable -nthreads $n_threads --job $input_file" in script
 
 
 def test_slurm_mpi_async_progress_validates_rank_core_layout():
@@ -2134,9 +2090,6 @@ def test_slurm_batch_poll_ignores_scheduler_status_while_pending(monkeypatch):
 def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
-    site.pool.nproc = 4
-    site.pool.ncore = 8
-
     batch_script = site._sweep_SLURM_script(
         n_tasks=4,
         n_nodes=1,
@@ -2155,13 +2108,6 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
         fresh=True,
     )
 
-    class PostprocessDummyJob(DummyJob):
-        def requires_postprocess(self):
-            return True
-
-    attached_script = site._sweep_script(PostprocessDummyJob())
-    fresh_attached_script = site._sweep_script(DummyJob(), fresh=True)
-    attached_disabled_script = site._sweep_script(DummyJob(), pack=False)
     disabled_script = site._sweep_SLURM_script(
         n_tasks=4,
         n_nodes=1,
@@ -2178,28 +2124,16 @@ def test_slurm_sweep_scripts_run_solver_pack_after_tasks(monkeypatch):
     assert "FS_SCHEDULER_STATUS" not in batch_script
     assert '"successful"' in batch_script
     assert '"pending"' in batch_script
-    assert "--pack >> $dir_out/pack.log 2>&1" in attached_script
     assert 'fresh_flag="--fresh"' in fresh_batch_script
-    assert 'fresh_flag="--fresh"' in fresh_attached_script
     assert "export OMP_NUM_THREADS=$n_threads" in batch_script
-    assert "export OMP_NUM_THREADS=$n_threads" in attached_script
     assert "I_MPI_ASYNC_PROGRESS" not in batch_script
-    assert "I_MPI_ASYNC_PROGRESS" not in attached_script
     assert "-nthreads $n_threads" in batch_script
-    assert "-nthreads $n_threads" in attached_script
     assert (
         '"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$n_procs" '
         '${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" '
         '--job "$job_file" $fresh_flag --smooth'
     ) in batch_script
-    assert (
-        "$mpi_exec -n $n_procs $executable -nthreads $n_threads "
-        "--job $input_file $fresh_flag --smooth"
-    ) in attached_script
     assert '--init --sizing "$sizing_json" > "$dir_out/init.log" 2>&1' in batch_script
-    assert "--init > $dir_out/init.log 2>&1" in attached_script
-    assert "--map" not in attached_script
-    assert "--pack" not in attached_disabled_script
     assert "--pack" not in disabled_script
 
 
@@ -2208,141 +2142,8 @@ def test_slurm_submit_attached_requires_active_allocation(monkeypatch):
     monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: False))
     site = DummySlurmSite("project/run")
 
-    with pytest.raises(RuntimeError, match="No active compute allocation"):
+    with pytest.raises(RuntimeError, match="No persistent allocation is active"):
         site.submit(DummyJob(), mode="attached")
-
-
-def test_slurm_submit_auto_uses_attached_when_provisioned(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
-    site = DummySlurmSite("project/run")
-    site.pool.id = "42"
-
-    class DummyFuture:
-        def done(self):
-            return False
-
-    monkeypatch.setattr(
-        site, "_submit_attached", lambda job, ranks_per_task=2, **kwargs: DummyFuture()
-    )
-
-    run = site.submit(DummyJob())
-
-    assert run.mode == "attached"
-    assert run.status().state == "running"
-
-
-def test_attached_run_cancel_does_not_cancel_shared_allocation(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
-    site = DummySlurmSite("project/run")
-    site.pool.id = "42"
-
-    class DummyFuture:
-        def done(self):
-            return False
-
-    monkeypatch.setattr(
-        site, "_submit_attached", lambda job, ranks_per_task=2, **kwargs: DummyFuture()
-    )
-    monkeypatch.setattr(
-        site,
-        "cancel_job",
-        lambda job_id: pytest.fail(f"cancelled shared allocation {job_id}"),
-    )
-
-    run = site.submit(DummyJob(), mode="attached")
-
-    with pytest.raises(NotImplementedError, match="shared allocation"):
-        run.cancel()
-
-
-def test_fresh_attached_submit_without_allocation_id_fails_before_launch(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
-    site = DummySlurmSite("project/run")
-    launched = []
-    monkeypatch.setattr(
-        site,
-        "_submit_attached",
-        lambda job, ranks_per_task=2, **kwargs: launched.append(job),
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match="^Active SLURM allocation is missing a valid scheduler job id$",
-    ):
-        site.submit(DummyJob(), mode="attached")
-
-    assert launched == []
-
-
-def test_slurm_submit_attached_can_disable_pack(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
-    site = DummySlurmSite("project/run")
-    site.pool.id = "42"
-    seen = {}
-
-    class DummyFuture:
-        def done(self):
-            return False
-
-    def fake_submit(
-        job,
-        ranks_per_task=2,
-        *,
-        pack=True,
-        fresh=False,
-        mpi_async_progress=False,
-    ):
-        seen["pack"] = pack
-        seen["fresh"] = fresh
-        seen["mpi_async_progress"] = mpi_async_progress
-        return DummyFuture()
-
-    monkeypatch.setattr(site, "_submit_attached", fake_submit)
-
-    site.submit(DummyJob(), pack=False)
-
-    assert seen["pack"] is False
-    assert seen["fresh"] is False
-    assert seen["mpi_async_progress"] is False
-
-
-def test_slurm_submit_rejects_mpi_async_progress(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
-    site = DummySlurmSite("project/run")
-    site.pool.id = "42"
-
-    def fail_submit(*args, **kwargs):
-        raise AssertionError("unsupported configuration reached submission")
-
-    monkeypatch.setattr(site, "_submit_attached", fail_submit)
-
-    with pytest.raises(NotImplementedError, match="race during MPI initialization"):
-        site.submit(DummyJob(), mpi_async_progress=True)
-
-
-def test_slurm_allocation_attach_returns_awaitable_handle(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-    states = iter(["pending", "running"])
-    attached = {}
-
-    monkeypatch.setattr(site, "update_status", lambda job_id=None: next(states))
-    monkeypatch.setattr(
-        site, "_attach_compute_client", lambda: attached.setdefault("ok", True)
-    )
-
-    allocation = site.attach_allocation("99")
-    result = allocation.wait(poll_interval=0.0)
-
-    assert allocation.mode == "allocation"
-    assert result.successful
-    assert result.status.raw["scheduler_state"] == "running"
-    assert attached["ok"] is True
 
 
 def test_slurm_attach_allocation_requires_explicit_id_when_multiple_jobs(monkeypatch):
@@ -2354,81 +2155,23 @@ def test_slurm_attach_allocation_requires_explicit_id_when_multiple_jobs(monkeyp
         lambda: "101 node01 1 R 00:10\n102 node02 1 PD 00:20\n",
     )
 
-    with pytest.raises(RuntimeError, match="pass job_id explicitly"):
-        site.attach_allocation()
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(RuntimeError, match="pass job_id explicitly"):
+            site.attach_allocation()
 
 
 def test_slurm_context_manager_closes_clients(monkeypatch):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
 
+    session = _FakeSession()
+    site._adopt_session(session)
+
     site.close()
 
     assert site._login_client is None
-    assert site._compute_client is None
-
-
-def test_slurm_provision_returns_allocation_handle(monkeypatch, tmp_path):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-    staging_directory = tmp_path / "local-staging"
-    config_path = tmp_path / "site.toml"
-    config_path.write_text(f'[host]\ntmp_dir = "{staging_directory.as_posix()}"\n')
-    site._site_config_path = config_path
-    uploaded_scripts = []
-
-    monkeypatch.setattr(
-        site,
-        "put",
-        lambda local, remote: uploaded_scripts.append((Path(local), Path(remote))),
-    )
-    monkeypatch.setattr(site, "_submit_sbatch", lambda cmd: "44")
-    monkeypatch.setattr(
-        site, "_generate_provision_script", lambda *args, **kwargs: "script"
-    )
-
-    allocation = site.provision(nodes=1, tasks=1, duration="00-00:10:00")
-
-    assert isinstance(allocation, RunHandle)
-    assert allocation.id == "44"
-    assert allocation.mode == "allocation"
-    assert uploaded_scripts[0][0].parent == staging_directory
-    assert uploaded_scripts[0][1].parent == site.remote_tmp_dir
-
-
-def test_slurm_attached_run_is_awaitable(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
-    site = DummySlurmSite("project/run")
-    site.pool.id = "42"
-
-    async def submit_and_wait():
-        future = asyncio.get_running_loop().create_future()
-        future.set_result(None)
-        monkeypatch.setattr(
-            site, "_submit_attached", lambda job, ranks_per_task=2, **kwargs: future
-        )
-        run = site.submit(DummyJob())
-        return await run
-
-    result = asyncio.run(submit_and_wait())
-
-    assert result.successful
-    assert result.status.state == "completed"
-
-
-def test_slurm_attached_sync_wait_inside_event_loop_has_clear_error(monkeypatch):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-
-    async def call_sync_wait():
-        future = asyncio.get_running_loop().create_future()
-        run = RunHandle(site=site, job=DummyJob(), id="attached", mode="attached")
-        run.backend["future"] = future
-        with pytest.raises(RuntimeError, match="use 'await run' instead"):
-            site._wait_attached_run(run)
-
-    asyncio.run(call_sync_wait())
+    # A provisioned allocation drains and ends with the site that owns it.
+    assert session.closed_with is True
 
 
 def test_slurm_site_config_validates_node_and_duration_requests():
@@ -2514,8 +2257,7 @@ def test_slurm_site_config_accepts_launcher_argument_arrays(value):
     [
         ("ibrun", "batch", False),
         ("mpirun", "batch", False),
-        ("srun", "attached", True),
-        ("srun", "auto", True),
+        ("ibrun", "auto", False),
     ],
 )
 def test_mpi_health_check_rejects_unsupported_launch_before_sync(
@@ -2536,36 +2278,6 @@ def test_mpi_health_check_rejects_unsupported_launch_before_sync(
     with pytest.raises(ValueError, match="requires batch mode with the srun launcher"):
         site.submit(DummyJob(), mode=mode, fresh=True)
     assert not any(sync_calls)
-
-
-@pytest.mark.parametrize("limit, expected", [(None, 8), (1, 1), (4, 4)])
-def test_attached_initialization_respects_job_rank_limit(
-    monkeypatch, tmp_path, limit, expected
-):
-    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    site = DummySlurmSite("project/run")
-    site.pool.nhost = 1
-    site.pool.nproc = 8
-    site.pool.ncore = 8
-    job = DummyJob()
-    job.max_ranks_per_task = limit
-    job.n_tasks = 1
-    launcher = tmp_path / "launcher"
-    log = tmp_path / "launches"
-    launcher.write_text('#!/bin/sh\nprintf "%s\n" "$*" >> "$LAUNCH_LOG"\n')
-    launcher.chmod(0o755)
-    monkeypatch.setenv("LAUNCH_LOG", str(log))
-    monkeypatch.setattr(type(site), "mpi_cmd", property(lambda self: str(launcher)))
-    monkeypatch.setattr(type(site), "work_dir", property(lambda self: tmp_path))
-    script = tmp_path / "sweep.sh"
-    script.write_text(site._sweep_script(job, pack=False))
-    result = subprocess.run(
-        ["bash", str(script), "job.json", "1"], capture_output=True, text=True
-    )
-    assert result.returncode == 0, result.stderr
-    init = next(line for line in log.read_text().splitlines() if "--init" in line)
-    args = init.split()
-    assert args[args.index("-n") + 1] == str(expected)
 
 
 def test_eikonal_batch_caps_initialization_and_task_launches(monkeypatch, tmp_path):
@@ -2668,12 +2380,10 @@ def test_dispatcher_backend_override_remains_explicit(monkeypatch):
     assert "export FS_SOLVER_PATH=/work/custom" in site._runtime_setup_lines()
 
 
-@pytest.mark.parametrize("batch", [True, False])
-def test_launch_scripts_survive_interleaved_submissions(monkeypatch, tmp_path, batch):
+def test_launch_scripts_survive_interleaved_submissions(monkeypatch, tmp_path):
     """Uploading the next launch must not alter a script awaiting submission."""
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     site = DummySlurmSite("project/run")
-    site._compute_client = object()
     project = Project(name="project", path=tmp_path / "project")
     sim = project.new_simulation(name="acoustic", physics="acoustic", dimension=2)
     jobs = [
@@ -2690,13 +2400,9 @@ def test_launch_scripts_survive_interleaved_submissions(monkeypatch, tmp_path, b
     )
     monkeypatch.setattr(site, "run_login", lambda command: "")
     monkeypatch.setattr(site, "_transfer_remote_simulation_inputs", lambda job: None)
-    monkeypatch.setattr(site, "_sweep_script", lambda job, **kwargs: job.name)
     paths = []
     for job in jobs + jobs[:1]:
-        if batch:
-            script, remote_job = site._transfer_SLURM_job(job.name, job)
-        else:
-            script, remote_job = site._transfer_job(job)
+        script, remote_job = site._transfer_SLURM_job(job.name, job)
         assert script.parent == Path(remote_job).parent / "logs" / "batch"
         paths.append(script)
     assert len(set(paths)) == 3
@@ -2741,3 +2447,152 @@ def test_adaptive_sweep_sizes_fresh_at_explicit_path(monkeypatch, tmp_path):
     init = next(args for args in launches if "--init" in args)
     assert "--fresh" in init
     assert init[init.index("--sizing") + 1] == str(sizing)
+
+
+class _FakeSession:
+    """Stands in for the AllocationSession behind the deprecated provision()."""
+
+    def __init__(self, allocation_id="44", *, state="ready", owned=True, **resources):
+        self.allocation_id = allocation_id
+        self.session_id = "a" * 32
+        self.state = state
+        self.owned = owned
+        self.resources = resources
+        self._closed = False
+        self._config = {
+            "nodes": resources.get("nodes", 1),
+            "total_ranks": resources.get("nodes", 1)
+            * resources.get("ranks_per_node", 1),
+        }
+        self.started = False
+        self.closed_with = None
+        self.submitted = []
+
+    def start(self):
+        self.started = True
+        return self
+
+    def wait_ready(self, timeout=None):
+        return self
+
+    def status(self):
+        return {"state": self.state}
+
+    def submit(self, job, **options):
+        self.submitted.append((job, options))
+        return "session-run"
+
+    def close(self, *, drain=True):
+        self._closed = True
+        self.closed_with = drain
+
+
+def test_slurm_provision_starts_a_persistent_session(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    sessions = []
+
+    def session(**resources):
+        sessions.append(_FakeSession(state="starting", **resources))
+        return sessions[-1]
+
+    monkeypatch.setattr(site, "session", session)
+
+    with pytest.warns(DeprecationWarning, match="site.session"):
+        allocation = site.provision(
+            nodes=2, tasks=8, duration="00:10:00", queue="debug", name="ignored"
+        )
+
+    (started,) = sessions
+    assert started.started
+    assert started.resources == {
+        "nodes": 2,
+        "ranks_per_node": 4,
+        "duration": "00:10:00",
+        "queue": "debug",
+    }
+    assert site.provisioned
+    assert (site.pool.id, site.pool.nhost, site.pool.nproc) == ("44", 2, 8)
+    assert (allocation.mode, allocation.id) == ("allocation", "44")
+    assert allocation.status().state == "running"
+    started.state = "ready"
+    assert allocation.wait(poll_interval=0.0).successful
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(RuntimeError, match="already provisioned"):
+            site.provision(nodes=1, tasks=1)
+
+    assert site.deprovision() is True
+    assert started.closed_with is False
+    assert not site.provisioned
+    assert site.deprovision() is False
+
+
+def test_slurm_provision_needs_the_same_ranks_on_every_node(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    monkeypatch.setattr(
+        site, "session", lambda **resources: pytest.fail("session was started")
+    )
+
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(ValueError, match="multiple of nodes"):
+            site.provision(nodes=2, tasks=3)
+
+
+def test_slurm_submit_routes_auto_and_attached_work_into_the_session(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    session = _FakeSession()
+    site._adopt_session(session)
+    job = DummyJob()
+
+    assert site.submit(job) == "session-run"
+    assert site.submit(job, mode="attached", force=True, nodes=1) == "session-run"
+    assert session.submitted[1] == (
+        job,
+        {"force": True, "fetch": False, "check": False, "nodes": 1},
+    )
+    with pytest.raises(NotImplementedError, match="MPI async progress"):
+        site.submit(job, mpi_async_progress=True)
+
+    def batch_path(**kwargs):
+        raise RuntimeError("batch path")
+
+    monkeypatch.setattr(site, "check_solver_compatibility", batch_path)
+    with pytest.raises(RuntimeError, match="batch path"):
+        site.submit(job, mode="batch")
+    assert len(session.submitted) == 2
+
+
+def test_attach_allocation_reconnects_only_to_persistent_sessions(monkeypatch):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    site = DummySlurmSite("project/run")
+    session = _FakeSession(allocation_id="99", owned=False)
+    session_id = "b" * 32
+    attached, cancelled = [], []
+
+    def run_login(command, **kwargs):
+        if '"allocation_id": "99"' in command:
+            return f"{site.work_dir}/.fs_sessions/{session_id}/allocation.json\n"
+        return ""
+
+    monkeypatch.setattr(site, "run_login", run_login)
+    monkeypatch.setattr(
+        site, "attach_session", lambda sid: attached.append(sid) or session
+    )
+    monkeypatch.setattr(
+        site, "cancel_job", lambda job_id: cancelled.append(job_id) or True
+    )
+
+    with pytest.warns(DeprecationWarning, match="attach_session"):
+        allocation = site.attach_allocation("99")
+
+    assert attached == [session_id]
+    assert session.started and site.provisioned
+    assert allocation.wait(poll_interval=0.0).successful
+    # Closing a borrowed session only detaches, so deprovision also cancels it.
+    assert site.deprovision() is True
+    assert cancelled == ["99"]
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(RuntimeError, match="not a FrequenSolve persistent session"):
+            site.attach_allocation("100")
