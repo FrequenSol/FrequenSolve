@@ -15,7 +15,13 @@ from frequensolve.imaging._objective import (
     objective_space,
 )
 from frequensolve.imaging.data import DataSpace, DataVector, file_sha256
-from tests.imaging_fakes import FakeImagingSite
+from tests.imaging_fakes import (
+    FAKE_STATE_SCHEMA,
+    LEGACY_STATE_SCHEMA,
+    FakeImagingSite,
+    reseal_state,
+    seal_state_manifest,
+)
 from tests.test_imaging_extension import _extension
 from tests.test_imaging_extension import _problem as _extension_problem
 from tests.test_imaging_problem import _problem
@@ -107,8 +113,9 @@ def test_lsqr_uses_frozen_objective_residual_and_affine_regularization(
     np.testing.assert_allclose(*outputs, rtol=1e-8, atol=1e-7)
 
 
+@pytest.mark.parametrize("schema", [FAKE_STATE_SCHEMA, LEGACY_STATE_SCHEMA])
 @pytest.mark.parametrize("labels", [("amplitude",), ("amplitude", "phase")])
-def test_named_objective_terms_share_a_receiver_group(tmp_path, labels):
+def test_named_objective_terms_share_a_receiver_group(tmp_path, labels, schema):
     class TermSite(FakeImagingSite):
         def surrogate(self, *args, **kwargs):
             J, d, space = super().surrogate(*args, **kwargs)
@@ -125,6 +132,11 @@ def test_named_objective_terms_share_a_receiver_group(tmp_path, labels):
             super()._write_state(job, task, lin, frequency)
             path = job.state_file(task)
             manifest = json.loads(path.read_text())
+            if "terms" in manifest:  # version 5: term configuration in the manifest
+                for term in manifest["terms"]:
+                    term["receiver_group"] = "surface"
+                path.write_text(json.dumps(seal_state_manifest(manifest)))
+                return
             for entry in manifest["shards"]:
                 shard = Path(entry["file"])
                 payload = json.loads(shard.read_text())
@@ -134,7 +146,7 @@ def test_named_objective_terms_share_a_receiver_group(tmp_path, labels):
                 entry["sha256"] = file_sha256(shard)
             path.write_text(json.dumps(manifest))
 
-    fake = TermSite(n_ranks=3)
+    fake = TermSite(n_ranks=3, state_schema=schema)
     _, problem = _problem(
         tmp_path,
         fake,
@@ -152,28 +164,43 @@ def test_named_objective_terms_share_a_receiver_group(tmp_path, labels):
         manifest = DataVector.read_objective_manifest(
             vjp.task_input(vjp.objective_vector, task)
         )
-        assert manifest["partition"]["n_ranks"] == len(manifest["shards"]) == 3
+        if schema == LEGACY_STATE_SCHEMA:
+            assert manifest["partition"]["n_ranks"] == len(manifest["shards"]) == 3
+        else:
+            # Canonical duals carry no partition; any rank count reads them.
+            assert manifest["schema"] == "fs-objective-vector-5"
+            assert "partition" not in manifest and "shards" not in manifest
         assert [term["id"] for term in manifest["terms"]] == list(labels)
 
 
-def test_saved_sparse_rows_and_missing_legacy_residual(tmp_path):
-    _, problem = _problem(tmp_path, FakeImagingSite(n_ranks=2))
+def _sparse_keys(group, *, drop_residual):
+    keys = group["coordinate_keys"][...]
+    keys[:, 1] *= 2
+    group["coordinate_keys"][...] = keys
+    if drop_residual:
+        del group["objective_residual"]
+
+
+@pytest.mark.parametrize("schema", [FAKE_STATE_SCHEMA, LEGACY_STATE_SCHEMA])
+def test_saved_sparse_rows_and_missing_legacy_residual(tmp_path, schema):
+    _, problem = _problem(tmp_path, FakeImagingSite(n_ranks=2, state_schema=schema))
     lin = problem.linearize()
     # Change keys to a valid sparse/projected coordinate sequence, keeping rows.
     for task in (1, 2):
         path = lin.job.state_file(task)
         manifest = json.loads(path.read_text())
+        if schema == FAKE_STATE_SCHEMA:
+            cache = path.parent / manifest["terms"][0]["cache"]["file"]
+            with h5py.File(cache, "a") as h5:
+                _sparse_keys(h5["terms/0"], drop_residual=task == 2)
+            reseal_state(path)
+            continue
         for entry in manifest["shards"]:
             shard = Path(entry["file"])
             payload = json.loads(shard.read_text())
             cache = Path(payload["terms"][0]["cache"]["file"])
             with h5py.File(cache, "a") as h5:
-                group = h5["terms/0"]
-                keys = group["coordinate_keys"][...]
-                keys[:, 1] *= 2
-                group["coordinate_keys"][...] = keys
-                if task == 2:
-                    del group["objective_residual"]
+                _sparse_keys(h5["terms/0"], drop_residual=task == 2)
             payload["terms"][0]["runtime"]["cache_fingerprint"] = file_sha256(cache)
             shard.write_text(json.dumps(payload))
             entry["sha256"] = file_sha256(shard)

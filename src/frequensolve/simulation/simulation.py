@@ -1,11 +1,14 @@
 """Simulation authoring containers and solver-contract serialization."""
 
 import copy
+import hashlib
 import json
 import logging
+import pickle
+import types
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
+from pathlib import Path, PurePath
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Tuple, Union
 
 import numpy as np
 
@@ -47,6 +50,66 @@ __all__ = [
     "BaseSimulation",
     "SeismicSimulation",
 ]
+
+
+class _NoIdentity(Exception):
+    """A payload object whose pickle need not determine its JSON."""
+
+
+class _IdentityPickler(pickle.Pickler):
+    """Pickle a JSON-like payload, rejecting objects that may encode otherwise.
+
+    Exact JSON types never reach ``reducer_override``; paths and NumPy scalars,
+    with the classes and constructors their reductions name, pickle their
+    whole value. Any other object makes the payload unidentified.
+    """
+
+    _VALUES = (type, types.BuiltinFunctionType, PurePath, np.generic, np.dtype)
+
+    def reducer_override(self, obj: Any) -> Any:
+        if isinstance(obj, self._VALUES):
+            return NotImplemented
+        raise _NoIdentity
+
+
+class _Digest:
+    """Write-only file object hashing what it receives."""
+
+    def __init__(self) -> None:
+        self.hash = hashlib.sha256()
+
+    def write(self, data: Any) -> None:
+        self.hash.update(data)
+
+
+def _payload_identity(payload: Any, options: Any) -> Optional[str]:
+    """Return a SHA-256 identifying a payload and its JSON options, or ``None``.
+
+    Equal identities imply equal JSON documents. Pickling streams into the
+    hash in C, so identifying ``n`` inline coefficients costs a fraction of
+    encoding them as indented JSON.
+    """
+
+    digest = _Digest()
+    try:
+        _IdentityPickler(digest, protocol=5).dump((payload, options))
+    except Exception:
+        return None
+    return digest.hash.hexdigest()
+
+
+def _file_status(path: Path) -> Optional[Tuple[int, ...]]:
+    try:
+        status = path.stat()
+    except OSError:
+        return None
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
 
 
 @register_class
@@ -617,6 +680,11 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     def save(self, **json_kwargs) -> Path:
         """Write the simulation JSON file under this simulation's project path.
 
+        Every job saves its simulation before it runs. When the serialized
+        content equals what this object last wrote to that file and the file
+        is unchanged since, nothing is written again: inline control
+        coefficients make the JSON grow with the number of controls.
+
         Args:
             **json_kwargs: Keyword arguments forwarded to ``json.dump``.
 
@@ -635,6 +703,14 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         indent = json_kwargs.pop("indent", 3)
         ctx = self.export_context()
         payload = self.to_fs(ctx)
+        identity = _payload_identity(payload, (indent, sorted(json_kwargs.items())))
+        if identity is not None and getattr(self, "_saved_identity", None) == (
+            identity,
+            file,
+            _file_status(file),
+        ):
+            return file
+        self._saved_identity = None
         atomic_write_json(
             file,
             payload,
@@ -658,6 +734,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
                     ctx.store.path,
                     reclaimed / (1024**3),
                 )
+        if identity is not None:
+            self._saved_identity = (identity, file, _file_status(file))
         return file
 
     def check(self) -> bool:

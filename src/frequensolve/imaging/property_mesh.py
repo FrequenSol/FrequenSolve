@@ -14,6 +14,30 @@ from scipy.sparse import csr_matrix
 
 __all__ = ["PropertyMesh", "read_reference_vertices"]
 
+
+def read_lumped_mass(path: str | Path, *, material: int, identity: str) -> np.ndarray:
+    """Read exact native support volumes for one immutable constrained basis."""
+    with h5py.File(path, "r") as h5:
+        group = h5["property_space"]
+        if _text(group["identity"]) != identity:
+            raise ValueError("Lumped mass belongs to a different property basis")
+        if "lumped_mass" not in group or "lumped_mass_units" not in group:
+            raise ValueError(
+                "Property artifact has no native lumped mass; regenerate it with the current Sauce build"
+            )
+        if _text(group["lumped_mass_units"]) != "km**D":
+            raise ValueError("Unsupported lumped-mass units")
+        ranges = group["material_ranges"]
+        if not 1 <= material <= len(ranges):
+            raise ValueError("Invalid lumped-mass material group")
+        offset, count = map(int, ranges[material - 1])
+        mass = np.asarray(group["lumped_mass"][offset : offset + count], dtype=float)
+        if len(mass) != count or not np.isfinite(mass).all() or np.any(mass <= 0):
+            raise ValueError("Invalid native lumped-mass vector")
+    mass.flags.writeable = False
+    return mass
+
+
 # Native element kind -> (VTK linear cell type, vertex count).
 _CELLS = {1: (12, 8), 2: (10, 4), 3: (13, 6), 4: (14, 5), 5: (9, 4), 6: (5, 3)}
 
@@ -23,51 +47,44 @@ def _text(dataset: h5py.Dataset) -> str:
     return value.decode().rstrip(" \0") if isinstance(value, bytes) else str(value)
 
 
-def _roots(group: h5py.Group, schema: str, dimension: int) -> Iterator[Any]:
-    """Expose legacy per-root and packed v2 constraints through one layout."""
+def _roots(
+    group: h5py.Group, schema: str, dimension: int, *, reference: bool = False
+) -> Iterator[Any]:
+    """Expose legacy per-root and packed v3 constraints through one layout."""
     if schema == "fs-property-space-1":
         yield from group["roots"].values()
         return
-    meta = np.asarray(group["root_meta"], dtype=int)
-    bounds = np.asarray(group["root_offsets"], dtype=int)
-    if (
-        bounds.shape != (len(meta) + 1, 4)
-        or np.any(bounds[0] != 0)
-        or np.any(np.diff(bounds, axis=0) < 0)
-    ):
-        raise ValueError("Invalid packed property root offsets")
-    for info, lo, hi in zip(meta, bounds[:-1], bounds[1:]):
-        if info[0] == 0:
-            continue
-        p0, e0, g0, l0 = map(int, lo)
-        p1, e1, g1, l1 = map(int, hi)
-        if l1 <= l0 or (p1 - p0) % (l1 - l0):
-            raise ValueError("Invalid packed property root geometry")
-        slots = (p1 - p0) // (l1 - l0)
-        yield {
-            "meta": info,
-            "visualization_points_m": np.asarray(
-                group["visualization_points_m"][p0:p1]
-            ).reshape(l1 - l0, slots, dimension),
-            "visualization_kind": group["visualization_kind"][l0:l1],
-            "offset": np.asarray(group["offset"][p0 : p1 + 1]) - e0,
-            "index": group["index"][e0:e1],
-            "weight": group["weight"][e0:e1],
-            "global_ids": group["global_ids"][g0:g1],
-        }
+    if schema == "fs-property-space-3":
+        yield from _packed_roots(group, dimension, reference=reference)
+        return
+    raise ValueError(f"Unsupported property-space schema {schema!r}")
 
 
-def read_reference_vertices(root: h5py.Group) -> np.ndarray:
+def _packed_roots(
+    group: h5py.Group, dimension: int, *, reference: bool = False
+) -> Iterator[Any]:
+    """Use the shared internal reader; reference operations need no plotting layer."""
+    from ._property_records import PackedPropertyReader
+
+    yield from PackedPropertyReader(group, dimension).roots(
+        reference=reference, visualization=not reference
+    )
+
+
+def read_reference_vertices(root: Any) -> np.ndarray:
     """Decode a root's lossless dyadic vertices to (nodes, corner slots, dimension)."""
-    dataset = root["vertices"]
-    if "encoding" not in dataset.attrs:
-        return np.asarray(dataset, dtype=float)
-    encoding = np.asarray(dataset.attrs["encoding"]).reshape(-1)[0]
-    if isinstance(encoding, bytes):
-        encoding = encoding.decode().rstrip(" \0")
-    if encoding != "dyadic-reference-i32-v1":
-        raise ValueError("Unsupported property vertex encoding")
-    words = np.asarray(dataset)
+    if "reference_vertex_words" in root:
+        words = np.asarray(root["reference_vertex_words"])
+    else:
+        dataset = root["vertices"]
+        if "encoding" not in getattr(dataset, "attrs", {}):
+            return np.asarray(dataset, dtype=float)
+        encoding = np.asarray(dataset.attrs["encoding"]).reshape(-1)[0]
+        if isinstance(encoding, bytes):
+            encoding = encoding.decode().rstrip(" \0")
+        if encoding != "dyadic-reference-i32-v1":
+            raise ValueError("Unsupported property vertex encoding")
+        words = np.asarray(dataset)
     if (
         words.ndim != 1
         or words.dtype.kind != "i"
@@ -137,8 +154,8 @@ class PropertyMesh:
         with h5py.File(path, "r") as h5:
             group = h5["property_space"]
             schema = _text(group["schema"])
-            if schema not in {"fs-property-space-1", "fs-property-space-2"}:
-                raise ValueError("Unsupported property-space schema")
+            if schema not in {"fs-property-space-1", "fs-property-space-3"}:
+                raise ValueError(f"Unsupported property-space schema {schema!r}")
             if _text(group["basis"]) != "continuous-material-h1-linear-v1":
                 raise ValueError("Unsupported property-space basis")
             dimension = int(np.asarray(group["header"])[0])

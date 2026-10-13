@@ -1571,8 +1571,7 @@ class ExtensionLinearization:
                     term_layout=self.data_space.term_layouts(
                         frequency=self.frequencies[task - 1]
                     ),
-                    n_ranks=self.objective_states[task - 1].n_ranks,
-                    schema=self.objective_states[task - 1].vector_schema,
+                    **self.objective_states[task - 1].vector_options(),
                 )
             job = self._action_job(
                 "vjp",

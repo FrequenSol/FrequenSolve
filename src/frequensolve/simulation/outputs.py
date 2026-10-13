@@ -826,6 +826,15 @@ class VtkOutput(Output):
         live model geometry and material transforms. Requires a Sauce build
         supporting the ``property_mesh`` target. Only property items and VTU
         are supported.
+
+        For an assembled imaging covector, pass
+        ``source={"kind": "control_gradient", "control": "vp"}`` without
+        property items. Native export writes binary VTU rank pieces and a PVTU
+        index, with physical coordinates in metres and constrained control
+        coefficients interpolated to leaf vertices. It adds no wave solves.
+        The default gradient divides the assembled covector by constrained
+        lumped mass before interpolation; the raw covector is a separate array.
+        These are per-frequency gradient densities, not physical model updates.
         """
         if not str(space).strip():
             raise ValueError("property_mesh requires a named space")
@@ -953,15 +962,28 @@ class VtkOutput(Output):
                 or any(item.get("kind") != "property" for item in self._items_payload())
             ):
                 raise ValueError("property_mesh supports property items and VTU only")
+        if self.source and self.source.get("kind") == "control_gradient":
+            if self._inferred_target() != "property_mesh" or not self.source.get(
+                "control"
+            ):
+                raise ValueError(
+                    "control_gradient requires a property_mesh target and a control id"
+                )
+            if self.fields or self.properties or self.items:
+                raise ValueError(
+                    "control_gradient exports its covector; do not specify physical fields or properties"
+                )
 
         payload = {
             "_type": "ParaviewOutput",
             "name": self.name,
             "path": self.path,
-            "properties": self.properties,
-            "show_pml": self.show_pml,
-            "writer": self._writer_payload(),
         }
+        # The output-config schema requires an array when present; omit unset properties.
+        if self.properties is not None:
+            payload["properties"] = self.properties
+        payload["show_pml"] = self.show_pml
+        payload["writer"] = self._writer_payload()
         extra = copy.deepcopy(self.extra)
         if self.fields is not None:
             payload["fields"] = _canonical_field_list(self.fields)
@@ -1935,6 +1957,11 @@ prop = output_property
 
 
 class _VtkFactory:
+    @staticmethod
+    def property_mesh(space: str, **kwargs: Any) -> VtkOutput:
+        """Create a visualization request on a frozen material-control mesh."""
+        return VtkOutput.property_mesh(space, **kwargs)
+
     field = staticmethod(field)
     prop = staticmethod(output_property)
     property = staticmethod(output_property)

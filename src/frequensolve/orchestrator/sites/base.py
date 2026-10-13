@@ -4,17 +4,20 @@ import asyncio
 import builtins
 import html
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import (
     Any,
     Awaitable,
     Callable,
+    ClassVar,
     Dict,
     Generator,
     Iterable,
+    List,
     Mapping,
     Optional,
     Protocol,
@@ -186,6 +189,65 @@ def _wait_for_path(
         time.sleep(poll_interval)
         waited += poll_interval
     return path.exists()
+
+
+def _result_relative_paths(relative_paths: Iterable[Any]) -> List[PurePosixPath]:
+    """Validate file paths that must stay inside a job result directory."""
+
+    if isinstance(relative_paths, (str, bytes, os.PathLike)):
+        raise TypeError("relative_paths must be an iterable of paths, not one path")
+    validated = []
+    for value in relative_paths:
+        text = os.fspath(value)
+        if not isinstance(text, str):
+            raise TypeError("result file paths must be text")
+        path = PurePosixPath(text)
+        if (
+            any(character in text for character in ("\0", "\n", "\r", "\\"))
+            or path.is_absolute()
+            or ".." in path.parts
+            or not path.parts
+            or (len(text) > 1 and text[1] == ":" and text[0].isalpha())
+        ):
+            raise ValueError(
+                f"Result file path {text!r} must be a relative '/'-separated "
+                "path inside the job result directory"
+            )
+        validated.append(path)
+    return validated
+
+
+def _remove_emptied_directories(root: Path, relative_paths: Iterable[Any]) -> None:
+    """Remove the directories below ``root`` that removing ``relative_paths`` emptied.
+
+    The parents of every validated path are tried deepest first with
+    ``rmdir``; non-empty directories, symbolic links, ``root`` itself and
+    directories resolving outside ``root`` are kept.
+    """
+
+    resolved = root.resolve()
+    parents = {
+        parent
+        for path in _result_relative_paths(relative_paths)
+        for parent in path.parents
+        if parent.parts
+    }
+    for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+        directory = root.joinpath(*parent.parts)
+        if directory.is_symlink() or resolved not in directory.resolve().parents:
+            continue
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # not empty (or already gone)
+
+
+def _background_layout(value: Any) -> str:
+    """Validate a background checkpoint layout (``"rank"`` or ``"shared"``)."""
+
+    if value not in ("rank", "shared"):
+        raise ValueError(f"background_layout must be 'rank' or 'shared', not {value!r}")
+    return str(value)
 
 
 def _check_if_notebook() -> bool:
@@ -1044,6 +1106,81 @@ class BaseSite:
         verbose: Whether site methods should print status messages in addition
             to logging them.
     """
+
+    supports_curvature = False
+
+    stages_job_inputs: ClassVar[bool] = False
+    """Whether ``submit`` uploads the job's ``remote_input_files`` itself.
+
+    ``True`` on SLURM sites, which transfer them with the job and simulation
+    JSON; callers such as the imaging ``Backend`` then upload nothing.
+    """
+
+    supports_background_reuse: ClassVar[bool] = False
+    """Whether later jobs can reuse ``fwi_operator/background`` checkpoints.
+
+    A ``linearize`` job with a ``background`` output leaves a manifest per
+    task and its HDF5 checkpoint files (one per MPI rank, or one per task with
+    the ``"shared"`` :attr:`background_layout`) in its result directory. A
+    later ``jvp``/``vjp``/``normal`` job naming that background reads them in
+    place, so the site must keep the producer's result directory where the
+    consumer runs, and run each consumer task on the same MPI rank count as
+    the producing task in either layout (otherwise Sauce recomputes the
+    fields). ``True`` on ``LocalSite`` and SLURM sites, whose result
+    directories persist and which run every task reading a partitioned input
+    (saved state, objective vector, receiver state or background) on the rank
+    count its producer recorded. ``False`` here and on ``AWSSite``, whose
+    workers start from fresh storage; workflows must not request backgrounds
+    on such sites.
+    """
+
+    background_layout = "rank"
+    """Files of a background capture (``fwi_operator.background_layout``).
+
+    ``"rank"`` writes one HDF5 file per MPI rank and task without collective
+    I/O; ``"shared"`` writes one file per task through parallel HDF5, keeping
+    the file count independent of the rank count. ``LocalSite`` and SLURM
+    sites take it as their ``background_layout`` option; Sauce's
+    ``FS_BACKGROUND_LAYOUT`` environment variable overrides it.
+    """
+
+    def run_curvature(self, request: Path) -> None:
+        """Execute one Sauce ``--curvature`` request on this site's compute resources.
+
+        Return only after the request's declared ``output`` and a
+        ``solver.log`` beside the request are available locally. Sites may
+        accept keyword resource overrides; the caller verifies the output.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not run Sauce curvature operations; "
+            "use LocalSite or a SLURM site"
+        )
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Delete files below ``job``'s result directory where this site keeps it.
+
+        Args:
+            job: Job whose result directory holds the files.
+            relative_paths: File paths relative to that directory, with ``/``
+                separators. Every path is validated before anything is
+                removed: absolute paths, ``..`` components, backslashes,
+                control characters and paths naming the directory itself
+                raise :class:`ValueError`.
+
+        Missing files are not errors and named directories are never
+        removed; parent directories below the result directory that the
+        removal leaves empty are (``rmdir``, never recursively). ``LocalSite``
+        unlinks the files and SLURM sites remove them on the login node; this
+        base implementation (and ``AWSSite``) only validates the paths,
+        because those sites keep no reusable result files.
+        """
+
+        if _result_relative_paths(relative_paths):
+            logging.getLogger(self.__class__.__module__).debug(
+                "%s keeps no reusable result files; nothing removed for %s",
+                type(self).__name__,
+                getattr(job, "name", job),
+            )
 
     _is_notebook: bool = field(default_factory=_check_if_notebook)
     verbose: bool = False

@@ -1,0 +1,81 @@
+{
+  "schema": "fs-job-1",
+  "name": "reliable_traveltime_blocks",
+  "workflow": "fwi_operator",
+  "simulation": "simulation.json",
+  "result_path": "results/reliable_traveltime_blocks",
+  "Imaging": {
+    "misfit": {
+      "comparison": {
+        "kind": "phase_derivative",
+        "derivative_axis": "frequency",
+        "source_derivative": "frozen",
+        "relative_amplitude_floor": 0.01,
+        "confidence_floor": 0.05,
+        "reliability": "predicted"
+      },
+      "objective": {
+        "kind": "student_t",
+        "nu": 2,
+        "c2": 0.01
+      },
+      "receiver_groups": [
+        {
+          "name": "receivers",
+          "observed": {
+            "_type": "HDF5TraceStore",
+            "file": "observed.h5",
+            "dataset": "receivers"
+          },
+          "observed_derivatives": {
+            "df": {
+              "_type": "HDF5TraceStore",
+              "file": "observed_df.h5",
+              "dataset": "receivers"
+            }
+          },
+          "projection": {
+            "kind": "identity"
+          }
+        }
+      ],
+      "preprocess": {
+        "include_defaults": false
+      }
+    }
+  },
+  "f_list": [
+    4.0
+  ],
+  "fwi_operator": {
+    "action": "linearize",
+    "model_gradient": true,
+    "cache_receiver_state": true,
+    "controls": {
+      "active": [
+        "model.vp",
+        "model.rho"
+      ]
+    },
+    "covector": "gradient.h5",
+    "state": "state.json",
+    "receiver_diagonal": {
+      "probes": 4,
+      "source_samples": 16,
+      "seed": 7,
+      "blocks": {
+        "controls": [
+          "vp",
+          "rho"
+        ],
+        "output": "receiver_blocks.h5"
+      }
+    }
+  },
+  "control_sensitivities": {
+    "active": [
+      "vp",
+      "rho"
+    ]
+  }
+}

@@ -37,13 +37,24 @@ from frequensolve.orchestrator.sites.base import (
     JobStatus,
     RunHandle,
     RunResult,
+    _background_layout,
     _merge_task_status_with_plan,
+    _remove_emptied_directories,
+    _result_relative_paths,
     _wait_for_path,
+)
+from frequensolve.orchestrator.sites.curvature import (
+    OPEN_MPI_UNBOUND,
+    dispatcher_hint,
+    positive_count,
+    read_request,
+    single_rank,
 )
 from frequensolve.orchestrator.sites.local.config import LocalSiteConfig
 from frequensolve.orchestrator.sites.local.dask_logging import (
     configure_dependency_logging,
 )
+from frequensolve.orchestrator.sites.partition import TaskPartition, task_partitions
 from frequensolve.orchestrator.utils.environment import (
     NUMERIC_RUNTIME_DEFAULTS,
     build_subprocess_environment,
@@ -259,10 +270,10 @@ def _read_task_result(
     if result_path is None:
         return None
     job_data = json.loads(Path(job_file).read_text(encoding="utf-8"))
-    if job_data.get("workflow") == "patch_prepare":
+    if job_data.get("workflow") in {"patch_prepare", "transient"}:
         if task_id != 0:
-            raise ArtifactContractError("Patch preparation has exactly one operation")
-        return load_operation_result(result_path, "patch_prepare")
+            raise ArtifactContractError("This workflow has exactly one operation")
+        return load_operation_result(result_path, job_data["workflow"])
     path = task_result_path(result_path, task_id + 1)
     task_result = TaskResult.read(path, result_path=result_path)
     if task_result.partition.task != task_id + 1:
@@ -631,6 +642,10 @@ def run_task(
             "-np",
             f"{n_ranks}",
         ]
+        # Open MPI binds each rank, and all of its threads, to one core, and
+        # concurrent local launches would bind to the same cores. Leave ranks
+        # unbound unless the environment already chose a binding policy.
+        env = {**OPEN_MPI_UNBOUND, **env}
     else:
         args = []
 
@@ -823,6 +838,17 @@ def run_task(
         return result
 
 
+class _HintedProcessError(subprocess.CalledProcessError):
+    """A failed solver process whose message carries an actionable hint."""
+
+    def __init__(self, error: subprocess.CalledProcessError, hint: str) -> None:
+        super().__init__(error.returncode, error.cmd, error.output, error.stderr)
+        self.hint = hint
+
+    def __str__(self) -> str:
+        return f"{super().__str__()} Hint: {self.hint}."
+
+
 @dataclass
 class LocalTaskSubmission:
     """Dask futures and task-plan metadata for one local job submission.
@@ -856,9 +882,111 @@ class LocalSite(BaseSite):
             completes.
         dashboard_host: Hostname used for the Dask dashboard.
         dashboard_port: Dashboard port, or ``0`` to let Dask choose.
+        curvature_ranks: MPI ranks for row-distributed Sauce curvature
+            operations; they share the worker thread budget.
+        background_layout: Files of a background capture, ``"rank"``
+            (default) or ``"shared"`` (see :attr:`BaseSite.background_layout`).
     """
 
     supports_frequency_groups = True
+    supports_curvature = True
+    # Results stay in place; consumers run each task on its producer's ranks.
+    supports_background_reuse = True
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Unlink files below ``job``'s local result directory.
+
+        Paths follow :meth:`BaseSite.remove_result_files`; a path whose
+        parent resolves outside the result directory (through a symbolic
+        link) is rejected as well. Every path is checked before any file is
+        removed; missing files are skipped, directories raise
+        :class:`IsADirectoryError` and emptied parent directories are removed.
+        """
+
+        relative = _result_relative_paths(relative_paths)
+        if not relative:
+            return
+        root = Path(job._result_path)
+        resolved_root = root.resolve()
+        targets = []
+        for path in relative:
+            target = root.joinpath(*path.parts)
+            parent = target.parent.resolve()
+            if parent != resolved_root and resolved_root not in parent.parents:
+                raise ValueError(f"Result file path {str(path)!r} leaves {root}")
+            if target.is_dir() and not target.is_symlink():
+                raise IsADirectoryError(f"Result path {target} is a directory")
+            targets.append(target)
+        for target in targets:
+            target.unlink(missing_ok=True)
+        _remove_emptied_directories(root, relative)
+
+    def run_curvature(
+        self,
+        request: Path,
+        *,
+        ranks: Optional[int] = None,
+        threads_per_rank: Optional[int] = None,
+    ) -> None:
+        """Run one Sauce curvature request on this machine.
+
+        Row-distributed methods launch ``ranks`` MPI processes (default
+        ``curvature_ranks``) through the local MPI launcher, each with
+        ``threads_per_rank`` threads (default: the worker thread budget
+        divided among the ranks). Mesh transfer and sampling always run on one
+        rank with the whole budget. Open MPI's default one-core rank binding is
+        disabled unless the environment configures a binding policy. Sauce
+        writes the declared output and ``solver.log`` beside the request;
+        failures raise :class:`subprocess.CalledProcessError`.
+        """
+
+        request = Path(request)
+        payload = read_request(request)
+        count = positive_count(
+            self.curvature_ranks if ranks is None else ranks, "ranks"
+        )
+        if threads_per_rank is None:
+            budget = self._current_threads_per_worker()
+            per_rank = max(1, budget // count)
+        else:
+            per_rank = positive_count(threads_per_rank, "threads_per_rank")
+            budget = count * per_rank
+        processes, threads = (1, budget) if single_rank(payload) else (count, per_rank)
+        thread_count = str(threads)
+        environment = self.env.copy()
+        for name in (
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "BLIS_NUM_THREADS",
+        ):
+            if name not in self._explicit_environment_keys:
+                environment[name] = thread_count
+        executable = self._solver_executable()
+        command = [executable, "-nthreads", thread_count, "--curvature", str(request)]
+        if processes > 1:
+            # One-core rank binding would squash every rank's threads.
+            for name, value in OPEN_MPI_UNBOUND.items():
+                environment.setdefault(name, value)
+            command = [self.config.mpi_wrapper, "-np", str(processes), *command]
+        log_path = request.parent / "solver.log"
+        try:
+            with log_path.open("w") as log:
+                subprocess.run(
+                    command,
+                    cwd=request.parent,
+                    env=environment,
+                    check=True,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+        except subprocess.CalledProcessError as error:
+            hint = dispatcher_hint(executable, log_path.read_text(errors="replace"))
+            if hint is None:
+                raise
+            raise _HintedProcessError(error, hint) from error
+
     config: LocalSiteConfig = field(init=False)
     executable: Optional[str] = field(init=False)
     env: Dict[str, str] = field(default_factory=dict)
@@ -871,6 +999,8 @@ class LocalSite(BaseSite):
     shutdown_on_completion: bool = True
     dashboard_host: str = "localhost"
     dashboard_port: int = 0
+    curvature_ranks: int = 1
+    background_layout: str = "rank"
 
     _dask_client: Optional[Client] = field(default=None, init=False)
     _dask_cluster: Optional[LocalCluster] = field(default=None, init=False)
@@ -888,6 +1018,11 @@ class LocalSite(BaseSite):
     # ----------------- lifecycle -----------------
 
     def __post_init__(self) -> None:
+        self.curvature_ranks = positive_count(self.curvature_ranks, "curvature_ranks")
+        self.background_layout = _background_layout(self.background_layout)
+        self._explicit_environment_keys = frozenset(self.env) | frozenset(
+            self.environment
+        )
         self.config = LocalSiteConfig()
         self.executable = self._get_solver_path()
         explicit_environment = solver_environment(
@@ -956,9 +1091,16 @@ class LocalSite(BaseSite):
             getattr(job, "supports_trace_packing", True)
         )
         tolerate_failures = _normalize_failure_tolerance(
-            kwargs.pop("tolerate_failures", 4),
+            kwargs.pop(
+                "tolerate_failures",
+                0 if getattr(job, "workflow", None) == "transient" else 4,
+            ),
             default=4,
         )
+        if getattr(job, "workflow", None) == "transient" and tolerate_failures != 0:
+            raise ValueError(
+                "TransientJob requires tolerate_failures=0; incomplete trajectories are failures"
+            )
         shutdown_on_completion = bool(
             kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )
@@ -1820,6 +1962,22 @@ class LocalSite(BaseSite):
                 f"{type(job).__name__} supports at most {max_ranks} MPI rank "
                 f"per task; received {n_ranks}"
             )
+        task_ranks = {
+            index: pin.ranks
+            for index, pin in self._partition_task_ranks(
+                job, pending_indices, n_ranks
+            ).items()
+        }
+        if frequency_groups > 1 and task_ranks:
+            # One shared launch gives every frequency group the same ranks.
+            counts = set(task_ranks.values())
+            if len(counts) > 1:
+                raise ValueError(
+                    f"{job.name} reads inputs written on different MPI rank "
+                    f"counts ({', '.join(map(str, sorted(counts)))}); a shared "
+                    "frequency fit runs every frequency on one count"
+                )
+            n_ranks = counts.pop()
 
         self._ensure_dask_for_tasks(1)
         client = self._dask_client_or_raise()
@@ -1912,7 +2070,7 @@ class LocalSite(BaseSite):
                     i,
                     executable,
                     self.env,
-                    n_ranks=n_ranks,
+                    n_ranks=task_ranks.get(i, n_ranks),
                     n_threads=self._current_threads_per_worker(),
                     stdout_dir=stdout_dir,
                     fresh=fresh_run,
@@ -1931,6 +2089,44 @@ class LocalSite(BaseSite):
         return LocalTaskSubmission(
             futures=futures, task_plan=task_plan, mesh_result=mesh_result
         )
+
+    def _partition_task_ranks(
+        self, job: BaseJob, pending_indices: Iterable[int], n_ranks: int
+    ) -> Dict[int, TaskPartition]:
+        """Return the producer's rank count for tasks reading partitioned inputs.
+
+        Keys are zero-based task indices. Sauce reads a saved input that
+        records its rank partition (see
+        :mod:`frequensolve.orchestrator.sites.partition`) only on the rank
+        count that wrote it, so these tasks ignore ``procs_per_job``.
+
+        Raises:
+            ValueError: If a required count exceeds ``max_ranks_per_task``.
+        """
+
+        max_ranks = getattr(job, "max_ranks_per_task", None)
+        pins: Dict[int, TaskPartition] = {}
+        for task, partition in task_partitions(
+            job, [index + 1 for index in pending_indices]
+        ).items():
+            if max_ranks is not None and partition.ranks > max_ranks:
+                message = (
+                    f"{job.name} task {task} reads {', '.join(partition.inputs)} "
+                    f"written on {partition.ranks} MPI ranks, above the job's "
+                    f"limit of {max_ranks}"
+                )
+                if partition.required:
+                    raise ValueError(message)
+                self._emit(f"{message}; not pinned", level=logging.WARNING)
+                continue
+            pins[task - 1] = partition
+        moved = sorted(index + 1 for index, pin in pins.items() if pin.ranks != n_ranks)
+        if moved:
+            self._emit(
+                f"{job.name}: running task(s) {', '.join(map(str, moved))} on the "
+                "MPI rank counts that wrote their saved inputs"
+            )
+        return pins
 
     def fetch_traces(
         self,

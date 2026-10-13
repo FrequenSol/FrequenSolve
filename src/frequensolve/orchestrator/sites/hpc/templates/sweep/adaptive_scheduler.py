@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Union
@@ -28,6 +30,65 @@ _STEP_LABELS = {
     "smooth": "Solver postprocess",
     "pack": "Packing",
 }
+_MPIRUN_LAUNCHERS = frozenset({"mpiexec", "mpirun"})
+# "cores": map each mpirun/mpiexec rank onto its OpenMP threads' cores (Open MPI
+# on Linux); "none": ranks stay unbound; "launcher"/"explicit": add nothing.
+RANK_BINDINGS = ("launcher", "cores", "none", "explicit")
+# Rank zero signals that Slurm has actually started the step, before exec.
+# No Python interpreter or controller query is needed on the worker ranks.
+_SLURM_START = (
+    'if [ "${SLURM_PROCID:-}" = 0 ]; then '
+    'printf \'%s\\n\' "${SLURM_STEP_ID:-unknown}" > "$1.tmp" '
+    '&& mv "$1.tmp" "$1" || exit 1; fi; shift; exec "$@"'
+)
+# GPU nodes: concurrent tasks are separate MPI jobs whose ranks all start at
+# local rank 0, so the solver's local-rank device choice would stack them on
+# the same GPUs. Each rank instead selects the device under its allocation slot
+# (task offset + rank, block-placed by ibrun -o and srun's arbitrary hostfile)
+# through the solver's FS_GPU_DEVICE override. Arguments: offset, ranks per
+# node, GPUs per node.
+_GPU_PLACE = (
+    "slot=$(($1 + ${PMI_RANK:-${SLURM_PROCID:-0}})); "
+    "FS_GPU_DEVICE=$((slot % $2 * $3 / $2)); export FS_GPU_DEVICE; "
+    'shift 3; exec "$@"'
+)
+
+
+def write_gpu_place_script(directory: Union[str, Path]) -> str:
+    """Write the executable ``fs-gpu-place`` wrapper and return its path.
+
+    Launch commands carry only words: TACC's ibrun re-splits its arguments,
+    so an inline ``sh -c`` script would reach the shell broken.
+    """
+
+    path = Path(directory) / "fs-gpu-place"
+    text = f"#!/bin/sh\n{_GPU_PLACE}\n"
+    try:
+        if path.read_text() == text and os.access(path, os.X_OK):
+            return str(path)
+    except OSError:
+        pass
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text)
+    temporary.chmod(0o755)
+    os.replace(temporary, path)
+    return str(path)
+
+
+def _slurm_counts(value: str, nodes: int) -> list[int]:
+    """Expand Slurm's per-node counts, e.g. ``8(x3),4``; never guess a layout."""
+    counts = []
+    for item in value.split(","):
+        match = re.fullmatch(r"\s*(\d+)(?:\(x(\d+)\))?\s*", item)
+        if match is None:
+            raise ValueError(f"Invalid Slurm per-node counts: {value!r}")
+        count, repeat = int(match[1]), int(match[2] or 1)
+        if repeat < 1 or len(counts) + repeat > nodes:
+            raise ValueError("Slurm per-node counts do not match the node list")
+        counts.extend([count] * repeat)
+    if len(counts) != nodes:
+        raise ValueError("Slurm per-node counts do not match the node list")
+    return counts
 
 
 def _parse_args() -> argparse.Namespace:
@@ -43,6 +104,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--log", default="")
     parser.add_argument("--return-code", type=int, default=1)
     parser.add_argument("--not-before", type=float, default=0.0)
+    parser.add_argument(
+        "--rank-binding",
+        choices=RANK_BINDINGS,
+        default="explicit",
+        help="How the sweep places mpirun/mpiexec ranks (see adaptive_sweep.sh)",
+    )
     args = parser.parse_args()
     if args.record_failure:
         if args.status is None:
@@ -313,7 +380,15 @@ def _free_interval(intervals, offset: int, ranks: int):
 
 
 class AdaptiveScheduler:
-    def __init__(self, config, *, job_file: str, output: str, status: str):
+    def __init__(
+        self,
+        config,
+        *,
+        job_file: str,
+        output: str,
+        status: str,
+        rank_binding: str = "explicit",
+    ):
         self.config = config
         self.job_file = job_file
         self.output = Path(output)
@@ -322,6 +397,9 @@ class AdaptiveScheduler:
         self.mpi = str(config.get("mpi", "ibrun"))
         self.mpi_args = [str(value) for value in config.get("mpi_args", [])]
         self.mpi_launcher = Path(self.mpi).name
+        if rank_binding not in RANK_BINDINGS:
+            raise ValueError(f"unsupported rank binding: {rank_binding}")
+        self.rank_binding = rank_binding
         self.fresh_flag = ["--fresh"] if config.get("fresh") else []
         self.total_ranks = int(config["total_ranks"])
         self.omp_threads = int(config["omp_threads"])
@@ -330,6 +408,8 @@ class AdaptiveScheduler:
         self.task_indices = [int(value) for value in config.get("task_indices", [])]
         self.skip_sizing = bool(config.get("skip_sizing", False))
         self.min_ranks = int(config.get("min_ranks", 1))
+        if self.min_ranks < 1:
+            raise ValueError("min_ranks must be positive")
         self.round_to = int(config.get("round_to", 1))
         self.cap_fraction = float(config.get("cap_fraction", 1.0))
         self.mem_cushion = float(config.get("mem_cushion", 1.5))
@@ -341,6 +421,10 @@ class AdaptiveScheduler:
         # A frequency postprocess consumes every task, so any failure is fatal.
         self.require_all_tasks = bool(config.get("require_all_tasks", False))
         self.launch_delay = float(config.get("launch_delay_seconds", 0.25))
+        self.ranks_per_node = int(config.get("ranks_per_node", 0))
+        self.gpus_per_node = int(config.get("gpus_per_node", 0))
+        if self.ranks_per_node < 0 or self.gpus_per_node < 0:
+            raise ValueError("ranks_per_node and gpus_per_node must not be negative")
         self.max_ranks_per_task = (
             self.total_ranks
             if self.skip_sizing
@@ -350,16 +434,35 @@ class AdaptiveScheduler:
         if rank_limit < 1 or self.min_ranks > rank_limit:
             raise ValueError("max_ranks_per_task must be positive and >= min_ranks")
         self.max_ranks_per_task = min(self.max_ranks_per_task, rank_limit)
-        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+        if self.mpi_launcher in _MPIRUN_LAUNCHERS:
             # These launchers cannot isolate concurrent steps within an allocation.
             self.max_ranks_per_task = min(self.total_ranks, rank_limit)
+        # Tasks that restore a background checkpoint run on exactly the rank
+        # count that wrote it; sizing, boosts and leftover ranks never apply.
+        self.task_ranks: Dict[int, int] = {
+            int(task): int(ranks)
+            for task, ranks in dict(config.get("task_ranks") or {}).items()
+        }
+        pin_limit = min(self.total_ranks, rank_limit)
+        for task, ranks in sorted(self.task_ranks.items()):
+            if not 1 <= ranks <= pin_limit:
+                raise ValueError(
+                    f"task {task} is pinned to {ranks} ranks; this sweep runs "
+                    f"tasks on 1 to {pin_limit} ranks"
+                )
         self.running = []
         self.successful_tasks = []
         self.failed_tasks = []
         self.failed_reasons: Dict[int, str] = {}
         self.launched_at: Dict[int, float] = {}
+        self.launched_ranks: Dict[int, int] = {}
+        self._slurm_hosts: Optional[list[str]] = None
+        self._start_files: Dict[int, Path] = {}
+        self._started_steps: Dict[int, str] = {}
+        self._launch_clocks: Dict[int, float] = {}
+        self._wait_warnings: Dict[int, float] = {}
         self.free_intervals = [(0, self.total_ranks)]
-        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+        if self.mpi_launcher in _MPIRUN_LAUNCHERS:
             self.free_intervals = [(0, self.max_ranks_per_task)]
 
     def _load_task_memory(self):
@@ -367,9 +470,11 @@ class AdaptiveScheduler:
             return [0.0] * max(self.job_task_count, max(self.task_indices, default=1))
         return _load_task_memory_file(self.sizing_json)
 
-    def _choose_base_ranks(self, task_memory: float) -> int:
-        if self.mpi_launcher in {"mpiexec", "mpirun"}:
+    def _choose_base_ranks(self, task_memory: float, task: Optional[int] = None) -> int:
+        if self.mpi_launcher in _MPIRUN_LAUNCHERS:
             return self.max_ranks_per_task
+        if task in self.task_ranks:
+            return self.task_ranks[task]
         ranks = int(math.ceil(task_memory * self.mem_cushion / self.mem_per_rank))
         ranks = max(ranks, self.min_ranks)
         ranks = min(ranks, self.max_ranks_per_task, self.total_ranks)
@@ -378,6 +483,103 @@ class AdaptiveScheduler:
             max(ranks, self.min_ranks), self.total_ranks, self.max_ranks_per_task
         )
 
+    def _balanced_idle_plan(self, candidates):
+        """Reserve every pending minimum, then balance estimated work per rank.
+
+        Memory is a cost proxy, not a runtime prediction. Only rebalance a fully
+        idle allocation when the whole pending cohort fits; running tasks retain
+        their ranks and the existing backfilling policy.
+        """
+        if (
+            not candidates
+            or self.running
+            or self.mpi_launcher in _MPIRUN_LAUNCHERS
+            or self.free_intervals != [(0, self.total_ranks)]
+        ):
+            return None
+        ranks = [minimum for _, minimum, _, _ in candidates]
+        spare = self.total_ranks - sum(ranks)
+        if spare < 0:
+            return None
+        limits = []
+        weights = []
+        for task, minimum, _, memory in candidates:
+            limit = self.max_ranks_per_task
+            if task in self.task_ranks:
+                limit = minimum
+            elif len(candidates) > 1:
+                limit = min(limit, math.ceil(max(2.0, self.boost_max_factor) * minimum))
+            limits.append(limit)
+            weights.append(memory if memory > 0 else 1.0)
+        # Grant the next rank quantum to the task with the largest work/rank.
+        # The heap costs O(granted ranks * log(tasks)); no rank-count search.
+        heap = [
+            (-weights[i] / ranks[i], i)
+            for i in range(len(ranks))
+            if ranks[i] < limits[i]
+        ]
+        heapq.heapify(heap)
+        while spare and heap:
+            _, i = heapq.heappop(heap)
+            increment = (
+                min(_round_up(ranks[i] + 1, self.round_to), limits[i]) - ranks[i]
+            )
+            if increment > spare:
+                continue
+            ranks[i] += increment
+            spare -= increment
+            if ranks[i] < limits[i]:
+                heapq.heappush(heap, (-weights[i] / ranks[i], i))
+        plan = []
+        offset = 0
+        for (task, _, _, memory), count in zip(candidates, ranks):
+            plan.append((task, offset, count, memory))
+            offset += count
+        return plan
+
+    def _plan_launches(self, candidates):
+        """Balance an idle cohort, otherwise preserve greedy interval backfilling."""
+        balanced = self._balanced_idle_plan(candidates)
+        if balanced is not None:
+            return balanced
+        simulated = list(self.free_intervals)
+        plan = []
+        chosen = set()
+        boost_pool = sorted(
+            candidates, key=lambda item: (item[2], item[3]), reverse=True
+        )
+        while True:
+            best = None
+            best_metric = None
+            for task, _, maximum, task_memory in boost_pool:
+                if task in chosen:
+                    continue
+                offset, updated = _allocate_interval(simulated, maximum)
+                if offset is None:
+                    continue
+                metric = (
+                    _total_free_ranks(updated),
+                    max((length for _, length in updated), default=0),
+                )
+                if best is None or metric < best_metric:
+                    best = (task, offset, maximum, task_memory, updated)
+                    best_metric = metric
+            if best is None:
+                break
+            task, offset, maximum, task_memory, simulated = best
+            plan.append((task, offset, maximum, task_memory))
+            chosen.add(task)
+        for task, minimum, _, task_memory in sorted(
+            (item for item in candidates if item[0] not in chosen),
+            key=lambda item: item[1],
+            reverse=True,
+        ):
+            offset, updated = _allocate_interval(simulated, minimum)
+            if offset is not None:
+                plan.append((task, offset, minimum, task_memory))
+                simulated = updated
+        return plan
+
     def _write_status(
         self,
         state: str,
@@ -385,7 +587,30 @@ class AdaptiveScheduler:
         aborted: Optional[Iterable[int]] = None,
         reason: Optional[str] = None,
     ) -> None:
-        running = [entry[3] for entry in self.running]
+        active = [entry[3] for entry in self.running]
+        launching = []
+        waiting = []
+        now = time.monotonic()
+        for task in active:
+            if self.mpi_launcher != "srun" or task in self._started_steps:
+                continue
+            try:
+                self._started_steps[task] = self._start_files[task].read_text().strip()
+                continue
+            except FileNotFoundError:
+                pass
+            launching.append(task)
+            elapsed = now - self._launch_clocks[task]
+            if elapsed >= 60:
+                waiting.append(task)
+                if now - self._wait_warnings.get(task, self._launch_clocks[task]) >= 60:
+                    print(
+                        f"[scheduler] task={task} waiting for Slurm step startup "
+                        f"for {elapsed:.0f}s; see task_{task}.log",
+                        flush=True,
+                    )
+                    self._wait_warnings[task] = now
+        running = [task for task in active if task not in launching]
         complete = len(self.successful_tasks) + len(self.failed_tasks)
         payload = {
             "state": state,
@@ -393,7 +618,11 @@ class AdaptiveScheduler:
             "successful": len(self.successful_tasks),
             "failed": len(self.failed_tasks),
             "running": len(running),
-            "pending": max(0, len(self.task_indices) - complete - len(running)),
+            "pending": max(0, len(self.task_indices) - complete - len(active)),
+            "launching": len(launching),
+            "launching_tasks": launching,
+            "waiting_for_step_tasks": waiting,
+            "step_ids": {str(task): step for task, step in self._started_steps.items()},
             "complete": complete,
             "running_tasks": running,
             "successful_tasks": self.successful_tasks,
@@ -406,34 +635,181 @@ class AdaptiveScheduler:
             payload["failed_reasons"] = {
                 str(task): reason for task, reason in self.failed_reasons.items()
             }
+        if self.launched_ranks:
+            # MPI ranks each launched task ran on, for run records.
+            payload["task_ranks"] = {
+                str(task): ranks for task, ranks in self.launched_ranks.items()
+            }
         if reason:
             payload["abort_reason"] = reason
         _write_json_atomic(self.status_file, payload)
+
+    def _launch_ranks(self, task_id: int, ranks: int) -> int:
+        """Return the ranks a task runs on within its ``ranks`` allocated slots.
+
+        mpirun/mpiexec tasks hold the whole allocation, even when pinned to
+        fewer ranks; other launchers allocate exactly the pinned count.
+        """
+
+        if self.mpi_launcher in _MPIRUN_LAUNCHERS:
+            return min(ranks, self.task_ranks.get(task_id, ranks))
+        return ranks
+
+    def _slurm_rank_hosts(self, offset: int, ranks: int) -> list[str]:
+        """Map logical slots to allocation hosts once, including unequal capacities.
+
+        Pending launches retain their slots. Slurm assigns disjoint CPUs within
+        each host with --exclusive --exact; completed steps release the same slots.
+        """
+        if self._slurm_hosts is None:
+            if int(os.environ.get("SLURM_HET_SIZE", "1")) > 1:
+                raise ValueError("Adaptive scheduling requires one Slurm job component")
+            nodelist = os.environ.get("SLURM_JOB_NODELIST")
+            if not nodelist:
+                raise ValueError("srun adaptive scheduling requires SLURM_JOB_NODELIST")
+            hosts = subprocess.check_output(
+                ["scontrol", "show", "hostnames", nodelist], text=True, timeout=30
+            ).split()
+            if not hosts or len(set(hosts)) != len(hosts):
+                raise ValueError("Slurm allocation has an empty or duplicate node list")
+            if os.environ.get("SLURM_TASKS_PER_NODE"):
+                counts = _slurm_counts(os.environ["SLURM_TASKS_PER_NODE"], len(hosts))
+            elif os.environ.get("SLURM_NTASKS_PER_NODE"):
+                counts = [int(os.environ["SLURM_NTASKS_PER_NODE"])] * len(hosts)
+            else:
+                raise ValueError("Slurm allocation is missing per-node task counts")
+            if any(count < 0 for count in counts) or sum(counts) != self.total_ranks:
+                raise ValueError("Slurm allocation does not match scheduler rank slots")
+            if os.environ.get("SLURM_JOB_CPUS_PER_NODE"):
+                cpus = _slurm_counts(os.environ["SLURM_JOB_CPUS_PER_NODE"], len(hosts))
+                if any(n * self.omp_threads > c for n, c in zip(counts, cpus)):
+                    raise ValueError(
+                        "Slurm allocation has insufficient CPUs for task threads"
+                    )
+            self._slurm_hosts = [
+                host for host, n in zip(hosts, counts) for _ in range(n)
+            ]
+        if offset < 0 or ranks < 1 or offset + ranks > len(self._slurm_hosts):
+            raise ValueError("Task rank interval is outside the Slurm allocation")
+        return self._slurm_hosts[offset : offset + ranks]
+
+    def _launch_environment(self):
+        env = os.environ.copy()
+        if self.mpi_launcher == "srun":
+            # Do not inherit allocation-wide constraints into a sub-allocation.
+            # Keep job identity, CPU binding, MPI transport and memory settings.
+            for name in (
+                "SLURM_NNODES",
+                "SLURM_JOB_NUM_NODES",
+                "SLURM_NODELIST",
+                "SLURM_NTASKS",
+                "SLURM_NPROCS",
+                "SLURM_NTASKS_PER_NODE",
+                "SLURM_TASKS_PER_NODE",
+                "SLURM_NTASKS_PER_SOCKET",
+                "SLURM_NTASKS_PER_CORE",
+                "SLURM_HOSTFILE",
+                "SLURM_DISTRIBUTION",
+                "SLURM_DIST_PLANESIZE",
+                "SLURM_RELATIVE",
+                "SLURM_EXCLUDE",
+                "SLURM_OVERLAP",
+                "SLURM_NODEFILE",
+            ):
+                env.pop(name, None)
+        return env
 
     def _launch_command(self, task_id: int, offset: int, ranks: int) -> list[str]:
         if self.mpi_launcher == "ibrun":
             prefix = [self.mpi, "-n", str(ranks), "-o", str(offset), "task_affinity"]
         elif self.mpi_launcher == "srun":
+            for arg in self.mpi_args:
+                if (
+                    arg.split("=", 1)[0]
+                    in {
+                        "--nodes",
+                        "--nodelist",
+                        "--nodefile",
+                        "--exclude",
+                        "--relative",
+                        "--ntasks-per-node",
+                        "--ntasks-per-socket",
+                        "--ntasks-per-core",
+                        "--overlap",
+                        "--overcommit",
+                    }
+                    or arg.startswith(("-N", "-w", "-x", "-r"))
+                    or arg == "-O"
+                ):
+                    raise ValueError(
+                        f"mpi_args conflicts with adaptive Slurm placement: {arg}"
+                    )
+            hosts = self._slurm_rank_hosts(offset, ranks)
+            hostfile = (self.output / f"task_{task_id}.hosts").resolve()
+            hostfile.write_text("\n".join(hosts) + "\n")
+            self._start_files.setdefault(
+                task_id,
+                (self.output / f"task_{task_id}.{uuid.uuid4().hex}.started").resolve(),
+            )
             prefix = [
                 self.mpi,
                 "--exclusive",
+                "--exact",
+                "--distribution=arbitrary",
+                "--nodelist=" + str(hostfile),
                 "--ntasks",
                 str(ranks),
                 "--cpus-per-task",
                 str(self.omp_threads),
             ]
-        elif self.mpi_launcher in {"mpiexec", "mpirun"}:
+        elif self.mpi_launcher in _MPIRUN_LAUNCHERS:
             if offset != 0 or ranks != self.max_ranks_per_task:
                 raise SystemExit(
                     f"{self.mpi_launcher} task launch requires exclusive use of the allocation"
                 )
-            prefix = [self.mpi, "-n", str(ranks)]
+            prefix = [self.mpi, "-n", str(self._launch_ranks(task_id, ranks))]
+            if self.rank_binding == "cores":
+                # Open MPI binds each rank to one core by default, squashing
+                # its OpenMP threads; give every rank omp_threads cores.
+                prefix += [
+                    "--map-by",
+                    f"slot:PE={self.omp_threads}",
+                    "--bind-to",
+                    "core",
+                ]
         else:
             raise SystemExit(f"unsupported MPI launcher: {self.mpi_launcher}")
+        startup = (
+            [
+                "/bin/sh",
+                "-c",
+                _SLURM_START,
+                "fs-task-start",
+                str(self._start_files[task_id]),
+            ]
+            if self.mpi_launcher == "srun"
+            else []
+        )
+        # mpirun/mpiexec tasks hold the whole allocation, so local ranks already
+        # map onto distinct GPUs.
+        placement = (
+            [
+                write_gpu_place_script(self.output),
+                str(offset),
+                str(self.ranks_per_node),
+                str(self.gpus_per_node),
+            ]
+            if self.gpus_per_node > 0
+            and self.ranks_per_node > 0
+            and self.mpi_launcher not in _MPIRUN_LAUNCHERS
+            else []
+        )
         return [
             prefix[0],
             *self.mpi_args,
             *prefix[1:],
+            *startup,
+            *placement,
             self.executable,
             "-nthreads",
             str(self.omp_threads),
@@ -458,17 +834,25 @@ class AdaptiveScheduler:
 
     def _launch(self, task_id: int, offset: int, ranks: int, memory: float):
         self.launched_at[task_id] = time.time()
-        output = open(self.output / f"task_{task_id}.log", "ab", buffering=0)
+        self._launch_clocks[task_id] = time.monotonic()
         command = self._launch_command(task_id, offset, ranks)
+        output = open(self.output / f"task_{task_id}.log", "ab", buffering=0)
         try:
-            process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(
+                command,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                env=self._launch_environment(),
+            )
         except Exception:
             output.close()
             raise
         self.running.append((process, offset, ranks, task_id, memory, output))
+        self.launched_ranks[task_id] = self._launch_ranks(task_id, ranks)
         print(
             f"[scheduler] launch task={task_id} mem≈{memory:.2f}GiB "
-            f"offset={offset} ranks={ranks}",
+            f"offset={offset} ranks={self.launched_ranks[task_id]}"
+            + (" (pinned)" if task_id in self.task_ranks else ""),
             flush=True,
         )
         time.sleep(self.launch_delay)
@@ -511,9 +895,14 @@ class AdaptiveScheduler:
         ]
         if bad:
             raise SystemExit(f"invalid task indices: {bad}")
-        if self.skip_sizing and len(self.task_indices) != 1:
+        if (
+            self.skip_sizing
+            and len(self.task_indices) != 1
+            and not set(self.task_indices) <= set(self.task_ranks)
+        ):
             raise SystemExit(
-                "--init-no-size scheduling requires exactly one submitted task"
+                "--init-no-size scheduling requires exactly one submitted task "
+                "or pinned ranks for every task"
             )
 
         queue = deque(
@@ -529,7 +918,12 @@ class AdaptiveScheduler:
             candidates = []
             remaining = len(queue) + len(self.running)
             for task in list(queue):
-                base = self._choose_base_ranks(memory[task - 1])
+                base = self._choose_base_ranks(memory[task - 1], task)
+                if task in self.task_ranks and self.mpi_launcher not in (
+                    _MPIRUN_LAUNCHERS
+                ):
+                    candidates.append((task, base, base, memory[task - 1]))
+                    continue
                 maximum = base
                 if len(queue) == 1:
                     maximum = free_ranks
@@ -551,45 +945,7 @@ class AdaptiveScheduler:
                 )
                 candidates.append((task, minimum, maximum, memory[task - 1]))
 
-            simulated = list(self.free_intervals)
-            plan = []
-            chosen = set()
-
-            boost_pool = sorted(
-                candidates, key=lambda item: (item[2], item[3]), reverse=True
-            )
-            while True:
-                best = None
-                best_metric = None
-                for task, _, maximum, task_memory in boost_pool:
-                    if task in chosen:
-                        continue
-                    offset, updated = _allocate_interval(simulated, maximum)
-                    if offset is None:
-                        continue
-                    metric = (
-                        _total_free_ranks(updated),
-                        max((length for _, length in updated), default=0),
-                    )
-                    if best is None or metric < best_metric:
-                        best = (task, offset, maximum, task_memory, updated)
-                        best_metric = metric
-                if best is None:
-                    break
-                task, offset, maximum, task_memory, simulated = best
-                plan.append((task, offset, maximum, task_memory))
-                chosen.add(task)
-
-            for task, minimum, _, task_memory in sorted(
-                (item for item in candidates if item[0] not in chosen),
-                key=lambda item: item[1],
-                reverse=True,
-            ):
-                offset, updated = _allocate_interval(simulated, minimum)
-                if offset is not None:
-                    plan.append((task, offset, minimum, task_memory))
-                    simulated = updated
-
+            plan = self._plan_launches(candidates)
             for task, _, ranks, task_memory in plan:
                 queue.remove(task)
                 offset, self.free_intervals = _allocate_interval(
@@ -597,7 +953,10 @@ class AdaptiveScheduler:
                 )
                 if offset is None:
                     raise RuntimeError("Adaptive scheduler allocation mismatch")
-                self._launch(task, offset, ranks, task_memory)
+                try:
+                    self._launch(task, offset, ranks, task_memory)
+                except Exception as exc:
+                    self._abort(f"task {task} launch failed: {exc}")
                 launched = True
 
             if self.running:
@@ -674,6 +1033,7 @@ def main() -> None:
         job_file=args.job,
         output=args.output,
         status=args.status,
+        rank_binding=args.rank_binding,
     ).run()
 
 

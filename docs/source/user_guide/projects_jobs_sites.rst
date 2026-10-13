@@ -223,6 +223,8 @@ a site will stage.
 Jobs
 ----
 
+For direct physical-time propagation, use :doc:`transient`.
+
 ``TimeDomainJob`` defines a frequency sweep and reconstructs :term:`time-domain`
 traces through the trace API. ``FrequencyDomainJob`` runs explicit frequencies
 and is the normal place to request :term:`ParaView output`:

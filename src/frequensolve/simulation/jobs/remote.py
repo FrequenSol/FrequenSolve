@@ -8,11 +8,23 @@ the staged payloads on local, cloud, or HPC execution sites.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from frequensolve.model.property import rsf_binary_path
-from frequensolve.simulation.simulation import CustomJSONEncoder
+from frequensolve.simulation.simulation import CustomJSONEncoder, _file_status
+from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.mixins import ExportContext
 from frequensolve.util.store import compact_hdf5_file
 
@@ -33,6 +45,141 @@ _PROJECT_FILE_REFERENCE_KEYS = frozenset(
 )
 
 _STAGED_PROVENANCE_SCHEMA = "fs-staged-provenance-1"
+
+# Saved objective states and vectors: Sauce writes them with their payloads
+# (caches, vector data) into a job result directory.
+_OBJECTIVE_MANIFESTS = ("fs-objective-linearization-", "fs-objective-vector-")
+# Vector manifests whose payload references staging rewrites.
+_OBJECTIVE_VECTORS = frozenset(
+    {"fs-objective-vector-3", "fs-objective-vector-4", "fs-objective-vector-5"}
+)
+# Run-record states after which a site's result directory may no longer hold
+# the outputs fetched from an earlier run (SLURM finalizes successful batch
+# runs as "complete"; attached runs keep "running").
+_FAILED_RUNS = frozenset({"failed", "cancelled", "timeout"})
+
+# Jobs sharing an unchanged saved simulation stage one remote copy of it.
+# (simulation file, mapping roots) -> (its status, staged copy, copy status, digest)
+_STAGED_SIMULATIONS: Dict[Tuple[str, ...], Tuple[Any, Path, Any, str]] = {}
+# Saved simulation path -> (status, payload without numbers) for input scans.
+_SIMULATION_SKELETONS: Dict[str, Tuple[Any, Any]] = {}
+
+
+def _reference_skeleton(value: Any) -> Any:
+    """Return ``value`` without numbers, all that file and project-root scans read.
+
+    Inline control coefficients make a simulation payload O(controls); its
+    file references and project roots are strings.
+    """
+
+    if isinstance(value, Mapping):
+        return {key: _reference_skeleton(item) for key, item in value.items()}
+    if isinstance(value, list):
+        kept = (
+            _reference_skeleton(item)
+            for item in value
+            if not isinstance(item, (int, float))
+        )
+        return [item for item in kept if item != []]
+    return value
+
+
+def _simulation_skeleton(path: Path) -> Any:
+    """Read a saved simulation's reference skeleton, once per file status."""
+
+    status = _file_status(path)
+    cached = _SIMULATION_SKELETONS.get(str(path))
+    if status is not None and cached is not None and cached[0] == status:
+        return cached[1]
+    with open(path, "r") as f:
+        skeleton = _reference_skeleton(json.load(f))
+    if status is not None:
+        _SIMULATION_SKELETONS[str(path)] = (status, skeleton)
+    return skeleton
+
+
+def _recorded_outputs(result_dir: Path) -> Dict[str, int]:
+    """Return ``{relative path: bytes}`` of the outputs a result's task catalog records."""
+
+    from frequensolve.simulation.artifact_contract import (
+        ArtifactCatalog,
+        ArtifactContractError,
+    )
+    from frequensolve.simulation.task_index import TaskIndex, task_index_path
+
+    try:
+        if task_index_path(result_dir).is_file():
+            records = TaskIndex.read(result_dir).query()
+        else:
+            tasks = sorted(
+                int(path.parent.name[len("task_") :])
+                for path in (result_dir / "_fs_run" / "tasks").glob(
+                    "task_*/result.json"
+                )
+                if path.parent.name[len("task_") :].isdigit()
+            )
+            records = ArtifactCatalog.read_task_results(result_dir, tasks=tasks).query()
+    except (ArtifactContractError, OSError, ValueError, KeyError, TypeError):
+        return {}
+    return {record.relative_path: int(record.bytes) for record in records}
+
+
+def _resident_output(
+    local: Path, remote: Path, remote_project: Path, cache: Dict[Path, Any]
+) -> bool:
+    """Return whether ``local`` is a fetched copy of a solver output at ``remote``.
+
+    True when the nearest job result directory holding ``local`` was run on
+    this site's project (its latest run record there has ``work_dir`` equal
+    to ``remote_project``, did not fail, and places the result directory so
+    that ``local`` maps to ``remote``), and its committed task catalog, which
+    records outputs of successful tasks, lists ``local`` with its current
+    size. Client-written inputs beside the outputs (operator inputs under a
+    linearization's directory) are not recorded and are uploaded.
+    """
+
+    result_dir = next(
+        (parent for parent in local.parents if (parent / "_fs_run").is_dir()), None
+    )
+    if result_dir is None:
+        return False
+    if result_dir not in cache:
+        remote_dir = None
+        try:
+            payload = json.loads((result_dir / "_fs_run" / "runs.json").read_text())
+            records = payload.get("runs") if isinstance(payload, Mapping) else payload
+            runs = sorted(
+                (
+                    record
+                    for record in records or ()
+                    if isinstance(record, Mapping)
+                    and Path(str(record.get("work_dir"))) == remote_project
+                ),
+                key=lambda record: str(
+                    record.get("updated_at") or record.get("submitted_at") or ""
+                ),
+            )
+            if runs and runs[-1].get("status") not in _FAILED_RUNS:
+                remote_dir = Path(str(runs[-1]["result_dir"]))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            remote_dir = None
+        cache[result_dir] = (
+            remote_dir,
+            _recorded_outputs(result_dir) if remote_dir is not None else {},
+        )
+    remote_dir, recorded = cache[result_dir]
+    if remote_dir is None:
+        return False
+    relative = local.relative_to(result_dir)
+    size = recorded.get(relative.as_posix())
+    try:
+        return (
+            remote_dir / relative == remote
+            and size is not None
+            and local.stat().st_size == size
+        )
+    except OSError:
+        return False
 
 
 class JobRemoteMixin:
@@ -168,21 +315,6 @@ class JobRemoteMixin:
         self.save()
         local_layout = self._saved_layout()
         remote_layout = local_layout.with_project(remote_project)
-        with open(local_layout.simulation_file, "r") as f:
-            data = json.load(f)
-        source_projects = self._remote_source_projects(local_layout, data)
-        data = self._map_payload_project_roots(
-            data,
-            source_projects=source_projects,
-            target_project=remote_layout.project,
-        )
-        data["project_path"] = str(remote_layout.project)
-        self._assert_remote_payload_has_no_local_roots(
-            data,
-            source_projects=source_projects,
-            target_project=remote_layout.project,
-            payload_name="simulation JSON",
-        )
         try:
             staged_relpath = remote_layout.simulation_file.relative_to(
                 remote_layout.project
@@ -191,13 +323,60 @@ class JobRemoteMixin:
             staged_relpath = Path(remote_layout.simulation_file.name)
 
         staged_file = self._result_path / "_fs_run" / "remote" / site / staged_relpath
-        self._write_json_file(staged_file, data)
-        provenance = self._read_staged_provenance(site)
-        provenance["simulation"] = {"digest": self._sha256_file(staged_file)}
         staged_job = (
             self._result_path / "_fs_run" / "remote" / site / local_layout.job_file.name
         )
-        if self.preserve_task_outputs and staged_job.is_file():
+        compatibility = self.preserve_task_outputs and staged_job.is_file()
+        # The staged copy depends only on the saved file and these roots: jobs
+        # sharing an unchanged simulation copy one mapping (keeping its mtime,
+        # so rsync skips the remote file) instead of remapping it per job.
+        key = (
+            str(local_layout.simulation_file),
+            str(local_layout.project),
+            str(remote_layout.project),
+            str(getattr(self, "project_path", None)),
+            str(getattr(getattr(self, "simulation", None), "project_path", None)),
+        )
+        status = _file_status(local_layout.simulation_file)
+        reused = None if compatibility else _STAGED_SIMULATIONS.get(key)
+        if (
+            reused is not None
+            and status is not None
+            and reused[0] == status
+            and _file_status(reused[1]) == reused[2]
+        ):
+            digest = reused[3]
+            if reused[1] != staged_file:
+                with atomic_output_path(staged_file) as temporary:
+                    shutil.copy2(reused[1], temporary)
+        else:
+            with open(local_layout.simulation_file, "r") as f:
+                data = json.load(f)
+            source_projects = self._remote_source_projects(local_layout, data)
+            data = self._map_payload_project_roots(
+                data,
+                source_projects=source_projects,
+                target_project=remote_layout.project,
+            )
+            data["project_path"] = str(remote_layout.project)
+            self._assert_remote_payload_has_no_local_roots(
+                data,
+                source_projects=source_projects,
+                target_project=remote_layout.project,
+                payload_name="simulation JSON",
+            )
+            self._write_json_file(staged_file, data)
+            digest = self._sha256_file(staged_file)
+            if status is not None:
+                _STAGED_SIMULATIONS[key] = (
+                    status,
+                    staged_file,
+                    _file_status(staged_file),
+                    digest,
+                )
+        provenance = self._read_staged_provenance(site)
+        provenance["simulation"] = {"digest": digest}
+        if compatibility:
             provenance["compatibility"] = self._compatibility_hash_payloads(
                 json.loads(staged_job.read_text()), data
             )
@@ -366,6 +545,11 @@ class JobRemoteMixin:
     def remote_input_files(self, remote_project: Union[Path, str]) -> List[tuple]:
         """Return local input files that must accompany remote job inputs.
 
+        An objective state or vector that a job already wrote on this site
+        (see :func:`_resident_output`) is read there in place: neither its
+        manifest nor its cache or data file is uploaded again, so the
+        producer's remote copies stay byte-identical and self-consistent.
+
         Args:
             remote_project: Project root visible on the remote site.
 
@@ -395,11 +579,11 @@ class JobRemoteMixin:
         if mesh_file is not None:
             payloads.append(mesh_file)
 
-        for payload_file in [local_layout.job_file, local_layout.simulation_file]:
-            if not payload_file.exists():
-                continue
-            with open(payload_file, "r") as f:
+        if local_layout.job_file.exists():
+            with open(local_layout.job_file, "r") as f:
                 payloads.append(json.load(f))
+        if local_layout.simulation_file.exists():
+            payloads.append(_simulation_skeleton(local_layout.simulation_file))
 
         source_projects = self._remote_source_projects(local_layout, *payloads)
 
@@ -414,6 +598,7 @@ class JobRemoteMixin:
             )
 
         visited = set()
+        residency: Dict[Path, Any] = {}
 
         def add_reference(
             file_ref: Union[str, Path], *, parent: Optional[Path] = None
@@ -433,17 +618,25 @@ class JobRemoteMixin:
             if local in visited:
                 return
             visited.add(local)
+            payload = (
+                json.loads(local.read_text())
+                if local.suffix.lower() == ".json"
+                else None
+            )
+            if (
+                isinstance(payload, Mapping)
+                and str(payload.get("schema", "")).startswith(_OBJECTIVE_MANIFESTS)
+                and _resident_output(local, remote, remote_project, residency)
+            ):
+                return
             add_pair(pair)
             for sidecar in self._rsf_sidecar_references(pair):
                 add_reference(sidecar)
-            if local.suffix.lower() != ".json":
-                return
-            payload = json.loads(local.read_text())
             if not isinstance(payload, Mapping):
                 return
             schema = payload.get("schema", "")
             if not (
-                schema.startswith(("fs-objective-", "fs-receiver-"))
+                schema.startswith(("fs-objective-", "fs-receiver-", "fs-background-"))
                 or "terms" in payload
                 or "file" in payload
             ):
@@ -451,7 +644,7 @@ class JobRemoteMixin:
             for ref in self._iter_file_references(payload):
                 add_reference(ref, parent=local.parent)
             # Shards are files too; generic file traversal includes them.
-            if schema in {"fs-objective-vector-3", "fs-objective-vector-4"}:
+            if schema in _OBJECTIVE_VECTORS:
                 from frequensolve.imaging.data import DataVector, canonical_json_sha256
 
                 validated = DataVector.read_objective_manifest(local)
@@ -459,7 +652,7 @@ class JobRemoteMixin:
                     add_reference(ref, parent=local.parent)
 
                 def staged_reference(reference: str) -> str:
-                    if schema == "fs-objective-vector-4":
+                    if schema != "fs-objective-vector-3":
                         return self._relative_artifact_reference(reference, local)
                     # Distributed version-3 solvers read shard paths verbatim.
                     mapped = self._remote_project_file_pair(
@@ -758,8 +951,11 @@ class JobRemoteMixin:
             operator = value.get("fwi_operator")
             if isinstance(operator, Mapping):
                 keys = ["model_direction"]
-                if operator.get("action") != "linearize":
+                if operator.get("action") != "linearize" and not (
+                    operator.get("action") == "solve" and "reflectivity" in operator
+                ):
                     keys.append("state")
+                    keys.append("background")
                 if operator.get("action") in {"jvp", "normal", "solve", "wri"}:
                     keys.append("direction")
                 if operator.get("action") == "vjp":
@@ -768,6 +964,10 @@ class JobRemoteMixin:
                     path = operator.get(key)
                     if isinstance(path, (str, Path)):
                         yield JobRemoteMixin._strip_file_locator(path)
+                if operator.get("action") == "normal":
+                    for path in operator.get("directions") or ():
+                        if isinstance(path, (str, Path)):
+                            yield JobRemoteMixin._strip_file_locator(path)
                 for section, key in (("controls", "state"), ("extension", "direction")):
                     path = operator.get(section, {}).get(key)
                     if isinstance(path, (str, Path)):
@@ -779,6 +979,9 @@ class JobRemoteMixin:
                     keys.append("context")
                 for key in keys:
                     path = regularization.get(key)
+                    if isinstance(path, (str, Path)):
+                        yield JobRemoteMixin._strip_file_locator(path)
+                for path in regularization.get("inputs") or ():
                     if isinstance(path, (str, Path)):
                         yield JobRemoteMixin._strip_file_locator(path)
             derivatives = value.get("observed_derivatives")

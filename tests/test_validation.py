@@ -1020,6 +1020,63 @@ def test_site_prepare_job_can_skip_validation(tmp_path):
     assert BaseSite().prepare_job(job, validate=False) is job
 
 
+def _property_space_job(tmp_path):
+    from frequensolve.model.parameterization import MeshPropertySpace
+
+    job = _simple_job(tmp_path)
+    job.simulation.model.property_spaces = {
+        "vp": MeshPropertySpace(artifact="spaces/vp.h5", frequency=5.0, epw=4.0)
+    }
+    return job
+
+
+def _write_property_space(path, schema):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        h5["property_space/schema"] = np.bytes_(schema)
+
+
+@pytest.mark.parametrize(
+    "name,schema,rejected",
+    [
+        ("vp.h5", "fs-property-space-3", False),
+        ("vp.h5", "fs-property-space-1", True),
+        ("vp.0123456789abcdef.h5", "fs-property-space-1", True),
+        ("vp.0123456789abcdef.h5", "fs-property-space-3", False),
+        ("vp.backup.h5", "fs-property-space-1", False),
+    ],
+)
+def test_validation_rejects_property_artifacts_sauce_cannot_stage(
+    tmp_path, name, schema, rejected
+):
+    job = _property_space_job(tmp_path)
+    _write_property_space(tmp_path / "spaces" / name, schema)
+
+    report = job.validate()
+
+    assert ("model.property_space.artifact.unsupported" in _codes(report)) is rejected
+
+
+def test_declared_property_artifact_shadows_mesh_keyed_siblings(tmp_path):
+    job = _property_space_job(tmp_path)
+    _write_property_space(tmp_path / "spaces" / "vp.h5", "fs-property-space-3")
+    _write_property_space(
+        tmp_path / "spaces" / "vp.0123456789abcdef.h5", "fs-property-space-1"
+    )
+
+    assert job.validate().ok
+
+
+def test_site_prepare_job_rejects_legacy_property_artifact_before_submit(tmp_path):
+    job = _property_space_job(tmp_path)
+    (tmp_path / "spaces").mkdir()
+    (tmp_path / "spaces" / "vp.h5").write_text("not hdf5")
+
+    with pytest.raises(ValidationError, match="no readable schema"):
+        BaseSite().prepare_job(job)
+    assert job._file is None
+
+
 def test_remote_site_submit_logs_unverified_source_once_per_validation(
     tmp_path, caplog
 ):
@@ -1074,3 +1131,27 @@ def test_validation_rejects_volume_injection_in_elastic_physics(tmp_path):
         receiver_field="velocity_z",
     )
     assert "acquisition.source.kind.unsupported" in _codes(job.validate())
+
+
+@pytest.mark.parametrize(
+    "physics", ["elastic_axisym", "acoustic_axisym", "coupled_axisym"]
+)
+def test_axisymmetric_galerkin_helmholtz_fields(tmp_path, physics):
+    job = _simple_job(tmp_path, physics=physics, receiver_field="p_velocity_r")
+    job.simulation.discretization = Discretization(method="Galerkin")
+    job.simulation.extra["helmholtz_projection"] = {"parts": ["p", "s"]}
+    job += VtkOutput(name="split", fields=["velocity", "p_velocity", "s_velocity"])
+    report = job.validate()
+    assert report.ok, report.issues
+    job.simulation.extra["helmholtz_projection"]["s_projection"] = "solenoidal"
+    assert "helmholtz.axisymmetric.s_projection.unsupported" in _codes(job.validate())
+
+
+@pytest.mark.parametrize("physics", ["elastic_axisym", "coupled_axisym"])
+def test_validation_rejects_unavailable_field_for_galerkin_axisymmetric(
+    tmp_path, physics
+):
+    job = _simple_job(tmp_path, physics=physics, receiver_field="stress")
+    job.simulation.discretization = Discretization(method="Galerkin")
+
+    assert "field.unsupported" in _codes(job.validate())

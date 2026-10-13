@@ -68,6 +68,34 @@ def _surrogate(fake, lin):
 # ---------------------------------------------------------------------------
 
 
+def test_control_gradient_outputs_follow_gradient_jobs_and_views(tmp_path, fake):
+    from frequensolve import vtk
+
+    output = vtk.property_mesh(
+        "vp", source={"kind": "control_gradient", "control": "vp"}
+    )
+    _, problem = _problem(tmp_path, fake, outputs=[output])
+    for view in (
+        problem,
+        problem.restrict(frequencies=[4.0]),
+        problem.with_controls(_space()),
+    ):
+        job = view._linearize_job(view.space, None, gradient=True)
+        job.validate_outputs()
+        payload = job.to_fs()["Outputs"]["ParaView"][0]
+        assert payload["target"] == {"kind": "property_mesh", "space": "vp"}
+        assert payload["source"] == {"kind": "control_gradient", "control": "vp"}
+        value_job = view._linearize_job(view.space, None, gradient=False)
+        assert not value_job.to_fs()["Outputs"].get("ParaView")
+
+    with pytest.raises(ValueError, match="do not specify"):
+        vtk.property_mesh(
+            "vp",
+            properties=["Vp"],
+            source={"kind": "control_gradient", "control": "vp"},
+        ).to_fs()
+
+
 @pytest.mark.parametrize("order", [1, 2, 3, 4])
 def test_spectral_fwi_selection_reaches_every_action(tmp_path, fake, order):
     selection = {"axis": "fourier", "residual": "derivative", "order": order}

@@ -1,0 +1,39 @@
+{
+  "batches": [
+    {
+      "digest": "fs-block-sha256-1:5c1d0b2f0e7e6a6c3f4c2b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e",
+      "n_sources": 4,
+      "source_first": 1
+    },
+    {
+      "digest": "fs-block-sha256-1:0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "n_sources": 2,
+      "source_first": 5
+    }
+  ],
+  "build": "88d8dada4e1e-true-20261001T141647Z",
+  "context": "sha256:7d2f1c6b5a4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c",
+  "layout": "rank",
+  "ranks": 2,
+  "schema": "fs-background-state-2",
+  "shards": [
+    {
+      "file": "background_1/generations/run_7f3a9c2e/rank_00000.h5"
+    },
+    {
+      "file": "background_1/generations/run_7f3a9c2e/rank_00001.h5"
+    }
+  ],
+  "slabs": [
+    {
+      "columns": 1530,
+      "offset": 0
+    },
+    {
+      "columns": 1494,
+      "offset": 1530
+    }
+  ],
+  "state": "sha256:c4fb014b306407584e4304f09e658b42081153f853240934919ca15be2f640a8",
+  "storage": "l2"
+}

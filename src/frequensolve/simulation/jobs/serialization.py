@@ -11,7 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Tuple, Union
 
 import blake3
 import numpy as np
@@ -21,7 +21,11 @@ from frequensolve.simulation.artifact_contract import (
     COLLECTION_CONTRACT_VERSION,
     OPERATION_CONTRACT_VERSION,
 )
-from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
+from frequensolve.simulation.simulation import (
+    BaseSimulation,
+    CustomJSONEncoder,
+    _file_status,
+)
 from frequensolve.simulation.task_index import TASK_INDEX_VERSION
 from frequensolve.util.atomic import atomic_write_json
 from frequensolve.util.class_registry import class_registry
@@ -40,6 +44,9 @@ _ARTIFACT_CONTRACT_VERSIONS = {
     "task_index": TASK_INDEX_VERSION,
     "collection": COLLECTION_CONTRACT_VERSION,
 }
+# Fingerprinted JSON documents (chiefly saved simulations, O(controls) with
+# inline coefficients): (resolved path, ignored keys) -> (file status, hash).
+_JSON_FILE_HASHES: Dict[Tuple[str, Tuple[str, ...]], Any] = {}
 
 
 class JobSerializationMixin:
@@ -134,6 +141,7 @@ class JobSerializationMixin:
             import frequensolve.simulation.jobs._patches  # noqa: F401
             import frequensolve.simulation.jobs.eikonal  # noqa: F401
             import frequensolve.simulation.jobs.forward  # noqa: F401
+            import frequensolve.simulation.jobs.transient  # noqa: F401
 
         if class_name not in class_registry:
             raise ValueError(f"Unknown job class: {class_name}")
@@ -164,7 +172,7 @@ class JobSerializationMixin:
         """
 
         self.validate_outputs()
-        f_list = self._encoded_frequencies()
+        f_list = None if self.frequency_independent else self._encoded_frequencies()
         payload = {
             "schema": "fs-job-1",
             "_type": self.__class__.__name__,
@@ -172,7 +180,7 @@ class JobSerializationMixin:
             "project_path": str(self._project_path()),
             "simulation": self._simulation_path(project_relative=project_relative),
             "workflow": self.workflow,
-            "f_list": f_list,
+            **({"f_list": f_list} if f_list is not None else {}),
             "Outputs": self.outputs.to_fs(),
         }
         payload.update(self._wavenumber_payload())
@@ -278,11 +286,13 @@ class JobSerializationMixin:
             [
                 "Outputs",
                 "Eikonal",
+                "Time",
                 "Image",
                 "control_sensitivities",
                 "focus",
                 "time_reconstruction",
                 "derivative_order",
+                "source_derivative",
             ]
         )
         return {field: job_data[field] for field in fields if field in job_data}
@@ -424,10 +434,26 @@ class JobSerializationMixin:
         return f"blake3:{blake3.blake3(encoded).hexdigest()}"
 
     @staticmethod
-    def _hash_json_file(path: Union[str, Path]) -> str:
+    def _hash_json_file(
+        path: Union[str, Path], ignored_keys: Tuple[str, ...] = ()
+    ) -> str:
+        """Hash a JSON document without top-level ``ignored_keys``, once per file status."""
+
+        key = (str(Path(path).resolve()), tuple(ignored_keys))
+        status = _file_status(Path(path))
+        cached = _JSON_FILE_HASHES.get(key)
+        if status is not None and cached is not None and cached[0] == status:
+            return str(cached[1])
         with open(path, "r") as f:
             payload = json.load(f)
-        return JobSerializationMixin._hash_payload(payload)
+        if ignored_keys and isinstance(payload, Mapping):
+            payload = dict(payload)
+            for name in ignored_keys:
+                payload.pop(name, None)
+        digest = JobSerializationMixin._hash_payload(payload)
+        if status is not None and _file_status(Path(path)) == status:
+            _JSON_FILE_HASHES[key] = (status, digest)
+        return digest
 
     @staticmethod
     def _sha256_file(path: Union[str, Path]) -> str:
@@ -496,6 +522,8 @@ class JobSerializationMixin:
             "schema": "fs-effective-output-request-1",
             "workflow": job_payload["workflow"],
         }
+        if "Time" in job_payload:
+            request["Time"] = job_payload["Time"]
         outputs = job_payload.get("Outputs")
         if outputs is None and simulation_payload is not None:
             outputs = simulation_payload.get("Outputs")

@@ -185,6 +185,8 @@ _LOSS_ALIASES = {
     "student_t": "student_t",
     "studentst": "student_t",
     "student-t": "student_t",
+    "tukey": "tukey",
+    "bisquare": "tukey",
 }
 
 
@@ -193,9 +195,9 @@ class Loss:
     """Radial loss applied to each metric-weighted residual sample.
 
     Args:
-        kind: ``"l2"``, ``"huber"`` (positive ``delta``), or ``"student_t"``
-            (positive ``nu`` and squared scale ``c2``).
-        delta: Huber transition amplitude in data-metric coordinates.
+        kind: ``"l2"``, ``"huber"`` or ``"tukey"`` (positive ``delta``),
+            or ``"student_t"`` (positive ``nu`` and squared scale ``c2``).
+        delta: Huber transition or Tukey cutoff amplitude in data-metric coordinates.
         c2: Student-t squared scale in data-metric coordinates.
         nu: Student-t degrees of freedom.
     """
@@ -215,9 +217,9 @@ class Loss:
         nu = None if self.nu is None else _positive_float(self.nu, "nu")
         if kind == "l2" and any(v is not None for v in (delta, c2, nu)):
             raise ValueError("l2 loss takes no parameters")
-        if kind == "huber":
+        if kind in {"huber", "tukey"}:
             if c2 is not None or nu is not None:
-                raise ValueError("huber loss takes only delta")
+                raise ValueError(f"{kind} loss takes only delta")
             delta = 1.5 if delta is None else delta
         if kind == "student_t":
             if delta is not None:
@@ -247,6 +249,16 @@ class Loss:
         return cls(kind="student_t", nu=nu, c2=c2)
 
     @classmethod
+    def tukey(cls, delta: float) -> "Loss":
+        """Return Tukey's bisquare loss, with zero influence at or beyond delta.
+
+        The positive IRLS multiplier is ``max(0, 1 - (r/delta)**2)**2``
+        inside the cutoff and zero outside. ``delta`` is in normalized
+        data-metric coordinates, and must be chosen for the residual scale.
+        """
+        return cls(kind="tukey", delta=delta)
+
+    @classmethod
     def from_value(cls, value: Any) -> "Loss":
         """Normalize a loss name, mapping, or :class:`Loss`."""
 
@@ -264,7 +276,7 @@ class Loss:
         """Serialize as ``objective`` in the imaging contract."""
 
         payload: Dict[str, Any] = {"kind": self.kind}
-        if self.kind == "huber":
+        if self.kind in {"huber", "tukey"}:
             payload["delta"] = self.delta
         elif self.kind == "student_t":
             payload["c2"] = self.c2
@@ -283,7 +295,7 @@ class Loss:
         if kind is None:
             raise ValueError(f"unsupported loss kind {data.get('kind')!r}")
         params: Dict[str, Any] = {}
-        if kind == "huber" and "delta" in data:
+        if kind in {"huber", "tukey"} and "delta" in data:
             params["delta"] = data["delta"]
         if kind == "student_t":
             if "c2" in data:
@@ -312,6 +324,9 @@ class Comparison:
     kind: Literal["waveform", "phase_derivative", "spectral_derivative"] = "waveform"
     source_derivative: Literal["frozen", "total"] = "frozen"
     relative_amplitude_floor: float = 0.01
+    array: Any = None
+    reliability: Optional[str] = None
+    confidence_floor: float = 0.0
 
     def __post_init__(self) -> None:
         kind = str(self.kind).strip().lower()
@@ -328,6 +343,20 @@ class Comparison:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "source_derivative", source_derivative)
         object.__setattr__(self, "relative_amplitude_floor", floor)
+        object.__setattr__(self, "confidence_floor", _nonnegative_float(self.confidence_floor, "confidence_floor"))
+        if self.confidence_floor and kind != "phase_derivative":
+            raise ValueError("confidence_floor requires phase_derivative")
+        from .synthetic_array import SyntheticArray
+
+        if self.array is not None and not isinstance(self.array, SyntheticArray):
+            raise TypeError("array must be an im.SyntheticArray")
+        if self.reliability not in {None, "predicted"}:
+            raise ValueError("reliability must be None or 'predicted'")
+        if self.array is not None or self.reliability is not None:
+            if kind != "phase_derivative":
+                raise ValueError("synthetic arrays and reliability require phase_derivative")
+            if self.reliability is not None and source_derivative != "frozen":
+                raise ValueError("predicted reliability requires frozen-source phase_derivative")
 
     @classmethod
     def waveform(cls) -> "Comparison":
@@ -341,6 +370,9 @@ class Comparison:
         *,
         source_derivative: Literal["frozen", "total"] = "frozen",
         relative_amplitude_floor: float = 0.01,
+        array: Any = None,
+        reliability: Optional[str] = None,
+        confidence_floor: float = 0.0,
     ) -> "Comparison":
         """Return the instantaneous travel-time (phase-slope) comparison."""
 
@@ -348,6 +380,55 @@ class Comparison:
             kind="phase_derivative",
             source_derivative=source_derivative,
             relative_amplitude_floor=relative_amplitude_floor,
+            array=array,
+            reliability=reliability,
+            confidence_floor=confidence_floor,
+        )
+
+    @property
+    def uses_synthetic_attributes(self) -> bool:
+        """Whether this comparison uses an array or predicted reliability."""
+        return self.array is not None or self.reliability is not None
+
+    def bind(self, jets, *, coordinates=None, definition=None, row_weights=None):
+        """Bind to shared spectral jets, freezing predicted reliability once.
+
+        ``definition`` optionally supplies advanced SpectralAttribute loss and
+        scaling settings. Use ``bound.trial(trial_jets)`` to keep the same
+        array and reliability snapshot for candidate evaluations.
+        """
+        from .spectral_attributes import SpectralAttribute
+
+        if self.kind != "phase_derivative" or self.source_derivative != "frozen":
+            raise ValueError(
+                "spectral binding currently requires frozen-source phase_derivative"
+            )
+        if definition is None:
+            definition = SpectralAttribute(
+                "phase_slope", relative_floor=self.relative_amplitude_floor,
+                confidence_floor=self.confidence_floor or None
+            )
+        if (
+            definition.kind != "phase_slope"
+            or definition.relative_floor != self.relative_amplitude_floor
+        ):
+            raise ValueError(
+                "definition must match phase_slope and the comparison amplitude floor"
+            )
+        pool = None
+        if self.array is not None:
+            if coordinates is None:
+                from ._synthetic_comparison import receiver_coordinates
+
+                coordinates = receiver_coordinates(jets.planes[0].problem)
+            pool = jets.synthetic_array(self.array, coordinates)
+        reliability = (
+            jets.reliability_weights(definition, pool=pool)
+            if self.reliability
+            else None
+        )
+        return jets.attribute(
+            definition, pool=pool, reliability=reliability, row_weights=row_weights
         )
 
     @property
@@ -396,6 +477,9 @@ class Comparison:
             "derivative_axis": "frequency",
             "source_derivative": self.source_derivative,
             "relative_amplitude_floor": self.relative_amplitude_floor,
+            **({"array": self.array.to_dict()} if self.array is not None else {}),
+            **({"confidence_floor": self.confidence_floor} if self.confidence_floor else {}),
+            **({"reliability": self.reliability} if self.reliability else {}),
         }
 
     @classmethod
@@ -407,6 +491,9 @@ class Comparison:
             "derivative_axis",
             "source_derivative",
             "relative_amplitude_floor",
+            "array",
+            "confidence_floor",
+            "reliability",
         }
         unknown = sorted(set(data).difference(allowed))
         if unknown:
@@ -416,7 +503,12 @@ class Comparison:
             raise ValueError(
                 "phase-derivative comparison requires derivative_axis='frequency'"
             )
+        from .synthetic_array import SyntheticArray
+
         return cls(
+            array=SyntheticArray.from_dict(data["array"]) if "array" in data else None,
+            confidence_floor=data.get("confidence_floor", 0.0),
+            reliability=data.get("reliability"),
             kind=data.get("kind", "waveform"),
             source_derivative=data.get("source_derivative", "frozen"),
             relative_amplitude_floor=data.get("relative_amplitude_floor", 0.01),
@@ -442,19 +534,19 @@ class Normalization:
         kind: ``"explicit"`` (one ``value`` or per-component ``components``),
             ``"observed_rms"`` (optional ``minimum`` floor), or
             ``"balance_artifact"`` (``file`` written by ``action=calibrate``).
-        value: Explicit scale, plain or with units.
+        value: Explicit scale, plain or with units (defaults to 1.0).
         components: Explicit per-component scales.
         minimum: Floor for the observed RMS scale.
         file: Balance artifact path.
-        reduction: ``"weighted_mean"`` (default) or ``"sum"``.
+        reduction: ``"sum"`` (default) or ``"weighted_mean"``.
     """
 
-    kind: str = "observed_rms"
+    kind: str = "explicit"
     value: Any = None
     components: Optional[Mapping[str, Any]] = None
     minimum: Any = None
     file: Optional[Path] = None
-    reduction: Literal["weighted_mean", "sum"] = "weighted_mean"
+    reduction: Literal["weighted_mean", "sum"] = "sum"
 
     def __post_init__(self) -> None:
         kind = str(self.kind).strip().lower()
@@ -468,10 +560,12 @@ class Normalization:
         minimum = None
         file = None
         if kind == "explicit":
-            if (self.value is None) == (self.components is None):
+            if self.value is not None and self.components is not None:
                 raise ValueError("explicit normalization needs value or components")
-            if self.value is not None:
-                value = _scale_value(self.value, "normalization value")
+            if self.components is None:
+                value = _scale_value(
+                    1.0 if self.value is None else self.value, "normalization value"
+                )
             else:
                 components = {
                     str(name): _scale_value(scale, f"normalization component {name!r}")
@@ -503,9 +597,9 @@ class Normalization:
         value: Any = None,
         *,
         components: Optional[Mapping[str, Any]] = None,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
-        """Return a fixed scale (one value or per-component values)."""
+        """Return a fixed scale (unit scale unless a value or components is given)."""
 
         return cls(
             kind="explicit", value=value, components=components, reduction=reduction
@@ -516,7 +610,7 @@ class Normalization:
         cls,
         minimum: Any = None,
         *,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
         """Return the observed-RMS scale with an optional floor."""
 
@@ -527,7 +621,7 @@ class Normalization:
         cls,
         file: Union[str, Path],
         *,
-        reduction: Literal["weighted_mean", "sum"] = "weighted_mean",
+        reduction: Literal["weighted_mean", "sum"] = "sum",
     ) -> "Normalization":
         """Return the scale stored in a calibration balance artifact."""
 
@@ -538,7 +632,7 @@ class Normalization:
         """Normalize a kind name, number, mapping, or :class:`Normalization`."""
 
         if value is None:
-            return cls.observed_rms()
+            return cls()
         if isinstance(value, cls):
             return value
         if isinstance(value, str):
@@ -582,7 +676,7 @@ class Normalization:
             components=scale.get("components"),
             minimum=scale.get("minimum"),
             file=scale.get("file"),
-            reduction=data.get("reduction", "weighted_mean"),
+            reduction=data.get("reduction", "sum"),
         )
 
 
@@ -870,17 +964,28 @@ class Preprocess:
         *,
         units: Mapping[Any, Any],
         name: Optional[str] = None,
+        mode: str = "frozen",
+        state_file: Optional[Union[str, Path]] = None,
     ) -> "Preprocess":
-        """Apply material-defined W inside the residual norm, frozen for the objective lifetime.
+        """Apply material-defined W inside the residual norm, fixed within a job by default.
 
         Keys are one-based component IDs or tuples of coupled component IDs.
         Values are material expressions. ``units`` specifies transformed trace
         units for each block. Frequency-independent W also weights df traces.
+        ``pinned`` persists W in ``state_file`` across jobs; ``live`` includes
+        material derivatives but does not support independently selected sides.
         """
         from frequensolve.physics import ReceiverExpression
 
         if not blocks or set(blocks) != set(units):
             raise ValueError("Every material weighting block needs output units")
+        if mode not in {"frozen", "live", "pinned"}:
+            raise ValueError("Material weighting mode must be frozen, live, or pinned")
+        if mode == "pinned":
+            if not isinstance(state_file, (str, Path)) or not str(state_file).strip():
+                raise ValueError("Pinned material weighting requires state_file")
+        elif state_file is not None:
+            raise ValueError("state_file applies only to pinned material weighting")
         rows = []
         used: set[int] = set()
         for key, expression in blocks.items():
@@ -894,6 +999,10 @@ class Preprocess:
                 raise ValueError("Material weighting blocks must not overlap")
             if not isinstance(expression, ReceiverExpression) or expression.wavefield:
                 raise TypeError("Material weighting requires material expressions")
+            if mode == "live" and expression._has_material_domain():
+                raise ValueError(
+                    "Live weighting of independently selected material coefficients is unsupported"
+                )
             used.update(components)
             rows.append(
                 {
@@ -905,7 +1014,11 @@ class Preprocess:
         return cls(
             "material_weighting",
             "trace_pair",
-            {"model_policy": "frozen", "blocks": rows},
+            {
+                "mode": mode,
+                "blocks": rows,
+                **({"state_file": str(state_file)} if state_file is not None else {}),
+            },
             name=name,
         )
 
@@ -1565,7 +1678,24 @@ class Misfit:
         terms: Optional[Sequence[ObjectiveTerm]] = None,
         group_preprocess: Optional[Mapping[str, Any]] = None,
         include_default_preprocess: bool = False,
+        noise_std: Any = None,
     ) -> None:
+        self.noise_std = noise_std
+        if noise_std is not None:
+            if terms is not None or normalization is not None or weights is not None:
+                raise ValueError(
+                    "noise_std requires a simple misfit without terms, weights or normalization"
+                )
+            if (
+                Loss.from_value(loss).kind != "l2"
+                or Comparison.from_value(comparison).kind != "waveform"
+            ):
+                raise ValueError("noise_std requires L2 waveform comparison")
+            normalization = (
+                Normalization.explicit(components=noise_std)
+                if isinstance(noise_std, Mapping)
+                else Normalization.explicit(noise_std)
+            )
         if terms is not None:
             if any(v is not None for v in (loss, comparison, normalization, weights)):
                 raise ValueError(
@@ -1635,6 +1765,11 @@ class Misfit:
         """Return a Student-t misfit."""
 
         return cls(loss=Loss.student_t(nu=nu, c2=c2), **options)
+
+    @classmethod
+    def tukey(cls, delta: float, **options: Any) -> "Misfit":
+        """Return a bisquare misfit that mutes residuals at the given cutoff."""
+        return cls(loss=Loss.tukey(delta), **options)
 
     @classmethod
     def terms(cls, *terms: ObjectiveTerm, **options: Any) -> "Misfit":
@@ -1828,7 +1963,7 @@ class Misfit:
         return cls(
             loss=data.get("objective"),
             comparison=data.get("comparison"),
-            normalization=Normalization.observed_rms(),
+            normalization=Normalization(),
             **common,
         )
 
@@ -1843,7 +1978,14 @@ class Misfit:
 
     def __repr__(self) -> str:
         if self._terms is not None:
+            if any(t.comparison.uses_synthetic_attributes for t in self._terms):
+                return f"Misfit.terms({self._terms!r})"
             return f"Misfit.terms({', '.join(term.id for term in self._terms)})"
+        if self.comparison.uses_synthetic_attributes:
+            return (
+                f"Misfit(loss={self.loss!r}, comparison={self.comparison!r}, "
+                f"normalization={self.normalization!r}, weights={self.weights!r})"
+            )
         return (
             f"Misfit(loss={self.loss.kind!r}, comparison={self.comparison.kind!r}, "
             f"normalization={self.normalization.kind!r})"

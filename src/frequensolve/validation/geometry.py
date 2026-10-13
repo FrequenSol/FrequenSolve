@@ -47,6 +47,7 @@ class _ValidationContext:
     systems: dict[str, CoordinateSystem]
     domain: Optional[_DomainBounds] = None
     allow_unverified_remote_files: bool = False
+    workflow: Optional[str] = None
 
 
 def _build_context(

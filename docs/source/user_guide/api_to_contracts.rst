@@ -51,6 +51,13 @@ The core workflow is intentionally repetitive across tutorials:
    * - ``TimeDomainJob`` / ``FrequencyDomainJob``
      - ``fs-job-1`` plus job-owned outputs
      - Frequency list or band, result path, logs, traces, and visualization requests.
+   * - ``TransientJob`` / ``TimeIntegration`` / ``TimeOutput``
+     - ``fs-job-1`` with ``fs-time-domain-1``
+     - Native time integration, analytic sources, explicit-time/interval/stride
+       snapshots, and checkpoint restart.
+   * - ``TransientDataset``
+     - ``fs-time-step-1`` and ``fs-operation-result-1``
+     - Committed receiver and wavefield shards with physical time coordinates.
    * - ``EikonalJob`` / ``EikonalConfig``
      - ``fs-job-1`` with ``fs-eikonal-1``
      - First-arrival sources and receivers, FIM tolerances and budgets,

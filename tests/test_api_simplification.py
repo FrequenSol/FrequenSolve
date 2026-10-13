@@ -3104,7 +3104,7 @@ def test_mesh_adapt_uses_elems_per_wave_and_accepts_epw_alias():
     assert MeshAdaptor(elems_per_wave=2.0, f_adapt=5.0, f_high=30.0).to_fs() == {
         "elems_per_wave": 2.0,
         "order": 3,
-        "f_low": 5.0,
+        "f_adapt": 5.0,
         "f_high": 30.0,
     }
     assert MeshAdaptor.from_fs(
@@ -3112,14 +3112,34 @@ def test_mesh_adapt_uses_elems_per_wave_and_accepts_epw_alias():
     ).to_fs() == {
         "elems_per_wave": 2.0,
         "order": 3,
-        "f_low": 6.0,
+        "f_adapt": 6.0,
         "f_high": 20.0,
     }
 
     with pytest.raises(ValueError, match="Specify only one"):
         mesh.set_adapt(elems_per_wave=2.0, epw=3.0)
-    with pytest.raises(ValueError, match="Specify only one"):
-        mesh.set_adapt(elems_per_wave=2.0, f_low=5.0, f_adapt=6.0)
+
+
+@pytest.mark.parametrize("f_adapt", [0.0, 6.0])
+def test_mesh_adapt_roundtrip_keeps_explicit_frequency_separate_from_bounds(f_adapt):
+    mesh = MeshManager()
+    mesh.set_adapt(elems_per_wave=2.0, f_low=5.0, f_high=30.0, f_adapt=f_adapt)
+    payload = mesh.to_fs()
+    assert payload["adapt"] == {
+        "elems_per_wave": 2.0,
+        "order": 3,
+        "f_low": 5.0,
+        "f_high": 30.0,
+        "f_adapt": f_adapt,
+    }
+    restored = MeshManager.from_fs(payload)
+    assert restored.to_fs() == payload
+    restored.adapt.f_adapt = 8.0
+    assert restored.adapt.f_low == 5.0
+    restored.adapt.f_low = 4.0
+    assert restored.adapt.f_adapt == 8.0
+    restored.adapt.f_adapt = None
+    assert "f_adapt" not in restored.adapt.to_fs()
 
 
 def test_mesh_adapt_order_accepts_branch_expression():

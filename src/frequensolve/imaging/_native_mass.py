@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from frequensolve.inversion.optimization import _shares_arrays
+
 from ._artifacts import SmoothingConfig
 from ._native_regularization import BoundNativeRegularization, NativeRegularization
 from .controls import ControlSpace, ControlVector
@@ -163,5 +165,6 @@ class BoundNativeMass(BoundPreconditioner):
             return ControlVector(_values_on(self.space, b) / self._diagonal, self.space)
         return self._action("mass_inverse", b)
 
+    @_shares_arrays  # Reads ``g``; returns a new vector.
     def apply(self, g: Any) -> ControlVector:
         return ControlVector(self.scale * self.riesz(g).values, self.space)
