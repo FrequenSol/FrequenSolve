@@ -5,6 +5,16 @@ prepared.
 
 ## Unreleased
 
+- Persistent sessions can be reused across scripts.
+  `site.session(reuse=project, linger="30m")` adopts a compatible session
+  that the same user started with the same reuse scope and that no client is
+  attached to, instead of queueing a new allocation; `share=True` also joins
+  one in use. Only the user's own `FS_session` jobs recorded under the site's
+  work directory qualify. `linger` (default 0) keeps the allocation that long
+  once nothing is attached or running, so the context only detaches on exit;
+  `session.release()` and `site.release_sessions(...)` end it and
+  `site.sessions(...)` lists sessions. `site.attach_session(reuse=...)` adopts
+  without queueing, and `PersistentAllocation` takes the same options.
 - `SlurmSite.provision()` and `attach_allocation()` are deprecated in favor of
   `site.session(...)`. `provision()` now starts a persistent session (`tasks`
   ranks spread evenly over `nodes`) that `site.run`/`site.submit` in `"auto"`

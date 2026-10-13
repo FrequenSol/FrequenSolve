@@ -1,5 +1,6 @@
 """Small helpers shared by SLURM-backed site implementations."""
 
+import math
 import os
 import re
 import tempfile
@@ -42,6 +43,11 @@ SLURM_STATUS_COLORS = {
 }
 
 _SLURM_JOB_ID = re.compile(r"\d+(?:_\d+)?\Z")
+_SLURM_TIME = re.compile(r"(?:(\d+)-)?(\d+)(?::(\d+))?(?::(\d+))?")
+
+# Slurm job name of persistent allocation sessions. Session reuse and listing
+# only ever consider the user's jobs with this name.
+SESSION_JOB_NAME = "FS_session"
 
 
 def hms_to_seconds(hms: str) -> int:
@@ -55,6 +61,33 @@ def hms_to_seconds(hms: str) -> int:
         tmp = hms
     h, m, s = map(int, tmp.split(":"))
     return days * 86400 + h * 3600 + m * 60 + s
+
+
+def slurm_time_seconds(text: str) -> Optional[float]:
+    """Return seconds in a Slurm time such as squeue's ``%L`` (time left).
+
+    Accepts ``[D-]HH:MM:SS``, ``MM:SS``, ``MM`` and ``D-HH[:MM]``; returns
+    ``inf`` for ``UNLIMITED`` and ``None`` for anything else (``INVALID``,
+    ``NOT_SET``).
+    """
+
+    text = str(text).strip()
+    if text.upper() in {"UNLIMITED", "INFINITE"}:
+        return math.inf
+    match = _SLURM_TIME.fullmatch(text)
+    if match is None:
+        return None
+    days, *parts = match.groups()
+    numbers = [int(part) for part in parts if part is not None]
+    if days is not None:
+        hours, minutes, seconds = (numbers + [0, 0])[:3]
+        return float(int(days) * 86400 + hours * 3600 + minutes * 60 + seconds)
+    if len(numbers) == 3:
+        hours, minutes, seconds = numbers
+        return float(hours * 3600 + minutes * 60 + seconds)
+    if len(numbers) == 2:
+        return float(numbers[0] * 60 + numbers[1])
+    return float(numbers[0] * 60)
 
 
 def seconds_to_hms(seconds: int) -> str:

@@ -3239,7 +3239,8 @@ class FWI:
         """Run staged inversion, optionally inside one persistent allocation.
 
         ``execution=PersistentAllocation(...)`` owns an allocation for the
-        entire workflow and releases it on success, failure or interruption.
+        entire workflow and releases it on success, failure or interruption,
+        unless its ``linger`` keeps it for reuse (then the workflow detaches).
         Passing an already-open ``AllocationSession`` borrows it without
         closing it. Derived problems, preparation, solver postprocessing and
         curvature all use that executor. Existing site behavior is unchanged

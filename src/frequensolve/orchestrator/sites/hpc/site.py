@@ -84,6 +84,10 @@ from frequensolve.orchestrator.sites.hpc.enterprise import (
     _validate_bundle_snapshot,
     installed_frequensolve_artifact_sha256,
 )
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    SESSION_JOB_NAME,
+    SLURM_QUEUE_STATES,
+)
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import as_list as _as_list
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     hms_to_seconds as _hms_to_seconds,
@@ -102,6 +106,9 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     shell_word_batches as _shell_word_batches,
+)
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    slurm_time_seconds as _slurm_time_seconds,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     ssh_exit_status as _ssh_exit_status,
@@ -1852,16 +1859,89 @@ class SlurmSite(BaseSite):
         ``duration``) are fixed for its lifetime. An ``AdaptiveWorkers``
         policy bounds individual solver workers. Every run, including
         postprocessing and curvature, stays inside this allocation.
+
+        ``reuse=project`` (or a string) adopts a compatible, unattached
+        session this user started earlier with the same ``reuse`` instead of
+        queueing a new allocation; ``share=True`` also joins one another
+        client is using. ``linger="30m"`` keeps the allocation that long once
+        nothing is attached or running (default 0), so a later script can
+        reuse it; ``session.release()`` or :meth:`release_sessions` ends it.
+        See :class:`~frequensolve.orchestrator.sites.hpc.AllocationSession`.
         """
         from frequensolve.orchestrator.sites.hpc.session import AllocationSession
 
         return AllocationSession(self, **options)
 
-    def attach_session(self, session_id: str, **options):
-        """Borrow a persistent session by id; context exit only detaches."""
+    def attach_session(
+        self, session_id: Optional[str] = None, *, reuse: Any = None, **options
+    ):
+        """Borrow a persistent session by id, or adopt one by ``reuse`` scope.
+
+        With ``session_id``, context exit only detaches. With ``reuse``, a
+        compatible session started with that scope is adopted as with
+        ``site.session(reuse=...)``, but a missing one raises instead of
+        queueing a new allocation; pass the same resources as when it was
+        started.
+        """
         from frequensolve.orchestrator.sites.hpc.session import AllocationSession
 
-        return AllocationSession(self, session_id=session_id, **options)
+        if (session_id is None) == (reuse is None):
+            raise TypeError("attach_session needs exactly one of session_id or reuse")
+        if session_id is not None:
+            return AllocationSession(self, session_id=session_id, **options)
+        session = AllocationSession(self, reuse=reuse, **options)
+        session._adopt_only = True
+        return session
+
+    def sessions(self, reuse: Any = None):
+        """List this user's queued and running persistent sessions on the site.
+
+        Returns :class:`~frequensolve.orchestrator.sites.hpc.SessionInfo`
+        records; ``reuse`` keeps those started with that reuse scope.
+        """
+        from frequensolve.orchestrator.sites.hpc.session import list_sessions
+
+        return list_sessions(self, reuse)
+
+    def release_sessions(self, reuse: Any = None, *, include_attached: bool = False):
+        """End this user's idle persistent sessions; return the released ones.
+
+        ``reuse`` limits this to sessions started with that reuse scope, such
+        as lingering allocations a project left for reuse. Sessions with an
+        attached client are kept unless ``include_attached=True``, which also
+        cancels their work.
+        """
+        from frequensolve.orchestrator.sites.hpc.session import release_sessions
+
+        return release_sessions(self, reuse, include_attached=include_attached)
+
+    def _session_allocations(self) -> Dict[str, Dict[str, Any]]:
+        """Return this user's queued or running session jobs.
+
+        Maps each Slurm job id to its normalized ``state`` and ``time_left``
+        (seconds; the time limit while pending).
+        """
+
+        user = shlex.quote(str(self.credentials.username))
+        output = self.run_login(
+            f"squeue -u {user} -h -n {SESSION_JOB_NAME} -o '%i %t %L'"
+        )
+        jobs = {}
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            try:
+                job_id = _validate_slurm_job_id(fields[0])
+            except ValueError:
+                continue
+            jobs[job_id] = {
+                "state": SLURM_QUEUE_STATES.get(fields[1], "unknown"),
+                "time_left": (
+                    _slurm_time_seconds(fields[2]) if len(fields) > 2 else None
+                ),
+            }
+        return jobs
 
     def provision(
         self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs

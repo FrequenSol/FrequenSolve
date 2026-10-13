@@ -46,6 +46,14 @@ class PersistentAllocation:
     ``session_command_timeout`` bounds each session filesystem command on the
     login node; ``"auto"`` uses the site's ``session_command_timeout``
     (default 120 s).
+
+    ``reuse`` (a project or a string) adopts a compatible, unattached session
+    started earlier with the same ``reuse`` instead of queueing a new
+    allocation; ``share=True`` also joins one in use. ``linger`` (seconds or a
+    duration such as ``"30m"``; default 0) keeps the allocation that long
+    once nothing is attached or running, so the workflow detaches instead of
+    releasing it; ``min_time_left`` is the least walltime a reused session
+    must have left.
     """
 
     nodes: Optional[int] = None
@@ -58,6 +66,10 @@ class PersistentAllocation:
     cleanup_timeout: Optional[float] = None
     heartbeat_timeout: Union[float, str, None] = "auto"
     session_command_timeout: Union[float, str] = "auto"
+    reuse: Any = None
+    linger: Union[float, str] = 0
+    share: bool = False
+    min_time_left: Union[float, str] = 900.0
 
     def open(self, site: Any) -> Any:
         factory = getattr(site, "session", None)
@@ -82,5 +94,9 @@ class PersistentAllocation:
             cleanup_timeout=self.cleanup_timeout,
             heartbeat_timeout=self.heartbeat_timeout,
             session_command_timeout=self.session_command_timeout,
+            reuse=self.reuse,
+            linger=self.linger,
+            share=self.share,
+            min_time_left=self.min_time_left,
             **resources,
         )

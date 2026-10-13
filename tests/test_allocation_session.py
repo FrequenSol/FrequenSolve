@@ -78,6 +78,9 @@ class Job:
     def write_run_state(self, **kwargs):
         self.last_state = kwargs
 
+    def latest_run(self, site=None):
+        return getattr(self, "record", None)
+
 
 @pytest.fixture
 def cluster(tmp_path, monkeypatch):
@@ -193,6 +196,16 @@ print('solver success')
     monkeypatch.setattr(site, "_run_session_command", login)
     monkeypatch.setattr(site, "_submit_sbatch", submit)
     monkeypatch.setattr(site, "cancel_job", cancel)
+    # squeue: this user's live session allocations.
+    monkeypatch.setattr(
+        site,
+        "_session_allocations",
+        lambda: {
+            str(index + 100): {"state": "running", "time_left": 3600.0}
+            for index, process in enumerate(processes)
+            if process.poll() is None
+        },
+    )
     monkeypatch.setattr(
         site,
         "update_status",
@@ -1220,3 +1233,286 @@ def test_controller_enables_faulthandler_before_anything_else(monkeypatch):
     with pytest.raises(SystemExit):
         controller_module.main()  # --root is missing
     assert enabled == [{"all_threads": True}]
+
+
+# -- reuse and linger ---------------------------------------------------------
+
+
+def events(cluster):
+    return [
+        json.loads(line)
+        for line in (cluster.root / "events.jsonl").read_text().splitlines()
+    ]
+
+
+def test_lingering_session_is_reused_by_the_next_client(cluster):
+    with cluster.site.session(reuse="study", linger="1m") as first:
+        assert not first.reused
+        assert first.run(Job(cluster.root, "first"), check=True).successful
+    # A normal exit only detaches; the allocation stays up for reuse.
+    assert cluster.processes[0].poll() is None and not cluster.cancellations
+    wait_until(lambda: first.status().get("clients") == 0)
+    [info] = cluster.site.sessions(reuse="study")
+    assert (info.session_id, info.allocation_id) == (first.session_id, "100")
+    assert (info.state, info.linger, info.reuse) == ("ready", 60.0, "study")
+    assert info.idle_seconds is not None
+    with cluster.site.session(reuse="study", linger="1m") as second:
+        assert second.reused and second.session_id == first.session_id
+        assert second.run(Job(cluster.root, "second"), check=True).successful
+    assert len(cluster.processes) == 1
+    second.release()
+    # release() ends it even after the context detached; no scancel needed.
+    assert cluster.processes[0].poll() == 0
+    assert cluster.site.sessions() == [] and not cluster.cancellations
+
+
+def test_closed_session_still_completing_in_slurm_is_not_listed(cluster, monkeypatch):
+    with cluster.site.session(reuse="done") as session:
+        pass
+    monkeypatch.setattr(
+        cluster.site,
+        "_session_allocations",
+        lambda: {"100": {"state": "running", "time_left": 60.0}},  # Slurm CG
+    )
+    assert session.status()["state"] == "closed"
+    assert cluster.site.sessions() == []
+
+
+def test_default_session_neither_lingers_nor_is_reused(cluster):
+    with cluster.site.session(reuse="plain") as first:
+        pass
+    assert cluster.processes[0].poll() is not None
+    with cluster.site.session(linger="1m") as unscoped:
+        pass
+    with cluster.site.session() as other:
+        # Sessions without reuse never adopt one, even a lingering session.
+        assert not other.reused
+    assert len(cluster.processes) == 3
+    assert cluster.processes[1].poll() is None
+    unscoped.release()
+    assert not first.reused
+
+
+def test_reuse_needs_the_same_scope_resources_and_walltime(cluster, monkeypatch):
+    with cluster.site.session(reuse="a", linger="1m") as first:
+        pass
+    with cluster.site.session(reuse="b") as other_scope:
+        assert not other_scope.reused
+    with cluster.site.session(reuse="a", ranks_per_node=2) as other_shape:
+        assert not other_shape.reused
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            cluster.site,
+            "_session_allocations",
+            lambda: {"100": {"state": "running", "time_left": 60.0}},
+        )
+        with cluster.site.session(reuse="a") as late:
+            assert not late.reused
+    assert len(cluster.processes) == 4
+    with cluster.site.session(reuse="a", min_time_left=0) as again:
+        assert again.reused and again.session_id == first.session_id
+    with pytest.raises(RuntimeError, match="No running or queued"):
+        cluster.site.attach_session(reuse="missing").start()
+    assert len(cluster.processes) == 4
+
+
+def test_project_scopes_differ_by_path_and_name(tmp_path):
+    def project(name, path):
+        return SimpleNamespace(name=name, path=tmp_path / path)
+
+    key, label = session_module.reuse_key(project("fwi", "a"))
+    assert label == "fwi" and key.startswith("project:fwi:")
+    assert key == session_module.reuse_key(project("fwi", "a"))[0]
+    assert key != session_module.reuse_key(project("fwi", "b"))[0]
+    assert key != session_module.reuse_key(project("rtm", "a"))[0]
+    assert session_module.reuse_key("fwi") == ("key:fwi", "fwi")
+    with pytest.raises(TypeError):
+        session_module.reuse_key(3)
+
+
+def test_reuse_options_are_validated(cluster):
+    with pytest.raises(ValueError, match="share=True requires reuse"):
+        cluster.site.session(share=True)
+    with pytest.raises(ValueError, match="borrows"):
+        cluster.site.attach_session("a" * 32, linger=60)
+    with pytest.raises(ValueError, match="linger"):
+        cluster.site.session(linger="soon")
+    with pytest.raises(TypeError, match="exactly one"):
+        cluster.site.attach_session()
+    assert session_module._duration("1h30m", "x") == 5400
+    assert session_module._duration("01:30:00", "x") == 5400
+    assert session_module._duration(90, "x") == 90
+
+
+def test_attached_session_is_joined_only_with_share(cluster):
+    with cluster.site.session(reuse="s") as owner:
+        with cluster.site.session(reuse="s") as other:
+            assert not other.reused
+        with cluster.site.session(reuse="s", share=True) as joined:
+            assert joined.reused and joined.session_id == owner.session_id
+            assert joined.run(Job(cluster.root, "joined"), check=True).successful
+        # Closing a shared session detaches; the owner keeps working.
+        assert cluster.processes[0].poll() is None
+        assert owner.run(Job(cluster.root, "owner"), check=True).successful
+    wait_until(lambda: cluster.processes[0].poll() is not None)
+    assert len(cluster.processes) == 2
+
+
+def test_disappeared_client_leaves_its_run_to_the_next_client(cluster):
+    first = cluster.site.session(reuse="crash", linger="1m", lease_timeout=1.0)
+    first.wait_ready()
+    job = Job(cluster.root, "long", tasks=1, sleep=2)
+    run = first.submit(job)
+    job.record = SimpleNamespace(
+        metadata={
+            "session_id": first.session_id,
+            "session_run_id": run.id,
+            "generation": first.generation,
+        }
+    )
+    first._stop.set()  # the client vanishes without detaching
+    first._lease_thread.join()
+    wait_until(lambda: first.status().get("clients") == 0)
+    with cluster.site.session(reuse="crash", linger="1m") as second:
+        assert second.reused
+        resumed = second.submit(job)
+        assert resumed.id == run.id
+        assert resumed.wait(check=True).successful
+    starts = [row for row in events(cluster) if row["event"] == "start"]
+    assert [row["step"] for row in starts if row["step"] == 1] == [1]
+    assert len(cluster.processes) == 1
+    second.release()
+
+
+def test_lease_of_an_exited_local_process_does_not_block_reuse(cluster):
+    first = cluster.site.session(reuse="pid", linger="1m")
+    first.wait_ready()
+    first._stop.set()
+    first._lease_thread.join()
+    # The controller still counts the lease; its process is gone.
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait()
+    lease = first.root / "leases" / f"{first._client_id}.json"
+    lease.write_text(json.dumps(dict(json.loads(lease.read_text()), pid=exited.pid)))
+    assert first.status()["clients"] == 1
+    with cluster.site.session(reuse="pid", linger="1m") as second:
+        assert second.reused
+    second.release()
+
+
+def test_queued_allocation_is_adopted_after_an_interrupt(cluster, monkeypatch):
+    scripts = []
+    start = cluster.site._submit_sbatch
+    monkeypatch.setattr(
+        cluster.site, "_submit_sbatch", lambda command: scripts.append(command) or "100"
+    )
+    monkeypatch.setattr(
+        cluster.site,
+        "_session_allocations",
+        lambda: {"100": {"state": "pending", "time_left": 3600.0}},
+    )
+
+    def interrupted(self, timeout=None):
+        self.start()
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(session_module.AllocationSession, "wait_ready", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            with cluster.site.session(reuse="queued", linger="1m"):
+                pass
+    # A lingering allocation keeps its place in the queue for the next client.
+    assert not cluster.cancellations
+    second = cluster.site.session(reuse="queued", linger="1m")
+    second.start()
+    assert second.reused and len(scripts) == 1
+    start(scripts[0])  # Slurm starts the queued job
+    with second:
+        assert second.run(Job(cluster.root, "queued"), check=True).successful
+    second.release()
+    assert cluster.processes[0].poll() == 0
+
+
+def test_release_sessions_keeps_attached_ones(cluster):
+    with cluster.site.session(reuse="idle", linger="1m") as idle:
+        pass
+    wait_until(lambda: idle.status().get("clients") == 0)
+    with cluster.site.session(reuse="busy", linger="1m") as busy:
+        wait_until(lambda: busy.status().get("clients") == 1)
+        assert cluster.site.release_sessions("busy") == []
+        released = cluster.site.release_sessions()
+        assert [info.session_id for info in released] == [idle.session_id]
+        wait_until(lambda: cluster.processes[0].poll() is not None)
+        assert busy.run(Job(cluster.root, "busy"), check=True).successful
+    busy.release()
+
+
+def test_controller_lingers_for_orphaned_runs_then_idles(tmp_path, monkeypatch):
+    controller_module = load_controller(monkeypatch)
+    controller = controller_module.SessionController(
+        tmp_path, dict(generation="g", total_ranks=1, lease_timeout=30, linger=100)
+    )
+    now = [1000.0]
+    clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time)
+    monkeypatch.setattr(controller_module, "time", clock)
+    controller.started = now[0]
+    lease = tmp_path / "leases" / "client.json"
+    lease.write_text(json.dumps(dict(generation="g", sequence=1, timeout=30)))
+    controller.active_runs = 1
+    controller._check_clients()
+    assert controller.clients == ["client"]
+    now[0] += 31  # the client stopped renewing
+    controller._check_clients()
+    # An orphaned run keeps the allocation; nothing counts as idle yet.
+    assert controller.stop_reason is None and controller.idle_since is None
+    controller.active_runs = 0
+    controller._check_clients()
+    controller._controller_status()
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert (status["clients"], status["client_ids"], status["linger"]) == (0, [], 100)
+    now[0] += 99
+    controller._check_clients()
+    assert controller.stop_reason is None
+    now[0] += 1
+    controller._check_clients()
+    assert "linger" in controller.stop_reason
+
+
+def test_controller_lingers_as_long_as_the_last_clients_ask(tmp_path, monkeypatch):
+    controller_module = load_controller(monkeypatch)
+    controller = controller_module.SessionController(
+        tmp_path, dict(generation="g", total_ranks=1, lease_timeout=30, linger=100)
+    )
+    leases = tmp_path / "leases"
+
+    def lease(name, linger, **extra):
+        payload = dict(generation="g", sequence=1, timeout=30, linger=linger)
+        (leases / f"{name}.json").write_text(json.dumps(dict(payload, **extra)))
+
+    lease("owner", 600)
+    lease("sharer", 0)
+    lease("borrower", None)
+    controller._check_clients()
+    assert controller.clients == ["borrower", "owner", "sharer"]
+    assert controller.linger == 600
+    lease("owner", 600, revoked=True)
+    controller._check_clients()
+    assert controller.linger == 0  # the sharer is the last owner attached
+    lease("sharer", 0, revoked=True)
+    lease("borrower", None, revoked=True)
+    controller.active_runs = 1
+    controller._check_clients()
+    # Without linger, the original rule: cancel outstanding work and end.
+    assert controller.stop_reason == "client lease expired"
+
+
+def test_slurm_time_left_parsing():
+    from frequensolve.orchestrator.sites.hpc.slurm_helpers import slurm_time_seconds
+
+    assert slurm_time_seconds("1-02:03:04") == 93784
+    assert slurm_time_seconds("2:03:04") == 7384
+    assert slurm_time_seconds("3:04") == 184
+    assert slurm_time_seconds("5") == 300
+    assert slurm_time_seconds("2-03") == 183600
+    assert slurm_time_seconds("UNLIMITED") == float("inf")
+    assert slurm_time_seconds("INVALID") is None

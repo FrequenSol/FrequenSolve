@@ -11,6 +11,12 @@ delay it. Clients judge liveness by whether the sequence advances (on their own
 monotonic clock), never by comparing wall clocks across hosts. Client leases
 are judged the same way on this side. Processed requests and commands move to
 ``processed/`` subdirectories so each tick lists only new work.
+
+With no live client lease, a session whose ``linger`` is 0 cancels its work
+and ends. A positive ``linger`` lets runs finish and then keeps the allocation
+idle for that long, so a later client can reuse it. Owning clients state their
+``linger`` in their leases; the longest among the clients last attached
+applies (the creator's ``config.json`` value until a lease states one).
 """
 
 from __future__ import annotations
@@ -71,6 +77,15 @@ class SessionController:
         # seen, revoked, timeout).
         self.leases = {}
         self.lease_checked_at = None
+        # Live client ids (lease file stems) and the lease sequence last read
+        # for every client, published in every heartbeat. A client whose
+        # lease sequence differs has renewed since and is live too.
+        self.clients = []
+        self.lease_sequences = {}
+        self.lease_lingers = {}
+        self.linger = max(0.0, float(config.get("linger") or 0.0))
+        # Monotonic time since which no client is attached and nothing runs.
+        self.idle_since = None
         for name in ("leases", "runs"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         for name in ("requests", "commands"):
@@ -119,6 +134,7 @@ class SessionController:
             if state is not None:
                 self.state = state
             self.sequence += 1
+            idle_since = self.idle_since
             _write_json_atomic(
                 self.root / "status.json",
                 {
@@ -135,6 +151,16 @@ class SessionController:
                     ),
                     "reason": self.stop_reason or "",
                     "active_runs": self.active_runs,
+                    "client_ids": list(self.clients),
+                    "clients": len(self.clients),
+                    "lease_sequences": dict(self.lease_sequences),
+                    "linger": self.linger,
+                    # This host's monotonic clock; null while attached or busy.
+                    "idle_seconds": (
+                        None
+                        if idle_since is None
+                        else round(time.monotonic() - idle_since, 3)
+                    ),
                 },
             )
 
@@ -611,7 +637,11 @@ class SessionController:
             self._controller_status(state)  # publish transitions immediately
 
     def _lease_alive(self):
-        """Return whether any client renewed its lease within its timeout.
+        """Return whether any client renewed its lease within its timeout."""
+        return bool(self._live_clients())
+
+    def _live_clients(self):
+        """Return the ids of clients that renewed their leases within timeout.
 
         A renewal is any change of the lease's ``sequence`` (or, for older
         clients, its ``expires_at``), timed with this host's monotonic clock,
@@ -631,15 +661,56 @@ class SessionController:
                     bool(lease.get("revoked")) or float(lease.get("expires_at", 1)) <= 0
                 )
                 timeout = float(lease.get("timeout", default))
+                linger = lease.get("linger")
+                linger = None if linger is None else max(0.0, float(linger))
             except (ValueError, KeyError, TypeError, OSError):
                 continue
             previous = self.leases.get(path.name)
             seen = now if previous is None or previous[0] != token else previous[1]
             self.leases[path.name] = (token, seen, revoked, timeout)
-        return any(
-            not revoked and now - seen <= timeout
-            for _token, seen, revoked, timeout in self.leases.values()
-        )
+            self.lease_lingers[path.name] = linger
+        self.lease_sequences = {
+            Path(name).stem: token[0] for name, (token, *_rest) in self.leases.items()
+        }
+        live = [
+            name
+            for name, (_token, seen, revoked, timeout) in self.leases.items()
+            if not revoked and now - seen <= timeout
+        ]
+        # The clients attached last decide how long the allocation lingers;
+        # borrowing clients state no linger.
+        lingers = [
+            self.lease_lingers[name]
+            for name in live
+            if self.lease_lingers.get(name) is not None
+        ]
+        if lingers:
+            self.linger = max(lingers)
+        return sorted(Path(name).stem for name in live)
+
+    def _check_clients(self):
+        """Track attached clients; end the session when none remain.
+
+        Without a client, ``linger`` 0 keeps the original rule: outstanding
+        work is cancelled and the allocation ends. A positive ``linger`` lets
+        orphaned runs finish, then ends the allocation once it has been idle
+        (no client, no active run) for ``linger`` seconds.
+        """
+        now = time.monotonic()
+        self.clients = self._live_clients()
+        if self.clients or (self.linger > 0 and self.active_runs):
+            self.idle_since = None
+            return
+        if self.idle_since is None:
+            self.idle_since = now
+        if not self.leases and now - self.started <= float(
+            self.config["lease_timeout"]
+        ):
+            return  # no lease seen yet: the starting client may still write one
+        if self.linger <= 0:
+            self.stop_reason = "client lease expired"
+        elif now - self.idle_since >= self.linger:
+            self.stop_reason = f"no client attached for {self.linger:g} s (linger)"
 
     def _lease_check_due(self):
         # Leases renew every few seconds; listing them every tick only adds
@@ -655,6 +726,9 @@ class SessionController:
         # A second controller cannot accidentally execute the same requests.
         with (self.root / "controller.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # The first heartbeat already lists the attached clients.
+            self.clients = self._live_clients()
+            self.lease_checked_at = time.monotonic()
             self._controller_status("ready")
             heartbeat = threading.Thread(
                 target=self._beat, name="session-heartbeat", daemon=True
@@ -680,13 +754,8 @@ class SessionController:
                         run["state"] in TERMINAL for run in self.runs.values()
                     ):
                         break
-                    if (
-                        time.monotonic() - self.started
-                        > float(self.config["lease_timeout"])
-                        and self._lease_check_due()
-                        and not self._lease_alive()
-                    ):
-                        self.stop_reason = "client lease expired"
+                    if self._lease_check_due():
+                        self._check_clients()
                     time.sleep(self.interval)
             except BaseException as error:
                 # Log the cause first: cleanup below may fail on the same

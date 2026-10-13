@@ -126,11 +126,68 @@ Clients renew leases from a background thread while connected, including
 during long uploads and project synchronization. The controller times each
 renewal with its own monotonic clock, so client clock skew does not expire a
 lease. If every client disappears, the controller cancels unfinished work and
-exits after ``lease_timeout`` (default 300 seconds) without a renewal; the
-hard Slurm walltime still bounds the allocation. A warning signal 120 seconds
-before walltime stops admission and marks unfinished runs timed out. Resume an
-inversion from its last accepted checkpoint in a new session. Automatic
-allocation rollover is not supported.
+exits after ``lease_timeout`` (default 300 seconds) without a renewal, unless
+the session lingers (see below); the hard Slurm walltime still bounds the
+allocation. A warning signal 120 seconds before walltime stops admission and
+marks unfinished runs timed out. Resume an inversion from its last accepted
+checkpoint in a new session. Automatic allocation rollover is not supported.
+
+Reusing a session across scripts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To let a later script reuse an allocation instead of waiting in the queue
+again, start sessions with a reuse scope and, optionally, a linger period::
+
+   with site.session(
+       nodes=2,
+       ranks_per_node=48,
+       duration="04:00:00",
+       reuse=project,  # or a string naming the scope
+       linger="30m",  # stay up this long once nothing is attached or running
+   ) as session:
+       session.submit(job)
+
+With ``reuse``, entering the context first looks for a session that this user
+started with the same scope, and adopts it when all of these hold:
+
+- its Slurm job is this user's, named ``FS_session``, queued or running, and
+  recorded by a session directory under the site's work directory, so no
+  other job ever qualifies;
+- it has the same nodes, ranks per node, queue, account, solver executable,
+  launcher, worker limits, GPU layout and module and environment setup;
+- at least ``min_time_left`` of walltime remains (default 15 minutes);
+- no other client is attached; ``share=True`` also joins a session that
+  another client is using.
+
+Otherwise the context queues a new allocation as before and records the
+scope; each skipped session is reported with the reason. ``session.reused``
+tells which happened. A project scope combines the project's name with its
+resolved path, so unrelated projects that share a name never share
+allocations; a string scope can be shared deliberately across projects or
+machines. ``site.attach_session(reuse=project)`` adopts a matching session but
+raises instead of queueing one. A client that exited on the same host is
+recognized at once; otherwise its lease must lapse (``lease_timeout``) before
+another client may adopt the session.
+
+``linger`` (seconds, or a duration such as ``"30m"``, ``"2h"`` or
+``"01:30:00"``; default 0) keeps the allocation once no client is attached and
+nothing runs. A context with ``linger`` therefore only detaches on exit,
+after waiting for its own runs (normal exit) or cancelling them (exception),
+and reports how long the allocation stays up. Interrupting a lingering
+session while it waits in the queue leaves it queued, so the next script
+keeps its place. If a client disappears without detaching, its runs finish;
+resubmitting such a job after adopting the session waits on the existing run
+instead of starting it again. The longest ``linger`` among the clients
+attached last applies. Without ``linger`` a session ends with its owner, as
+before, unless other clients are still attached.
+
+End a lingering allocation with ``session.release()`` (also after the context
+has exited), ``site.release_sessions(project)`` (the scope's idle sessions;
+``include_attached=True`` also ends ones in use and cancels their work) or
+``scancel``. ``site.sessions(reuse=...)`` lists queued and running sessions
+with their state, attached clients, idle time, linger and remaining walltime.
+``PersistentAllocation`` accepts the same ``reuse``, ``linger``, ``share`` and
+``min_time_left`` options.
 
 Quick Start
 -----------

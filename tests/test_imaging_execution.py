@@ -78,6 +78,26 @@ def test_fwi_owned_execution_matches_existing_result_and_restores_sites(
     assert result.problem.site is site
 
 
+def test_persistent_allocation_forwards_reuse_options():
+    options = {}
+
+    class Site:
+        def session(self, **kwargs):
+            options.update(kwargs)
+            return "session"
+
+    execution = PersistentAllocation(
+        nodes=1, reuse="study", linger="30m", share=True, min_time_left=60
+    )
+    assert execution.open(Site()) == "session"
+    assert {key: options[key] for key in ("reuse", "linger", "share")} == {
+        "reuse": "study",
+        "linger": "30m",
+        "share": True,
+    }
+    assert options["min_time_left"] == 60 and options["nodes"] == 1
+
+
 def test_fwi_borrows_open_session_without_closing_it(tmp_path):
     site = FakeImagingSite(seed=11)
     problem = _problem(tmp_path, site)

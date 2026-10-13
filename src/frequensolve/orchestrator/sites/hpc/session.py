@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import getpass
+import hashlib
 import json
 import logging
 import math
+import os
+import re
 import shlex
+import socket
+import sys
 import threading
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.resources import as_file, files
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 from uuid import uuid4
 
@@ -29,14 +36,20 @@ from frequensolve.orchestrator.sites.hpc.site import (
     partition_gpus_per_node,
     rank_memory_gib,
 )
-from frequensolve.orchestrator.sites.hpc.slurm_helpers import temporary_text_file
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    SESSION_JOB_NAME,
+    slurm_time_seconds,
+    temporary_text_file,
+)
 from frequensolve.simulation.jobs.run_state import SkipPolicy
 
 __all__ = [
     "AdaptiveWorkers",
     "AllocationSession",
     "DEFAULT_HEARTBEAT_TIMEOUT",
+    "DEFAULT_MIN_TIME_LEFT",
     "DEFAULT_SESSION_COMMAND_TIMEOUT",
+    "SessionInfo",
 ]
 
 logger = logging.getLogger(__name__)
@@ -64,6 +77,37 @@ _SLURM_ENDED = {"complete", "failed", "cancelled", "timeout"}
 _POLL_INTERVAL = 0.2
 _PROCESSED = "processed"
 _ENDED = {"closed", "failed", "complete", "cancelled", "timeout"}
+# Reuse skips sessions with less walltime left than this, by default.
+DEFAULT_MIN_TIME_LEFT = 900.0
+# How long an adopting client waits for the controller to list its lease.
+_ADOPT_CONFIRM_TIMEOUT = 15.0
+# A lingering session this close to the end of its linger is not adopted.
+_LINGER_MARGIN = 30.0
+# Settings a session must share with a request to be reused for it.
+_COMPATIBLE = {
+    "schema": "its controller version",
+    "nodes": "nodes",
+    "ranks_per_node": "ranks_per_node",
+    "total_ranks": "total ranks",
+    "queue": "queue",
+    "account": "account",
+    "gpus_per_node": "GPUs per node",
+    "rank_binding": "rank binding",
+    "environment_digest": "module and environment setup",
+}
+_COMPATIBLE_SCHEDULER = (
+    "executable",
+    "mpi",
+    "mpi_args",
+    "omp_threads",
+    "mem_per_rank_gib",
+    "min_ranks",
+    "max_ranks_per_task",
+    "mem_cushion",
+)
+_DURATION = re.compile(
+    r"(?:(?P<h>\d+(?:\.\d*)?)h)?(?:(?P<m>\d+(?:\.\d*)?)m)?(?:(?P<s>\d+(?:\.\d*)?)s)?"
+)
 
 
 @dataclass(frozen=True)
@@ -88,6 +132,302 @@ class AdaptiveWorkers:
             raise ValueError("mem_cushion must be finite and >= 1")
 
 
+def _duration(value, name):
+    """Seconds from a number or a duration such as ``"90s"``, ``"30m"``,
+    ``"1h30m"`` or Slurm's ``[D-]HH:MM:SS``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise TypeError(f"{name} must be seconds or a duration such as '30m'")
+    if isinstance(value, str):
+        text = value.strip().lower()
+        match = _DURATION.fullmatch(text)
+        if text and match and any(match.groupdict().values()):
+            seconds = sum(
+                float(match[unit] or 0) * scale
+                for unit, scale in (("h", 3600.0), ("m", 60.0), ("s", 1.0))
+            )
+        else:
+            seconds = slurm_time_seconds(text)
+            if seconds is None:
+                raise ValueError(
+                    f"{name} must be seconds or a duration such as '30m', '2h' "
+                    "or '01:30:00'"
+                )
+    else:
+        seconds = float(value)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError(f"{name} must be finite and >= 0")
+    return seconds
+
+
+def _describe(seconds):
+    for unit, size in (("h", 3600.0), ("min", 60.0)):
+        if seconds >= size:
+            return f"{seconds / size:.3g} {unit}"
+    return f"{seconds:.3g} s"
+
+
+def reuse_key(reuse):
+    """Return ``(key, label)`` for a ``reuse`` scope: a string or a project.
+
+    A project's key combines its name with a digest of its resolved path, so
+    unrelated projects that share a name never share allocations. A string
+    names a scope directly, for example to share across projects.
+    """
+    if reuse is None:
+        return None, None
+    if isinstance(reuse, str):
+        if not reuse.strip():
+            raise ValueError("reuse must be a non-empty string or a Project")
+        return f"key:{reuse}", reuse
+    name, path = getattr(reuse, "name", None), getattr(reuse, "path", None)
+    if isinstance(name, str) and path is not None:
+        resolved = str(Path(path).expanduser().resolve())
+        digest = hashlib.sha256(resolved.encode()).hexdigest()[:16]
+        return f"project:{name}:{digest}", name
+    raise TypeError("reuse must be None, a string or a Project")
+
+
+def _creator():
+    """Who started a session, shown in listings; never used to grant reuse."""
+    try:
+        user = getpass.getuser()
+    except Exception:  # pragma: no cover - no login name in the environment
+        user = None
+    return {
+        "user": user,
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "script": Path(sys.argv[0]).name if sys.argv and sys.argv[0] else None,
+    }
+
+
+def _revoked(lease):
+    return bool(lease.get("revoked")) or float(lease.get("expires_at", 1) or 0) <= 0
+
+
+def _gone_here(lease):
+    """Whether a lease names a process on this host that has exited."""
+    pid = lease.get("pid")
+    if (
+        lease.get("host") != socket.gethostname()
+        or not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid <= 0
+        or pid == os.getpid()
+    ):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False  # alive, but owned by someone else
+    return False
+
+
+def _live_leases(leases, status):
+    """Return the ids of the clients whose leases are live.
+
+    Revoked leases, and leases of exited processes on this host, are not.
+    With a running controller (``status``), a lease is live if the
+    controller lists it or if it renewed since the controller last read it;
+    before the controller runs, every other lease counts as live.
+    """
+    live = {
+        client
+        for client, lease in leases.items()
+        if not _revoked(lease) and not _gone_here(lease)
+    }
+    if not status or "client_ids" not in status:
+        return live
+    listed = set(status.get("client_ids") or ())
+    observed = status.get("lease_sequences") or {}
+    return {
+        client
+        for client in live
+        if client in listed or observed.get(client) != leases[client].get("sequence")
+    }
+
+
+def _command_timeout(site):
+    return getattr(
+        getattr(site, "run_config", None),
+        "session_command_timeout",
+        DEFAULT_SESSION_COMMAND_TIMEOUT,
+    )
+
+
+def _session_dirs(site, allocation_ids, timeout):
+    """Map live allocation ids to the ids of the sessions that recorded them."""
+    if not allocation_ids:
+        return {}
+    sessions = site.work_dir / ".fs_sessions"
+    needles = " ".join(
+        "-e " + shlex.quote(f'"allocation_id": "{job}"') for job in allocation_ids
+    )
+    output = site._run_session_command(
+        f"grep -H -o -F {needles} -- {shlex.quote(str(sessions))}/*/allocation.json "
+        "2>/dev/null; true",
+        timeout=timeout,
+        action="session lookup (grep)",
+        path=sessions,
+    )
+    found = {}
+    for line in output.splitlines():
+        directory, separator, match = line.partition("/allocation.json:")
+        fields = match.split('"')
+        if not separator or len(fields) < 4:
+            continue
+        session_id, allocation_id = directory.rsplit("/", 1)[-1], fields[3]
+        if allocation_id not in allocation_ids or len(session_id) != 32:
+            continue
+        # An allocation recorded twice is ambiguous; never guess.
+        found[allocation_id] = None if allocation_id in found else session_id
+    return {job: session for job, session in found.items() if session is not None}
+
+
+def _read_leases(site, root, timeout):
+    """Return ``{client id: lease}`` for the client leases of a session."""
+    leases = root / "leases"
+    output = site._run_session_command(
+        f"for f in {shlex.quote(str(leases))}/*.json; do "
+        '[ -f "$f" ] || continue; printf "%s\t" "${f##*/}"; head -n 1 -- "$f"; '
+        "echo; done; true",
+        timeout=timeout,
+        action="lease listing",
+        path=leases,
+    )
+    found = {}
+    for line in output.splitlines():
+        name, _, text = line.partition("\t")
+        if not name.endswith(".json") or not text.strip():
+            continue
+        try:
+            lease = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(lease, dict):
+            found[name[: -len(".json")]] = lease
+    return found
+
+
+@dataclass(frozen=True)
+class SessionInfo:
+    """A queued or running persistent session of this user on a site.
+
+    ``state`` is ``"pending"`` while Slurm queues the allocation, then the
+    controller's state (``"starting"`` before its first heartbeat).
+    ``clients`` counts attached clients (``None`` before the controller
+    runs); ``idle_seconds`` is how long nothing has been attached or running.
+    ``time_left`` is Slurm's remaining walltime in seconds (the time limit
+    while pending). ``reuse`` names the reuse scope the session was started
+    with, if any.
+    """
+
+    session_id: str
+    allocation_id: str
+    state: str
+    clients: Optional[int]
+    idle_seconds: Optional[float]
+    linger: float
+    time_left: Optional[float]
+    nodes: Optional[int]
+    ranks_per_node: Optional[int]
+    queue: Optional[str]
+    reuse: Optional[str]
+    created_by: dict = field(default_factory=dict)
+    config: dict = field(default_factory=dict, repr=False, compare=False)
+    status: Optional[dict] = field(default=None, repr=False, compare=False)
+
+
+def list_sessions(site, reuse=None):
+    """List the user's queued and running sessions on ``site``.
+
+    Only Slurm jobs of the current user named like session allocations, and
+    recorded by a session directory under the site's work directory, are
+    considered. ``reuse`` keeps the sessions started with that reuse scope.
+    """
+    return _list_sessions(site, reuse_key(reuse)[0])
+
+
+def _list_sessions(site, key):
+    jobs = site._session_allocations()
+    sessions = []
+    for allocation_id, session_id in sorted(
+        _session_dirs(site, sorted(jobs), _command_timeout(site)).items()
+    ):
+        root = site.work_dir / ".fs_sessions" / session_id
+        config = site._read_remote_json(root / "config.json")
+        if not isinstance(config, dict) or "generation" not in config:
+            continue
+        reuse = config.get("reuse") or {}
+        if key is not None and reuse.get("key") != key:
+            continue
+        job = jobs[allocation_id]
+        status = None
+        if job["state"] == "running":
+            status = site._read_remote_json(root / "status.json")
+            if (
+                not isinstance(status, dict)
+                or status.get("generation") != config["generation"]
+            ):
+                status = None
+        if job["state"] == "running":
+            state = (status or {}).get("state") or "starting"
+        else:
+            state = job["state"]  # "pending", or a state reuse never adopts
+        if state in _ENDED:
+            continue  # its controller closed; Slurm is still completing the job
+        sessions.append(
+            SessionInfo(
+                session_id=session_id,
+                allocation_id=allocation_id,
+                state=state,
+                clients=None if status is None else status.get("clients"),
+                idle_seconds=None if status is None else status.get("idle_seconds"),
+                linger=float(
+                    (status or {}).get("linger", config.get("linger") or 0.0) or 0.0
+                ),
+                time_left=job.get("time_left"),
+                nodes=config.get("nodes"),
+                ranks_per_node=config.get("ranks_per_node"),
+                queue=config.get("queue"),
+                reuse=reuse.get("label"),
+                created_by=dict(config.get("created_by") or {}),
+                config=config,
+                status=status,
+            )
+        )
+    return sessions
+
+
+def release_sessions(site, reuse=None, *, include_attached=False):
+    """End the user's idle sessions on ``site``; return the released ones.
+
+    ``reuse`` limits this to sessions started with that reuse scope; ``None``
+    releases every idle session of this user on the site. Sessions with an
+    attached client are kept unless ``include_attached=True``, which cancels
+    their work.
+    """
+    released = []
+    for info in list_sessions(site, reuse):
+        session = AllocationSession(site, session_id=info.session_id)
+        if not include_attached:
+            live, _ = session._attached(info, observe=False)
+            if live:
+                logger.info(
+                    "Keeping allocation %s (session %s): %d client(s) attached",
+                    info.allocation_id,
+                    info.session_id,
+                    len(live),
+                )
+                continue
+        session._load(info.config)
+        session.release(drain=False)
+        released.append(info)
+    return released
+
+
 class AllocationSession(BaseSite):
     """Site-compatible executor backed by one allocation-resident scheduler.
 
@@ -96,6 +436,19 @@ class AllocationSession(BaseSite):
     Closing an owned session drains its work and releases the allocation;
     closing a borrowed session only disconnects this client. Remote request
     and result records are retained for inspection and reattachment.
+
+    ``reuse`` (a project or a string) lets a later client adopt this session
+    instead of queueing a new allocation, and lets this one adopt an earlier
+    session started with the same ``reuse``: only the user's own running or
+    queued sessions with that scope, the same resources, solver and
+    environment, at least ``min_time_left`` of walltime and no attached
+    client qualify (``share=True`` also joins sessions other clients use).
+    Non-FrequenSolve jobs never qualify. ``linger`` (seconds or a duration
+    such as ``"30m"``; default 0) keeps the allocation that long once no
+    client is attached and nothing runs, including after a normal exit, so
+    closing only detaches; :meth:`release` ends it now. With ``linger``, a
+    client that disappears leaves its runs to finish, and resubmitting such
+    a job after adopting the session waits on the existing run.
 
     ``heartbeat_timeout`` is how long the controller heartbeat may stop
     advancing, measured on this client's monotonic clock while Slurm reports
@@ -129,12 +482,32 @@ class AllocationSession(BaseSite):
         heartbeat_timeout="auto",
         session_command_timeout="auto",
         session_id=None,
+        reuse=None,
+        linger=0,
+        share=False,
+        min_time_left=DEFAULT_MIN_TIME_LEFT,
         **resources,
     ):
         self.base_site = site
         self.session_id = self._id(session_id or uuid4().hex)
-        self.root = site.work_dir / ".fs_sessions" / self.session_id
+        self._new_session_id = self.session_id
+        self.root = self._session_root(self.session_id)
         self.owned = session_id is None
+        self.reuse_key, self.reuse_label = reuse_key(reuse)
+        self.linger = _duration(linger, "linger")
+        self.share = bool(share)
+        self.min_time_left = _duration(min_time_left, "min_time_left")
+        if not self.owned and (reuse is not None or self.share or self.linger):
+            raise ValueError(
+                "attach_session(session_id) borrows a session; reuse, share and "
+                "linger apply to sessions this client starts or adopts"
+            )
+        if self.share and self.reuse_key is None:
+            raise ValueError("share=True requires reuse")
+        # Whether this client adopted an earlier session instead of starting one.
+        self.reused = False
+        self._adopt_only = False
+        self._released = False
         self.workers = workers or AdaptiveWorkers()
         if not isinstance(self.workers, AdaptiveWorkers):
             raise TypeError("workers must be an AdaptiveWorkers configuration")
@@ -233,6 +606,9 @@ class AllocationSession(BaseSite):
     def _identity(self):
         return f"session {self.session_id} (Slurm allocation {self.allocation_id})"
 
+    def _session_root(self, session_id):
+        return self.base_site.work_dir / ".fs_sessions" / session_id
+
     @property
     def controller_log(self):
         """Remote path of the allocation controller's log (stdout and stderr)."""
@@ -293,6 +669,12 @@ class AllocationSession(BaseSite):
                     "timeout": self.lease_timeout,
                     "revoked": revoke,
                     "expires_at": 0 if revoke else time.time() + self.lease_timeout,
+                    # Lets a later client on this host see that we exited.
+                    "client": self._client_id,
+                    "host": socket.gethostname(),
+                    "pid": os.getpid(),
+                    # The last clients attached decide how long it lingers.
+                    "linger": self.linger if self.owned else None,
                 },
             )
             self._lease_revoked = revoke
@@ -316,8 +698,21 @@ class AllocationSession(BaseSite):
         )
         self._lease_thread.start()
 
+    def _end_lease(self, *, revoke):
+        self._stop.set()
+        if self._lease_thread is not None:
+            self._lease_thread.join(timeout=1)
+        # A client that never wrote a lease has nothing to revoke.
+        if self.generation and revoke and self._lease_sequence:
+            try:
+                self._renew(revoke=True)
+            except Exception as error:
+                logger.debug(
+                    "Could not revoke the lease of %s: %s", self._identity(), error
+                )
+
     def start(self):
-        """Submit once (or attach), renew the client lease, return this session."""
+        """Submit once, adopt a reusable session, or attach; renew the lease."""
         with self._lock:
             if self._closed:
                 raise RuntimeError("allocation session is closed")
@@ -325,144 +720,370 @@ class AllocationSession(BaseSite):
                 return self
             self._warn_if_short_window()
             if not self.owned:
-                self._config = self._read(self.root / "config.json")
-                metadata = self._read(self.root / "allocation.json")
-                if not self._config or not metadata:
-                    raise RuntimeError("allocation session was not found")
-                self.generation = self._config["generation"]
-                self.allocation_id = str(metadata["allocation_id"])
+                self._load()
                 self.lease_timeout = float(self._config["lease_timeout"])
-                scheduler = self._config["scheduler"]
-                self.workers = AdaptiveWorkers(
-                    min_ranks=scheduler["min_ranks"],
-                    max_ranks_per_task=scheduler["max_ranks_per_task"],
-                    mem_cushion=scheduler["mem_cushion"],
-                )
                 self._start_lease()
                 return self
+            planned, plan = self._plan()
             site = self.base_site
-            config, extra = site.run_config.resolved(site.config, **self.resources)
-            if extra:
-                raise TypeError(
-                    "Unexpected allocation resource option(s): "
-                    + ", ".join(sorted(extra))
-                )
-            if config.mpi_async_progress or config.mpi_health_check_timeout:
-                raise NotImplementedError(
-                    "persistent sessions do not support MPI async progress or health-check options"
-                )
-            nodes = positive_count(config.nodes, "nodes")
-            per_node = positive_count(config.ranks_per_node or 8, "ranks_per_node")
-            shape = site.config_for_partition(str(config.queue))
-            if per_node > shape.cores_per_node:
-                raise ValueError("ranks_per_node exceeds available CPU cores")
-            if shape.memory_per_node <= 0:
-                raise ValueError(
-                    "persistent sessions require memory_per_node in the site profile"
-                )
-            duration = shape.validate_request(
-                nodes, nodes * per_node, config.duration or shape.max_duration
-            )
-            limit = self.workers.max_ranks_per_task or nodes * per_node
-            if self.workers.min_ranks > limit or limit > nodes * per_node:
-                raise ValueError("worker rank limits exceed the allocation")
             if site.enterprise_hpc is not None:
-                site._enterprise_hpc_preflight(run_config=config)
-            else:
+                site._enterprise_hpc_preflight(run_config=plan.run_config)
+            if self.reuse_key is not None and self._adopt(planned):
+                return self
+            if self._adopt_only:
+                raise RuntimeError(
+                    f"No running or queued allocation session for "
+                    f"{self.reuse_label!r} can be reused with these resources; "
+                    "start one with site.session(..., reuse=...)"
+                )
+            if site.enterprise_hpc is None:
                 site.check_solver_compatibility()
-            self.generation = uuid4().hex
-            threads = shape.cores_per_node // per_node
-            self._config = {
-                "schema": "fs-allocation-session-1",
-                "generation": self.generation,
-                "nodes": nodes,
-                "ranks_per_node": per_node,
-                "total_ranks": nodes * per_node,
-                "queue": config.queue,
-                "duration": duration,
-                "account": config.account or site.config.account,
-                "lease_timeout": self.lease_timeout,
-                "heartbeat_timeout": self.heartbeat_timeout,
-                # Several heartbeats per window, without rewriting status.json
-                # more than once a second on the shared filesystem.
-                "heartbeat_interval": (
-                    1.0
-                    if self.heartbeat_timeout is None
-                    else min(1.0, self.heartbeat_timeout / 10)
-                ),
-                "rank_binding": "explicit",
-                # Ranks of concurrent steps select the GPU under their slot.
-                "gpus_per_node": partition_gpus_per_node(shape, config.queue),
-                "scheduler": {
-                    "executable": str(site.executable),
-                    "mpi": str(site.mpi_cmd),
-                    "mpi_args": list(site.mpi_args),
-                    "total_ranks": nodes * per_node,
-                    "omp_threads": threads,
-                    "mem_per_rank_gib": rank_memory_gib(shape, per_node),
-                    "min_ranks": self.workers.min_ranks,
-                    "max_ranks_per_task": limit,
-                    "mem_cushion": self.workers.mem_cushion,
-                },
-            }
-            # A unique directory prevents accidental reuse after controller loss.
-            self._login(
-                f"mkdir -p -- {shlex.quote(str(self.root.parent))} && mkdir -- {shlex.quote(str(self.root))} && mkdir -- "
-                + " ".join(
-                    shlex.quote(str(self.root / name))
-                    for name in ("requests", "commands", "runs", "leases")
-                ),
-                action="session directory creation (mkdir)",
-                path=self.root,
-            )
-            self._text(json.dumps(self._config), self.root / "config.json")
-            directory = files("frequensolve.orchestrator.sites.hpc").joinpath(
-                "templates", "sweep"
-            )
-            for name in ("adaptive_scheduler.py", "session_controller.py"):
-                with as_file(directory.joinpath(name)) as source:
-                    site.put(source, self.root / name)
-            script = site._render_template(
-                "session/session_SLURM.sh",
-                name=_safe_slurm_directive("FS_session", "name"),
-                queue=_safe_slurm_directive(config.queue, "queue"),
-                account=_safe_slurm_directive(
-                    config.account or site.config.account, "account"
-                ),
-                duration=_safe_slurm_directive(duration, "duration"),
-                nodes=nodes,
-                ranks=nodes * per_node,
-                ranks_per_node=per_node,
-                cpus_per_task=(
-                    None if Path(str(site.mpi_cmd)).name == "ibrun" else threads
-                ),
-                root=shlex.quote(str(self.root)),
-                log_path=_safe_slurm_directive(
-                    str(self.root / "controller.log"), "log_path"
-                ),
-                runtime_setup=site._runtime_setup_lines(
-                    getattr(shape, "partition_environment", None)
-                ),
-            )
-            self._text(script, self.root / "allocation.sh")
-            self._renew()
-            self.allocation_id = site._submit_sbatch(
-                "sbatch "
-                + " ".join(shlex.quote(str(arg)) for arg in config.slurm_args)
-                + " "
-                + shlex.quote(str(self.root / "allocation.sh"))
-            )
-            self._text(
-                json.dumps(
-                    {"allocation_id": self.allocation_id, "generation": self.generation}
-                ),
-                self.root / "allocation.json",
-            )
-            self._start_lease()
-            site._emit(
-                f"Persistent allocation {self.allocation_id}; session {self.session_id}"
-            )
+            self._submit_allocation(planned, plan)
             return self
+
+    def _load(self, config=None):
+        """Read an existing session's configuration and allocation id."""
+        self._config = config or self._read(self.root / "config.json")
+        metadata = self._read(self.root / "allocation.json")
+        if not self._config or not metadata:
+            raise RuntimeError("allocation session was not found")
+        self.generation = self._config["generation"]
+        self.allocation_id = str(metadata["allocation_id"])
+        scheduler = self._config["scheduler"]
+        self.workers = AdaptiveWorkers(
+            min_ranks=scheduler["min_ranks"],
+            max_ranks_per_task=scheduler["max_ranks_per_task"],
+            mem_cushion=scheduler["mem_cushion"],
+        )
+
+    def _plan(self):
+        """Resolve and validate a new allocation's configuration, locally."""
+        site = self.base_site
+        config, extra = site.run_config.resolved(site.config, **self.resources)
+        if extra:
+            raise TypeError(
+                "Unexpected allocation resource option(s): " + ", ".join(sorted(extra))
+            )
+        if config.mpi_async_progress or config.mpi_health_check_timeout:
+            raise NotImplementedError(
+                "persistent sessions do not support MPI async progress or health-check options"
+            )
+        nodes = positive_count(config.nodes, "nodes")
+        per_node = positive_count(config.ranks_per_node or 8, "ranks_per_node")
+        shape = site.config_for_partition(str(config.queue))
+        if per_node > shape.cores_per_node:
+            raise ValueError("ranks_per_node exceeds available CPU cores")
+        if shape.memory_per_node <= 0:
+            raise ValueError(
+                "persistent sessions require memory_per_node in the site profile"
+            )
+        duration = shape.validate_request(
+            nodes, nodes * per_node, config.duration or shape.max_duration
+        )
+        limit = self.workers.max_ranks_per_task or nodes * per_node
+        if self.workers.min_ranks > limit or limit > nodes * per_node:
+            raise ValueError("worker rank limits exceed the allocation")
+        threads = shape.cores_per_node // per_node
+        runtime_setup = site._runtime_setup_lines(
+            getattr(shape, "partition_environment", None)
+        )
+        planned = {
+            "schema": "fs-allocation-session-1",
+            "nodes": nodes,
+            "ranks_per_node": per_node,
+            "total_ranks": nodes * per_node,
+            "queue": config.queue,
+            "duration": duration,
+            "account": config.account or site.config.account,
+            "lease_timeout": self.lease_timeout,
+            "heartbeat_timeout": self.heartbeat_timeout,
+            # Several heartbeats per window, without rewriting status.json
+            # more than once a second on the shared filesystem.
+            "heartbeat_interval": (
+                1.0
+                if self.heartbeat_timeout is None
+                else min(1.0, self.heartbeat_timeout / 10)
+            ),
+            "rank_binding": "explicit",
+            # Ranks of concurrent steps select the GPU under their slot.
+            "gpus_per_node": partition_gpus_per_node(shape, config.queue),
+            # Reuse requires the same modules and environment.
+            "environment_digest": hashlib.sha256(
+                "\n".join(runtime_setup).encode()
+            ).hexdigest(),
+            "linger": self.linger,
+            "reuse": (
+                None
+                if self.reuse_key is None
+                else {"key": self.reuse_key, "label": self.reuse_label}
+            ),
+            "created_by": _creator(),
+            "scheduler": {
+                "executable": str(site.executable),
+                "mpi": str(site.mpi_cmd),
+                "mpi_args": list(site.mpi_args),
+                "total_ranks": nodes * per_node,
+                "omp_threads": threads,
+                "mem_per_rank_gib": rank_memory_gib(shape, per_node),
+                "min_ranks": self.workers.min_ranks,
+                "max_ranks_per_task": limit,
+                "mem_cushion": self.workers.mem_cushion,
+            },
+        }
+        plan = SimpleNamespace(
+            run_config=config,
+            duration=duration,
+            per_node=per_node,
+            threads=threads,
+            runtime_setup=runtime_setup,
+        )
+        return planned, plan
+
+    def _submit_allocation(self, planned, plan):
+        """Create the session directory and submit its batch job."""
+        site = self.base_site
+        self.generation = uuid4().hex
+        self._config = {**planned, "generation": self.generation}
+        # A unique directory prevents accidental reuse after controller loss.
+        self._login(
+            f"mkdir -p -- {shlex.quote(str(self.root.parent))} && mkdir -- {shlex.quote(str(self.root))} && mkdir -- "
+            + " ".join(
+                shlex.quote(str(self.root / name))
+                for name in ("requests", "commands", "runs", "leases")
+            ),
+            action="session directory creation (mkdir)",
+            path=self.root,
+        )
+        self._text(json.dumps(self._config), self.root / "config.json")
+        directory = files("frequensolve.orchestrator.sites.hpc").joinpath(
+            "templates", "sweep"
+        )
+        for name in ("adaptive_scheduler.py", "session_controller.py"):
+            with as_file(directory.joinpath(name)) as source:
+                site.put(source, self.root / name)
+        config = plan.run_config
+        script = site._render_template(
+            "session/session_SLURM.sh",
+            name=_safe_slurm_directive(SESSION_JOB_NAME, "name"),
+            queue=_safe_slurm_directive(config.queue, "queue"),
+            account=_safe_slurm_directive(
+                config.account or site.config.account, "account"
+            ),
+            duration=_safe_slurm_directive(plan.duration, "duration"),
+            nodes=planned["nodes"],
+            ranks=planned["total_ranks"],
+            ranks_per_node=plan.per_node,
+            cpus_per_task=(
+                None if Path(str(site.mpi_cmd)).name == "ibrun" else plan.threads
+            ),
+            root=shlex.quote(str(self.root)),
+            log_path=_safe_slurm_directive(
+                str(self.root / "controller.log"), "log_path"
+            ),
+            runtime_setup=plan.runtime_setup,
+        )
+        self._text(script, self.root / "allocation.sh")
+        self._renew()
+        self.allocation_id = site._submit_sbatch(
+            "sbatch "
+            + " ".join(shlex.quote(str(arg)) for arg in config.slurm_args)
+            + " "
+            + shlex.quote(str(self.root / "allocation.sh"))
+        )
+        self._text(
+            json.dumps(
+                {"allocation_id": self.allocation_id, "generation": self.generation}
+            ),
+            self.root / "allocation.json",
+        )
+        self._start_lease()
+        site._emit(
+            f"Persistent allocation {self.allocation_id}; session {self.session_id}"
+        )
+
+    # -- reuse ----------------------------------------------------------------
+
+    def _adopt(self, planned):
+        """Take over a compatible session started with the same reuse scope."""
+        site = self.base_site
+        try:
+            candidates = _list_sessions(site, self.reuse_key)
+        except Exception as error:
+            logger.warning(
+                "Could not look up reusable allocation sessions for %r; starting "
+                "a new allocation: %s",
+                self.reuse_label,
+                error,
+            )
+            return False
+        # Running sessions first, then those with the most walltime left.
+        candidates.sort(
+            key=lambda info: (info.state == "pending", -(info.time_left or 0.0))
+        )
+        for info in candidates:
+            reason = self._unsuitable(info, planned)
+            seen = set()
+            if reason is None:
+                live, seen = self._attached(info)
+                if live and not self.share:
+                    reason = (
+                        f"{len(live)} other client(s) attached; pass share=True to "
+                        "join it"
+                    )
+            if reason is not None:
+                site._emit(
+                    f"Not reusing allocation {info.allocation_id} (session "
+                    f"{info.session_id}): {reason}"
+                )
+                continue
+            if self._claim(info, seen):
+                return True
+        return False
+
+    def _unsuitable(self, info, planned):
+        """Return why a candidate session cannot take this work, or None."""
+        if info.state not in {"pending", "starting", "ready"}:
+            return f"its controller is {info.state}"
+        if info.time_left is not None and info.time_left < self.min_time_left:
+            return (
+                f"{info.time_left:.0f} s of walltime left, below min_time_left "
+                f"({self.min_time_left:g} s)"
+            )
+        if (
+            info.idle_seconds is not None
+            and info.linger - info.idle_seconds < _LINGER_MARGIN
+        ):
+            return "its linger period is about to end"
+        config = info.config
+        for key, label in _COMPATIBLE.items():
+            if config.get(key) != planned.get(key):
+                if key == "environment_digest":
+                    return f"its {label} differs"
+                return (
+                    f"{label} differs (session {config.get(key)!r}, requested "
+                    f"{planned.get(key)!r})"
+                )
+        scheduler = config.get("scheduler") or {}
+        for key in _COMPATIBLE_SCHEDULER:
+            if scheduler.get(key) != planned["scheduler"].get(key):
+                return (
+                    f"{key} differs (session {scheduler.get(key)!r}, requested "
+                    f"{planned['scheduler'].get(key)!r})"
+                )
+        return None
+
+    def _attached(self, info, *, observe=True):
+        """Return ``(live, seen)`` client ids of a candidate session's leases.
+
+        With a running controller, liveness is as in :func:`_live_leases`.
+        Before it runs, a lease is live while its sequence advances, observed
+        over one renewal period when ``observe``.
+        """
+        site = self.base_site
+        root = self._session_root(info.session_id)
+        leases = _read_leases(site, root, self.command_timeout)
+        seen = set(leases)
+        if info.status is not None and "client_ids" in info.status:
+            return _live_leases(leases, info.status), seen
+        waiting = {client: leases[client] for client in _live_leases(leases, None)}
+        if not waiting or not observe:
+            return set(waiting), seen
+        period = max(
+            min(10.0, float(lease.get("timeout") or 300.0) / 3)
+            for lease in waiting.values()
+        )
+        site._emit(
+            f"Checking whether a client still waits for queued allocation "
+            f"{info.allocation_id} (session {info.session_id})"
+        )
+        time.sleep(period + 5.0)
+        again = _read_leases(site, root, self.command_timeout)
+        live = {
+            client
+            for client, lease in waiting.items()
+            if client in again
+            and not _revoked(again[client])
+            and again[client].get("sequence") != lease.get("sequence")
+        }
+        return live, seen | set(again)
+
+    def _claim(self, info, seen):
+        """Adopt ``info``; back off if another client adopts it at once."""
+        self.session_id = info.session_id
+        self.root = self._session_root(info.session_id)
+        self._config = info.config
+        self.generation = info.config["generation"]
+        self.allocation_id = info.allocation_id
+        try:
+            self._start_lease()
+            reason = None
+            if not self.share:
+                # Each adopter writes its lease before reading the others', so
+                # of two concurrent adopters at least one sees the other.
+                current = _read_leases(self.base_site, self.root, self.command_timeout)
+                if any(
+                    client != self._client_id
+                    and client not in seen
+                    and not _revoked(lease)
+                    for client, lease in current.items()
+                ):
+                    reason = "another client is adopting it"
+            if reason is None and not self._confirm_adoption():
+                reason = "it ended while being adopted"
+        except BaseException:
+            self._abandon()
+            raise
+        if reason is not None:
+            self.base_site._emit(
+                f"Not reusing allocation {info.allocation_id} (session "
+                f"{info.session_id}): {reason}"
+            )
+            self._abandon()
+            return False
+        self.reused = True
+        scheduler = self._config["scheduler"]
+        self.workers = AdaptiveWorkers(
+            min_ranks=scheduler["min_ranks"],
+            max_ranks_per_task=scheduler["max_ranks_per_task"],
+            mem_cushion=scheduler["mem_cushion"],
+        )
+        detail = info.state
+        if info.idle_seconds is not None:
+            detail += f", idle {_describe(round(info.idle_seconds))}"
+        if info.time_left is not None and math.isfinite(info.time_left):
+            detail += f", {_describe(round(info.time_left))} left"
+        self.base_site._emit(
+            f"Reusing allocation {self.allocation_id} (session {self.session_id}; "
+            f"{detail})",
+            force=True,
+        )
+        return True
+
+    def _confirm_adoption(self):
+        """Wait for a running controller to list this client; False if it ended."""
+        deadline = time.monotonic() + _ADOPT_CONFIRM_TIMEOUT
+        while True:
+            status = self._read(self.root / "status.json")
+            if not status or status.get("generation") != self.generation:
+                return True  # not started: the controller reads leases at start
+            if status.get("state") in _ENDED or status.get("reason"):
+                return False
+            if self._client_id in (status.get("client_ids") or ()):
+                return True
+            if time.monotonic() >= deadline:
+                # A slow filesystem; wait_ready() keeps checking liveness.
+                return True
+            time.sleep(0.5)
+
+    def _abandon(self):
+        """Drop an unsuccessful claim, leaving the candidate session as it was."""
+        self._end_lease(revoke=True)
+        self._stop = threading.Event()
+        self._lease_thread = None
+        self._lease_revoked = False
+        self.session_id = self._new_session_id
+        self.root = self._session_root(self.session_id)
+        self._config = self.generation = self.allocation_id = None
 
     def wait_ready(self, timeout=None):
         """Wait for controller readiness, not merely SLURM RUNNING status."""
@@ -485,9 +1106,18 @@ class AllocationSession(BaseSite):
     def __enter__(self):
         try:
             return self.wait_ready()
-        except BaseException:
+        except BaseException as error:
             try:
-                self.close(drain=False)
+                if (
+                    self.owned
+                    and not self.reused
+                    and not (self.linger and isinstance(error, KeyboardInterrupt))
+                ):
+                    # A new allocation that never became usable. Interrupting
+                    # a lingering one keeps its place in the queue for reuse.
+                    self.release(drain=False)
+                else:
+                    self.close(drain=False)
             except Exception as cleanup:
                 # Report the readiness failure, not the cleanup failure.
                 logger.warning(
@@ -639,7 +1269,14 @@ class AllocationSession(BaseSite):
             },
             immutable=True,
         )
-        handle = RunHandle(
+        handle = self._run_handle(
+            job, run_id, fetch=fetch, check=check, task_plan=task_plan
+        )
+        self._handles[run_id] = handle
+        return handle
+
+    def _run_handle(self, job, run_id, *, fetch=False, check=False, task_plan=None):
+        return RunHandle(
             site=self,
             job=job,
             id=run_id,
@@ -659,7 +1296,36 @@ class AllocationSession(BaseSite):
                 (lambda run: self.base_site.fetch_outputs(run.job)) if fetch else None
             ),
         )
-        self._handles[run_id] = handle
+
+    def _resume(self, job, *, fresh, fetch, check):
+        """Return a handle to this job's run that an earlier client left running.
+
+        The job's run record names the session run. ``fresh`` cancels that run
+        (and waits for it to stop) so the job is submitted again.
+        """
+        latest = getattr(job, "latest_run", None)
+        record = latest(site=self.site_name) if callable(latest) else None
+        metadata = getattr(record, "metadata", None) or {}
+        run_id = metadata.get("session_run_id")
+        if (
+            not run_id
+            or run_id in self._handles
+            or metadata.get("session_id") != self.session_id
+            or metadata.get("generation") != self.generation
+        ):
+            return None
+        handle = self._run_handle(job, self._id(run_id), fetch=fetch, check=check)
+        if handle.status().is_complete:
+            return None
+        if fresh:
+            handle.cancel()
+            handle.wait(check=False)
+            return None
+        self.base_site._emit(
+            f"Resuming run {run_id} of {getattr(job, 'name', 'job')} in "
+            f"{self._identity()}"
+        )
+        self._handles[handle.id] = handle
         return handle
 
     def submit(
@@ -722,6 +1388,10 @@ class AllocationSession(BaseSite):
                 if fresh:
                     raise RuntimeError("this job already has an active session run")
                 return inflight
+            resumed = self._resume(job, fresh=fresh, fetch=fetch, check=check)
+            if resumed is not None:
+                self._jobs[str(getattr(job, "job_file", job.name))] = resumed
+                return resumed
             plan = job.task_run_plan(reuse=skip.reuse, force=fresh, skip_policy=skip)
             tasks = (
                 []
@@ -934,6 +1604,12 @@ class AllocationSession(BaseSite):
         to the lease and walltime. ``drain=False`` cancels outstanding work
         and the allocation. Transport errors raise after cleanup, naming the
         session so it can be reattached.
+
+        An owned session with ``linger``, or with other clients attached,
+        only detaches: ``drain=True`` waits for this client's runs (up to
+        ``cleanup_timeout``) and ``drain=False`` cancels them, while the
+        allocation stays up for the other clients, then for ``linger``
+        seconds. :meth:`release` ends it now.
         """
         if self._closed:
             return
@@ -942,18 +1618,116 @@ class AllocationSession(BaseSite):
         keep_lease = False
         try:
             if self.owned and self.allocation_id:
-                keep_lease = self._release(drain)
+                others = self._other_clients()
+                if self.linger > 0 or others:
+                    self._detach(drain, others)
+                else:
+                    keep_lease = self._release(drain)
         finally:
-            self._stop.set()
-            if self._lease_thread is not None:
-                self._lease_thread.join(timeout=1)
-            if self.generation and not keep_lease:
+            self._end_lease(revoke=not keep_lease)
+
+    def release(self, *, drain=True):
+        """End the allocation now, including work other clients submitted.
+
+        Also works after :meth:`close`, for example on a lingering session
+        once its ``with`` block has exited. ``drain`` is as for :meth:`close`.
+        """
+        if self.allocation_id is None:
+            if self.owned:
+                self.close(drain=drain)
+                return
+            self._load()
+        if self._released:
+            return
+        self._released = True
+        self._closed = True
+        self._ready = False
+        keep_lease = False
+        try:
+            keep_lease = self._release(drain)
+        finally:
+            self._end_lease(revoke=not keep_lease)
+
+    def _other_clients(self):
+        """Count other attached clients, as the controller or leases report."""
+        try:
+            status = self._read(self.root / "status.json")
+            leases = _read_leases(self.base_site, self.root, self.command_timeout)
+        except Exception as error:
+            logger.debug(
+                "Could not list the clients of %s: %s", self._identity(), error
+            )
+            return 0
+        if not status or status.get("generation") != self.generation:
+            status = None
+        return len(_live_leases(leases, status) - {self._client_id})
+
+    def _detach(self, drain, others):
+        """Leave the allocation to other clients or to its ``linger``."""
+        unfinished = [
+            handle
+            for handle in self._handles.values()
+            if handle._result is None and not handle._last_status.is_complete
+        ]
+        if unfinished and drain:
+            unfinished = self._await_own_runs(unfinished)
+        elif unfinished:
+            for handle in unfinished:
                 try:
-                    self._renew(revoke=True)
+                    self.cancel_job(handle.id)
                 except Exception as error:
-                    logger.debug(
-                        "Could not revoke the lease of %s: %s", self._identity(), error
+                    logger.warning(
+                        "Could not cancel run %s in %s: %s",
+                        handle.id,
+                        self._identity(),
+                        error,
                     )
+            unfinished = []
+        if others:
+            kept = f"it stays up for {others} other attached client(s)"
+            if self.linger:
+                kept += f", then {_describe(self.linger)} once idle (linger)"
+        else:
+            kept = f"it stays up {_describe(self.linger)} once idle (linger)"
+        again = (
+            "site.session(..., reuse=<the same reuse>)"
+            if self.reuse_key is not None
+            else f"site.attach_session({self.session_id!r})"
+        )
+        message = (
+            f"Detached from allocation {self.allocation_id} (session "
+            f"{self.session_id}); {kept}. Use it again with {again}, or end it "
+            f"with session.release(), site.release_sessions(...) or scancel "
+            f"{self.allocation_id}."
+        )
+        if unfinished:
+            message += (
+                f" {len(unfinished)} run(s) of this client were still running and "
+                "continue."
+            )
+        self.base_site._emit(message, force=True)
+
+    def _await_own_runs(self, handles):
+        """Wait (up to ``cleanup_timeout``) for runs; return those still running."""
+        started = time.monotonic()
+        announced = False
+        while True:
+            handles = [
+                handle for handle in handles if not self._poll(handle).is_complete
+            ]
+            elapsed = time.monotonic() - started
+            if not handles or (
+                self.cleanup_timeout is not None and elapsed >= self.cleanup_timeout
+            ):
+                return handles
+            if not announced:
+                logger.info(
+                    "Waiting for %d run(s) in %s before detaching",
+                    len(handles),
+                    self._identity(),
+                )
+                announced = True
+            time.sleep(min(2.0, _POLL_INTERVAL + elapsed / 30))
 
     def _release(self, drain):
         """Close the owned allocation; return True when it is left running."""
