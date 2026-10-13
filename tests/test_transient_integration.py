@@ -7,7 +7,6 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 import h5py
-
 import numpy as np
 import pytest
 

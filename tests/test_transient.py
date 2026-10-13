@@ -328,9 +328,10 @@ def test_restart_checks_interval_and_fingerprints_content(tmp_path):
 
 
 def test_export_matches_adopted_time_contract(tmp_path):
+    from pathlib import Path
+
     from jsonschema import Draft202012Validator
     from referencing import Registry, Resource
-    from pathlib import Path
 
     root = Path(__file__).parent / "contracts/sauce-time-domain-1/contracts"
     registry = Registry()
@@ -420,6 +421,7 @@ def test_pending_run_state_does_not_report_failure(tmp_path):
 
 def test_slurm_transient_catalog_requires_only_operation_metadata(tmp_path):
     from types import SimpleNamespace
+
     from frequensolve.orchestrator.sites.hpc.site import SlurmSite
 
     job = job_at(tmp_path, output_schedule=fs.TimeOutput(stride=5))

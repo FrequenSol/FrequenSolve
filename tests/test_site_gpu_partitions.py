@@ -52,7 +52,10 @@ def test_stampede3_pvc_jobs_default_to_gpu_aware_mpi():
     runtime = pvc["I_MPI_ROOT"]
     assert pvc["PATH"] == f"{runtime}/bin:${{PATH}}"
     # The compiler's Unified Runtime loader precedes module copies such as python/3.12's.
-    assert pvc["LD_LIBRARY_PATH"] == f"{runtime}/lib:${{CMPLR_ROOT}}/lib:${{LD_LIBRARY_PATH}}"
+    assert (
+        pvc["LD_LIBRARY_PATH"]
+        == f"{runtime}/lib:${{CMPLR_ROOT}}/lib:${{LD_LIBRARY_PATH}}"
+    )
     assert "FS_CUDA_AWARE_MPI" not in pvc
     assert Stampede3Config("spr").partition_environment == {}
 

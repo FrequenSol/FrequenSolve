@@ -9,7 +9,6 @@ from frequensolve.simulation.jobs.eikonal import *  # noqa: F403
 from frequensolve.simulation.jobs.eikonal import __all__ as _eikonal_all
 from frequensolve.simulation.jobs.forward import *  # noqa: F403
 from frequensolve.simulation.jobs.forward import __all__ as _forward_all
-
 from frequensolve.simulation.jobs.transient import *  # noqa: F403
 from frequensolve.simulation.jobs.transient import __all__ as _transient_all
 

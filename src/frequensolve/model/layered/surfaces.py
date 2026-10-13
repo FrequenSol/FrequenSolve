@@ -764,9 +764,15 @@ class Fracture(SimpleSurface):
         nonnegative = {"normal_stiffness", "tangential_stiffness", "leakoff"}
         for key, value in self.constitutive.items():
             if key == "aperture_modes":
-                if (isinstance(value, bool) or not math.isfinite(float(value))
-                        or not 1 <= float(value) <= 64 or float(value) != int(float(value))):
-                    raise ValueError("Fracture aperture_modes must be an integer between 1 and 64")
+                if (
+                    isinstance(value, bool)
+                    or not math.isfinite(float(value))
+                    or not 1 <= float(value) <= 64
+                    or float(value) != int(float(value))
+                ):
+                    raise ValueError(
+                        "Fracture aperture_modes must be an integer between 1 and 64"
+                    )
                 self.constitutive[key] = int(float(value))
                 continue
             if key not in positive | nonnegative:
@@ -810,7 +816,10 @@ class Fracture(SimpleSurface):
     def is_reduced(self) -> bool:
         """Whether the aperture defines support without opening a volume."""
         return self.fracture_model in {
-            "linear_slip", "lower_dimensional_fluid", "lower_dimensional_viscous_fluid", "hydraulic"
+            "linear_slip",
+            "lower_dimensional_fluid",
+            "lower_dimensional_viscous_fluid",
+            "hydraulic",
         }
 
     @classmethod

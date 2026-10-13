@@ -123,6 +123,7 @@ class TransientDataset:
     def read(self, group, *, steps=None):
         """Read one group and optional completed steps as a physical xarray."""
         import xarray as xr
+
         from frequensolve.seismic.trace_store import TraceStore
 
         family, path = self._groups[group]

@@ -25,11 +25,10 @@ from frequensolve.seismic.trace_conversion import *  # noqa: F403
 from frequensolve.seismic.trace_conversion import __all__ as _trace_conversion_all
 from frequensolve.seismic.traces import *  # noqa: F403
 from frequensolve.seismic.traces import __all__ as _traces_all
-from frequensolve.seismic.wavelet import *  # noqa: F403
-from frequensolve.seismic.wavelet import __all__ as _wavelet_all
-
 from frequensolve.seismic.transient import *  # noqa: F403
 from frequensolve.seismic.transient import __all__ as _transient_all
+from frequensolve.seismic.wavelet import *  # noqa: F403
+from frequensolve.seismic.wavelet import __all__ as _wavelet_all
 
 __all__ = unique_exports(
     _transient_all,

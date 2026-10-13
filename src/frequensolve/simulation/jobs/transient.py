@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import copy
 import json
-import h5py
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
+import h5py
 import numpy as np
 
 from frequensolve.simulation.artifact_contract import (
@@ -160,12 +160,20 @@ class TransientJob(BaseJob):
         sim = self.simulation
         physics = sim.physics.removesuffix("_axisym")
         axisymmetric = sim.axisymmetric or sim.physics.endswith("_axisym")
-        reduced = [s for s in getattr(sim.model, "surfaces", []) or [] if getattr(s, "is_reduced", False)]
+        reduced = [
+            s
+            for s in getattr(sim.model, "surfaces", []) or []
+            if getattr(s, "is_reduced", False)
+        ]
         if reduced:
             if sim.dimension not in {2, 3} or physics not in {"elastic", "coupled"}:
-                raise ValueError("Native reduced fractures require Cartesian 2D/3D or axisymmetric 2D elastic or coupled physics")
+                raise ValueError(
+                    "Native reduced fractures require Cartesian 2D/3D or axisymmetric 2D elastic or coupled physics"
+                )
             if self.time.method != Newmark():
-                raise ValueError("Native reduced fractures require Newmark(beta=0.25, gamma=0.5)")
+                raise ValueError(
+                    "Native reduced fractures require Newmark(beta=0.25, gamma=0.5)"
+                )
         if (
             physics not in {"acoustic", "elastic", "coupled"}
             or sim.dimension not in {2, 3}
