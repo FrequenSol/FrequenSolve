@@ -148,7 +148,9 @@ def _observed_data_path(observed: Any) -> Optional[Path]:
     if isinstance(observed, TraceDataset):
         if not observed.files:
             raise ValueError("TraceDataset has no files")
-        return Path(observed.files[0]).parent
+        # The manifest selects the immutable trace-store root. A backing file
+        # can live beneath shards/ and does not locate its sibling packed data.
+        return Path(observed.manifest.output_path)
     path = _as_path(observed)
     if path is not None:
         return path
