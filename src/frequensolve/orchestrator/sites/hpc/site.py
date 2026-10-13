@@ -65,6 +65,7 @@ from frequensolve.orchestrator.sites.base import (
     JobStatus,
     RunHandle,
     RunResult,
+    _background_layout,
     _check_if_notebook,
     _merge_task_status_with_plan,
     _result_relative_paths,
@@ -766,6 +767,8 @@ class SlurmSite(BaseSite):
         run_config: Default SLURM resource request.
         curvature_run_config: Optional resource request for Sauce curvature
             batch jobs; ``run_config`` is used when omitted.
+        background_layout: Files of a background capture, ``"rank"``
+            (default) or ``"shared"`` (see :attr:`BaseSite.background_layout`).
         config.tmp_dir: Optional remote directory for transient transfer
             tarballs and provisioning scripts. Defaults to ``/tmp``.
         verbose: Whether to print site status messages in addition to logging.
@@ -775,6 +778,8 @@ class SlurmSite(BaseSite):
     # Remote result directories persist below work_dir, and the adaptive
     # scheduler launches each consuming task on its producer's ranks.
     supports_background_reuse = True
+    # _transfer_remote_simulation_inputs uploads remote_input_files per submit.
+    stages_job_inputs = True
 
     credentials: SlurmLoginCredentials
     config: Any
@@ -834,6 +839,7 @@ class SlurmSite(BaseSite):
         solver_policy: Optional[str] = None,
         curvature_run_config: Optional[Union[SlurmRunConfig, Mapping[str, Any]]] = None,
         storage: Optional[str] = None,
+        background_layout: str = "rank",
     ):
         if (
             default_partition is not None
@@ -843,6 +849,7 @@ class SlurmSite(BaseSite):
             raise ValueError(
                 "Pass either default_partition or default_queue, not conflicting values"
             )
+        self.background_layout = _background_layout(background_layout)
         partition = (
             default_partition
             if default_partition is not None
@@ -1449,7 +1456,9 @@ class SlurmSite(BaseSite):
 
         Paths follow :meth:`BaseSite.remove_result_files` and are validated
         before any command runs. One ``rm -f`` login command removes them,
-        split only when the quoted list would exceed a safe command length.
+        split only when the quoted list would exceed a safe command length,
+        then ``rmdir`` removes each file's parent directories, deepest first,
+        while they are empty and physically below the result directory.
         Missing files (or a missing result directory) are not errors; a
         directory fails the command before its batch removes anything.
 
@@ -1470,7 +1479,13 @@ class SlurmSite(BaseSite):
                 f"set -- {batch}; "
                 'for f in "$@"; do if [ -d "$f" ] && [ ! -L "$f" ]; then '
                 'printf "%s is a directory\\n" "$f" >&2; exit 1; fi; done; '
-                'rm -f -- "$@"'
+                'rm -f -- "$@" || exit; '
+                # rmdir each file's emptied parents (no symlinks, nothing above root).
+                'root=$(pwd -P); for f in "$@"; do d=$f; '
+                'while [ "${d%/*}" != "$d" ]; do d=${d%/*}; [ ! -L "$d" ] || break; '
+                'case $(cd -P -- "$d" 2>/dev/null && pwd) in "$root"/*) ;; '
+                '*) break ;; esac; rmdir -- "$d" 2>/dev/null || break; done; done; '
+                "exit 0"
             )
             _, stdout, stderr = self.run_login_cmd(command)
             _read_stream(stdout)
@@ -3178,13 +3193,20 @@ class SlurmSite(BaseSite):
         successful = int(payload.get("successful") or payload.get("succeeded") or 0)
         failed = int(payload.get("failed") or 0)
         running = int(payload.get("running") or 0)
+        launching = int(payload.get("launching") or 0)
         pending = int(
-            payload.get("pending") or max(0, total - successful - failed - running)
+            payload.get(
+                "pending", max(0, total - successful - failed - running - launching)
+            )
         )
+        launch_text = f"{launching} launching, " if launching else ""
+        waiting = len(payload.get("waiting_for_step_tasks") or [])
+        if waiting:
+            launch_text = f"{launching} launching ({waiting} waiting for Slurm step), "
         return (
             "tasks: "
             f"{successful} successful, {failed} failed, {running} running, "
-            f"{pending} pending, {total} total"
+            f"{launch_text}{pending} pending, {total} total"
         )
 
     def _allocation_handle(self, job_id: str) -> RunHandle:
@@ -4133,6 +4155,8 @@ class SlurmSite(BaseSite):
         ranks_per_node = int(rank_values.get("ranks_per_node") or 8)
         mem_cushion = float(kwargs.pop("mem_cushion", 1.5))
         min_ranks = int(kwargs.pop("min_ranks", 1))
+        if min_ranks < 1:
+            raise ValueError("min_ranks must be positive")
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
         max_ranks_per_task = int(

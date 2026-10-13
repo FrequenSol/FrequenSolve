@@ -28,6 +28,7 @@ CONTRACT_ROOT = (
 )
 JOB_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-job-1" / "schema.json"
 JOB_EXAMPLES = CONTRACT_ROOT / "inputs" / "fs-job-1" / "examples"
+BACKGROUND_EXAMPLES = CONTRACT_ROOT / "outputs" / "fs-background-state-2" / "examples"
 
 
 def _job_validator() -> Draft202012Validator:
@@ -148,6 +149,68 @@ def test_background_checkpoint_roundtrip_and_recursive_staging(tmp_path):
     assert {manifest, shard} <= {Path(pair[0]) for pair in pairs}
 
 
+@pytest.mark.parametrize("layout", ["rank", "shared"])
+def test_version2_background_layout_roundtrip_and_staging(tmp_path, layout):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "capture",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["vp"],
+        state="state.json",
+        background="background.json",
+        background_layout=layout,
+    )
+    loaded = BaseJob.load(linearize.save())
+    assert loaded.background_layout == layout
+    assert _assert_valid(loaded.to_fs())["fwi_operator"]["background_layout"] == layout
+    # Sauce's published manifest names one file per rank or one shared file.
+    example = BACKGROUND_EXAMPLES / f"{layout}.json"
+    payload = json.loads(example.read_text())
+    manifest = linearize.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(example.read_text())
+    files = [manifest.parent / entry["file"] for entry in payload.get("shards", [])]
+    files = files or [manifest.parent / payload["file"]]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"native-checkpoint-fixture")
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction-fixture")
+    action = FWIOperatorJob(
+        "reuse",
+        sim,
+        [3.0],
+        action="normal",
+        active=["vp"],
+        state=state,
+        direction=direction,
+        covector="normal.h5",
+        background=manifest,
+    )
+    pairs = BaseJob.load(action.save()).remote_input_files("/remote/project")
+    assert {manifest, *files} <= {Path(pair[0]) for pair in pairs}
+
+
+def test_background_layout_requires_a_linearize_capture(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    options = dict(action="linearize", active=["vp"], state="state.json")
+    with pytest.raises(ValueError, match="'rank' or 'shared', not 'striped'"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [3.0],
+            background="background.json",
+            background_layout="striped",
+            **options,
+        )
+    with pytest.raises(ValueError, match="requires a linearize background"):
+        FWIOperatorJob("bad", sim, [3.0], background_layout="shared", **options)
+
+
 @pytest.mark.parametrize(
     "extra",
     [
@@ -208,7 +271,10 @@ def _round_trip(job):
     return loaded
 
 
-@pytest.mark.parametrize("options", [{}, {"probes": 32, "seed": 17}])
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"probes": 32, "seed": 17}, {"probes": 4, "source_samples": 16, "seed": 7}],
+)
 def test_receiver_diagonal_contract(tmp_path, options):
     job = FWIOperatorJob(
         "probes",
@@ -228,9 +294,43 @@ def test_receiver_diagonal_contract(tmp_path, options):
     _round_trip(job)
 
 
+def test_receiver_blocks_contract_and_round_trip(tmp_path):
+    job = FWIOperatorJob(
+        "blocks",
+        _saved_simulation(tmp_path),
+        [1.0, 2.0],
+        action="linearize",
+        active=["model.vp", "model.rho"],
+        state="state.json",
+        covector="gradient.h5",
+        receiver_diagonal={
+            "probes": 4,
+            "source_samples": 16,
+            "blocks": {"controls": ["model.vp", "rho"]},
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["receiver_diagonal"]["blocks"]["controls"] == [
+        "vp",
+        "rho",
+    ]
+    assert job.receiver_blocks_file(2).name == "receiver_blocks_2.h5"
+    loaded = _round_trip(job)
+    assert loaded.receiver_diagonal == job.receiver_diagonal
+
+
 @pytest.mark.parametrize(
     "options",
-    [{"probes": 0}, {"probes": 1.5}, {"probes": True}, {"seed": 2**40}, {"wrong": 1}],
+    [
+        {"probes": 0},
+        {"probes": 1.5},
+        {"probes": True},
+        {"seed": 2**40},
+        {"wrong": 1},
+        {"source_samples": 0},
+        {"source_samples": 1.5},
+        {"source_samples": True},
+    ],
 )
 def test_receiver_diagonal_rejects_invalid_options(tmp_path, options):
     with pytest.raises(ValueError):
@@ -1777,6 +1877,185 @@ def test_control_gradient_born_serializes_incremental_traces(tmp_path):
     assert loaded.observed is None
 
 
+def test_control_gradient_spectral_born_writes_series_planes(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    direction = tmp_path / "controls" / "direction.h5"
+    window = {"axis": "fourier", "residual": "window", "window": [1.0, 0.0, 20.0]}
+    job = ControlGradientJob(
+        "born",
+        sim,
+        [8.0 - 0.1j],
+        kind="born",
+        direction=direction,
+        kernel_derivative=window,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["workflow"] == "born"
+    assert payload["kernel_derivative"] == window
+    assert payload["control_sensitivities"]["direction"] == str(direction)
+    assert "Imaging" not in payload and "Image" not in payload
+    # Born planes with a nonzero series weight: orders zero and two of the window.
+    assert job.trace_outputs.groups == ["surface_inc", "surface_inc_d2f"]
+    assert job.trace_outputs.components == ["surface_inc:vz", "surface_inc_d2f:vz"]
+    assert not job.requires_postprocess()
+    assert _round_trip(job).kernel_derivative == window
+
+    derivative = ControlGradientJob(
+        "born_ds",
+        sim,
+        [8.0 - 0.1j],
+        kind="born",
+        direction=direction,
+        kernel_derivative={"axis": "laplace", "residual": "derivative", "order": 1},
+    )
+    assert derivative.trace_outputs.groups == ["surface_inc_ds"]
+
+
+def test_control_gradient_spectral_lsrtm_gradient(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    kernel = {"axis": "fourier", "residual": "derivative", "order": 3}
+    job = ControlGradientJob(
+        "lsrtm",
+        sim,
+        [2.5],
+        kind="lsrtm_gradient",
+        direction="direction.h5",
+        observed="observed.h5",
+        gradient="g.h5",
+        objective_file="objective.h5",
+        kernel_derivative=kernel,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["workflow"] == "lsrtm_gradient"
+    sensitivities = payload["control_sensitivities"]
+    assert Path(sensitivities["direction"]).name == "direction.h5"
+    assert Path(sensitivities["gradient"]).name == "g.h5"
+    assert Path(sensitivities["objective"]).name == "objective.h5"
+    assert payload["Image"] == payload["Imaging"]
+    assert payload["kernel_derivative"] == kernel
+    assert job.requires_postprocess()
+    assert job.derivative_orders == (3,)
+    # Base order zero is always sampled; the series order carries the Born plane.
+    assert job.trace_outputs.groups == ["surface", "surface_d3f", "surface_inc_d3f"]
+    assert job.trace_outputs.components == [
+        "surface:vz",
+        "surface_d3f:vz",
+        "surface_inc_d3f:vz",
+    ]
+    loaded = _round_trip(job)
+    assert loaded.kind == "lsrtm_gradient"
+    assert loaded.kernel_derivative == kernel
+    assert loaded.direction == job.direction
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+            },
+            "require kernel_derivative",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "observed": "o",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require a direction",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require observed data",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require a gradient output",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "jet", "order": 2},
+            },
+            "'jet' is not allowed here",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {"residual": "base"},
+            },
+            "'base' is not allowed here",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {
+                    "residual": "derivative",
+                    "export_lower_orders": True,
+                },
+            },
+            "export_lower_orders requires an rtm",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "gram_derivative": "total",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "frozen Gram",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {
+                    "residual": "derivative",
+                    "order": 2,
+                    "source_derivative": "total",
+                },
+            },
+            "support order one",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+                "misfit": {"comparison": {"kind": "phase_derivative"}},
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "waveform comparisons",
+        ),
+    ],
+)
+def test_control_gradient_spectral_born_validation(tmp_path, kwargs, message):
+    sim = _saved_simulation(tmp_path)
+    with pytest.raises(ValueError, match=message):
+        ControlGradientJob("bad", sim, [3.0], **kwargs)
+
+
 @pytest.mark.parametrize(
     "kwargs, message",
     [
@@ -1823,7 +2102,7 @@ def test_control_gradient_born_serializes_incremental_traces(tmp_path):
                 "direction": "d",
                 "kernel_derivative": {"residual": "jet"},
             },
-            "do not take",
+            "'jet' is not allowed here; choose one of derivative, window",
         ),
         (
             {"kind": "rtm", "observed": "o", "gradient": "g", "active": ["a", "a"]},
@@ -2043,6 +2322,40 @@ def test_image_kernel_born_and_lsrtm_workflows(tmp_path):
         born_traces_only=True,
     )
     assert _assert_valid(traces_only.to_fs())["Imaging"]["born_traces_only"] is True
+
+
+@pytest.mark.parametrize("workflow", ["born", "lsrtm_gradient"])
+def test_image_kernel_rejects_cartesian_spectral_born(tmp_path, workflow):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    with pytest.raises(ValueError, match="ControlGradientJob"):
+        ImageKernelJob(
+            "bad",
+            sim,
+            [2.5],
+            grid=grid,
+            images={"vp": ("fwi:elastic", "vp")},
+            observed="o",
+            workflow=workflow,
+            zero_direction=True,
+            kernel_derivative={"residual": "window", "window": [1.0, 2.0]},
+        )
+
+
+def test_image_kernel_accepts_base_residual(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    job = ImageKernelJob(
+        "kernel",
+        sim,
+        [2.5],
+        grid=grid,
+        images={"vp": ("fwi:acoustic", "vp")},
+        kernel_derivative={"order": 2, "axis": "laplace", "residual": "base"},
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["kernel_derivative"]["residual"] == "base"
+    assert _round_trip(job).kernel_derivative == job.kernel_derivative
 
 
 def test_image_kernel_kernel_derivative_emits_image_and_imaging(tmp_path):
@@ -2367,8 +2680,9 @@ def test_smooth_job_rejects_sources_without_parts(tmp_path):
 
 
 @pytest.mark.parametrize("relative_tolerance", [None, 2e-5])
+@pytest.mark.parametrize("fractional_scales", [None, {"model.vp": 2.5}])
 def test_native_regularization_job_preserves_mesh_identity_and_round_trips(
-    tmp_path, relative_tolerance
+    tmp_path, relative_tolerance, fractional_scales
 ):
     from frequensolve.imaging.jobs import RegularizationJob
 
@@ -2390,6 +2704,7 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(
         smoothing=SmoothingConfig(kind="tv", normalize_amplitude=True),
         input_vector=vector,
         operation="prepare",
+        fractional_scales=fractional_scales,
         **(
             {}
             if relative_tolerance is None
@@ -2409,6 +2724,13 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(
         == expected_tolerance
     )
     loaded = _round_trip(prepare)
+    assert loaded.fractional_scales == (
+        {} if fractional_scales is None else {"vp": 2.5}
+    )
+    assert (
+        payload["control_sensitivities"]["Regularization"].get("fractional_scales", {})
+        == loaded.fractional_scales
+    )
     assert loaded.relative_tolerance == expected_tolerance
     assert isinstance(loaded, RegularizationJob) and loaded.operation == "prepare"
     assert loaded.context == prepare.context

@@ -290,6 +290,7 @@ class JobSerializationMixin:
                 "focus",
                 "time_reconstruction",
                 "derivative_order",
+                "source_derivative",
             ]
         )
         return {field: job_data[field] for field in fields if field in job_data}

@@ -57,6 +57,8 @@ class Stampede3Site(SlurmSite):
         environment: Non-secret environment values exported before solver
             execution.
         verbose: Whether to enable verbose site logging.
+        background_layout: Files of a background capture, ``"rank"``
+            (default) or ``"shared"``.
     """
 
     credentials: TACCLoginCredentials
@@ -96,6 +98,7 @@ class Stampede3Site(SlurmSite):
         verbose: bool = False,
         curvature_run_config: Optional[SlurmRunConfig] = None,
         storage: Optional[str] = None,
+        background_layout: str = "rank",
     ):
         super().__init__(
             rel_path=rel_path,
@@ -116,4 +119,5 @@ class Stampede3Site(SlurmSite):
             verbose=verbose,
             curvature_run_config=curvature_run_config,
             storage=storage,
+            background_layout=background_layout,
         )

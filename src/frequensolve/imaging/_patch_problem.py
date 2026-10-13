@@ -86,7 +86,7 @@ class _ChildProblem(ImagingProblem):
             stage_mesh=self._patch_mesh,
             gram_derivative="total",
             source_controls=self._source_controls(space),
-            reflectivity=self._reflectivity(space),
+            reflectivity=self._reflectivity(),
             **options,
         )
         self._patch_artifacts.track(job)
@@ -356,7 +356,7 @@ class _PatchRuntime:
                 gram_derivative="total",
                 min_support=problem.min_support,
                 source_controls=context._source_controls(space),
-                reflectivity=context._reflectivity(space),
+                reflectivity=context._reflectivity(),
             )
             artifacts.track(job)
             pending.append((index, context, job))

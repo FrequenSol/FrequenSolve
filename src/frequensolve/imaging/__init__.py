@@ -40,10 +40,22 @@ from frequensolve.imaging.operators import __all__ as _operators_all
 from frequensolve.imaging.problem import *  # noqa: F403
 from frequensolve.imaging.problem import __all__ as _problem_all
 from frequensolve.imaging.property_mesh import PropertyMesh as PropertyMesh
+from frequensolve.imaging.receiver_blocks import ReceiverBlocks as ReceiverBlocks
 from frequensolve.imaging.regularization import *  # noqa: F403
 from frequensolve.imaging.regularization import __all__ as _regularization_all
 from frequensolve.imaging.results import *  # noqa: F403
 from frequensolve.imaging.results import __all__ as _results_all
+from frequensolve.imaging.spectral_attributes import ReceiverPool as ReceiverPool
+from frequensolve.imaging.spectral_attributes import (
+    SpectralAttribute as SpectralAttribute,
+)
+from frequensolve.imaging.spectral_attributes import (
+    SpectralJetLinearization as SpectralJetLinearization,
+)
+from frequensolve.imaging.spectral_objective import (
+    SpectralObjective as SpectralObjective,
+)
+from frequensolve.imaging.synthetic_array import SyntheticArray as SyntheticArray
 from frequensolve.imaging.transfer import Transfer as Transfer
 from frequensolve.imaging.windows import write_receiver_window as write_receiver_window
 from frequensolve.imaging.workflows import *  # noqa: F403
@@ -52,10 +64,16 @@ from frequensolve.imaging.workflows import __all__ as _workflows_all
 __all__ = unique_exports(
     [
         "PropertyMesh",
+        "ReceiverBlocks",
         "Transfer",
         "NativeMass",
         "NativeRegularization",
         "SourceEnergy",
+        "ReceiverPool",
+        "SyntheticArray",
+        "SpectralAttribute",
+        "SpectralJetLinearization",
+        "SpectralObjective",
         "write_receiver_window",
     ],
     _controls_all,
@@ -85,3 +103,23 @@ __all__ += [
     "ReferenceIllumination",
     "IlluminationCalibration",
 ]
+
+from .awi import AWI, AWILinearization, AWIProblem
+from .hv import HV, HVLinearization, HVProblem
+
+__all__ += [
+    "AWI",
+    "AWIProblem",
+    "AWILinearization",
+    "HV",
+    "HVProblem",
+    "HVLinearization",
+]
+
+from .preconditioning import CoarseCorrection, ReceiverBlockDiagonal
+
+__all__ += ["CoarseCorrection", "ReceiverBlockDiagonal"]
+
+from .rwi import RWILinearization, RWIProblem
+
+__all__ += ["RWILinearization", "RWIProblem"]

@@ -446,6 +446,9 @@ extra.
      - MPI ranks for row-distributed Sauce curvature operations; they share
        the worker thread budget. Defaults to ``1``. Mesh transfer and sampling
        always run on one rank.
+   * - ``background_layout``
+     - Files of imaging background checkpoints: ``rank`` (default) or
+       ``shared`` (see `Partitioned Solver Inputs`_).
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
 
@@ -712,6 +715,9 @@ The generated profile is equivalent to this minimal configuration:
        ``duration``, ``queue``, ...) for Sauce curvature batch jobs. The run
        fields above apply when it is omitted. Without ``ranks_per_node``,
        curvature uses one rank per socket.
+   * - ``background_layout``
+     - Files of imaging background checkpoints: ``rank`` (default) or
+       ``shared`` (see `Partitioned Solver Inputs`_).
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
 
@@ -720,14 +726,44 @@ flat as shown above, or grouped under nested ``config`` and ``run_config``
 tables. Preset values are loaded first, nested profile tables are merged over
 them, and explicit construction-time overrides are applied last.
 
+Adaptive Slurm Task Placement
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Adaptive ``srun`` sweeps map reserved rank slots onto the allocation's ordered
+hosts and per-node task counts, including unequal capacities. Each step uses
+an explicit repeated-host file with ``--distribution=arbitrary --exclusive
+--exact``. Tasks can share a node on disjoint CPUs; they do not use
+``--overlap``. Allocation-wide node and task placement variables are removed
+from the step environment. Thread counts, CPU binding and memory settings are
+preserved. Conflicting explicit placement options in ``launcher_args`` are
+rejected. Multi-component heterogeneous Slurm jobs are not supported.
+
+This applies to both observation and imaging tasks. A launched ``srun`` is
+reported as ``launching`` until rank zero starts on a worker and records its
+Slurm step ID. Startup waits longer than 60 seconds appear in the status and
+scheduler log; reserved slots remain held until the launcher exits. This
+signal confirms step startup, not completion of solver MPI initialization.
+
+Developers can run a bounded, solver-free placement check inside an explicitly
+approved, otherwise idle allocation with at least three rank slots. It starts
+two concurrent steps using one and two ranks, checks actual hosts against their
+host files, and terminates pending launchers on timeout. The working directory
+must be shared by all allocated nodes; it does not submit a batch job:
+
+.. code-block:: bash
+
+   FS_SLURM_PLACEMENT_PROBE=1 FS_SLURM_PROBE_DIR=/approved/shared/scratch \
+     python -m pytest -m hpc tests/test_adaptive_scheduler_slurm_live.py
+
 Partitioned Solver Inputs
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sauce partitions the objective state a ``linearize`` task saves, objective
-vectors, receiver states and background checkpoints by MPI rank, records the
-rank count of the task that wrote them, and rejects a later JVP, VJP, normal
-or receiver action that reads them on another count (a background is
-recomputed instead). Local and SLURM sites therefore run each such task on
+Sauce partitions version-3 objective states and vectors, receiver states and
+background checkpoints by MPI rank, records the rank count of the task that
+wrote them, and rejects a later JVP, VJP, normal or receiver action that reads
+them on another count (a background is recomputed instead). Version-5
+objective states and vectors reload on any rank count and impose none. Local
+and SLURM sites therefore run each task reading a partitioned input on
 the rank count recorded in its producer's manifest, read from the fetched
 copy or, when absent, from the remote project in one login command; all other
 tasks keep their adaptive sizing. A batch job whose tasks all have recorded
@@ -739,9 +775,18 @@ every task, so jobs with differing counts use ``mode="batch"``.
 which keep result directories in place for later actions. FrequenSol Cloud
 does not keep results for later workers, so it reports ``False`` and
 workflows recompute the background there. Source batching follows the job's
-acquisition and is unchanged by the site.
+acquisition and is unchanged by the site. A background checkpoint is a task
+manifest (``fs-background-state-2``) and the HDF5 files it names below
+``<manifest stem>/generations/<run>/``; the profile key ``background_layout``
+chooses them for the site's file system: ``rank`` (default) writes one file
+per MPI rank without collective I/O, ``shared`` one file per task through
+parallel HDF5, which keeps the file count independent of the rank count.
+Reuse needs the producer's rank count in both layouts, and Sauce's
+``FS_BACKGROUND_LAYOUT`` environment variable (for example in the profile's
+``environment``) overrides the setting.
 ``site.remove_result_files(job, ["background_1.json", ...])`` deletes files by
-path relative to a job's result directory once they are no longer needed.
+path relative to a job's result directory once they are no longer needed,
+together with the directories that this leaves empty.
 
 Module And Library Setup
 ~~~~~~~~~~~~~~~~~~~~~~~~

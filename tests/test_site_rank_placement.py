@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -133,6 +134,10 @@ def _run_sweep(
     task_ranks=None,
     bash="bash",
     environment=None,
+    attached=False,
+    cores_per_node=8,
+    ranks_per_node=4,
+    nodes=1,
 ):
     """Render and run a batch sweep with fake launchers; return its launches."""
 
@@ -150,8 +155,8 @@ def _run_sweep(
             queue="debug",
             mpi_wrapper=str(fake.bin / launcher),
             launcher_args=tuple(launcher_args),
-            max_nodes=1,
-            cores_per_node=8,
+            max_nodes=nodes,
+            cores_per_node=cores_per_node,
             memory_per_node=4096,
         ),
         solver=str(solver),
@@ -168,8 +173,8 @@ def _run_sweep(
         n_tasks=n_tasks,
         n_job_tasks=n_tasks,
         task_indices=list(range(1, n_tasks + 1)),
-        n_nodes=1,
-        ranks_per_node=4,
+        n_nodes=nodes,
+        ranks_per_node=ranks_per_node,
         stdout=str(output),
         duration="00-00:10:00",
         run_path=str(tmp_path),
@@ -178,6 +183,17 @@ def _run_sweep(
         launch_delay_seconds=0,
         **({"task_ranks": task_ranks} if task_ranks else {}),
     )
+    if attached:
+        site.pool.nproc = nodes * ranks_per_node
+        site.pool.ncore = nodes * cores_per_node
+        job_stub = SimpleNamespace(
+            n_tasks=n_tasks,
+            _remote_path=lambda work_dir: tmp_path,
+            requires_postprocess=lambda: True,
+        )
+        script = site._sweep_script(
+            job_stub, procs_per_task=ranks_per_node, run_path=str(tmp_path), pack=False
+        )
     sweep = tmp_path / "sweep.sh"
     sweep.write_text(script)
     job = tmp_path / "job.json"
@@ -276,6 +292,23 @@ def test_srun_sweep_gives_every_step_its_threads_cores(tmp_path, monkeypatch):
     assert all(line[:2] == ["srun", "--exclusive"] for line in tasks)
     assert all(line[line.index("--cpus-per-task") + 1] == "2" for line in tasks)
     assert "#SBATCH --cpus-per-task=2" in script
+
+
+@pytest.mark.parametrize("attached", [False, True])
+def test_srun_initialization_reserves_all_hybrid_cores(tmp_path, monkeypatch, attached):
+    _, lines, records = _run_sweep(
+        tmp_path,
+        monkeypatch,
+        "srun",
+        attached=attached,
+        cores_per_node=112,
+        ranks_per_node=8,
+        nodes=8,
+    )
+    init, *_, smooth = lines
+    assert init[:5] == ["srun", "-n", "64", "--cpus-per-task", "14"]
+    assert smooth[:5] == ["srun", "-n", "64", "--cpus-per-task", "14"]
+    assert _step(records, "--init")[0]["env"]["OMP_NUM_THREADS"] == "14"
 
 
 def test_ibrun_sweep_keeps_tacc_placement(tmp_path, monkeypatch):

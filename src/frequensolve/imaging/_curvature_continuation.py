@@ -69,8 +69,25 @@ def _configuration_value(value: Any) -> Any:
     """Hash declared arrays without materializing large JSON lists or binding a PDE."""
     from scipy.sparse import issparse
 
-    from .controls import ControlState
+    from .controls import ControlSpace, ControlState
 
+    if isinstance(value, ControlSpace):
+        return dict(
+            blocks=[
+                dict(
+                    name=b.name,
+                    kind=b.kind,
+                    size=b.size,
+                    basis=b.basis_identity,
+                    transform=b.transform,
+                    prop=b.prop,
+                    subdomain=b.subdomain,
+                    units=str(b.units),
+                )
+                for b in value.resolved_blocks
+            ],
+            active=_configuration_value(value.active_indices),
+        )
     if isinstance(value, (ControlState, ControlVector)):
         return dict(
             values=_configuration_value(value.values),

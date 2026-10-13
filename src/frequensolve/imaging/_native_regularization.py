@@ -15,7 +15,13 @@ import numpy as np
 
 from frequensolve.inversion.optimization import _shares_arrays
 
-from ._artifacts import ControlVectorFile, SmoothingConfig, control_smoothing
+from ._artifacts import (
+    ControlVectorFile,
+    SmoothingConfig,
+    control_smoothing,
+    _fractional_scales,
+    unqualified_block_name,
+)
 from ._block_digest import block_digest
 from .controls import ControlSpace, ControlState, ControlVector
 from .jobs import RegularizationJob
@@ -45,6 +51,12 @@ class NativeRegularization(Regularization):
     wavespeed of that model, largest frequency, no ``2*pi``).
     ``reference`` is an optional complete ControlState; fixed DOFs contribute
     their actual values to the energy. Without it, the model itself is regularized.
+    ``fractional_scales={"ss": 0.8, "sp": 0.4, "rho": 2.0}`` optionally
+    evaluates each named block's energy on its coefficients divided by that
+    fixed positive reference scale (in control-vector units). This overrides
+    amplitude normalization for named blocks and is frozen in the native
+    context. Unlisted blocks retain their existing scaling; log controls
+    already represent relative changes and normally need no extra scale.
     """
 
     smoothing: Any = None
@@ -52,10 +64,14 @@ class NativeRegularization(Regularization):
     iterations: int = 1000
     relative_tolerance: float = 1e-4
     absolute_tolerance: float = 1e-8
+    fractional_scales: Optional[Mapping[str, float]] = None
 
     def __post_init__(self) -> None:
         config = control_smoothing(self.smoothing or SmoothingConfig())
         object.__setattr__(self, "smoothing", config)
+        object.__setattr__(
+            self, "fractional_scales", _fractional_scales(self.fractional_scales)
+        )
         if self.reference is not None and not isinstance(self.reference, ControlState):
             raise TypeError(
                 "native regularization reference must be a complete ControlState"
@@ -97,6 +113,14 @@ class BoundNativeRegularization(BoundRegularization):
         self.problem = problem
         self.baseline: ControlState = linearization.state
         self.factor = 1.0
+        known = {
+            unqualified_block_name(n) for n in space.blocks if n.startswith("model.")
+        }
+        unknown = set(specification.fractional_scales) - known
+        if unknown:
+            raise ValueError(
+                f"fractional scales refer to inactive material blocks: {sorted(unknown)}"
+            )
         self.reference = np.zeros_like(self.baseline.values)
         if specification.reference is not None:
             reference = specification.reference
@@ -127,6 +151,7 @@ class BoundNativeRegularization(BoundRegularization):
     def checkpoint(self) -> dict[str, Any]:
         return {
             "config": self.regularization.smoothing.to_control_fs(),
+            "fractional_scales": dict(self.regularization.fractional_scales),
             "factor": self.factor,
             # Same digest as hashing tobytes(), without copying the vector.
             "reference": hashlib.sha256(
@@ -137,6 +162,8 @@ class BoundNativeRegularization(BoundRegularization):
 
     def restore(self, recorded: Mapping[str, Any]) -> None:
         current = self.checkpoint()
+        if recorded.get("fractional_scales", {}) != current["fractional_scales"]:
+            raise ValueError("checkpoint fractional reference scales changed")
         if any(recorded[k] != current[k] for k in ("config", "factor", "reference")):
             raise ValueError(
                 "checkpoint regularization configuration or reference changed"
@@ -248,6 +275,7 @@ class BoundNativeRegularization(BoundRegularization):
         job = RegularizationJob(
             self.source,
             smoothing=spec.smoothing,
+            fractional_scales=spec.fractional_scales,
             input_vector=(
                 full if isinstance(full, ControlVectorFile) else self._model_file(full)
             ),
@@ -554,6 +582,8 @@ def bind_workflow_regularization(
     smooth_bound = (
         None
         if not smooth
-        else smooth[0] if len(smooth) == 1 else _BoundSum(specification, space, smooth)
+        else smooth[0]
+        if len(smooth) == 1
+        else _BoundSum(specification, space, smooth)
     )
     return smooth_bound, native

@@ -13,6 +13,7 @@ The test needs a Sauce executable: ``FS_SAUCE_EXECUTABLE`` or
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -422,7 +423,7 @@ def test_extended_problem_solves_against_sauce(tmp_path):
 
 
 def test_named_terms_and_normalized_residual_on_two_mpi_ranks(tmp_path):
-    """Saved term rows feed VJP under the baseline MPI partition."""
+    """Saved term rows feed VJP on the linearization's and on another MPI rank count."""
     import shutil
 
     from frequensolve.imaging import Misfit, Normalization, ObjectiveTerm
@@ -455,10 +456,30 @@ def test_named_terms_and_normalized_residual_on_two_mpi_ranks(tmp_path):
     )
     lin = problem.linearize()
     assert lin.data_space.groups == ("amplitude", "energy")
-    assert lin.objective_states[0].n_ranks == 2
+    # Version-5 states record no partition: any rank count reloads them.
+    assert lin.objective_states[0].n_ranks is None
     residual = lin.objective_residual()
     np.testing.assert_allclose(0.5 * residual.dot(residual), lin.value, rtol=1e-5)
     np.testing.assert_allclose(
         lin.vjp(residual).values, lin.gradient.values, rtol=3e-3, atol=1e-6
     )
     assert lin.jacobian.dot_test(seed=3, tolerance=3e-3)["passed"]
+    # The site pins nothing, so a one-rank VJP reloads the two-rank state.
+    problem.backend.submit_options["procs_per_job"] = 1
+    reference = 2.0 * lin.vjp(residual).values
+    np.testing.assert_allclose(
+        lin.vjp(2.0 * residual).values,
+        reference,
+        rtol=1e-4,
+        atol=1e-5 * np.abs(reference).max(),
+    )
+    results = [
+        json.loads(path.read_text())
+        for path in tmp_path.rglob("_fs_run/tasks/task_*/result.json")
+    ]
+    ranks = {
+        result["execution"]["mpi_ranks"]
+        for result in results
+        if result["workflow"]["name"] == "fwi_operator"
+    }
+    assert ranks == {1, 2}, ranks

@@ -90,6 +90,8 @@ GROUPS = {
         (Loss.l2(), {"kind": "l2"}),
         (Loss("none"), {"kind": "l2"}),
         (Loss.huber(), {"kind": "huber", "delta": 1.5}),
+        (Loss.tukey(0.15), {"kind": "tukey", "delta": 0.15}),
+        (Loss("bisquare", delta=0.3), {"kind": "tukey", "delta": 0.3}),
         (Loss("hybrid", delta=0.7), {"kind": "huber", "delta": 0.7}),
         (Loss.student_t(), {"kind": "student_t", "c2": 1.0, "nu": 2.0}),
         (Loss("StudentsT", nu=3.0), {"kind": "student_t", "c2": 1.0, "nu": 3.0}),

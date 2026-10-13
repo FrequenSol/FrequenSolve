@@ -179,11 +179,19 @@ def mesh_descriptor(space: ControlSpace, block: Any) -> dict:
         )
         if expected != block.basis_identity:
             raise ValueError("Property mesh differs from the statistical control basis")
-        if "roots" not in group:
+        if group["schema"][()].decode().rstrip(" \0") == "fs-property-space-3":
+            from ._property_records import PackedPropertyReader
+
+            reader = PackedPropertyReader(group, int(group["header"][0]))
+            roots = reader.directory[:, 0]
+        elif "root_directory" in group:
+            roots = np.asarray(group["root_directory"][:, 0], dtype=np.int32)
+        elif "roots" in group:
+            roots = sorted(int(key) for key in group["roots"])
+        else:
             raise ValueError(
                 "Native statistical operations require a readable property-space artifact"
             )
-        roots = sorted(int(key) for key in group["roots"])
         metres = (
             None
             if "metres_per_native_unit" not in group

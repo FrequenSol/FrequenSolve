@@ -5,6 +5,39 @@ prepared.
 
 ## Unreleased
 
+- Background checkpoints follow Sauce's `fs-background-state-2`: one HDF5 file
+  per MPI rank (`"rank"`) or one file per task written by every rank
+  (`"shared"`). The new site option and `site.toml` key `background_layout`
+  (`LocalSite` and SLURM sites; default `"rank"`) reaches background-capturing
+  linearize jobs as `fwi_operator.background_layout`
+  (`FWIOperatorJob(background_layout=...)`); Sauce's `FS_BACKGROUND_LAYOUT`
+  overrides it. `background_checkpoint_files`, `Backend.release_background`
+  and the background budget cover both layouts and version-1 checkpoints, and
+  `remove_result_files` on local and SLURM sites also removes the directories
+  (`<stem>/generations/<run>/` and its parents) it leaves empty, never
+  recursively. Consumers keep their non-required pin to the producer's rank
+  count. Version-2 checkpoints need a matching solver; Sauce treats version-1
+  manifests as a cache miss.
+- Imaging reads Sauce's `fs-objective-linearization-5` states and reads and
+  writes `fs-objective-vector-5` vectors: one manifest and one canonical HDF5
+  file per task, with every dataset identified by its `fs-block-sha256-1`
+  digest flattened to one axis (`f4` now supported) instead of whole-file
+  SHA-256. Versions 3 and 4 are still read. Operator duals of a version-5
+  state carry no partition and store values in the state's precision;
+  `ObjectiveState.vector_options()` supplies a state's dual format, and
+  `write_task_objective_vectors` gains `schema` and `dtype`. Version-5 states
+  are no longer pinned to the linearize task's MPI rank count (Sauce rejects
+  one only when its realized mesh differs), so sites size their consumer tasks
+  normally; background checkpoints still prefer their recorded count, and
+  `ObjectiveState.n_ranks` is `None` for states without a partition (version
+  4 and current version 5). Manifest fingerprints hash floats exactly as
+  Sauce's nlohmann/json prints them. Remote staging no longer re-uploads a
+  state or vector (manifest and cache/data file) that a completed run on the
+  same site wrote, and SLURM submissions upload operator inputs once instead
+  of twice (`BaseSite.stages_job_inputs`). Control-registry manifests without rank
+  descriptors (current Sauce) or their per-rank `file` entries are accepted.
+  `objective_layout_fingerprint` is O(N log N) instead of quadratic in the row
+  count.
 - `NativeCurvature` deletes each operation's staged `input.h5` once its
   result is verified, unless the result has an HDF5 external link into it
   (warm-start factors link their unchanged `/modes`); a failed operation

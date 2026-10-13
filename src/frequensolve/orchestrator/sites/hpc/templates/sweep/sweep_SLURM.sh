@@ -54,6 +54,10 @@ mpi_args=( {{mpi_args_shell}} )
 executable={{executable_shell}}
 n_threads={{n_threads}}
 export OMP_NUM_THREADS=$n_threads
+place=()
+case "${mpi_exec##*/}" in
+    srun) place=(--cpus-per-task "$n_threads") ;;
+esac
 {% for line in mpi_async_progress_setup %}
 {{ line }}
 {% endfor %}
@@ -68,7 +72,7 @@ n_workers=$((n_procs / procs_per_task))
 
 start_time=$(date +%s)
 
-"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n {{init_ranks}} $executable -nthreads $n_threads --job $input_file $fresh_flag --init > $dir_out/init.log 2>&1
+"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n {{init_ranks}} ${place[@]+"${place[@]}"} $executable -nthreads $n_threads --job $input_file $fresh_flag --init > $dir_out/init.log 2>&1 || exit $?
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
@@ -83,7 +87,7 @@ wait
 
 {% if postprocess_job %}
 echo "$mpi_exec -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth"
-"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n $n_procs $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth >> $dir_out/smooth.log 2>&1
+"$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n $n_procs ${place[@]+"${place[@]}"} $executable -nthreads $n_threads --job $input_file $fresh_flag --smooth >> $dir_out/smooth.log 2>&1
 {% endif %}
 
 {% if pack_job %}

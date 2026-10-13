@@ -1124,6 +1124,28 @@ class ImagingProblem:
 
         return self.restrict(misfit=misfit, loss=loss)
 
+    def freeze_reliability(
+        self, v: Any = None, *, relative_floor=None, window=None
+    ) -> "ImagingProblem":
+        """Return a native point-receiver view with predicted confidence frozen.
+
+        Prepare one multifrequency forward reference, then store immutable
+        confidence weights for all trial models. The returned view supports
+        ordinary FWI, Huber/Student-t, normal actions and regularization.
+        Call again on the original problem at an accepted model to begin a
+        new stage with refreshed confidence; never refresh within a line search.
+        Arrays and patch problems are not supported by this native snapshot.
+        ``relative_floor`` sets confidence independently of attribute stabilization.
+        With ``window=im.SyntheticArray.gaussian(sigma=...)``, confidence uses a
+        local predicted-power reference (default floor 0.1), instead of the
+        shot-wide observed RMS. Only confidence is smoothed; each traveltime
+        remains a point attribute. Author separate receiver groups for lines
+        that must not share a confidence neighborhood.
+        """
+        from ._reliability import freeze
+
+        return freeze(self, v, relative_floor=relative_floor, window=window)
+
     def with_controls(
         self,
         controls: Any,
@@ -1413,6 +1435,12 @@ class ImagingProblem:
             active=list(space.blocks),
             state="state.json",
             background="background.json" if background else None,
+            # A file-system property of the site (one file per rank or task).
+            background_layout=(
+                getattr(shared.backend.site, "background_layout", "rank")
+                if background
+                else None
+            ),
             covector="gradient.h5" if gradient else None,
             objective="report.json",
             control_state=control_state,
@@ -1420,7 +1448,7 @@ class ImagingProblem:
             manifest="registry.json" if discover or not gradient else None,
             min_support=self.min_support,
             misfit=self._misfit_payload,
-            reflectivity=self._reflectivity(space),
+            reflectivity=self._reflectivity(),
             receiver_diagonal=receiver_diagonal,
             kernel_derivative=self.kernel_derivative,
             source_controls=self._source_controls(space),
@@ -1469,13 +1497,15 @@ class ImagingProblem:
             return {"location_method": "analytic"}
         return None
 
-    def _reflectivity(self, space: ControlSpace) -> Optional[Dict[str, Any]]:
-        """Return ``fwi_operator.reflectivity`` for the active blocks, if any."""
+    def _reflectivity(self) -> Optional[Dict[str, Any]]:
+        """Preserve the physical scattering model independently of active controls.
 
-        if not any(b.kind == "reflectivity" for b in space.resolved_blocks):
-            return None
-        restricted = self._shared.space.restrict(list(space.blocks))
-        payload = getattr(restricted, "reflectivity_payload", None)
+        ``controls.active`` selects derivative columns, not which fields
+        contribute to the prediction. Frozen contrasts still need their
+        definitions so Sauce registers and restores their baseline values.
+        """
+
+        payload = getattr(self._shared.space, "reflectivity_payload", None)
         return None if payload is None else payload()
 
     def _operator_job(
@@ -1496,7 +1526,7 @@ class ImagingProblem:
             action=action,
             active=list(space.blocks),
             misfit=self._misfit_payload,
-            reflectivity=self._reflectivity(space),
+            reflectivity=self._reflectivity(),
             source_controls=self._source_controls(space),
             kernel_derivative=self.kernel_derivative,
             **kwargs,
@@ -1756,7 +1786,15 @@ class ImagingProblem:
             if receiver_diagonal is not None:
                 saved = candidate.job.receiver_diagonal
                 if saved is None or any(
-                    saved.get(k) != v for k, v in receiver_diagonal.items()
+                    (
+                        any(
+                            saved.get(k, {}).get(field) != value
+                            for field, value in v.items()
+                        )
+                        if k == "blocks"
+                        else saved.get(k) != v
+                    )
+                    for k, v in receiver_diagonal.items()
                 ):
                     return False
             return True
@@ -1882,6 +1920,7 @@ class ImagingProblem:
         return (
             self.patches is None
             and self.kernel_derivative is None
+            and self._reflectivity() is None
             and not any(
                 block.kind in {"source", "reflectivity", "interface"}
                 for block in self.space.resolved_blocks
@@ -1900,7 +1939,9 @@ class ImagingProblem:
         *,
         gradient: bool = True,
         receiver_diagonal: Optional[Mapping[str, Any]] = None,
+        receiver_blocks: Optional[Mapping[str, Any]] = None,
         background: bool = False,
+        reference: Any = None,
     ) -> "Linearization":
         """Save (or reuse) the Sauce state at ``v`` and return its linearization.
 
@@ -1912,8 +1953,18 @@ class ImagingProblem:
             receiver_diagonal: Request shared receiver probes in the same run.
                 ``{}`` uses min(16, source RHS); ``{"probes": 32, "seed": 0}``
                 overrides it. Matching cached probe products are reused.
+            receiver_blocks: Retain collocated cross-parameter products from
+                those same probes, e.g. ``{"controls": ["ss", "sp", "rho"],
+                "probes": 4, "source_samples": 16}``. Also provides the
+                diagonal. Selected controls must share a meshed material
+                basis and transform. Use either request, not both.
             background: Save native forward DOFs for ordinary material actions
-                on the same model, source batches and MPI mesh partition.
+                on the same model, source batches and MPI rank count, in the
+                site's ``background_layout``.
+            reference: Synthetic-comparison linearization whose array and
+                reliability snapshot should be retained. Equivalently call
+                ``reference.trial(v, gradient=...)``. Omitting it prepares a
+                new local objective, including fresh predicted reliability.
 
         The first linearize of a problem learns Sauce's complete registry
         baseline from ``state_output``/``manifest``: a linearize at the
@@ -1930,6 +1981,30 @@ class ImagingProblem:
         is one job over the view's frequencies (one task per frequency).
         """
 
+        from ._synthetic_comparison import selected as synthetic_selected
+
+        if receiver_blocks is not None:
+            if receiver_diagonal is not None:
+                raise ValueError(
+                    "receiver_blocks already includes receiver_diagonal; supply one request"
+                )
+            from .receiver_blocks import block_probe_request
+
+            receiver_diagonal = block_probe_request(receiver_blocks, self.space)
+            if self.patches is not None:
+                raise ValueError(
+                    "receiver_blocks is not yet supported for patch linearizations"
+                )
+        if synthetic_selected(self) and receiver_diagonal is None:
+            if background:
+                raise ValueError(
+                    "synthetic comparisons do not support receiver_diagonal or background checkpoints"
+                )
+            from ._synthetic_comparison import linearize as synthetic_linearize
+
+            return synthetic_linearize(self, v, gradient=gradient, reference=reference)
+        if reference is not None:
+            raise ValueError("reference is only used by synthetic comparisons")
         if self.patches is not None:
             if background:
                 raise ValueError(
@@ -2273,6 +2348,7 @@ class ImagingProblem:
         space = self.space
         blocks = list(space.resolved_blocks)
         kinds = {block.kind for block in blocks}
+        has_reflectivity = self._reflectivity() is not None
         errors: List[str] = []
         warnings: List[str] = []
         misfit = self.misfit
@@ -2284,9 +2360,9 @@ class ImagingProblem:
         if self.kernel_derivative is not None:
             if comparisons - {"waveform"}:
                 errors.append("kernel_derivative requires waveform comparisons")
-            if kinds.intersection({"source", "reflectivity"}) or extension is not None:
+            if "source" in kinds or has_reflectivity or extension is not None:
                 errors.append(
-                    "kernel_derivative requires fixed sources and no model extension"
+                    "kernel_derivative requires fixed sources and no extension or reflectivity"
                 )
             discretization = getattr(self.simulation, "discretization", None)
             method = str(
@@ -2299,7 +2375,7 @@ class ImagingProblem:
                 "source controls require waveform comparisons "
                 f"(misfit uses {sorted(comparisons)})"
             )
-        if "reflectivity" in kinds:
+        if has_reflectivity:
             rejected, limited = self._reflectivity_rules(blocks, comparisons, extension)
             errors.extend(rejected)
             warnings.extend(limited)
@@ -2335,6 +2411,22 @@ class ImagingProblem:
         if self._patch_runtime is not None:
             self._patch_runtime.cache.clear()
 
+    def rwi(self, *, reflectivity=None, execution="sdk", **solver):
+        """Return a shared-frequency acoustic or elastic RWI view with reduced GN curvature.
+
+        Select inner blocks with ``reflectivity``; other contrasts stay frozen.
+        Solver options include ``damping``, ``relative_tolerance`` (1e-4),
+        ``max_iterations`` and ``absolute_tolerance``. SDK coordination is the
+        default; ``execution="native"`` retains acoustic native grouped fitting, where
+        ``cache_mb`` controls incident-field storage. Reduced normal actions
+        use SDK coordination in either mode.
+        """
+        from .rwi import RWIProblem
+
+        return RWIProblem(
+            self, reflectivity=reflectivity, execution=execution, **solver
+        )
+
     def extend(self, extension: Any) -> Any:
         """Return an :class:`~frequensolve.imaging.extension.ExtendedProblem`.
 
@@ -2346,6 +2438,31 @@ class ImagingProblem:
         from frequensolve.imaging.extension import ExtendedProblem
 
         return ExtendedProblem(self, extension)
+
+    def awi(
+        self,
+        config: Any,
+        *,
+        trace_weights: Any = None,
+        synthetic_array: Any = None,
+        coordinates: Any = None,
+    ) -> Any:
+        """Fit finite-duration matching filters through the receiver-band workflow."""
+        from .awi import AWIProblem
+
+        return AWIProblem(
+            self,
+            config,
+            trace_weights=trace_weights,
+            synthetic_array=synthetic_array,
+            coordinates=coordinates,
+        )
+
+    def hv(self, config: Any) -> Any:
+        """Use native HV receiver geometry with material gradients or reduced GN."""
+        from .hv import HVProblem
+
+        return HVProblem(self, config)
 
     def focus(self, focusing: Any) -> Any:
         """Return a :class:`~frequensolve.imaging.focusing.FocusingProblem`.
@@ -2915,6 +3032,13 @@ class Linearization:
         return diagonal
 
     @property
+    def receiver_blocks(self):
+        """Frequency-weighted native-unit local curvature from shared receiver probes."""
+        from .receiver_blocks import ReceiverBlocks
+
+        return ReceiverBlocks.from_linearization(self)
+
+    @property
     def support(self) -> SupportMask:
         """Return the per-DOF support mask of ``space``."""
 
@@ -3075,8 +3199,7 @@ class Linearization:
                 term_layout=self.data_space.term_layouts(
                     frequency=self.frequencies[task - 1]
                 ),
-                n_ranks=self.objective_states[task - 1].n_ranks,
-                schema=self.objective_states[task - 1].vector_schema,
+                **self.objective_states[task - 1].vector_options(),
             )
         return stem
 
@@ -3108,7 +3231,7 @@ class Linearization:
         """
 
         self.problem._sync_simulation(self.state)
-        return self.problem._operator_job(
+        job = self.problem._operator_job(
             self.space,
             action,
             frequencies=self.frequencies,
@@ -3125,6 +3248,15 @@ class Linearization:
             ),
             **options,
         )
+
+        # Reuse the frozen job's materialized weights. Re-exporting arrays to
+        # another inputs.h5 changes native context identity despite equal values.
+        if self.job.job_file.is_file():
+            payload = json.loads(self.job.job_file.read_text())
+            imaging = payload.get("Imaging", payload.get("Image", {}))
+            if "misfit" in imaging:
+                job.misfit = imaging["misfit"]
+        return job
 
     def weight_data(self, r: Any) -> DataVector:
         """Return ``W r``: the data vector scaled by the per-frequency weights.
@@ -3238,6 +3370,7 @@ class Linearization:
         self,
         directions: Any,
         *,
+        cache: bool = True,
         regularization: Optional[BoundNativeRegularization] = None,
     ) -> List[ControlVector]:
         """Return ``Re(J^H W J) d`` for every direction from one ``normal`` job.
@@ -3248,6 +3381,8 @@ class Linearization:
         source batch, so ``k`` products cost one job rather than ``k``.
         Products are memoized per direction digest; directions not yet known
         share one job, split only beyond :attr:`max_normal_directions`.
+        ``cache=False`` bypasses that memoization for one-use setup directions,
+        retaining no additional controls-by-directions arrays on this object.
         Frequency weights and task factors reduce each product exactly as
         :meth:`apply_normal` does.
 
@@ -3263,7 +3398,6 @@ class Linearization:
         """
 
         vectors = [self._control_vector(d) for d in self._direction_rows(directions)]
-        digests = [_digest(v.values) for v in vectors]
         key = None
         if regularization is not None:
             if regularization.space is not self.space and not (
@@ -3272,6 +3406,31 @@ class Linearization:
                 raise ValueError("regularization belongs to a different control space")
             key = "regularization:" + fingerprint(**regularization.checkpoint())
         fold = key is not None and self._folds_regularization(regularization)
+        if not cache:
+            results = []
+            operator = None
+            if regularization is not None and not fold:
+                operator = regularization.hessian_operator(self.point)
+            chunk = max(1, int(self.max_normal_directions))
+            for first in range(0, len(vectors), chunk):
+                part = vectors[first : first + chunk]
+                if fold:
+                    products, images = self._normal_job(part, regularization)
+                    results.extend(p + image for p, image in zip(products, images))
+                else:
+                    products = self._normal_products(part)
+                    if operator is None:
+                        results.extend(products)
+                    else:
+                        results.extend(
+                            p
+                            + ControlVector(
+                                np.asarray(operator @ v.values).reshape(-1), self.space
+                            )
+                            for p, v in zip(products, part)
+                        )
+            return results
+        digests = [_digest(v.values) for v in vectors]
         unknown = {
             d: v for d, v in zip(digests, vectors) if ("normal", d) not in self._ops
         }
@@ -3338,6 +3497,7 @@ class Linearization:
 
         if len(directions) > 1 and (
             self.problem.kernel_derivative is not None
+            or self.problem._reflectivity() is not None
             or any(
                 block.kind in {"source", "reflectivity"}
                 for block in self.space.resolved_blocks
@@ -3445,6 +3605,8 @@ class Linearization:
             inputs.append(path)
         spec = regularization.regularization
         request = spec.smoothing.to_control_fs()
+        if spec.fractional_scales:
+            request["fractional_scales"] = dict(spec.fractional_scales)
         request.update(
             operation="gradient",
             context=regularization.context,

@@ -42,6 +42,7 @@ _HISTORY_ARRAYS = ("base_inverse_diagonal", "steps", "gradient_differences")
 _ELEMENT_TYPES = dict(
     offsets=np.int64,
     indices=np.int32,
+    basis_indices=np.int32,
     source_roots=np.int32,
     target_roots=np.int32,
     grid_shape=np.int32,
@@ -745,7 +746,7 @@ class NativeCurvature:
         reported = dict(input_digests=staged)
         if factors is not None:
             reported["factors_digests"] = None
-        if method in _FACTOR_METHODS:
+        if method in _FACTOR_METHODS or method == "coarse_factor":
             reported["output_digests"] = None
         for key, value in dict(expected, **reported).items():
             if key not in result:
@@ -776,6 +777,12 @@ class NativeCurvature:
                 or not all(_is_digest(value) for value in written.values())
             ):
                 raise ValueError("Sauce curvature result has invalid output_digests")
+        if method == "coarse_factor":
+            written = result["output_digests"]
+            if not isinstance(written, dict) or any(
+                not _is_digest(written.get(name)) for name in ("/directions", "/images")
+            ):
+                raise ValueError("Sauce coarse factors lack valid dataset digests")
         path = directory / "result.h5"
         pending.replace(path)
         # The staged input (directions or images: up to rank x controls) is
@@ -1088,6 +1095,84 @@ class NativeCurvature:
             target_identity=target["identity"],
             material=target["material"],
             dimension=_property_dimension(source, target),
+        )
+
+    def mesh_basis(self, source: dict, target: dict, indices: Any) -> CurvatureResult:
+        """Lift selected native coarse cardinal functions, without a dense identity.
+
+        ``indices`` are zero-based full source-control indices. Sauce owns the
+        constrained interpolation; the result has one lifted function per row.
+        """
+        if source["material"] != target["material"]:
+            raise ValueError("Mesh basis transfer cannot change materials")
+        columns = np.asarray(indices)
+        if columns.ndim != 1 or columns.dtype.kind not in "iu" or not len(columns):
+            raise ValueError("basis indices must be a nonempty integer vector")
+        if np.any(columns < 0) or np.any(columns >= source["size"]):
+            raise ValueError("basis indices exceed the source controls")
+        if len(np.unique(columns)) != len(columns):
+            raise ValueError("basis indices must be distinct")
+        return self._execute(
+            "mesh_basis",
+            dict(
+                source_roots=source["roots"],
+                target_roots=target["roots"],
+                basis_indices=columns + 1,
+            ),
+            state=source["identity"],
+            coordinates=target["identity"],
+            expect=dict(controls=target["size"], rank=len(columns)),
+            source_mesh=source["path"],
+            target_mesh=target["path"],
+            source_identity=source["identity"],
+            target_identity=target["identity"],
+            material=target["material"],
+            dimension=_property_dimension(source, target),
+        )
+
+    def coarse_factor(
+        self,
+        directions: Any,
+        images: Any,
+        *,
+        state: str,
+        coordinates: str,
+        symmetry_tolerance: float = 1e-2,
+    ) -> CurvatureResult:
+        """Energy-normalize Q and AQ in Sauce for a balanced coarse inverse.
+
+        Both arrays contain directions as rows. The returned rows satisfy
+        Q A Q.T = I up to the reported normal-action asymmetry. Nonpositive
+        or numerically unresolved coarse curvature is rejected.
+        """
+        directions = _real_input(directions, "coarse directions")
+        images = _real_input(images, "coarse images")
+        if (
+            directions.ndim != 2
+            or images.shape != directions.shape
+            or not all(directions.shape)
+        ):
+            raise ValueError(
+                "coarse directions and images need matching nonempty matrices"
+            )
+        tolerance = _relative_tolerance(symmetry_tolerance, "symmetry_tolerance")
+        return self._execute(
+            "coarse_factor",
+            dict(
+                base_inverse_diagonal=np.ones(directions.shape[1]),
+                directions=directions,
+                images=images,
+            ),
+            state=state,
+            coordinates=coordinates,
+            expect=dict(
+                controls=directions.shape[1],
+                rank=len(directions),
+                symmetry_tolerance=tolerance,
+                hessian_asymmetry=None,
+                condition=None,
+            ),
+            symmetry_tolerance=tolerance,
         )
 
     def mesh_sampling(self, mesh: dict, points: Any) -> tuple:

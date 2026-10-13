@@ -1,9 +1,10 @@
 """Tasks reading partitioned solver artifacts run on their producer's MPI ranks.
 
-Sauce records the rank count of the task that saved an objective state,
-objective vector, receiver state or background checkpoint, and rejects (or,
+Sauce records the rank count of the task that saved a version-3 objective
+state or vector, a receiver state or a background checkpoint, and rejects (or,
 for backgrounds, recomputes) a consumer task on any other count. Sites pin
-those tasks to the recorded count and size every other task as before.
+those tasks to the recorded count and size every other task as before;
+version-5 objective states and vectors reload on any rank count.
 """
 
 import json
@@ -25,13 +26,26 @@ from frequensolve.orchestrator.sites.partition import (
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
 _STATE = "fs-objective-linearization-3"
+_STATE_V5 = "fs-objective-linearization-5"
+# Sauce's published version-5 state manifest.
+_STATE_V5_EXAMPLE = (
+    Path(__file__).parent
+    / "contracts/sauce-f533e6f/trunk/contracts/outputs"
+    / "fs-objective-linearization-5/examples/canonical.json"
+)
+# Sauce's published version-2 background manifests (two ranks).
+_BACKGROUND_V2_EXAMPLES = (
+    Path(__file__).parent
+    / "contracts/sauce-f533e6f/trunk/contracts/outputs"
+    / "fs-background-state-2/examples"
+)
 
 
 def _manifest(path, ranks=None, *, schema=_STATE, **extra):
     """Write one manifest as Sauce publishes it."""
 
     payload = {"schema": schema, **extra}
-    if schema == "fs-background-state-1":
+    if schema.startswith("fs-background-state-"):
         payload["ranks"] = ranks
     elif ranks is not None:
         payload["partition"] = {
@@ -105,6 +119,56 @@ def test_writers_canonical_artifacts_and_other_jobs_impose_nothing(tmp_path):
     assert partitioned_inputs(linearize) == [] and task_partitions(linearize) == {}
     assert task_partitions(canonical) == {}
     assert partitioned_inputs(other) == []
+
+
+def test_version5_states_and_vectors_pin_nothing_beside_a_background(tmp_path):
+    """-5 states and vectors reload on any rank count; a background still pins."""
+    from frequensolve.imaging.data import DataSpace, _DataSegment
+
+    example = json.loads(_STATE_V5_EXAMPLE.read_text())
+    for task in (1, 2):
+        _manifest(tmp_path / "lin" / f"state_{task}.json", **example)
+    _task_files(tmp_path, "lin/background", {2: 6}, schema="fs-background-state-1")
+    space = DataSpace([4.0, 6.0], [_DataSegment("g", ("p",), (1, 2), (1, 2, 3))])
+    for task, frequency in ((1, 4.0), (2, 6.0)):
+        space.ones().write_objective_vector(
+            tmp_path / "ops" / f"dual_{task}.json",
+            state_fingerprint="sha256:" + "a" * 64,
+            term_layout=space.term_layouts(frequency=frequency),
+            schema="fs-objective-vector-5",
+        )
+    vjp = _Consumer(
+        tmp_path,
+        action="vjp",
+        n_tasks=2,
+        state="lin/state.json",
+        objective_vector="ops/dual.json",
+        background="lin/background.json",
+    )
+
+    assert task_partitions(vjp) == {2: TaskPartition(6, False, ("background",))}
+    # A -5 state from an earlier build that records the binding keeps its pin.
+    _task_files(tmp_path, "lin/state", {1: 4}, schema=_STATE_V5)
+    assert task_partitions(vjp) == {
+        1: TaskPartition(4, True, ("state",)),
+        2: TaskPartition(6, False, ("background",)),
+    }
+
+
+@pytest.mark.parametrize("layout", ["rank", "shared"])
+def test_version2_backgrounds_pin_their_rank_count_in_either_layout(tmp_path, layout):
+    """Reuse needs the producer's rank count in both layouts; Sauce only recomputes."""
+
+    published = _BACKGROUND_V2_EXAMPLES / f"{layout}.json"
+    (tmp_path / "lin").mkdir()
+    (tmp_path / "lin" / "background_1.json").write_text(published.read_text())
+    _task_files(tmp_path, "lin/background", {3: 6}, schema="fs-background-state-2")
+    job = _Consumer(tmp_path, action="jvp", background="lin/background.json")
+
+    assert task_partitions(job) == {
+        1: TaskPartition(2, False, ("background",)),
+        3: TaskPartition(6, False, ("background",)),
+    }
 
 
 def test_tasks_fall_back_to_the_named_file_like_sauce(tmp_path):

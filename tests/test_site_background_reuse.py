@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from frequensolve.orchestrator.sites import Site
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.orchestrator.sites.hpc import site as hpc
@@ -38,6 +39,44 @@ def test_background_reuse_capability_per_site():
     assert AWSSite.supports_background_reuse is False
 
 
+def test_background_layout_is_a_validated_site_setting(tmp_path, monkeypatch):
+    assert BaseSite().background_layout == "rank"
+    assert _local_site(monkeypatch).background_layout == "rank"
+    with pytest.raises(ValueError, match="'rank' or 'shared', not 'striped'"):
+        _local_site(monkeypatch, background_layout="striped")
+    config = tmp_path / "site.toml"
+    config.write_text(
+        'default = "local"\n\n[sites.local]\ntype = "local"\n'
+        'background_layout = "shared"\n'
+    )
+    assert Site(config_path=config).background_layout == "shared"
+
+
+def test_slurm_sites_take_a_validated_background_layout(slurm):
+    site, _ = slurm
+    assert site.background_layout == "rank"
+    options = dict(
+        config=site.config,
+        solver=site.solver,
+        work_dir=str(site.work_dir),
+        solver_policy="off",
+    )
+    shared = type(site)(background_layout="shared", **options)
+    assert shared.background_layout == "shared"
+    with pytest.raises(ValueError, match="'rank' or 'shared', not 'per-node'"):
+        type(site)(background_layout="per-node", **options)
+
+
+def _tree(root):
+    """Background files and directories below ``root``."""
+
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.relative_to(root).parts[0].startswith("background")
+    )
+
+
 def test_local_site_removes_result_files_inside_the_result_directory(
     tmp_path, monkeypatch
 ):
@@ -51,6 +90,30 @@ def test_local_site_removes_result_files_inside_the_result_directory(
 
     assert sorted(p.name for p in results.rglob("*") if p.is_file()) == ["keep.h5"]
     assert (tmp_path / "outside.h5").exists()
+
+
+def test_local_site_removes_the_directories_it_empties(tmp_path, monkeypatch):
+    site = _local_site(monkeypatch)
+    results = tmp_path / "results"
+    run = "generations/run_1"
+    _files(
+        results,
+        f"background_1/{run}/rank_00000.h5",
+        f"background_2/{run}/rank_00000.h5",
+        f"background_2/{run}/notes.txt",
+    )
+    job = SimpleNamespace(name="job", _result_path=results)
+
+    site.remove_result_files(
+        job, [f"background_{task}/{run}/rank_00000.h5" for task in (1, 2)]
+    )
+
+    assert _tree(results) == [
+        "background_2",
+        "background_2/generations",
+        f"background_2/{run}",
+        f"background_2/{run}/notes.txt",
+    ]
 
 
 @pytest.mark.parametrize("bad", _INVALID)
@@ -149,6 +212,44 @@ def test_slurm_site_removes_result_files_with_one_login_command(slurm):
     assert (results.parent / "outside.h5").exists()
 
 
+def test_slurm_site_removes_the_directories_it_empties_below_the_results(
+    slurm, tmp_path
+):
+    site, fake = slurm
+    job = _RemoteJob()
+    results = job._remote_path(site.work_dir) / "results"
+    run = "generations/run 1"
+    _files(
+        results,
+        f"background_1/{run}/rank_00000.h5",
+        f"background_1/{run}/rank_00001.h5",
+        f"background_2/{run}/fields.h5",
+        f"background_2/{run}/notes.txt",
+    )
+    outside = tmp_path / "outside" / "empty"
+    outside.mkdir(parents=True)
+    (results / "link").symlink_to(outside.parent, target_is_directory=True)
+
+    site.remove_result_files(
+        job,
+        [
+            f"background_1/{run}/rank_00000.h5",
+            f"background_1/{run}/rank_00001.h5",
+            f"background_2/{run}/fields.h5",
+            "link/empty/gone.h5",
+        ],
+    )
+
+    assert len(fake.login) == 1
+    assert _tree(results) == [
+        "background_2",
+        "background_2/generations",
+        f"background_2/{run}",
+        f"background_2/{run}/notes.txt",
+    ]
+    assert outside.is_dir() and (results / "link").is_symlink()
+
+
 def test_slurm_site_validates_paths_before_any_login_command(slurm):
     site, fake = slurm
     for bad in _INVALID:
@@ -176,6 +277,7 @@ def test_slurm_site_batches_long_lists_and_tolerates_missing_directories(
 
     assert len(fake.login) > 2
     assert not any(results.rglob("*.h5"))
+    assert not (results / "ckpt").exists()  # emptied by the last batch
 
 
 def test_slurm_site_refuses_to_remove_directories(slurm):

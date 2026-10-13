@@ -200,36 +200,78 @@ def test_control_space_identity_keys_are_normalized():
         im.ControlStateFile({"vp": [1]}, control_spaces={"rho": "basis"})
 
 
-def test_packed_v2_preserves_root_constraints(adapted_artifact, tmp_path):
+def test_unpublished_v2_schema_is_rejected(adapted_artifact, tmp_path):
+    path, _ = adapted_artifact
+    prototype = tmp_path / "prototype.h5"
+    with h5py.File(path) as src, h5py.File(prototype, "w") as dst:
+        src.copy("property_space", dst)
+        del dst["property_space/schema"]
+        dst["property_space/schema"] = np.bytes_("fs-property-space-2")
+    with pytest.raises(ValueError, match="fs-property-space-2"):
+        im.PropertyMesh.read(prototype, material=2)
+
+
+def test_packed_v3_preserves_root_constraints(adapted_artifact, tmp_path):
+    from frequensolve.imaging._property_records import encode_record
+
     path, _ = adapted_artifact
     expected = im.PropertyMesh.read(path, material=2)
-    packed = tmp_path / "packed.h5"
+    packed = tmp_path / "packed-v3.h5"
     with h5py.File(path) as src, h5py.File(packed, "w") as dst:
         src.copy("property_space", dst)
         g = dst["property_space"]
         root = g["roots/1"]
-        # Two copies exercise nonzero offsets in every packed array.
-        points = root["visualization_points_m"][:].reshape(-1, 2)
-        index, weight, ids = (root[k][:] for k in ("index", "weight", "global_ids"))
         ptr = root["offset"][:]
-        n, e, m, l = len(points), len(index), len(ids), 3
-        g["root_meta"] = [root["meta"][:], root["meta"][:]]
-        g["root_offsets"] = [[0, 0, 0, 0], [n, e, m, l], [2 * n, 2 * e, 2 * m, 2 * l]]
-        g["visualization_points_m"] = np.tile(points, (2, 1))
-        g["visualization_kind"] = np.tile(root["visualization_kind"][:], 2)
-        g["offset"] = np.r_[ptr[:-1], ptr + e]
-        g["index"], g["weight"], g["global_ids"] = (
-            np.tile(a, 2) for a in (index, weight, ids)
+        index, weight, ids = (root[k][:] for k in ("index", "weight", "global_ids"))
+        # Plotting consumes constraints but need not decode the native tree/vertex words.
+        header = np.r_[
+            root["meta"][:],
+            1,
+            0,
+            0,
+            2,
+            3,
+            0,
+            len(ptr),
+            len(index),
+            len(ids),
+            len(ids) + 1,
+            0,
+        ]
+        integers = np.r_[
+            header,
+            [0, 1],
+            [1, 2, 3],
+            ptr,
+            index,
+            np.ones(len(ids)),
+            np.zeros(len(ids) + 1),
+        ].astype("i4")
+        record = encode_record(integers, ids, weight)
+        g["root_directory"] = np.array([[1, 15, 2, 5], [2, 25, 2, 5]], dtype="i4")
+        g["root_geometry"] = np.zeros((2, 4, 2))
+        g["root_linear_geometry"] = [1, 1]
+        g["payload_offsets"] = np.arange(3) * len(record)
+        integers[2] = 2
+        g["payload"] = np.r_[record, encode_record(integers, ids, weight)]
+        g["visualization_offsets"] = [0, 3, 6]
+        g["visualization_points_m"] = np.tile(
+            root["visualization_points_m"][:], (2, 1, 1)
         )
+        g["visualization_kind"] = np.tile(root["visualization_kind"][:], 2)
         del g["roots"]
         del g["schema"]
-        g["schema"] = np.bytes_("fs-property-space-2")
+        g["schema"] = np.bytes_("fs-property-space-3")
     actual = im.PropertyMesh.read(packed, material=2)
     np.testing.assert_array_equal(actual.points, np.tile(expected.points, (2, 1)))
     np.testing.assert_allclose(
         actual.basis.toarray(), np.tile(expected.basis.toarray(), (2, 1))
     )
     assert actual.identity == expected.identity
+    with h5py.File(packed, "a") as h5:
+        h5["property_space/payload_offsets"][1] = -1
+    with pytest.raises(ValueError, match="offsets"):
+        im.PropertyMesh.read(packed, material=2)
 
 
 @pytest.mark.parametrize(

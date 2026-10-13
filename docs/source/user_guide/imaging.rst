@@ -589,6 +589,35 @@ require 15 solves, for 20 total instead of 30 across separate jobs. This export
 counts solves per frequency and RHS batch; it does not create multiple saved
 linearizations or matching Hessian diagonals.
 
+Material-control Born traces and LSRTM gradients use the same selection with a
+``derivative`` or ``window`` residual:
+
+.. code-block:: python
+
+   window = {"axis": "fourier", "residual": "window", "window": [1.0, 0.0, 20.0]}
+   born = im.ControlGradientJob(
+       "born_window", simulation, frequencies, kind="born",
+       direction="direction.h5", kernel_derivative=window,
+   )
+   lsrtm = im.ControlGradientJob(
+       "lsrtm_window", simulation, frequencies, kind="lsrtm_gradient",
+       direction="direction.h5", observed={"seabed": observed_path},
+       gradient="lsrtm_gradient.h5", objective_file="lsrtm_objective.h5",
+       kernel_derivative=window,
+   )
+
+``born`` writes one Born trace group per order with a nonzero series weight,
+for example ``seabed_inc`` and ``seabed_inc_d2f``. These are the planes an
+``fwi_operator`` JVP writes. Combine them with ``a_k/(-2*pi*i)**k`` (Fourier) or
+``a_k/(2*pi)**k`` (Laplace) to form the window trace. ``lsrtm_gradient`` returns
+the exact control gradient of half the squared linearized series residual, and
+that objective. They equal the ``linearize`` gradient plus ``normal(direction)``
+of the same misfit, at ``3*(order+1)`` solves per batch. A ``jet`` is rejected as
+for ``FWIOperatorJob``: one Born trace set cannot represent separate per-order
+objectives. ``ImageKernelJob`` keeps ``kernel_derivative`` for ``rtm`` only.
+Cartesian image directions build their Born load on the image grid and have no
+spectral Born jet.
+
 Observations must contain the matching orders at the same complex frequencies
 and source-derivative policy. Generate them with a ``forward_df`` job and
 ``derivative_order=4``; use its complete trace store as ``observed``. The groups
@@ -672,7 +701,336 @@ Galerkin and the shared receiver-probe diagonal are not supported here.
 Separate independently weighted order terms still use separate problem views;
 the existing joint ``u``/``u_f`` comparison remains available as above.
 
-Centered WRI also accepts this selection through ``FWIOperatorJob``:
+Nonlinear spectral attributes can compose those saved derivative-data
+states through ``SpectralJetLinearization``::
+
+   # One frequency or a band; observations include orders zero through three.
+   jets = im.SpectralJetLinearization.from_problem(problem, order=3)
+   curvature = jets.attribute(im.SpectralAttribute(
+       "log_curvature", time_scale=4.0, relative_floor=0.05,
+   ))
+   value, gradient = curvature.value, curvature.gradient()
+   tangent = curvature.jvp(direction)
+   normal_direction = curvature.normal(direction)
+
+The moments are ``M[k] = U_f^(k) / (-2*pi*i)**k``, in powers of seconds;
+they are raw derivatives, not factorial-scaled Taylor coefficients. Available
+attributes are ``phase_slope`` (real normalized first moment),
+``amplitude_slope`` (imaginary normalized first moment), ``log_curvature``
+(complex ``M2/M0 - (M1/M0)**2``), ``normalized_jet`` (the complex moment vector
+divided by its regularized norm), and ``relative_time`` (the difference of
+two complex polynomial-windowed first moments). ``waveform`` and
+``windowed_waveform`` provide reference objectives. The phase-slope attribute
+has the travel-time sign under Sauce's Fourier convention.
+
+To compare progressively later arrivals, apply a fixed polynomial before
+forming traveltime. A degree-k window requires moments through k+1::
+
+   jets = im.SpectralJetLinearization.from_problem(problem, order=4)
+   later = jets.attribute(im.SpectralAttribute(
+       "phase_slope", window=[0, 0, 0, 1], time_scale=4,
+       relative_floor=0.005, confidence_floor=0.05,
+       loss="student_t", loss_scale=0.03,
+   ), pool=receiver_pool)
+   gradient = later.gradient()
+   frequency_parts = later.gradient_tasks()  # sum equals gradient
+   order_two = jets.through_order(2).attribute(
+       im.SpectralAttribute("normalized_jet", time_scale=4))
+
+``window`` coefficients multiply ascending powers of time in seconds. For
+``[0, 0, 0, 1]``, traveltime compares the stabilized first moment of ``t**3*u``;
+with damping alpha, the effective window is ``t**3*exp(-alpha*t)``. Gaussian
+receiver pooling acts on the windowed signal's energy and cross-products.
+Floors and observed confidence are recomputed from the windowed observations;
+the exact derivative includes both windowed numerator and denominator.
+``through_order(0)`` makes normalized jets a stabilized complex-phase objective.
+Saved planes are reused across objectives. Each derivative order uses one
+standard job over the whole band; distinct orders and objective VJPs currently
+remain separate jobs, without shared PDE factorization between them. Frequency
+rows are kept separate in receiver pooling and RMS floors. The attribute loss
+averages over all rows; equal receiver counts give an equal-frequency average.
+
+All ratios use ``conj(M0)/(abs(M0)**2 + epsilon**2)`` with fixed observed-group
+RMS floors; confidence weights are also fixed from observations. Each group is
+one frequency, term, shot and component. ``time_scale`` nondimensionalizes moments;
+``early_window`` and ``late_window`` are ascending polynomial coefficients in
+seconds, shared or shaped ``(receiver rows, coefficients)``. Relative timing
+needs one derivative beyond the higher window degree. The default early window
+is unity and the late window is quadratic, both multiplied by the complex
+frequency's damping. These are broad windows, not isolated event picks.
+
+Losses average squared attribute residuals over rows and feature components.
+Use ``row_weights=`` to multiply each row's squared attribute residual by a
+fixed, nonnegative objective weight. The residual and its Jacobian receive
+the square root of that weight; observed confidence multiplies it. Floors,
+attribute values, and the full-row-count reduction remain unchanged. This
+avoids a trace-amplitude taper being cancelled by a normalized attribute.
+
+For example, with individual physical shots and horizontal coordinates in
+kilometres, taper long offsets with ``1 / (1 + sqrt(d / 1 km))``::
+
+   offset_km = abs(source_x_km[:, None] - receiver_x_km[None, :])
+   trace_weights = (1 / (1 + np.sqrt(offset_km)))[:, None, :]
+   weights = jets.weights_from_traces(trace_weights)
+   curvature = jets.attribute(
+       im.SpectralAttribute("log_curvature", time_scale=4.0),
+       row_weights=weights,
+   )
+
+``weights_from_traces`` aligns a dense ``(source RHS, component, receiver)``
+table with canonical saved row keys, including reordered or sparse selections.
+The example has one pressure component. With multiple objective terms, pass
+a dictionary of tables keyed by term ID. Encoded shots generally have no
+single physical offset; construct physical offset weights with unencoded
+shots. Weights stay fixed in all derivative and Gauss--Newton actions; no
+derivatives of weights derived from the current model are taken. The standalone
+``SpectralAttribute.linearize`` method accepts the same ``row_weights=`` keyword.
+Standard serialized misfits already support ``Preprocess.trace_weight``,
+``Preprocess.offset_taper`` and ``Preprocess.offset_power``. These native hooks
+are separate from weighting a composed nonlinear spectral attribute.
+
+The exact real-linear chain rule includes the regularized denominator. Finite
+floors only approximately preserve gain/shift invariances. For signed or
+complex seismic data, log curvature is a generalized attribute, not a positive
+arrival variance. A normalized jet retains common phase and should not be
+confused with a phase-invariant objective.
+
+In particular, the ratio floor can introduce curvature even for one arrival.
+Write ``r = abs(M0)**2 / (abs(M0)**2 + epsilon**2)``, ``mu = M1/M0`` and
+``kappa = M2/M0 - mu**2``. Before time-scale normalization, the implemented
+regularized curvature is ``r*kappa + r*(1-r)*mu**2``. For a single impulse at
+time ``T``, the exact curvature vanishes but this expression becomes
+``r*(1-r)*T**2``. Near the floor it therefore responds to amplitude changes,
+even without any change in arrival spacing. Inspect floor activity and
+residuals by offset before interpreting curvature gradients as spacing
+sensitivity, especially with damped data and a group-wide amplitude floor.
+
+An opt-in alternative, ``curvature_regularization="joint"``, computes
+``(M0*M2-M1**2)*conj(M0)**2/(abs(M0)**2+epsilon**2)**2`` (before dividing
+by ``time_scale**2``). This equals ``r**2*kappa``: it suppresses poorly
+conditioned curvature instead of adding the single-arrival term. Its exact
+real JVP/VJP differentiates both the complete numerator and denominator.
+It still attenuates curvature near the floor and is not an unbiased estimator
+of complex cumulants there. The default ``"separate"`` preserves earlier
+results; select the joint form explicitly when comparing policies.
+
+Set ``confidence_floor=0.05`` independently of, for example,
+``relative_floor=0.005`` to lower the numerical ratio/jet floor without
+simultaneously increasing weak-data confidence. With ``confidence_floor=None``
+(the default), confidence uses ``relative_floor`` as before. A reliability
+mask passed through ``row_weights`` remains frozen for the bound objective;
+if it was selected using a reference model, keep it fixed during line search
+and derivative checks. Updating such a mask changes the objective and is not
+part of the returned model derivative.
+
+Use ``loss="pseudo_huber"`` or ``loss="student_t"`` to reduce the influence
+of large attribute residuals. ``loss_scale`` is a positive, fixed scale in
+the attribute's units after ``time_scale`` normalization and before confidence
+or objective weights. For an error magnitude ``a`` and scale ``delta``, these
+losses are ``delta**2*(sqrt(1+(a/delta)**2)-1)`` and
+``delta**2/2*log(1+(a/delta)**2)`` respectively. The latter is a radial
+Student-t-style (Cauchy) penalty with unit quadratic curvature at zero.
+Complex features use their magnitude; feature components are penalized
+separately. Confidence and receiver weights multiply the resulting loss.
+The API represents each robust loss as an exact transformed least-squares
+residual, differentiates that transformation, and retains exact real JVP/VJP
+actions. Its ``normal`` action is the positive semidefinite Gauss--Newton
+matrix for this residual representation, not the full robust-loss Hessian.
+If selecting a scale from starting residuals, hold it fixed throughout a line
+search and derivative checks. Robust residual influence alone does not bound
+the attribute Jacobian near a spectral null.
+
+Synthetic arrays for instantaneous traveltime
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``im.SyntheticArray`` on a phase-derivative comparison to combine nearby
+receiver channels when estimating instantaneous traveltime::
+
+   comparison = im.Comparison.phase_derivative(
+       array=im.SyntheticArray.gaussian(sigma=fs.Q_(250, "m")),
+       reliability="predicted",
+   )
+   view = problem.with_misfit(im.Misfit.student_t(comparison=comparison))
+   reference = view.linearize()  # value and raw material gradient
+   gradient = reference.gradient
+
+   # Candidate values and gradients use the SAME reliability snapshot:
+   trial = reference.trial(candidate, gradient=False)
+   # After accepting a model, start a new reference with view.linearize(accepted).
+
+The window constructors are ``gaussian(sigma=...)``, ``hann(radius=...)`` and
+``uniform(radius=...)``. Length quantities are required. Gaussian weights are
+``exp(-distance**2 / (2*sigma**2))``, truncated at three standard deviations
+by default; ``truncate=...`` changes that cutoff. Hann weights are
+``(1 + cos(pi*distance/radius))/2`` within the radius. Uniform weights are one
+within the radius. All maps normalize weights at each center, including edges.
+Omit ``array`` for individual traces or ``reliability`` to disable predicted
+reliability. Both are opt-in. ``fs.ReceiverArray`` remains the acquisition's
+physical receiver device; synthetic arrays combine existing output channels.
+
+Arrays without predicted reliability run in the native multi-frequency workflow,
+including gradient and optional receiver-diagonal probes in the same job. They
+support dense point receivers and pool energy and cross-products before division.
+The array map is prepared once; overlapping arrays reuse receiver samples.
+Residual trace weights, including offset tapers, are supported. Optional
+``confidence_floor=0.05`` adds fixed observed-power confidence using observed
+group RMS; zero disables this extra confidence weighting. Predicted reliability
+is a separate option and is not enabled by this setting.
+
+With ``receiver_diagonal`` or ``receiver_blocks``, predicted reliability runs
+in the native multi-frequency gradient job and supports residual trace weights.
+The weight is predicted power divided by predicted power plus the squared
+observed-RMS stabilization floor (pooled power when an array is selected).
+It multiplies the loss outside Student-t and is frozen in the saved
+linearization, including its probes and normal actions. ``confidence_floor``
+also works on individual point traces. Without a probe request, the existing
+Python composition retains explicit reliability snapshots across trial models;
+that path requires frozen sources, L2/Student-t loss, scalar explicit
+normalization and unprocessed point receivers. Frequencies, terms, shots and
+components remain separate. The Student-t ``nu`` and ``c2`` retain their usual ``Loss`` meaning.
+Generate synthetic observations with ``FrequencyDomainJob(...,
+phase_derivatives=1, source_derivative="frozen")`` when the comparison freezes
+the source. Forward jobs default to total source derivatives; observed and
+predicted derivative policies must match.
+
+For custom devices, cable arc length, expanded channel geometry, offset weights
+or multiple comparisons sharing the same forward jets, bind explicitly::
+
+   objective = comparison.bind(
+       jets, coordinates=fs.Q_(receiver_xyz, "km"),
+       definition=definition, row_weights=offset_weights,
+   )
+   gradient = objective.gradient()
+   trial = objective.trial(trial_jets)
+
+Here ``definition`` is an optional ``SpectralAttribute("phase_slope", ...)``
+with the same ``relative_floor`` as the comparison; it supplies advanced
+confidence, time scaling and robust-loss settings. Coordinates can also be
+mapped by term ID. To manage the sparse map directly, use
+``pool = jets.synthetic_array(array, coordinates)`` or
+``array.bind(coordinates, groups=...)``. Separate acquisition lines that must
+not mix should be authored as separate receiver groups; custom partitions can
+be passed through the lower-level map API.
+
+Use ``reference.trial`` (or ``view.linearize(candidate, reference=reference)``)
+throughout each line search. An independent ``view.linearize(candidate)``
+prepares fresh weights and therefore a new local objective. Automatic refresh
+inside the generic ``FWI`` optimizer is not implemented; that driver rejects
+predicted reliability rather than silently changing weights between trials.
+For point receivers, ``frozen = view.freeze_reliability(model)`` prepares a
+native multifrequency confidence snapshot. Pass ``frozen`` to ``FWI`` to keep
+weights fixed throughout a stage, including line-search trials and restarts.
+This path supports native Huber/Student-t, normal actions and regularization.
+Call ``view.freeze_reliability(accepted_model)`` on the original view for a
+new stage with refreshed weights. Start a new optimizer history when refreshing;
+objectives from different snapshots are not directly comparable. Native snapshots
+currently exclude receiver arrays, patches and kernel windows.
+For strongly damped data, keep the attribute's numerical floor small and configure
+confidence separately::
+
+   frozen = view.freeze_reliability(
+       model, relative_floor=0.1,
+       window=im.SyntheticArray.gaussian(sigma=fs.Q_(75, "m")),
+   )
+
+Here the window estimates local predicted power for confidence only; it does not
+average waveforms or traveltimes. A shot-wide amplitude reference can otherwise
+suppress far offsets solely because of Laplace decay. Receiver groups partition
+independent lines. An additional observed ``confidence_floor`` is optional and
+should not be enabled merely to stabilize the point attribute.
+Direct native probe linearizations with ``reliability="predicted"`` do not pin
+weights across independent jobs. Prepare a frozen view first when those jobs
+must share an objective.
+
+Predicted-signal reliability and receiver arrays are opt-in. Prepare reliability
+once at the reference model and pass the same frozen array to every trial model
+in that optimization step::
+
+   definition = im.SpectralAttribute(
+       "phase_slope", time_scale=4.0, relative_floor=0.005,
+       confidence_floor=0.05, loss="student_t", loss_scale=0.1,
+   )
+   reliability = jets.reliability_weights(definition)
+   objective = jets.attribute(definition, reliability=reliability)
+   # After creating trial_jets at a trial model, retain the original weights:
+   trial = trial_jets.attribute(definition, reliability=reliability)
+
+The weight is ``(E / (E + (floor_multiplier*epsilon)**2))**power``, with
+predicted base-signal power ``E`` and the existing observed-derived ratio floor
+``epsilon``. Both controls default to one. It multiplies the loss outside the
+Student-t/Huber argument, alongside observed confidence and ``row_weights``.
+The residual and its Jacobian receive its square root. Reliability does not
+change the attribute or robust residual scale and is never differentiated or
+automatically refreshed. Refreshing weights defines a new local objective;
+objective values across refreshes are not directly comparable. Retain an
+ungated waveform or normalized-jet term if poorly predicted traces need to
+recover. Reliability is available for phase/amplitude slope, log curvature and
+relative time; the latter multiplies reliability from both window denominators.
+The standalone equivalent is ``definition.reliability_weights(u, d, groups=...)``.
+
+For instantaneous traveltime only, share existing receiver samples between
+physical-radius windows::
+
+   # Actual sampled channel coordinates, indexed by canonical receiver ID.
+   pool = jets.receiver_pool(
+       fs.Q_(receiver_xyz, "km"), radius=fs.Q_(250, "m"),
+   )
+   reliability = jets.reliability_weights(definition, pool=pool)
+   objective = jets.attribute(
+       definition, pool=pool, reliability=reliability,
+       row_weights=offset_weights,
+   )
+   trial = trial_jets.attribute(
+       definition, pool=pool, reliability=reliability,
+       row_weights=offset_weights,
+   )
+
+The pooled attribute is
+``Re(P @ (conj(M0)*M1)) / (P @ abs(M0)**2 + P @ epsilon**2) / time_scale``.
+It accumulates power and cross-products before division, not waveforms or
+already-divided attributes. Opposite waveform phases therefore do not cancel
+the array denominator. Observed confidence and optional predicted reliability
+use pooled power too. One output is centered on each input receiver; terms,
+shots and components remain separate. Multiple terms require coordinate tables
+keyed by term ID. Use actual output-channel coordinates for DAS and reduced
+physical arrays, not their unexpanded device anchors. Pooling does not alter
+an existing device's sampling, gauge response or reduction.
+
+Windows use Euclidean distance in the supplied coordinates. One-dimensional
+arc length supports curved cables without linking spatially adjacent distant
+cable segments. Numeric coordinates/radii share units; alternatively supply
+both as length quantities. The default uniform window is normalized at edges;
+``taper="hann"`` and nonnegative per-sample quadrature ``sample_weights`` are
+optional. Reuse the pool across models/frequencies with identical receiver
+keys. Do not build neighborhoods again inside each objective evaluation.
+
+``im.ReceiverPool.from_coordinates(..., groups=...)`` also builds standalone
+maps. ``im.ReceiverPool(csr_weights, centers=...)`` accepts explicit sparse
+memberships, including fewer output arrays than input samples; ``centers``
+contains zero-based input sample indices. Such maps must respect the supplied
+groups. For rectangular maps, objective weights/reliability index outputs and
+the objective averages over output count. ``pool.centers`` maps output centers
+back to input rows. Pass these maps to ``definition.linearize(..., pool=pool)``.
+
+Each sample product is evaluated once, accumulated through a cached sparse
+map, and distributed backward through its transpose. Overlapping windows sum
+their loads before the existing native jet adjoints. Both numerator and
+denominator are differentiated; no dense receiver-by-receiver Jacobian or
+additional PDE solves are introduced. Ordinary native receiver evaluation is
+unchanged. Pooled curvature and other pooled attributes are rejected: they
+would require separate definitions accounting for inter-receiver moveout.
+
+This SDK composition requires one unit-weight frequency, fixed sources,
+untransformed waveform L2 inputs and matching model, control basis and receiver
+rows. The factory replaces L2 scales, term weights and reduction with unit raw
+states. Use unencoded shots for physical arrival attributes and observations
+with a matching frozen-source derivative convention. It saves one native
+linearization per order and sums native model adjoints; propagation across
+orders/objectives is not yet fused. The result exposes value, gradient, JVP,
+VJP and Gauss--Newton actions, rather than a serialized ``Misfit`` kind or a
+drop-in workflow problem.
+
+Centered WRI also accepts the raw derivative/window selection through ``FWIOperatorJob``:
 
 .. code-block:: python
 
@@ -887,6 +1245,26 @@ profiles and tensor hat lattices. Use ``regularization=`` on ``FWI``, ``Stage`` 
    )
    result = im.FWI(problem, stages, regularization=regularization).run()
 
+To regularize fractional material changes, supply fixed reference scales in
+each control vector's units:
+
+.. code-block:: python
+
+   regularization = im.NativeRegularization(
+       im.Smoothing(kind="tikhonov", alpha=alpha),
+       fractional_scales={"ss": 0.8, "sp": 0.4, "rho": 2.0},
+   )
+
+Sauce evaluates each named block's energy on ``u / scale`` and freezes the
+scales in the prepared stage context. Tikhonov, TV and TGV all support this
+option; values, derivatives and proximal solves use the same scaled energy.
+Fidelity metrics, coefficient bounds and mass operations keep their physical
+units. Named blocks bypass amplitude normalization; omitted blocks retain
+the existing behavior. These are explicit positive block constants, not local
+model values. Log-control increments already represent relative changes and
+normally need no extra scaling. Use ``reference=`` to regularize differences
+from a chosen complete control state.
+
 ``im.Tikhonov(alpha=...)``, ``im.TV(alpha=...)`` and ``im.TGV(alpha1=..., alpha2=...)``
 are also dispatched to Sauce by these workflows. A problem's ``smoothing=``
 configuration supplies the native regularizer when no explicit workflow or stage
@@ -984,6 +1362,18 @@ reduced objective and Schur normal. Outer model regularization is added once;
 Preconditioners
 ~~~~~~~~~~~~~~~
 
+``im.Misfit.tukey(delta=...)`` (or ``im.Loss.tukey(delta=...)`` for a term)
+provides a redescending bisquare loss in native objectives. ``delta`` is the
+cutoff in normalized data-metric coordinates. Below it the IRLS multiplier is
+``(1 - (r/delta)**2)**2``; at or above it both gradient influence and IRLS
+curvature weight are zero. Choose the cutoff from the residual scale, accounting
+for explicit normalization. Compared with Student-t, this can discard very bad
+traces completely, but also discards useful arrivals if the cutoff is too small.
+Receiver-diagonal and block probes retain these same weights. Their positive
+IRLS normal is not the full nonconvex Hessian. The Python shared-jet attribute
+composition does not yet support Tukey; prediction reliability with Tukey uses
+the native probe linearization path.
+
 .. code-block:: python
 
    preconditioner = im.Diagonal(probe_count=4, relative_damping=1e-2, maximum_inverse_ratio=1e3)
@@ -1005,6 +1395,53 @@ quadratic waveform loss, source-independent weights, material-independent
 receiver channels, and no preprocessing. The accessor sums frequency-weighted
 diagonals. Damping above is an explicit example, not an amplitude calibration.
 For additive Vp controls in km/s, the update is in km/s; the gradient is not.
+
+Instantaneous traveltime with Student-t loss uses source-dependent probes,
+batched into the same native gradient job::
+
+   lin = problem.linearize(receiver_diagonal={
+       "source_samples": 16, "probes": 4, "seed": 7,
+   })
+
+The gradient includes every shot. The diagonal selects one random shot from
+each contiguous source stratum and weights its contribution by the stratum's
+size. With 64 shots and 16 strata, each sampled contribution has weight four.
+Omit ``source_samples`` to include every shot. This estimates the positive
+frozen IRLS Gauss–Newton diagonal, not the exact Student-t Hessian. Each shot's
+attribute Jacobian and robust weights are retained; probes are packed across
+sampled shots, with two spectral-adjoint solves per packed batch. Four probes
+and 16 shots fit in one 64-column batch. A source batch must be at least as
+wide as the probe count. Dense material-independent receivers, frozen Gram,
+residual preprocessing and native synthetic arrays are supported.
+
+To retain local cross-parameter coupling from the same receiver probes::
+
+   lin = problem.linearize(receiver_blocks={
+       "controls": ["ss", "sp", "rho"],
+       "source_samples": 16, "probes": 4, "seed": 7,
+   })
+   blocks = lin.receiver_blocks
+   correlations = blocks.correlations
+   update = -blocks.solve(lin.gradient,
+                          scales={"ss": 0.006, "sp": 0.003, "rho": 0.016},
+                          damping=0.01)
+
+``receiver_blocks`` includes the diagonal; supply only one probe request.
+``blocks.matrices[node, row, column]`` uses the order in ``blocks.controls`` and
+already includes the frequency weights. Selected controls must share a frozen
+meshed material basis and transform. Each matrix is a sum of receiver-probe
+outer products, so it is positive semidefinite even with few probes. It omits
+coupling between different material coefficients. Retaining these products
+adds small contractions and storage, but no PDE solves.
+
+The example scales specify physical perturbations in the native control units;
+choose them for your parameterization. ``solve`` forms ``S H S``, adds a ridge
+equal to ``damping`` times its largest diagonal over the model, and returns an
+increment in native units. This requires matching active support for all
+selected controls, covering the active space. It is a preconditioner, not a
+calibrated step length. Blocks currently support waveform and instantaneous
+traveltime linearizations, including Student-t and synthetic arrays; separate
+spectral-kernel and patch linearizations do not yet support blocks.
 
 For separate spectral-derivative gradients, request matching diagonals in the
 same job::
@@ -1471,6 +1908,54 @@ gradient covector in the control basis is a visualization only, not a
 physical gradient density or a gradient transfer to grid parameters. The
 example labels that distinction and includes a single tensor-hat basis image.
 
+Packed property artifact contract
+---------------------------------
+
+``fs-property-space-3`` separates initial root metadata, solver records and
+optional visualization. A sorted ``root_directory`` maps root IDs to physical
+cells, material groups and kinds. ``root_geometry`` stores exact float64 physical
+corners in native units, and ``root_linear_geometry`` stores initial geometry
+flags. Geometry and initial identities are independent of refinement and basis
+identities. Python dataset axes reverse the Fortran order.
+
+``payload`` is one fixed, contiguous, uncompressed little-endian int64 dataset.
+``payload_offsets`` holds zero-based int64 word offsets in root-directory order,
+including an end sentinel equal to the payload extent. The codec header is
+``[1179865682, 1, int32_count, int64_count, float64_count]``. Int32 values occupy
+low then high halves of each word; an odd section has a zero high padding half.
+Int64 IDs occupy whole signed words. Float64 values retain their IEEE bit
+patterns. Section lengths must consume the record exactly.
+
+The int32 root section starts with 15 fields: material, GMP kind/id, cell kind,
+linear flag, refinement bit count (low/high halves), then lengths of tree words,
+dyadic vertex words, raw reference coordinates, constraint CSR offsets,
+constraint entries, controls, support offsets and support roots. Tree words,
+dyadic words, constraint offsets/indices, canonical owners, support offsets
+and support roots follow in that order. The int64 section contains ascending
+control IDs. The float64 section contains raw reference coordinates followed
+by constrained weights. Constraint offsets/indices are one-based. Support
+offsets are zero-based with a sentinel; inverse incidence is stored only at a
+control's canonical root. Reference coordinates keep ``2**D`` corner slots;
+physical geometry is never quantized or repeated in refined records.
+
+``visualization_points_m`` and ``visualization_kind`` are leaf arrays indexed
+by ``visualization_offsets``. Solver reads and reference/transfer reads do not
+require them. Plotting reports their absence explicitly. ``lumped_mass`` retains
+exact constrained support in ``km**D`` for output normalization. Legacy
+``fs-property-space-1`` artifacts remain readable offline, but solver jobs stage
+only packed artifacts. Job validation therefore rejects, before submission, an
+existing artifact that Sauce would reuse (the declared path, or its mesh-keyed
+``<stem>.<key>.h5`` sibling) unless it is ``fs-property-space-3``. Move it aside
+to regenerate the space; the regenerated basis has a new identity. The
+unpublished intermediate ``fs-property-space-2`` codec is rejected.
+
+The internal ``PackedPropertyReader`` serves visualization, statistical metadata,
+and reference/transfer consumers. Selected roots are read in contiguous bounded
+batches; typed sections use NumPy views. ``tests/fixtures/property-record-v1.json``
+is the SDK lossless interoperability fixture, including integer extremes,
+64-bit IDs, odd sections and floating-point bit patterns. Each repository keeps its own
+implementation, contract and fixture; there is no private solver dependency.
+
 Adapted property meshes
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1529,6 +2014,69 @@ contains geometry frozen at creation; native VTU uses the live geometry.
 Both display linear cells through leaf vertices, so curved geometry and
 nonlinear interior property variation are approximated between vertices.
 Use solver grid sampling when physical interior values are required.
+
+Coarse correction for full-space GN solves
+------------------------------------------
+
+``CoarseCorrection`` combines an existing local inverse with a balanced coarse
+correction. Every fine material coefficient remains an unknown. Supply a
+resolved native coarse space; construct it using the normal mesh adaptation API::
+
+   coarse_problem = problem.with_controls({
+       key: im.MeshParameters(prop, "solid", frequency=4, epw=0.5)
+       for key, prop in {"ss": "Ss", "sp": "Sp", "rho": "Rho"}.items()
+   })
+   local = im.ReceiverBlockDiagonal(
+       controls=("ss", "sp", "rho"), probe_count=16,
+       scales={"ss": 0.8, "sp": 0.4, "rho": 2.0},
+   )
+   coarse = im.CoarseCorrection(coarse_problem.space, local=local)
+   solve = im.LSRTM(
+       problem, method="cg", iterations=100,
+       regularization=im.NativeRegularization(
+           im.Smoothing(kind="tikhonov", alpha=0.02),
+           fractional_scales={"ss": 0.8, "sp": 0.4, "rho": 2.0},
+       ),
+       preconditioner=coarse,
+   )
+   update = solve.run()
+   print(solve.info["relative_residual_history"])
+   print(solve.info["preconditioner"])
+
+The local receiver blocks are requested alongside the linearization. Their
+positive damped inverse is factored once per refresh, including the regularizer's
+curvature diagonal. ``scales`` sets physical coordinates for damping; it does
+not change the objective or update units. Selected controls must cover the
+active space with a shared material basis and matching support masks.
+
+Sauce transfers the coarse cardinal functions using its constrained mesh basis,
+removes unsupported/dependent directions, evaluates their coupled coarse
+curvature, and energy-normalizes the basis and images. Fine-to-coarse residuals
+use the transpose of those same lifted functions, not a reverse model
+interpolation. With columns Q, cached images C=AQ and QᵀAQ=I, application is
+``Q Q.T + (I-Q C.T) B (I-C Q.T)``. All numerical factors are frozen during CG.
+Refresh after changing the model, frequencies, objective weights or regularizer.
+
+Setup costs one normal action per retained direction, dispatched through
+``Linearization.apply_normal_batch``. Native Tikhonov is fused into those jobs
+when supported. Application performs only local inverse operations and cached
+matrix-vector products; no backend invocation or wave solve occurs. Setup uses
+``cache=False`` to avoid retaining a second copy of its one-use normal columns
+on the linearization. The default limits are 256 input directions and a 512 MiB
+estimated setup-array budget (including the full-block transfer before support
+restriction); exceeding them raises before setup rather than
+silently dropping modes. Two controls-by-rank factors remain resident. Backend
+wavefield/factorization memory is additional to this budget.
+
+The first implementation supports real identity-transform mesh controls, with
+the same named physical parameters on both meshes. All active parameters are
+coupled in the coarse solve. Nonpositive or numerically unresolved coarse
+curvature raises an error; choose a better-conditioned space or regularize the
+system. This is a two-level preconditioner, not a multilevel Hessian solver.
+``solve.info["preconditioner"]`` reports retained rank, setup time, normal-action
+time, factor bytes, reduced condition and measured asymmetry. CG residual history
+is the recurrence residual; an independent final normal action can verify it
+when assessing an inexact wave solve.
 
 LSRTM, RTM and kernels
 ----------------------
@@ -1589,8 +2137,10 @@ ordinary material actions, including encoded shots. JVP/VJP need one propagation
 stage each; a normal action needs two. Eligible frozen-Gram acoustic/elastic DPG
 actions store only native L2 fields; trace-dependent boundaries, receiver terms,
 or field outputs retain full checkpoints. Checkpoints stay on disk, not all
-source fields in RAM. They require the same solver build, resolved mesh
-partition and source batching. Matrix assembly/factors are still rebuilt by each
+source fields in RAM, as one HDF5 file per MPI rank or, with the site's
+``background_layout = "shared"``, one file per task (see
+:doc:`site_configuration`). They require the same solver build, MPI rank count
+and source batching. Matrix assembly/factors are still rebuilt by each
 action job. ``reuse_background=False`` replays the background solve. LSRTM
 automatically falls back to uncached actions for unsupported controls, spectral
 objectives or sites without ``supports_background_reuse`` (``LocalSite`` and
@@ -1601,17 +2151,18 @@ transfer as well as the manifests.
 
 Full checkpoints hold ``n_dof * n_src`` complex values per frequency, often
 terabytes in production, so LSRTM deletes the checkpoint it created when it
-finishes, on this machine and in the site's result directory
-(``site.remove_result_files``). ``keep_background=True`` keeps it for later
-actions on the same linearization. Kept checkpoints are deleted when their
-linearization leaves ``problem.cache`` (eviction or ``problem.cache.clear()``)
-or, least recently used first, once ``problem.cache.background_budget``
-(bytes) is exceeded; ``problem.backend.release_background(lin.job)`` deletes
-one immediately. Later actions on a released linearization run uncached. When
-Sauce cannot use a checkpoint for environmental reasons (rank count, batching,
-missing or corrupt shards), it recomputes those forward fields and counts them
-in ``background_reuse_misses``; LSRTM reports the total as
-``info["background"]["misses"]`` and issues a :class:`RuntimeWarning`.
+finishes, with the directories this empties, on this machine and in the
+site's result directory (``site.remove_result_files``). ``keep_background=True``
+keeps it for later actions on the same linearization. Kept checkpoints are
+deleted when their linearization leaves ``problem.cache`` (eviction or
+``problem.cache.clear()``) or, least recently used first, once
+``problem.cache.background_budget`` (bytes) is exceeded;
+``problem.backend.release_background(lin.job)`` deletes one immediately. Later
+actions on a released linearization run uncached. When Sauce cannot use a
+checkpoint for environmental reasons (rank count, batching, an earlier
+checkpoint version, missing or corrupt files), it recomputes those forward
+fields and counts them in ``background_reuse_misses``; LSRTM reports the total
+as ``info["background"]["misses"]`` and issues a :class:`RuntimeWarning`.
 
 Receiver-probe preconditioning requests the diagonal with the initial gradient,
 adds the regularization/damping diagonal, and freezes the resulting positive
@@ -1811,6 +2362,21 @@ background-reflectivity cross terms) and stages like any other block. A
 Extension and reflectivity are mutually exclusive in one problem and the
 combination is rejected at construction.
 
+Restricting active controls freezes coefficients; it does not remove fields
+from the physical prediction. A background-only stage retains every reflectivity
+field at its current value and still uses the joint operator. Likewise, selecting
+one reflectivity field retains the other fields. Joint-workflow restrictions
+continue to apply when all reflectivity controls are inactive. At the same full
+state, restrictions preserve predicted data and objective values and select only
+the corresponding Jacobian columns and gradient entries.
+
+Reflectivity scattering excludes PML cells. Independent synthetic recovery tests
+must keep the absorbing-layer properties at the background values, rather than
+extend the truth contrast into that excluded region.
+Scattering also holds physical boundary coefficients fixed. A nonlinear truth
+comparison must preserve material-dependent boundary impedances; keep contrasts
+away from those boundaries when testing reflectivity accuracy.
+
 .. code-block:: python
 
    space = im.ControlSpace(
@@ -1821,6 +2387,70 @@ combination is rejected at construction.
        im.Stage([3, 5], iterations=10, active=["vp"]),
        im.Stage([5, 8], iterations=15, active=["vp", "refl"]),
    ]
+
+RWI fits one shared acoustic or elastic reflectivity at each trial background before
+returning its reduced objective and gradient. Select the inner contrast blocks
+explicitly when other reflectivity fields should stay frozen::
+
+   rwi = problem.rwi(reflectivity=["refl.ip"], damping=1e-4)
+   fit = rwi.linearize()
+   curvature = fit.normal
+   product = fit.apply_normal(direction)
+   result = im.FWI(rwi, stages=[im.Stage(problem.frequencies, iterations=10)],
+                   optimizer=im.NewtonCG(), scaling="curvature").run()
+
+``fit.state`` and the final result include the fitted reflectivity. FrequenSolve
+coordinates the fit and reduced Gauss-Newton response using ordinary frequency
+tasks. Frequencies can run concurrently or in waves through the configured site;
+they share physical coefficients and a common supported basis. Frequency weights
+belong on the problem. The coefficient penalty ``damping / 2 * ||r||²`` is added
+once after frequency reduction. The shared response inverts the summed
+reflectivity normal; summing separately reduced frequency operators would give
+a different result.
+
+``relative_tolerance`` (default ``1e-4``), ``absolute_tolerance`` (default zero),
+and ``max_iterations`` (default 50) control both inner fits and curvature
+responses. Fit tolerances use the zero-reflectivity right-hand side as their
+reference, independent of the warm start; response tolerances use the response
+right-hand side. Fits require independently recomputed stationarity; responses require
+a true residual check. An unconverged solve raises before publishing a reduced
+result, including when ``require_convergence=False``. ``fit.reports`` records
+fit diagnostics; ``fit.response_reports`` records curvature solve diagnostics.
+If CG's recurrence residual passes but its recomputed residual does not, the
+SDK automatically restarts from the recomputed residual within the remaining
+iteration budget. This correction preserves the requested tolerance and is
+separate from iterative refinement of the native wave solves.
+Near stationarity, finite-difference checks can require more accurate wave
+solves; tightening the inner tolerance alone does not reduce native wave-solve
+error. ``apply_normal_batch`` accepts multiple directions with independent response
+solves. Existing unit/Rademacher ``Diagonal`` preconditioning, explicit scaling,
+curvature scaling and outer regularization work through these reduced actions.
+Receiver-probe preconditioners remain unsupported.
+
+The portable path launches fresh native actions and does not retain factors
+between those processes. With ``LocalSite``, its existing
+``shutdown_on_completion=False`` option keeps the scheduler alive between
+actions; close the site when the workflow finishes. For retained native fitting, select
+``problem.rwi(..., execution="native", cache_mb=512)``. That fit requires native
+frequency groups; ``cache_mb`` controls resident incident fields and overflow
+spills to disk. Reduced curvature still uses SDK coordination in this mode.
+
+The default SDK path accepts acoustic ``vp_ip`` and elastic ``vp_vs_ip`` or
+``ip_is_rho`` reflectivity, including isotropic, TI and TTI material evaluators.
+Elastic impedances use reference-axis velocities; anisotropy and orientation
+remain background properties, which may be fixed or selected as outer controls.
+Use existing ``DepthProfile``/grid/mesh controls to select those properties;
+no separate TTI RWI interface is needed. ``execution="native"`` currently
+supports acoustic ``vp_ip`` only. Elastic recovery and reduced-derivative
+acceptance coverage currently targets 2D CPU; other dimensions and backends
+require separate qualification.
+
+RWI requires full-dimensional first-order DPG, fixed sources, waveform L2
+objectives and positive damping. Outer frequency and active-block stages are
+supported; changing control bases, patches and predicted reliability refresh
+are not supported. The normal is reduced Gauss-Newton,
+not the exact reduced Hessian at nonzero residual. Damping uses physical
+coefficient units; its default is not a noise-calibrated prior.
 
 Low-level jobs
 --------------
@@ -1842,7 +2472,7 @@ workflow needs an action the problem does not expose.
      - One action over the shared control registry, including extension,
        reflectivity and WRI.
    * - :class:`~frequensolve.imaging.ControlGradientJob`
-     - ``rtm`` / ``born`` with ``control_sensitivities``
+     - ``rtm`` / ``born`` / spectral ``lsrtm_gradient`` with ``control_sensitivities``
      - Native control VJP or Born JVP; ``gram_derivative="total"``
        opts into the total DPG gradient (Gram and trial-to-test terms) for
        verification.
@@ -1861,13 +2491,23 @@ by role (``image``, ``gradient``, ``objective``, ``state``,
 :mod:`frequensolve.imaging` (``ControlVectorFile``, ``ControlStateFile``,
 ``ObjectiveReport``, ``ImageSet`` ...) open them.
 
-Saved objective states and vectors are read in both formats: solver 0.4.1's
-canonical version 4 and the development solver's distributed version 3.
-Operator calls select the vector format from each task's saved state. Keep
-states with the solver build that created them and regenerate the linearization
-when changing builds. Low-level ``DataVector.write_objective_vector`` callers
-can specify ``schema="fs-objective-vector-4"`` for a canonical saved state;
-the default preserves the distributed version-3 convention.
+Saved objective states and vectors are read in three formats: the current
+solver's version 5 (one manifest and one canonical HDF5 file per task, each
+dataset checked against its ``fs-block-sha256-1`` digest), solver 0.4.1's
+canonical version 4 and the earlier distributed version 3. Operator calls write
+each task's duals in the format of its saved state: version-5 duals carry no
+rank partition and use the state's precision (single). Version-5 states carry
+none either, so sites size derivative actions on them like other tasks
+(Sauce rejects a state only when its realized mesh differs); a reused
+background checkpoint still prefers the rank count that wrote it.
+Keep states with the solver build that created them and regenerate the
+linearization when changing builds. Low-level
+``DataVector.write_objective_vector`` callers pass
+``schema="fs-objective-vector-5"`` (and optionally ``dtype``) or ``-4`` for a
+canonical saved state; the default preserves the distributed version-3
+convention. Remote staging does not upload a saved state or objective vector
+again when a completed run on the same SLURM site wrote it there; jobs read
+that copy in place.
 
 Sauce contract mapping
 ----------------------
@@ -2388,3 +3028,105 @@ scalar gamma; an independently constructed fixed-baseline history does not
 reproduce that changing optimizer operator. The high-level uncertainty workflow
 freezes its baseline to keep this contract consistent. Existing solver builds
 without these operations must be updated before using the API.
+
+Fixed waveform-derivative objectives
+-----------------------------------
+
+``SpectralObjective`` composes native spectral states and model adjoints with
+standard ``FWI`` stages, regularization and checkpoints. For one frequency per
+stage, ordinary waveform derivative residuals through order two can be balanced
+with fixed scales::
+
+    jets = im.SpectralJetLinearization.from_problem(raw_problem, order=2)
+    scales = np.sqrt(np.mean(np.abs(jets.observed)**2, axis=0))
+    definition = im.SpectralAttribute(
+        "waveform_jet", order_scales=scales,
+        loss="student_t", loss_scale=0.5,
+    )
+    objective = im.SpectralObjective(
+        raw_problem, definition, order=2, feature_weights=[1, 1, 1],
+    )
+    result = im.FWI(objective, [im.Stage(frequencies=(2-0.5j,), iterations=5)]).run()
+
+The raw problem uses unit-weight, unprocessed waveform L2 inputs and matching
+frozen-source observed derivatives. The algebra uses time moments
+``M_k = U_f^(k) / (-2*pi*i)^k``; the supplied scales have these same units.
+Scaling each moment by its fixed observed RMS is equivalent to scaling each raw
+Fourier derivative by its corresponding RMS. No predicted amplitude is divided
+out. ``feature_weights`` multiply the loss outside its robust penalty; keep both
+scales and weights fixed throughout a stage. Source/receiver reliability and
+synthetic arrays are not implicitly applied.
+
+
+Experimental AWI and HV objectives
+----------------------------------
+
+``problem.awi(im.AWI(...))`` fits a real finite-duration matching filter per
+physical trace across a frequency band. Supply increasing frequencies on one
+Laplace line, positive quadrature weights, explicit ``filter_lags`` in seconds,
+``relative_floor`` and ``minimum_filter_energy``. Identity-centered regularization
+makes matching data an exact zero. ``loss=im.Loss.student_t(nu=2, c2=0.25)`` applies
+a robust loss to the filter RMS lag (seconds), including its exact pullback.
+The squared scale ``c2`` therefore has units of seconds squared. The legacy
+``formulation="spectral_moment"`` is retained for reproduction only; it has
+identity bias and spectral-notch sensitivity and does not support robust losses.
+
+Optional ``regularization="gain_invariant"`` leaves zero-lag gain unpenalized
+and scales the other tap penalties with predicted power, including its derivative.
+``filter_kind="complex"`` fits analytic-signal filters and can absorb a constant
+phase rotation without treating it as a delay. These options change the objective;
+they do not guarantee a convex delay basin for arbitrary bands and lag supports.
+Use enough independent spectral information to constrain the requested filter.
+
+For shared local fits, pass ``synthetic_array=im.SyntheticArray.gaussian(sigma=...)``
+and unit-bearing output-receiver ``coordinates`` to ``problem.awi``. Multiple
+receiver groups require a coordinate table keyed by group name. Arrays pool
+powers and cross-products, fit one filter per array center, and scatter exact
+covectors to all contributing samples. They never mix shots or components.
+``trace_weights`` weight array centers; they do not mask individual contributors.
+
+AWI uses shared receiver checkpoints and bandwise gradient aggregation, with
+one forward and one adjoint solve per frequency/source for finite filters.
+It supports acoustic, elastic and coupled physical shots, multiple dense receiver
+groups and frozen
+meshed controls. No encoded shots, receiver preprocessing or source controls
+are supported. Band weights belong in ``quadrature_weights``, not ordinary
+FWI frequency weights. Use L-BFGS; no AWI curvature is implemented. Native mass
+metrics and model regularization use the retained covector job. The ordinary
+base problem's loss is not inherited.
+
+``problem.hv(im.HV(scale=pressure_scale))`` uses native receiver-line transport
+geometry. It requires a solver built with ``FS_ENABLE_HV=1``, Cartesian 2D
+acoustic, elastic or coupled modeling, one MPI rank, physical shots, dense uniform
+straight scalar receiver lines and material controls. Coupled hydrophone data
+produce elastic solid-property gradients through the shared wave adjoint. Choose the fixed amplitude scale in pressure units.
+Real and imaginary signals have independent auxiliary solves, with convergence
+required before accepting the material gradient. L-BFGS and ``NewtonCG`` are
+supported. The HV normal operator linearizes the coupled signal path and
+deformation, eliminates their auxiliary increments, and pulls the reduced
+receiver curvature through the wave Jacobian. It omits residual-weighted
+second derivatives, as required for Gauss–Newton. Auxiliary factorizations
+are reused across normal applications. ``hv.linearize(curvature=True)`` eagerly
+retains these matrices; otherwise the first normal application prepares them
+with another HV evaluation. First-order evaluations have no export overhead.
+The current auxiliary curvature factors use FP32 sparse LU with relative
+residual tolerance ``1e-4``. Its quadratic auxiliary energy does not inherit Student-t, synthetic
+arrays or other preprocessing from the base problem. Value requests currently
+also compute a gradient. Both objective views can be passed to ``im.FWI`` with
+model regularization; their supported scope is experimental.
+
+Attribute-space HV research is available separately through
+``frequensolve.imaging.hv_attributes.HVAttributeProblem`` and ``HVAttribute``.
+It composes saved first-order spectral jets with Gaussian-array traveltime,
+compressed traveltime, normalized phase, or a normalized two-jet Hermitian
+feature (``projective_jet``). The latter cancels common complex gain but retains
+spectral amplitude-slope information. Phase and projective channels share one
+receiver deformation. This prototype uses an independent Q1 auxiliary solver;
+its spatial and path meshes require convergence checks and it does not expose
+native HV curvature. It currently requires one frequency, physical shots,
+unprocessed spectral observations and uniform straight receiver lines.
+``floor_kind="local"`` stabilizes with observed array power; the default group
+floor can bias weak damped traces toward zero traveltime. Stabilization and
+relative amplitudes within an array limit exact gain invariance. Gradients use
+the standard native spectral pullbacks and retain material-control field and
+regularization access. This research API is not a replacement for ``problem.hv``.

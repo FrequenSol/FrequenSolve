@@ -1951,6 +1951,13 @@
       "remediation": "Use valid physical units appropriate for the model property."
     },
     {
+      "code": "model.property_space.artifact.unsupported",
+      "severity": "error",
+      "path": "model.property_spaces.*.artifact",
+      "explanation": "An existing property-space artifact that the solver would reuse, at the declared path or as a mesh-keyed sibling, is not a packed fs-property-space-3 artifact; Sauce would abort when staging it.",
+      "remediation": "Move the artifact aside so the job regenerates the space; control states saved for the old basis do not match the regenerated one."
+    },
+    {
       "code": "model.subdomain.mesh_block_id.duplicate",
       "severity": "error",
       "path": "model.subdomains[*].mesh_block_id",

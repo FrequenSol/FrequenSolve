@@ -19,6 +19,7 @@ from frequensolve.imaging import (
     Misfit,
     SourceParameters,
 )
+from frequensolve.imaging._backend import background_checkpoint_files
 from frequensolve.imaging.results import FWIResult, StageResult
 from frequensolve.imaging.workflows import (
     FWI,
@@ -1351,6 +1352,8 @@ def test_lsrtm_deletes_the_background_checkpoint_it_created(problem, fake):
     }
     assert fake.removed == [(job.name, tuple(sorted(names)))]
     assert not any((job._result_path / name).exists() for name in names)
+    # The emptied <stem>/generations/<run>/ directories go with them.
+    assert not any((job._result_path / f"background_{t}").exists() for t in (1, 2))
     assert workflow.info["background"]["released_bytes"] >= 2 * 4096
     # The cached linearization stays usable, now without the checkpoint.
     before = len(fake.jobs)
@@ -1361,6 +1364,33 @@ def test_lsrtm_deletes_the_background_checkpoint_it_created(problem, fake):
     lin = problem.linearize(problem.space.random(5), background=True)
     LSRTM(problem, method="cg", iterations=5).run(problem.space.random(5))
     assert lin.job.background is not None and len(fake.removed) == 1
+
+
+@pytest.mark.parametrize("setting, layout", [(None, "rank"), ("shared", "shared")])
+def test_background_capture_takes_the_site_layout(tmp_path, setting, layout):
+    fake = FakeImagingSite(seed=11)
+    if setting is not None:
+        fake.background_layout = setting
+    problem = _problem(tmp_path, fake)
+
+    job = problem.linearize(background=True).job
+
+    # The job JSON the site ran carries the layout; the fake writes it.
+    saved = json.loads(job._file.read_text())
+    assert saved["fwi_operator"]["background_layout"] == layout
+    assert _assert_valid(job.to_fs())["fwi_operator"]["background_layout"] == layout
+    name = "fields.h5" if layout == "shared" else "rank_00000.h5"
+    assert background_checkpoint_files(job)[0] == sorted(
+        path
+        for task in (1, 2)
+        for path in (
+            f"background_{task}.json",
+            f"background_{task}/generations/fake/{name}",
+        )
+    )
+    # Linearizations without a capture name no layout.
+    plain = problem.linearize(problem.space.random(1)).job
+    assert "background_layout" not in plain.to_fs()["fwi_operator"]
 
 
 def test_lsrtm_keeps_background_on_request_until_cache_eviction(tmp_path, fake):

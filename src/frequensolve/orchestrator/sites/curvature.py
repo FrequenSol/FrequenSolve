@@ -27,7 +27,9 @@ __all__ = [
     "single_rank",
 ]
 
-SINGLE_RANK_METHODS = frozenset({"mesh_prior", "mesh_sample", "mesh_directions"})
+SINGLE_RANK_METHODS = frozenset(
+    {"mesh_prior", "mesh_sample", "mesh_directions", "mesh_basis"}
+)
 """Methods Sauce rejects on more than one MPI rank."""
 
 FILE_KEYS = ("input", "output", "factors", "source_mesh", "target_mesh")

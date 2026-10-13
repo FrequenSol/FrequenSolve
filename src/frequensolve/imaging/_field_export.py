@@ -110,7 +110,14 @@ class NativeControlField:
             )
         work = Path(owner._field_export_workspace.name) / key[1]
         work.mkdir(exist_ok=True)
-        payload = lin.job.to_fs()
+        # The saved job already owns exported HDF5 inputs (including large
+        # trace-weight tables); reserializing live arrays lacks that context.
+        saved_job = (
+            type(lin.job).load(lin.job.job_file)
+            if Path(lin.job.job_file).is_file()
+            else lin.job
+        )
+        payload = saved_job.to_fs()
         payload.pop("Outputs", None)
         payload.pop("kernel_derivative", None)
         # Author directly in local scratch, never in an HPC job's result layout.

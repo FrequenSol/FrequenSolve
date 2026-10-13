@@ -344,7 +344,7 @@ class MaterialArtifactRecord:
         if (
             value.get("id") != f"material_space:{space}"
             or value.get("role") != "material_space"
-            or value.get("schema") != "fs-property-space-1"
+            or value.get("schema") not in {"fs-property-space-1", "fs-property-space-3"}
         ):
             raise ArtifactContractError(
                 f"material artifact for {space!r} has an unexpected id, role, or schema"

@@ -50,3 +50,33 @@ changes (2026-09-27). The input direction/covector implications include
 `receiver_jvp` / `receiver_vjp`. These are targeted working-tree overlays,
 not a verbatim snapshot of that commit, and require the matching rebuilt solver.
 The version-4 objective contracts and partition-independent control registry are copied from `FrequenSol/Sauce@80d9e5e8cd5fc67eb0610c8eecf35241631e7ef6` (solver 0.4.1). `fs-objective-linearization-4` and `fs-objective-vector-4` use one canonical row file per task; `fs-control-registry-1` describes distributed blocks in global order without per-rank descriptor files. Other contracts retain the earlier pins above.
+
+## Objective state and vector version 5 overlay
+
+`fs-objective-vector-5` is copied from Sauce `next` commit `c3d0abd4`
+(2026-10-01). `fs-objective-linearization-5`, the `fs-control-registry-1`
+contract/schema/example and two fs-job-1 contract passages (actions validate
+the realized mesh; the `controls/manifest` export) are copied from the
+partition-independence follow-up, Sauce `next` commit `88d8dada`
+(2026-10-01). The fs-job-1 overlay still describes version-3 states,
+so its MPI reload sentence and `fwi_operator.state` schema description keep
+their earlier wording. Version 5 publishes one manifest and one canonical HDF5
+file per task whose datasets are identified by `fs-block-sha256-1` digests of
+the dataset flattened to one axis. Neither states nor vectors carry a
+`same_mesh_partition` binding: any MPI rank count reloads them, and Sauce
+rejects a state only when its realized mesh differs. The registry index lists
+no rank descriptors and its fingerprint is independent of the partition. These
+are targeted overlays and require a solver built from `88d8dada` or later;
+FrequenSolve still reads versions 3 and 4.
+
+## Background checkpoint version 2 overlay
+
+`fs-background-state-2` (contract, schema and examples), the fs-job-1
+`fwi_operator.background` and new `background_layout` schema descriptions and
+the matching fs-job-1 contract passage are copied from Sauce `next` `856b1277`
+(2026-10-01). A version-2 manifest names one HDF5 file per MPI rank
+(`layout: "rank"`, the default) or one file per task written by every rank
+(`layout: "shared"`), with per-rank slabs and per-batch `fs-block-sha256-1`
+digests. Sauce treats `fs-background-state-1` manifests as a cache miss;
+FrequenSolve still lists and deletes their files. These are targeted overlays
+and require a solver built from `ace2325a` or later.

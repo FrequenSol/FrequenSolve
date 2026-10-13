@@ -57,7 +57,12 @@ from frequensolve.imaging._artifacts import (
 from frequensolve.imaging._block_digest import block_digest
 from frequensolve.imaging.data import DataSpace, DataVector
 from frequensolve.imaging.jobs import FWIOperatorJob, _task_path
-from frequensolve.orchestrator.sites.base import BaseSite, RunHandle, RunResult
+from frequensolve.orchestrator.sites.base import (
+    BaseSite,
+    RunHandle,
+    RunResult,
+    _remove_emptied_directories,
+)
 from frequensolve.orchestrator.sites.execution import resolve_execution
 from frequensolve.project import Project
 from frequensolve.simulation.jobs.base import BaseJob
@@ -398,12 +403,17 @@ def write_task_objective_vectors(
     space: DataSpace,
     state_fingerprint: str,
     *,
-    n_ranks: int = 1,
+    n_ranks: Optional[int] = None,
+    schema: str = "fs-objective-vector-3",
+    dtype: Any = None,
 ) -> List[Path]:
-    """Write one ``fs-objective-vector-3`` per frequency task of ``job``.
+    """Write one objective vector per frequency task of ``job``.
 
     Task ``t`` receives the rows of ``space`` at ``job.f_list[t - 1]``; the
-    files are written at ``job.objective_vector_file(t)``.
+    files are written at ``job.objective_vector_file(t)``. ``schema``,
+    ``n_ranks`` (version 3) and ``dtype`` (version 5) select the format as in
+    :meth:`DataVector.write_objective_vector`; pass
+    ``**ObjectiveState(...).vector_options()`` for a saved state's duals.
     """
 
     vector = (
@@ -422,6 +432,8 @@ def write_task_objective_vectors(
                 state_fingerprint=state_fingerprint,
                 term_layout=layouts,
                 n_ranks=n_ranks,
+                schema=schema,
+                dtype=dtype,
             )
         )
     return paths
@@ -522,7 +534,7 @@ def _operator_input_files(job: BaseJob) -> List[Path]:
 
 
 def _manifest_payload(path: Path) -> List[Path]:
-    """Return the data file an objective-vector manifest names beside itself."""
+    """Return the data file a canonical (version 4 or 5) objective-vector manifest names."""
 
     if path.suffix != ".json":
         return []
@@ -746,8 +758,11 @@ class Backend:
         """
 
         # Local sites read inputs in place; only remote sites expose a work_dir.
-        if getattr(self.site, "work_dir", None) is None or not callable(
-            getattr(self.site, "put", None)
+        # Sites that upload them while submitting need no second copy.
+        if (
+            getattr(self.site, "work_dir", None) is None
+            or not callable(getattr(self.site, "put", None))
+            or getattr(self.site, "stages_job_inputs", False)
         ):
             return
         try:
@@ -835,12 +850,13 @@ class Backend:
     def release_background(self, job: FWIOperatorJob) -> int:
         """Delete a linearize job's native background checkpoint everywhere.
 
-        Removes the files :func:`background_checkpoint_files` lists from this
-        machine and from the site's copy of the job result directory
-        (``site.remove_result_files``), and clears ``job.background``: later
-        actions on that linearization run uncached and a new
-        ``background=True`` request linearizes again. Returns the released
-        size in bytes (estimated for payloads kept only on the site).
+        Removes the files :func:`background_checkpoint_files` lists, with the
+        directories they leave empty (``<stem>/generations/<run>/`` and its
+        parents), from this machine and from the site's copy of the job result
+        directory (``site.remove_result_files``), and clears
+        ``job.background``: later actions on that linearization run uncached
+        and a new ``background=True`` request linearizes again. Returns the
+        released size in bytes (estimated for payloads kept only on the site).
         """
         if getattr(job, "background", None) is None:
             return 0
@@ -852,6 +868,7 @@ class Backend:
             path = root / name
             if path.is_file() or path.is_symlink():
                 path.unlink(missing_ok=True)
+        _remove_emptied_directories(root, files)
         if files:
             self.site.remove_result_files(job, files)
         return size
@@ -882,7 +899,11 @@ class Backend:
                 value = getattr(job, label)
                 if value is None:
                     continue
-                if label == "state" and job.action != "linearize":
+                if (
+                    label == "state"
+                    and job.action != "linearize"
+                    and not (job.action == "solve" and job.reflectivity is not None)
+                ):
                     continue
                 if label == "objective_vector" and job.action != "jvp":
                     continue
@@ -995,15 +1016,16 @@ _BACKGROUND_ROLES = ("checkpoint", "background_shard", "background_state")
 def background_checkpoint_files(job: FWIOperatorJob) -> Tuple[List[str], int]:
     """Return a linearize job's background checkpoint files and their size.
 
-    Paths are relative to the job result directory: each task's
-    ``fs-background-state-1`` manifest, the per-rank shards it lists (HDF5
-    shards holding every source batch, or, from earlier solver builds, JSON
-    shard manifests naming ``<shard>_batch_<b>.h5`` payloads) and every
-    task-catalog record with a checkpoint role. The manifests are
-    authoritative because earlier builds recorded only rank 0's files in the
-    task catalog. Files present on this machine count their size, payloads
-    kept only on the site their catalog size, and unrecorded payloads are
-    estimated from the recorded ones.
+    Paths are relative to the job result directory: each task's manifest, the
+    HDF5 files it names (``fs-background-state-2``: the ``shared`` layout's
+    ``file`` or every rank's ``shards[].file``; ``fs-background-state-1``:
+    per-rank shards or, from earlier solver builds, JSON shard manifests
+    naming ``<shard>_batch_<b>.h5`` payloads) and every task-catalog record
+    with a checkpoint role. The manifests are authoritative because earlier
+    builds recorded only rank 0's files in the task catalog. Files present on
+    this machine count their size, payloads kept only on the site their
+    catalog size, and unrecorded payloads are estimated from the recorded
+    ones.
     """
     if getattr(job, "background", None) is None:
         return [], 0
@@ -1031,12 +1053,15 @@ def background_checkpoint_files(job: FWIOperatorJob) -> Tuple[List[str], int]:
             state = json.loads(manifest.read_text())
         except (OSError, ValueError):
             continue
-        shards = state.get("shards") if isinstance(state, Mapping) else None
+        if not isinstance(state, Mapping):
+            continue
+        shards = state.get("shards")
         if isinstance(shards, Mapping):
             shards = list(shards.values())
-        batches = state.get("batches", 0) if isinstance(state, Mapping) else 0
-        for shard in shards if isinstance(shards, list) else []:
-            name = shard.get("file") if isinstance(shard, Mapping) else None
+        batches = state.get("batches", 0)
+        # Version 2 names one shared ``file`` or one file per rank in ``shards``.
+        for entry in [state, *(shards if isinstance(shards, list) else [])]:
+            name = entry.get("file") if isinstance(entry, Mapping) else None
             if not isinstance(name, str) or not name:
                 continue
             path = add(manifest.parent / name)
