@@ -909,7 +909,7 @@ class VtkOutput(Output):
         if self._inferred_target() == "grid" and self.format != "vtr":
             raise ValueError("ParaView grid targets require format='vtr'")
 
-        payload = {
+        payload: Dict[str, Any] = {
             "_type": "ParaviewOutput",
             "name": self.name,
             "path": self.path,

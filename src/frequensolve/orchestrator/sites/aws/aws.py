@@ -1100,6 +1100,7 @@ class AWSSite(BaseSite):
 
             # Freeze and validate the result layout before admitting remote work.
             run_job = self._prepare_run_snapshot(job)
+            retry_arguments: dict[str, Any] = {"retry": True} if retry else {}
             result = self.graphql_client.submit_job(
                 job_file_s3_key=str(s3_job_key),
                 job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
@@ -1109,7 +1110,7 @@ class AWSSite(BaseSite):
                 simulation_job_name=job.name,
                 send_simulation_status_email=kwargs.get("send_simulation_status_email"),
                 fresh=fresh_run,
-                **({"retry": True} if retry else {}),
+                **retry_arguments,
                 **execution_arguments,
             )
 

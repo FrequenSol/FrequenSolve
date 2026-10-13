@@ -8,6 +8,7 @@ from itertools import product
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.interpolate import BSpline
 from scipy.sparse import csr_matrix, diags
 from scipy.sparse.linalg import lsqr
@@ -361,12 +362,14 @@ class FieldRepresentation(ABC):
     ) -> np.ndarray:
         """Least-squares project point samples into this representation."""
 
-        values = np.asarray(samples, dtype=np.float64).reshape(-1)
+        values: NDArray[np.float64] = np.asarray(samples, dtype=np.float64).reshape(-1)
         if values.size != context.size or not np.all(np.isfinite(values)):
             raise ValueError("projection samples must be finite and match the context")
         operator = self.sampling_operator(context)
         if weights is not None:
-            scale = np.asarray(weights, dtype=np.float64).reshape(-1)
+            scale: NDArray[np.float64] = np.asarray(weights, dtype=np.float64).reshape(
+                -1
+            )
             if (
                 scale.size != context.size
                 or np.any(scale < 0.0)
