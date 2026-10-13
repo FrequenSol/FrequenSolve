@@ -420,7 +420,7 @@ class BaseJob(
         if self.simulation is None:
             raise ValueError("BaseJob requires a simulation")
         frequencies = np.asarray(self.f_list)
-        if frequencies.size == 0:
+        if frequencies.size == 0 and not self.frequency_independent:
             raise ValueError("BaseJob requires at least one frequency")
         self.f_list = frequencies.tolist()
         self.k_list = self._normalize_optional_real_list(self.k_list, "k_list")
@@ -625,7 +625,7 @@ class BaseJob(
             Length of ``f_list``.
         """
 
-        return len(self.f_list)
+        return 1 if self.frequency_independent else len(self.f_list)
 
     def requires_postprocess(self) -> bool:
         """Return whether frequency tasks require one solver postprocess step."""

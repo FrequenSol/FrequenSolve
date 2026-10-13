@@ -328,8 +328,17 @@ work for receivers, wavefields, and ParaView. For example:
        for field in ("velocity", "p_velocity", "s_velocity")
    ]
 
+Axisymmetric harmonic acoustic, elastic, and coupled simulations support the
+same fields with the default ``s_projection="complement"``. The projection uses
+cylindrical volume weighting and physical radial velocity, including Galerkin's
+regularized radial displacement. Use ``p_velocity_r`` / ``s_velocity_r`` for
+radial components and ``_z`` for axial components; ``_x`` aliases ``_r``.
+S is weakly orthogonal to discrete potential gradients. Axisymmetric transient
+physics and torsional projection channels are currently unsupported.
+
 Use ``helmholtz_projection={"s_projection": "solenoidal"}`` for a dedicated
-S projection instead of the default complementary field (raw minus P).
+Cartesian S projection instead of the default complementary field (raw minus P).
+Axisymmetric simulations reject this mode.
 Both potentials share one auxiliary solve. Do not set the legacy ``part``
 option when retaining ordinary velocity: that option intentionally replaces it
 with the selected part. The undecomposed output is the auxiliary element-local

@@ -48,3 +48,33 @@ cores_per_node = 48
 sockets_per_node = 2
 memory_per_node = 196608
 gpus_per_node = 0
+
+# Intel Data Center GPU Max 1550 nodes, checked with sinfo and the qpvc QoS on
+# 2026-10-12. Each node has four GPUs with two stacks each; gpus_per_node counts
+# the eight stacks, one MPI rank each, and gpu_memory_per_gpu is one stack's
+# device memory in MiB.
+[presets.stampede3.partitions.pvc]
+max_duration = "2-00:00:00"
+min_nodes = 1
+max_nodes = 4
+cores_per_node = 96
+sockets_per_node = 2
+memory_per_node = 1031000
+gpus_per_node = 8
+gpu_memory_per_gpu = 65536
+
+# GPU-aware MPI is the default on PVC: halo exchanges hand device buffers to
+# Intel MPI. impi/21.15 hangs with offload in one MPI_Alltoallv pattern, and no
+# newer Intel MPI module exists for intel/25.1, so jobs put the ABI-compatible
+# 2021.16 runtime ahead of it; drmfd shares GPU IPC handles because the compute
+# nodes block pidfd_getfd. The compiler's libraries also go ahead of module
+# paths such as python/3.12's, whose older Unified Runtime loader
+# (libur_loader) the SYCL runtime cannot use. FS_CUDA_AWARE_MPI = "0" in the
+# site environment stages exchanges through host memory instead.
+[presets.stampede3.partitions.pvc.environment]
+I_MPI_ROOT = "/scratch/projects/compilers/intel25.2/mpi/2021.16"
+PATH = "/scratch/projects/compilers/intel25.2/mpi/2021.16/bin:${PATH}"
+LD_LIBRARY_PATH = "/scratch/projects/compilers/intel25.2/mpi/2021.16/lib:${CMPLR_ROOT}/lib:${LD_LIBRARY_PATH}"
+I_MPI_OFFLOAD = "1"
+I_MPI_OFFLOAD_PIN = "0"
+I_MPI_OFFLOAD_IPC_MODE = "drmfd"

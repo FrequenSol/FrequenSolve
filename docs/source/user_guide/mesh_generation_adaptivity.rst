@@ -141,6 +141,13 @@ Adaptivity
        hmax=0.08,
    )
 
+``f_low`` and ``f_high`` bound the adaptation frequency. ``f_adapt`` sets an
+explicit physical adaptation frequency in hertz and serializes as
+``Mesh/adapt/f_adapt`` independently of those bounds. Transient wave simulations
+require a positive ``f_adapt``; ``f0`` only sets the nondimensionalization
+reference. For example, add ``f_adapt=30.0`` to the call above to resolve that
+frequency throughout a transient run.
+
 ``order`` is the initial :term:`polynomial order` assigned to the root mesh.
 ``elems_per_wave`` is the requested minimum element count per wavelength after
 adaptation. The practical points per wavelength are roughly

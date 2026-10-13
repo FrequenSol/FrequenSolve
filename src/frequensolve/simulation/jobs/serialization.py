@@ -141,6 +141,7 @@ class JobSerializationMixin:
             import frequensolve.simulation.jobs._patches  # noqa: F401
             import frequensolve.simulation.jobs.eikonal  # noqa: F401
             import frequensolve.simulation.jobs.forward  # noqa: F401
+            import frequensolve.simulation.jobs.transient  # noqa: F401
 
         if class_name not in class_registry:
             raise ValueError(f"Unknown job class: {class_name}")
@@ -171,7 +172,7 @@ class JobSerializationMixin:
         """
 
         self.validate_outputs()
-        f_list = self._encoded_frequencies()
+        f_list = None if self.frequency_independent else self._encoded_frequencies()
         payload = {
             "schema": "fs-job-1",
             "_type": self.__class__.__name__,
@@ -179,7 +180,7 @@ class JobSerializationMixin:
             "project_path": str(self._project_path()),
             "simulation": self._simulation_path(project_relative=project_relative),
             "workflow": self.workflow,
-            "f_list": f_list,
+            **({"f_list": f_list} if f_list is not None else {}),
             "Outputs": self.outputs.to_fs(),
         }
         payload.update(self._wavenumber_payload())
@@ -285,6 +286,7 @@ class JobSerializationMixin:
             [
                 "Outputs",
                 "Eikonal",
+                "Time",
                 "Image",
                 "control_sensitivities",
                 "focus",
@@ -520,6 +522,8 @@ class JobSerializationMixin:
             "schema": "fs-effective-output-request-1",
             "workflow": job_payload["workflow"],
         }
+        if "Time" in job_payload:
+            request["Time"] = job_payload["Time"]
         outputs = job_payload.get("Outputs")
         if outputs is None and simulation_payload is not None:
             outputs = simulation_payload.get("Outputs")

@@ -201,6 +201,41 @@ solver logs, and only then scale the mesh, frequencies, nodes, or duration.
 FrequenSolve submits computation to SLURM compute nodes; do not run solver work
 on a Stampede3 login node.
 
+Run On The PVC GPU Nodes
+------------------------
+
+The ``pvc`` partition has four Intel Data Center GPU Max 1550 GPUs per node,
+each with two stacks. A solver installation built with Intel GPU support
+assembles and solves on the GPU stacks when it runs there, and solves on the
+CPU on every other partition, so one installation serves both. Select the
+partition for a run:
+
+.. code-block:: python
+
+   site = fs.Site(queue="pvc", nodes=1, duration="01:00:00")
+   run = site.submit(job, fetch=True)
+
+On ``pvc`` FrequenSolve starts one MPI rank per GPU stack (eight per node, 12
+OpenMP threads each) unless the run passes ``ranks_per_node``; the profile's
+``ranks_per_node`` applies to the CPU partitions. Frequencies that run at the
+same time get separate stacks, and each frequency's rank count accounts for the
+64 GiB of device memory per stack as well as host memory. The packaged preset
+allows up to four ``pvc`` nodes and 48 hours per job; TACC also limits each user
+to two running ``pvc`` jobs.
+
+Ranks exchange data directly between GPU stacks through GPU-aware Intel MPI:
+the preset's ``pvc`` environment enables Intel MPI's GPU support with a
+compatible runtime, and the solver uses it whenever it is on. To stage the
+exchanges through host memory instead, add ``FS_CUDA_AWARE_MPI = "0"`` to the
+profile's ``[sites.stampede3.environment]`` table.
+
+To keep a job on the CPU of a ``pvc`` node, for example to compare results,
+disable the GPU solve before saving the simulation:
+
+.. code-block:: python
+
+   sim.solver.extra["gpu_backend"] = "none"
+
 Troubleshooting
 ---------------
 

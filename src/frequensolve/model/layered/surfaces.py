@@ -666,11 +666,12 @@ class LayerBounds:
 
 @dataclass
 class Fracture(SimpleSurface):
-    """Curve-based fracture geometry opened by the layered mesh generator.
+    """Fracture geometry represented as an opened volume or a closed interface.
 
     A fracture is defined by a center depth and a one-dimensional aperture/gap
-    curve. The mesher can open that curve into an explicit fracture domain with
-    ``mesh_block_id``; later reduced fracture models can use the same geometry.
+    curve. Volumetric models open the curve into a material domain. Reduced
+    models keep it closed and use positive aperture to define interface support.
+    Reduced models currently support 2D mesh generation only.
 
     Args:
         name: Fracture surface name.
@@ -691,6 +692,11 @@ class Fracture(SimpleSurface):
             properties.
         mesh_block_id: Optional positive mesh-block id for the opened fracture
             interval.
+        fracture_model: ``volumetric`` (default), ``fluid_filled``,
+            ``linear_slip``, ``lower_dimensional_fluid`` (acoustic waves),
+            ``lower_dimensional_viscous_fluid`` (viscous acoustic flow), or
+            ``hydraulic`` (diffusion/storage/leakoff). Reduced selectors
+            currently support 2D mesh generation only.
         subdomain_name: Optional name for the generated material subdomain.
         **kwargs: Extra serialized fracture fields.
 
@@ -708,6 +714,8 @@ class Fracture(SimpleSurface):
     property_system: Optional[str] = None
     subdomain_name: Optional[str] = None
     mesh_block_id: Optional[int] = None
+    fracture_model: str = "volumetric"
+    constitutive: Dict[str, float] = field(default_factory=dict)
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -727,6 +735,8 @@ class Fracture(SimpleSurface):
         property_system: Optional[str] = None,
         mesh_block_id: Optional[int] = None,
         subdomain_name: Optional[str] = None,
+        fracture_model: str = "volumetric",
+        constitutive: Optional[Mapping[str, float]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -737,6 +747,53 @@ class Fracture(SimpleSurface):
             units=units,
             system=system,
         )
+        if fracture_model not in {
+            "volumetric",
+            "fluid_filled",
+            "linear_slip",
+            "lower_dimensional_fluid",
+            "lower_dimensional_viscous_fluid",
+            "hydraulic",
+        }:
+            raise ValueError(f"Unsupported fracture_model: {fracture_model!r}")
+        self.fracture_model = fracture_model
+        self.constitutive = dict(constitutive or {})
+        if self.constitutive and not self.is_reduced:
+            raise ValueError("constitutive is only supported for reduced fractures")
+        positive = {"fluid_density", "fluid_bulk_modulus", "dynamic_viscosity"}
+        nonnegative = {"normal_stiffness", "tangential_stiffness", "leakoff"}
+        for key, value in self.constitutive.items():
+            if key == "aperture_modes":
+                if (isinstance(value, bool) or not math.isfinite(float(value))
+                        or not 1 <= float(value) <= 64 or float(value) != int(float(value))):
+                    raise ValueError("Fracture aperture_modes must be an integer between 1 and 64")
+                self.constitutive[key] = int(float(value))
+                continue
+            if key not in positive | nonnegative:
+                raise ValueError(f"Unknown fracture constitutive parameter: {key}")
+            if isinstance(value, bool) or not math.isfinite(float(value)):
+                raise ValueError(f"Fracture {key} must be a finite SI number")
+            if float(value) < 0 or (key in positive and float(value) == 0):
+                raise ValueError(f"Invalid fracture {key}: {value}")
+            self.constitutive[key] = float(value)
+        if self.is_reduced and any(
+            value is not None for value in (mesh_block_id, properties, physics)
+        ):
+            raise ValueError(
+                "Reduced fractures use an interface domain, not a volume "
+                "mesh_block_id, physics or material properties"
+            )
+        if self.is_reduced and "p_enrich" in kwargs:
+            raise ValueError("Reduced fractures do not support volume p_enrich")
+        if fracture_model == "fluid_filled":
+            if mesh_block_id is None and properties is None:
+                raise ValueError(
+                    "fluid_filled fractures require acoustic material properties "
+                    "or mesh_block_id"
+                )
+            if physics not in (None, "acoustic"):
+                raise ValueError("fluid_filled fractures require acoustic physics")
+            physics = "acoustic"
         self.mesh_block_id = None if mesh_block_id is None else int(mesh_block_id)
         if self.mesh_block_id is not None and self.mesh_block_id <= 0:
             raise ValueError("Fracture mesh_block_id must be positive")
@@ -748,6 +805,13 @@ class Fracture(SimpleSurface):
         self.property_system = property_system
         self.subdomain_name = subdomain_name
         self.extra = dict(kwargs)
+
+    @property
+    def is_reduced(self) -> bool:
+        """Whether the aperture defines support without opening a volume."""
+        return self.fracture_model in {
+            "linear_slip", "lower_dimensional_fluid", "lower_dimensional_viscous_fluid", "hydraulic"
+        }
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "Fracture":
@@ -790,6 +854,10 @@ class Fracture(SimpleSurface):
             "depth": self._property_to_fs(self.depth, field="depth", ctx=ctx),
             "gap": self._property_to_fs(self.gap, field="gap", ctx=ctx),
         }
+        if self.fracture_model != "volumetric":
+            payload["fracture_model"] = self.fracture_model
+        if self.constitutive:
+            payload["constitutive"] = dict(self.constitutive)
         if self.mesh_block_id is not None:
             payload["mesh_block_id"] = self.mesh_block_id
         return merge_extra(payload, self.extra, "Fracture")

@@ -109,7 +109,10 @@ max_nodes = 4
 cores_per_node = 64
 sockets_per_node = 2
 memory_per_node = 262144 # MiB
+# GPU partitions: devices (stacks) per node and one device's memory in MiB.
+# Runs there default to one MPI rank per device.
 gpus_per_node = 0
+gpu_memory_per_gpu = 0
 
 [sites.hpc.environment]
 # Values may reference module-defined variables with simple ${NAME} syntax.

@@ -268,7 +268,14 @@ def _quote_runtime_environment_value(value: str) -> str:
 # ----------------------------------
 @dataclass(frozen=True)
 class SlurmPartitionConfig:
-    """Resource shape and scheduler limits for one SLURM partition."""
+    """Resource shape and scheduler limits for one SLURM partition.
+
+    ``gpus_per_node`` counts the GPU devices the solver binds ranks to (GPU
+    stacks on Intel Data Center GPU Max nodes); ``gpu_memory_per_gpu`` is one
+    device's memory in MiB, or 0 when unknown. ``environment`` holds non-secret
+    values exported by jobs on this partition, such as the GPU-aware MPI setup
+    of GPU nodes; the site ``environment`` overrides them.
+    """
 
     max_duration: str = "00-02:00:00"
     min_nodes: int = 1
@@ -277,6 +284,11 @@ class SlurmPartitionConfig:
     sockets_per_node: int = 1
     memory_per_node: int = 0
     gpus_per_node: int = 0
+    gpu_memory_per_gpu: int = 0
+    environment: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "environment", validate_environment(self.environment))
 
 
 @dataclass
@@ -310,6 +322,8 @@ class SlurmSiteConfig(BaseSiteConfig):
     sockets_per_node: int = 1
     memory_per_node: int = 0
     gpus_per_node: int = 0
+    gpu_memory_per_gpu: int = 0
+    partition_environment: Mapping[str, str] = field(default_factory=dict)
     partitions: Mapping[str, Union[SlurmPartitionConfig, Mapping[str, Any]]] = field(
         default_factory=dict
     )
@@ -403,7 +417,8 @@ class SlurmSiteConfig(BaseSiteConfig):
                 f"Unknown SLURM partition {partition!r}. Known partitions: {known}"
             ) from exc
         for item in dataclass_fields(SlurmPartitionConfig):
-            setattr(self, item.name, getattr(values, item.name))
+            name = "partition_environment" if item.name == "environment" else item.name
+            setattr(self, name, getattr(values, item.name))
 
     def validate_request(self, nodes: int, tasks: int, duration: Optional[str]) -> str:
         """Validate a SLURM allocation request and return a usable duration."""
@@ -440,6 +455,27 @@ _RANK_ALIASES = {
     "procs_per_node": "ranks_per_node",
     "procs_per_task": "ranks_per_task",
 }
+
+
+# Same per-rank GPU selection as adaptive_scheduler._GPU_PLACE, for attached
+# allocations: arguments are the task offset, ranks per node and GPUs per node.
+GPU_PLACE_SNIPPET = (
+    "slot=$(($1 + ${PMI_RANK:-${SLURM_PROCID:-0}})); "
+    "FS_GPU_DEVICE=$((slot % $2 * $3 / $2)); export FS_GPU_DEVICE; "
+    'shift 3; exec "$@"'
+)
+
+
+def partition_gpus_per_node(site_config: Any, partition: Optional[str]) -> int:
+    """Return the GPU devices per node of a site partition (0 for CPU partitions)."""
+
+    partitions = getattr(site_config, "partitions", None) or {}
+    shape = partitions.get(partition) if partition is not None else None
+    if shape is None:
+        if partitions or partition != getattr(site_config, "queue", None):
+            return 0
+        shape = site_config
+    return max(0, int(getattr(shape, "gpus_per_node", 0) or 0))
 
 
 def _normalize_rank_aliases(values: Mapping[str, Any]) -> Dict[str, Any]:
@@ -715,6 +751,11 @@ class SlurmRunConfig:
             config.queue = site_config.queue
         if config.poll_interval is None:
             config.poll_interval = site_config.poll_interval
+        # GPU partitions run one rank per GPU device unless this run sets
+        # ranks_per_node; the profile-wide value is sized for CPU nodes.
+        gpus = partition_gpus_per_node(site_config, config.queue)
+        if gpus > 0 and overrides.get("ranks_per_node") is None:
+            config.ranks_per_node = gpus
         extra = {k: v for k, v in overrides.items() if k not in run_keys}
         return config, extra
 
@@ -1123,6 +1164,12 @@ class SlurmSite(BaseSite):
             ``RunHandle`` for the submitted or attached run.
         """
 
+        if getattr(job, "workflow", None) == "transient":
+            if overrides.get("tolerate_failures", 0) != 0:
+                raise ValueError(
+                    "TransientJob requires tolerate_failures=0; incomplete trajectories are failures"
+                )
+            overrides["tolerate_failures"] = 0
         overrides.update(
             {
                 name: value
@@ -2212,7 +2259,11 @@ class SlurmSite(BaseSite):
                     operations=("pack",),
                 )
 
-                db = TraceDataset.from_job(j, upscale)
+                db = (
+                    j.traces.open(upscale=upscale)
+                    if getattr(j, "workflow", None) == "transient"
+                    else TraceDataset.from_job(j, upscale)
+                )
                 db_map[j.name] = db
 
             except Exception as e:
@@ -2236,6 +2287,19 @@ class SlurmSite(BaseSite):
 
         for j in jobs:
             try:
+                if getattr(j, "workflow", None) == "transient":
+                    if upscale != 1:
+                        raise ValueError(
+                            "Transient output uses native samples; upscale must be 1"
+                        )
+                    self.fetch_artifacts(
+                        j,
+                        requests=(ArtifactRequest(role="sampled_wavefield"),),
+                        include_defaults=False,
+                        operations=("transient",),
+                    )
+                    db_map[j.name] = j.wavefields.open()
+                    continue
                 wavefield_outputs = j.wavefield_trace_outputs
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
@@ -2316,7 +2380,12 @@ class SlurmSite(BaseSite):
         """Fetch authoritative task metadata and named operation results."""
 
         postprocess_only = bool(getattr(job, "postprocess_only", False))
-        tasks = () if postprocess_only else tuple(range(1, job.n_tasks + 1))
+        operation_only = (
+            postprocess_only or getattr(job, "workflow", None) == "transient"
+        )
+        tasks = () if operation_only else tuple(range(1, job.n_tasks + 1))
+        if getattr(job, "workflow", None) == "transient":
+            operations = (*operations, "transient")
         requested_operations = tuple(
             dict.fromkeys((*operations, "smooth") if postprocess_only else operations)
         )
@@ -2341,7 +2410,7 @@ class SlurmSite(BaseSite):
             stage = Path(temporary)
             use_index = False
             catalog: Union[ArtifactCatalog, TaskIndex]
-            if postprocess_only:
+            if operation_only:
                 catalog = ArtifactCatalog.read_task_results(stage, tasks=())
             else:
                 self._transfer.get_files(
@@ -2382,6 +2451,13 @@ class SlurmSite(BaseSite):
                 raise RuntimeError(
                     "Current successful smooth operation metadata is missing"
                 )
+            if (
+                getattr(job, "workflow", None) == "transient"
+                and "transient" not in operation_results
+            ):
+                raise RuntimeError(
+                    "Current successful transient operation metadata is missing"
+                )
             candidates = (index_path,) if use_index else result_paths
             publish = [path for path in candidates if (stage / path).is_file()]
             publish.extend(
@@ -2394,7 +2470,7 @@ class SlurmSite(BaseSite):
                 target = local_root / relative
                 with atomic_output_path(target) as temporary_path:
                     shutil.copyfile(source, temporary_path)
-            if not use_index and not postprocess_only:
+            if not use_index and not operation_only:
                 (local_root / index_path).unlink(missing_ok=True)
             for operation, relative in operation_paths.items():
                 if operation not in operation_results:
@@ -3757,14 +3833,21 @@ class SlurmSite(BaseSite):
             .render(**context)
         )
 
-    def _runtime_setup_lines(self) -> List[str]:
-        """Return safely quoted module and environment setup commands."""
+    def _runtime_setup_lines(
+        self, partition_environment: Optional[Mapping[str, str]] = None
+    ) -> List[str]:
+        """Return safely quoted module and environment setup commands.
+
+        Jobs pass their partition's environment, which the site environment
+        overrides; login-node commands use the site environment only.
+        """
 
         lines = [f"module load {shlex.quote(module)}" for module in self.modules]
         if self.modules:
             lines.append("module list")
         runtime_environment = {
             **_HPC_RUNTIME_DEFAULTS,
+            **dict(partition_environment or {}),
             **solver_environment(self._get_solver_path(), self.environment),
         }
         lines.extend(
@@ -4076,9 +4159,15 @@ class SlurmSite(BaseSite):
                 cores_per_node=self.pool.ncore // nodes,
                 ranks_per_node=self.pool.nproc // nodes,
             )
+        gpus_per_node = partition_gpus_per_node(
+            self.config, getattr(self.config, "queue", None)
+        )
         return self._render_template(
             "sweep/sweep_SLURM.sh",
             batch_job=False,
+            gpus_per_node=gpus_per_node,
+            gpu_ranks_per_node=max(1, self.pool.nproc // int(self.pool.nhost or 1)),
+            gpu_place_shell=shlex.quote(GPU_PLACE_SNIPPET),
             n_tasks=n_tasks,
             n_procs=self.pool.nproc,
             init_ranks=min(
@@ -4092,7 +4181,9 @@ class SlurmSite(BaseSite):
             postprocess_job=_job_requires_postprocess(job),
             mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
             pack_job=bool(pack_job),
-            runtime_setup=self._runtime_setup_lines(),
+            runtime_setup=self._runtime_setup_lines(
+                getattr(self.config, "partition_environment", None)
+            ),
             mpi_async_progress_setup=mpi_async_progress_setup,
             **kwargs,
         )
@@ -4193,6 +4284,14 @@ class SlurmSite(BaseSite):
             bool(task_indices) and set(task_indices) <= set(task_ranks)
         )
         proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
+        gpus_per_node = max(0, int(getattr(config, "gpus_per_node", 0) or 0))
+        gpu_memory = max(0, int(getattr(config, "gpu_memory_per_gpu", 0) or 0))
+        if gpus_per_node and gpu_memory:
+            # GPU solves hold their operators in device memory: size tasks by
+            # each rank's share of the node's GPUs when that is the tighter limit.
+            proc_memory = min(
+                proc_memory, gpu_memory * gpus_per_node / ranks_per_node / 1024.0
+            )
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
         n_threads = config.cores_per_node // ranks_per_node
         mpi_async_progress_setup: List[str] = []
@@ -4222,6 +4321,8 @@ class SlurmSite(BaseSite):
             "require_all_tasks": bool(postprocess_job),
             "sizing_json": str(sizing_json),
             "launch_delay_seconds": launch_delay_seconds,
+            "ranks_per_node": ranks_per_node,
+            "gpus_per_node": gpus_per_node,
         }
         if task_ranks:
             scheduler_config["task_ranks"] = {
@@ -4270,7 +4371,9 @@ class SlurmSite(BaseSite):
                 if mpi_health_check_timeout is not None
                 else ""
             ),
-            runtime_setup=self._runtime_setup_lines(),
+            runtime_setup=self._runtime_setup_lines(
+                getattr(config, "partition_environment", None)
+            ),
             mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),
             sizing_json_shell=shlex.quote(str(sizing_json)),

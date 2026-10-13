@@ -52,7 +52,8 @@ _PROPERTY_SPACE_SCHEMA = "fs-property-space-3"
 def _validate_simulation(ctx: _ValidationContext) -> None:
     simulation = ctx.simulation
     _validate_simulation_identity(simulation, ctx.report)
-    _validate_formulation(simulation, ctx.report)
+    _validate_formulation(simulation, ctx.report, workflow=ctx.workflow)
+    _validate_helmholtz_projection(simulation, ctx.report)
     _validate_coordinate_systems(ctx)
     _validate_unit_config(getattr(simulation, "units", None), ctx.report)
     _validate_model(getattr(simulation, "model", None), ctx)
@@ -93,7 +94,9 @@ def _validate_simulation_identity(simulation: Any, report: ValidationReport) -> 
             )
 
 
-def _validate_formulation(simulation: Any, report: ValidationReport) -> None:
+def _validate_formulation(
+    simulation: Any, report: ValidationReport, *, workflow=None
+) -> None:
     discretization = getattr(simulation, "discretization", None)
     settings = getattr(discretization, "extra", {}) or {}
     method = str(settings.get("method", "DPG")).strip().lower()
@@ -101,17 +104,43 @@ def _validate_formulation(simulation: Any, report: ValidationReport) -> None:
         return
 
     physics = str(getattr(simulation, "physics", ""))
-    if physics not in {"acoustic", "acoustic_axisym", "elastic"}:
+    supported = {
+        "acoustic",
+        "acoustic_axisym",
+        "elastic",
+        "elastic_axisym",
+        "coupled_axisym",
+    }
+    if workflow == "transient":
+        supported.add("coupled")
+    if physics not in supported:
         report.error(
             "discretization.method.incompatible",
             f"Galerkin discretization is not supported by physics {physics!r}.",
             path="discretization.method",
-            hint="Use acoustic, acoustic_axisym, or elastic physics.",
+            hint="Use acoustic, elastic, or their axisymmetric variants; coupled_axisym is also supported.",
         )
 
     # The backend selects MUMPS and a single grid for frequency-domain
     # Galerkin, unless its explicit galerkin_multigrid option is enabled.
     # Authoring a Galerkin job therefore needs no grid-count override.
+
+
+def _validate_helmholtz_projection(simulation: Any, report: ValidationReport) -> None:
+    """Reject Cartesian stream-potential projection for cylindrical physics."""
+    physics = str(getattr(simulation, "physics", ""))
+    axisymmetric = getattr(simulation, "axisymmetric", False) or "axisym" in physics
+    projection = (getattr(simulation, "extra", {}) or {}).get(
+        "helmholtz_projection", {}
+    )
+    if not axisymmetric or not isinstance(projection, Mapping):
+        return
+    if str(projection.get("s_projection", "complement")).lower() != "complement":
+        report.error(
+            "helmholtz.axisymmetric.s_projection.unsupported",
+            "Axisymmetric Helmholtz decomposition requires s_projection='complement'.",
+            path="helmholtz_projection.s_projection",
+        )
 
 
 def _validate_model(model: Any, ctx: _ValidationContext) -> None:
@@ -131,6 +160,17 @@ def _validate_model(model: Any, ctx: _ValidationContext) -> None:
             f"dimension {ctx.dimension}.",
             path="model.dimension",
         )
+
+    for index, surface in enumerate(getattr(model, "surfaces", []) or []):
+        if not getattr(surface, "is_reduced", False):
+            continue
+        path = f"model.surfaces[{index}].fracture_model"
+        if ctx.workflow not in {None, "mesh", "transient"}:
+            ctx.report.error(
+                "model.fracture.solve.unsupported",
+                "Reduced fracture seismic solves require the transient workflow.",
+                path=path,
+            )
 
     seen_ids: set[int] = set()
     for index, subdomain in enumerate(getattr(model, "subdomains", []) or []):

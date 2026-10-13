@@ -2177,3 +2177,33 @@ def test_selected_dispatcher_allows_explicit_backend_directory(tmp_path):
     )
 
     assert site.env["FS_SOLVER_PATH"] == "/custom/backends"
+
+
+def test_transient_submission_cannot_tolerate_failed_trajectory(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+
+    class Transient(DummyJob):
+        workflow = "transient"
+        supports_trace_packing = False
+        name = "transient"
+
+        def is_run_current(self):
+            return False
+
+    monkeypatch.setattr(
+        site,
+        "_submit_local_tasks",
+        lambda *args, **kwargs: local_module.LocalTaskSubmission(
+            futures=[DummyFuture({"task_id": 0, "status": "error", "complete": False})],
+            task_plan={"pending_indices": [0]},
+        ),
+    )
+    run = site.submit(Transient())
+    assert run.backend["tolerate_failures"] == 0
+    assert run.backend["pack_after_tasks"] is False
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+    assert not site._wait_local_run(run).successful
+    with pytest.raises(ValueError, match="tolerate_failures=0"):
+        site.submit(Transient(), tolerate_failures=1)

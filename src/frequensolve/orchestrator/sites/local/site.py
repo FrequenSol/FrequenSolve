@@ -270,10 +270,10 @@ def _read_task_result(
     if result_path is None:
         return None
     job_data = json.loads(Path(job_file).read_text(encoding="utf-8"))
-    if job_data.get("workflow") == "patch_prepare":
+    if job_data.get("workflow") in {"patch_prepare", "transient"}:
         if task_id != 0:
-            raise ArtifactContractError("Patch preparation has exactly one operation")
-        return load_operation_result(result_path, "patch_prepare")
+            raise ArtifactContractError("This workflow has exactly one operation")
+        return load_operation_result(result_path, job_data["workflow"])
     path = task_result_path(result_path, task_id + 1)
     task_result = TaskResult.read(path, result_path=result_path)
     if task_result.partition.task != task_id + 1:
@@ -1091,9 +1091,16 @@ class LocalSite(BaseSite):
             getattr(job, "supports_trace_packing", True)
         )
         tolerate_failures = _normalize_failure_tolerance(
-            kwargs.pop("tolerate_failures", 4),
+            kwargs.pop(
+                "tolerate_failures",
+                0 if getattr(job, "workflow", None) == "transient" else 4,
+            ),
             default=4,
         )
+        if getattr(job, "workflow", None) == "transient" and tolerate_failures != 0:
+            raise ValueError(
+                "TransientJob requires tolerate_failures=0; incomplete trajectories are failures"
+            )
         shutdown_on_completion = bool(
             kwargs.pop("shutdown_on_completion", self.shutdown_on_completion)
         )

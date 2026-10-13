@@ -88,6 +88,7 @@ def validate_job(
         report,
         allow_unverified_remote_files=allow_unverified_remote_files,
     )
+    ctx.workflow = getattr(job, "workflow", None)
     _validate_simulation(ctx)
     _validate_job(job, ctx)
     if raise_errors:
@@ -100,7 +101,11 @@ def _validate_job(job: Any, ctx: _ValidationContext) -> None:
         try:
             job.validate_outputs()
         except (TypeError, ValueError) as exc:
-            ctx.report.error("job.config.invalid", str(exc), path="Eikonal")
+            ctx.report.error(
+                "job.config.invalid",
+                str(exc),
+                path=getattr(job, "config_key", "Eikonal"),
+            )
     else:
         _validate_frequencies(getattr(job, "f_list", None), ctx.report)
     _validate_half_dimension_wavenumbers(job, ctx)

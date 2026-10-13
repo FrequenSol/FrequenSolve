@@ -76,8 +76,14 @@ start_time=$(date +%s)
 
 for i in $(seq 1 $n_tasks); do
    off=$((procs_per_task * ((i-1) % n_workers)))
+   gpu_place=()
+{% if gpus_per_node %}
+   # Each rank selects the GPU under its allocation slot (FS_GPU_DEVICE); the
+   # concurrent tasks' ranks would otherwise all start on device 0.
+   gpu_place=(/bin/sh -c {{ gpu_place_shell }} fs-gpu-place "$off" {{ gpu_ranks_per_node }} {{ gpus_per_node }})
+{% endif %}
    echo "$mpi_exec -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i"
-   "$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n $procs_per_task -o $off task_affinity $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i >> $dir_out/task_${i}.log 2>&1 &
+   "$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n $procs_per_task -o $off task_affinity ${gpu_place[@]+"${gpu_place[@]}"} $executable -nthreads $n_threads --job $input_file $fresh_flag --task $i >> $dir_out/task_${i}.log 2>&1 &
    if [[ $((($i - 1) % n_workers)) -eq $((n_workers - 1)) ]]; then
       wait
       echo "Group done"

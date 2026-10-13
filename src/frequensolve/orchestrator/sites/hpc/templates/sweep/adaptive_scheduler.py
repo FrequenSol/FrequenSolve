@@ -41,6 +41,17 @@ _SLURM_START = (
     'printf \'%s\\n\' "${SLURM_STEP_ID:-unknown}" > "$1.tmp" '
     '&& mv "$1.tmp" "$1" || exit 1; fi; shift; exec "$@"'
 )
+# GPU nodes: concurrent tasks are separate MPI jobs whose ranks all start at
+# local rank 0, so the solver's local-rank device choice would stack them on
+# the same GPUs. Each rank instead selects the device under its allocation slot
+# (task offset + rank, block-placed by ibrun -o and srun's arbitrary hostfile)
+# through the solver's FS_GPU_DEVICE override. Arguments: offset, ranks per
+# node, GPUs per node.
+_GPU_PLACE = (
+    "slot=$(($1 + ${PMI_RANK:-${SLURM_PROCID:-0}})); "
+    "FS_GPU_DEVICE=$((slot % $2 * $3 / $2)); export FS_GPU_DEVICE; "
+    'shift 3; exec "$@"'
+)
 
 
 def _slurm_counts(value: str, nodes: int) -> list[int]:
@@ -389,6 +400,10 @@ class AdaptiveScheduler:
         # A frequency postprocess consumes every task, so any failure is fatal.
         self.require_all_tasks = bool(config.get("require_all_tasks", False))
         self.launch_delay = float(config.get("launch_delay_seconds", 0.25))
+        self.ranks_per_node = int(config.get("ranks_per_node", 0))
+        self.gpus_per_node = int(config.get("gpus_per_node", 0))
+        if self.ranks_per_node < 0 or self.gpus_per_node < 0:
+            raise ValueError("ranks_per_node and gpus_per_node must not be negative")
         self.max_ranks_per_task = (
             self.total_ranks
             if self.skip_sizing
@@ -754,11 +769,29 @@ class AdaptiveScheduler:
             if self.mpi_launcher == "srun"
             else []
         )
+        # mpirun/mpiexec tasks hold the whole allocation, so local ranks already
+        # map onto distinct GPUs.
+        placement = (
+            [
+                "/bin/sh",
+                "-c",
+                _GPU_PLACE,
+                "fs-gpu-place",
+                str(offset),
+                str(self.ranks_per_node),
+                str(self.gpus_per_node),
+            ]
+            if self.gpus_per_node > 0
+            and self.ranks_per_node > 0
+            and self.mpi_launcher not in _MPIRUN_LAUNCHERS
+            else []
+        )
         return [
             prefix[0],
             *self.mpi_args,
             *prefix[1:],
             *startup,
+            *placement,
             self.executable,
             "-nthreads",
             str(self.omp_threads),

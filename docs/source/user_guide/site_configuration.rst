@@ -511,6 +511,7 @@ extra.
    sockets_per_node = 2
    memory_per_node = 262144
    gpus_per_node = 0
+   gpu_memory_per_gpu = 0
 
    [sites.cluster.environment]
    # LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
@@ -692,7 +693,15 @@ The generated profile is equivalent to this minimal configuration:
      - Optional tables keyed by partition name. Each table can define
        ``max_duration``, node bounds, cores, sockets, memory, and GPUs per node.
        When a run selects another known partition, FrequenSolve resolves its
-       limits and node shape before validating and sizing the run.
+       limits and node shape before validating and sizing the run. On a
+       partition with ``gpus_per_node`` (GPU devices, or stacks, per node) runs
+       default to one MPI rank per device unless the run sets
+       ``ranks_per_node``, ranks of tasks that share a node select different
+       devices, and ``gpu_memory_per_gpu`` (MiB per device) also bounds each
+       rank's share of a task's memory estimate. A partition's
+       ``environment`` table is exported by jobs on that partition; the site
+       ``environment`` overrides its values. The Stampede3 ``pvc`` preset uses
+       it to enable GPU-aware MPI.
    * - ``nodes``
      - Requested nodes for submitted jobs.
    * - ``duration``
@@ -843,7 +852,8 @@ The same keywords can override those defaults for one submission:
    )
 
 The packaged ``site_presets.toml`` catalog currently defines Stampede3's
-``spr``, ``icx``, ``skx``, and ``skx-dev`` CPU partitions plus its standard
+``spr``, ``icx``, ``skx``, and ``skx-dev`` CPU partitions, its ``pvc`` GPU
+partition (see :doc:`stampede3_getting_started`), plus its standard
 Intel MPI, PETSc, and parallel-HDF5 runtime modules. These values are defaults:
 local profile values can override them, and TACC's ``qlimits`` output remains
 authoritative because queue policy can change without notice. See the

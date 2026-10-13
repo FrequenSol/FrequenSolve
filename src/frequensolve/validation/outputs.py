@@ -60,7 +60,11 @@ def _validate_outputs(outputs: JobOutputs, job: Any, ctx: _ValidationContext) ->
         for output in outputs.vtk
         if (output.source or {}).get("kind") != "control_gradient"
     ]
-    if ordinary_vtk and len(getattr(job, "f_list", []) or []) != 1:
+    if (
+        ordinary_vtk
+        and ctx.workflow != "transient"
+        and len(getattr(job, "f_list", []) or []) != 1
+    ):
         ctx.report.error(
             "outputs.vtk.frequency_count",
             "VTK outputs currently require a single-frequency job.",
@@ -392,9 +396,20 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
     if str(settings.get("method", "DPG")).strip().lower() == "galerkin":
         physics = str(ctx.simulation.physics).strip().lower()
         if physics in {"acoustic", "acoustic_axisym"}:
-            allowed &= {"pressure", "p_velocity", "s_velocity"}
+            allowed &= {"pressure", "velocity", "p_velocity", "s_velocity"}
         elif physics == "elastic":
             allowed &= {"velocity", "p_velocity", "s_velocity"}
+    if ctx.workflow == "transient":
+        allowed = {
+            "acoustic": {"pressure"},
+            "elastic": {"displacement", "stress", "strain"},
+            "coupled": {"pressure", "displacement", "stress", "strain"},
+        }.get(str(ctx.simulation.physics).removesuffix("_axisym"), set())
+        projection = ctx.simulation.extra.get("helmholtz_projection", {})
+        if isinstance(projection, Mapping):
+            if projection.get("enabled", False) or projection.get("parts"):
+                field = projection.get("field", "displacement")
+                allowed |= {field, f"p_{field}", f"s_{field}"}
     if value not in allowed and not _is_component_selector(value, allowed):
         ctx.report.error(
             "field.unsupported",
