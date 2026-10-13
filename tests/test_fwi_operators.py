@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -201,18 +202,28 @@ def test_imaging_job_syntax_serializes_trace_store_roots(tmp_path):
 
 
 @pytest.mark.parametrize("run_id", ["first-run", "second-run"])
-def test_imaging_from_observed_dataset_preserves_selected_run(tmp_path, run_id):
+@pytest.mark.parametrize("layout", ["packed", "shards"])
+def test_imaging_from_observed_dataset_preserves_selected_run(tmp_path, run_id, layout):
     sim = _elastic_simulation(tmp_path)
     legacy = tmp_path / "jobs" / "observed" / "results" / "traces"
     legacy.mkdir(parents=True)
     run_root = legacy.parent / "runs" / run_id
     trace_root = run_root / "traces"
     trace_root.mkdir(parents=True)
+    files = [trace_root / "traces.h5", trace_root / "trace_metadata.h5"]
+    backing_file = files[0]
+    if layout == "shards":
+        backing_file = trace_root / "shards" / "frequency-1.h5"
+        backing_file.parent.mkdir()
+        files.append(backing_file)
+    for file in files:
+        with h5py.File(file, "w") as h5:
+            h5["synthetic"] = [1.0]
     # A concrete run manifest selects these artifacts, even with a legacy
     # directory present. No native solve or Cloud submission is needed.
     traces = TraceDataset(
         TraceManifest(
-            files=[trace_root / "traces.h5"],
+            files=[backing_file],
             frequencies={2: 12.0, 1: 8.0, 3: 18.0},
             groups=["surface"],
             simulation=tmp_path / "observed.json",
@@ -229,11 +240,22 @@ def test_imaging_from_observed_dataset_preserves_selected_run(tmp_path, run_id):
         weights=[1.0, 0.8, 0.45],
     )
     assert job.f_list == [8.0, 12.0, 18.0]
+    assert job.data_path == trace_root
     assert job.misfit.receiver_groups[0].observed == trace_root
     loaded = BaseJob.load(job.save())
     assert loaded.misfit.receiver_groups[0].observed == trace_root
     assert loaded.misfit.receiver_groups[0].observed != legacy
     assert loaded.to_fs()["Image"]["weights"] == [1.0, 0.8, 0.45]
+    remote_root = Path("synthetic-cloud-project")
+    staged = loaded.remote_input_files(remote_root)
+    assert (trace_root, remote_root / trace_root.relative_to(tmp_path)) in staged
+    for file in files:
+        assert file.is_file() and file.is_relative_to(trace_root)
+    local, _remote = loaded.save_for_remote("AWSSite", remote_root)
+    payload = json.loads(local.read_text())
+    expected = str(trace_root.relative_to(tmp_path))
+    assert payload["Image"]["data_path"] == expected
+    assert payload["Image"]["misfit"]["receiver_groups"][0]["observed"] == expected
 
 
 def test_imaging_job_serializes_instantaneous_travel_time_comparison(tmp_path):
