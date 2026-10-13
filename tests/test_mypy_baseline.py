@@ -289,6 +289,8 @@ count: int = loaded.n_tasks
             "mypy",
             "--config-file",
             str(root / "pyproject.toml"),
+            "--python-version",
+            f"{sys.version_info.major}.{sys.version_info.minor}",
             "--follow-imports=silent",
             "-O",
             "json",

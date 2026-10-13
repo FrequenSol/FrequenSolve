@@ -439,7 +439,7 @@ class TraceStore:
                     [row.get("laplace", 0.0) for row in rows], dtype=float
                 )
             if "laplace" in f:
-                values = np.asarray(f["laplace"][()]).ravel()
+                values: np.ndarray = np.asarray(f["laplace"][()]).ravel()
                 if values.size:
                     if "frequency" in f:
                         indices = self._expected_frequency_laplace_indices(
@@ -2472,6 +2472,7 @@ class TraceStore:
                 "high_frequency_taper", False
             )
         derivative_assisted = False
+        fd: Optional[DataArray]
 
         if reconstruction == "hermite":
             if "f_taper" in kwargs:
