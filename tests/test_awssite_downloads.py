@@ -1483,3 +1483,29 @@ def test_upload_rejects_missing_local_path_before_any_provider_call(tmp_path, me
     site.config = SimpleNamespace(s3_bucket="bucket", s3_prefix="tenant-prefix")
     with pytest.raises(FileNotFoundError):
         getattr(site, method)(tmp_path / "missing", "remote-key")
+
+
+def test_observed_cloud_job_uses_its_accepted_run_without_changing_authoring(tmp_path):
+    from frequensolve.simulation.jobs.fwi import _observed_data_path
+
+    job = result_job(tmp_path / "project-a")
+    authored = job._result_path
+    job.outputs.traces.path = "nested/traces"
+    first = AWSSite._snapshot_run_job(job, "simulation-1")
+    job._cloud_result_binding = first._cloud_result_binding
+    assert _observed_data_path(job) == authored / "runs/simulation-1/nested/traces"
+    assert job._result_path == authored
+    second = AWSSite._snapshot_run_job(job, "simulation-2")
+    job._job_id = "simulation-2"
+    job._cloud_result_binding = second._cloud_result_binding
+    assert _observed_data_path(job) == authored / "runs/simulation-2/nested/traces"
+    assert _observed_data_path(first) == authored / "runs/simulation-1/nested/traces"
+    assert job._result_path == authored
+
+
+def test_unbound_jobs_and_stale_cloud_bindings_do_not_select_a_run_directory(tmp_path):
+    job = result_job(tmp_path / "project-a")
+    expected = job.trace_outputs.path
+    assert job.trace_path == expected
+    job._cloud_result_binding = ("other-run", tmp_path / "unrelated")
+    assert job.trace_path == expected
