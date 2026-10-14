@@ -73,7 +73,7 @@ jobs:
 
     - name: Preserve coverage report for the OIDC upload job
       if: matrix.python-version == '3.10'
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: coverage-report
         path: coverage.xml
@@ -91,12 +91,12 @@ jobs:
       id-token: write
     steps:
     - name: Download coverage report
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: coverage-report
 
     - name: Upload coverage report to Codecov
-      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
         use_oidc: true
         fail_ci_if_error: true
@@ -140,7 +140,7 @@ jobs:
         python-version: "3.10"
 
     - name: Download built distributions
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: dist
         path: dist/
@@ -202,7 +202,7 @@ jobs:
 
     - name: Upload optional contract coverage
       if: always()
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: optional-${{ matrix.contract }}-coverage
         path: |
@@ -299,7 +299,7 @@ jobs:
             --commit "$GITHUB_SHA"
 
       - name: Preserve validated test evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: frequensolve-test-evidence
           path: tests/output/
@@ -329,7 +329,7 @@ jobs:
         make html
 
     - name: Upload documentation artifact
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: documentation
         path: docs/build/html/
@@ -358,7 +358,7 @@ jobs:
       run: python -m twine check dist/*
 
     - name: Store build artifacts
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: dist
         path: dist/
@@ -379,7 +379,7 @@ jobs:
         python-version: "3.12"
 
     - name: Download built distributions
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: dist
         path: dist/
