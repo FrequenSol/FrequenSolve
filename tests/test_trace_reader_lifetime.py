@@ -71,3 +71,16 @@ def test_failed_refresh_preserves_existing_cache_and_readers(tmp_path):
         assert cache.read_bytes() == previous
         np.testing.assert_array_equal(fd.values, expected)
         assert list(cache.parent.glob("*.h5")) == [cache]
+
+
+def test_close_releases_independent_views_of_the_same_file(tmp_path):
+    pytest.importorskip("dask.array")
+    store = _shards(tmp_path)
+    store.consolidate(cache_dir=tmp_path / "cache")
+    views = [store.read_h5("surface") for _ in range(2)]
+    # HDF5 files compare equal even when they are independent Python owners.
+    assert len(store._open_files) == 2
+    store.close()
+    for view in views:
+        with pytest.raises(RuntimeError, match="Trace reader is closed"):
+            view.values
