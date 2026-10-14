@@ -185,7 +185,7 @@ class TraceStore:
     metadata: Dict[str, Any]
     files: List[str]
     _upscale: int
-    _open_files: weakref.WeakSet[h5py.File]
+    _open_files: weakref.WeakValueDictionary[int, h5py.File]
     _packed_group_files: Dict[str, Path]
     _packed_segment_entries: List[Dict[str, Any]]
     _consolidated: Optional[Path] = None
@@ -206,7 +206,7 @@ class TraceStore:
         self.upscale = upscale
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
         self._consolidated = None
-        self._open_files = weakref.WeakSet()
+        self._open_files = weakref.WeakValueDictionary()
         self._packed_group_files = {}
         self._packed_segment_entries = []
 
@@ -263,7 +263,7 @@ class TraceStore:
     def close(self) -> None:
         """Close HDF5 file handles owned by this reader."""
 
-        for handle in self._open_files:
+        for handle in self._open_files.values():
             try:
                 handle.close()
             except Exception:
@@ -1560,7 +1560,7 @@ class TraceStore:
             return self._read_segmented_h5(group, da)
 
         h5 = h5py.File(self._trace_file_for_group(group), "r")
-        self._open_files.add(h5)
+        self._open_files[id(h5)] = h5
         indexed_paths: list[str] = []
         indexed_frequencies: list[float] = []
         indexed_laplace: list[float] = []
@@ -1890,7 +1890,7 @@ class TraceStore:
             if h5 is None:
                 h5 = h5py.File(path, "r")
                 handles[path] = h5
-                self._open_files.add(h5)
+                self._open_files[id(h5)] = h5
             rows = [
                 row
                 for row in self._indexed_trace_rows(h5, group)
