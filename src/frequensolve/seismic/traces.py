@@ -441,6 +441,9 @@ class TraceDataset:
     ) -> Path:
         """Build or refresh the trace VDS cache and return its path.
 
+        Previously returned lazy arrays remain readable until this dataset is
+        explicitly closed. Cache replacement does not invalidate their readers.
+
         Args:
             cache_dir: Optional cache directory. Defaults to the job run cache
                 directory when available.

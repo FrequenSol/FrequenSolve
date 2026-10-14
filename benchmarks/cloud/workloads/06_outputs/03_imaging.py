@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/03_imaging.ipynb
-Source SHA-256: 8d282a5126d6be373989d11f5a105b9136e0a4af2cf40961a7c6522db497a59a
+Source SHA-256: 903bf51dc755ff4c1eb11e0d587b1bc011b13c0b4459686f5957a2af98b17f99
 """
 
 # %% source cell 5

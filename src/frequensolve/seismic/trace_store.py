@@ -6,8 +6,10 @@
 import html
 import sys
 import warnings
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 import h5py
@@ -32,6 +34,25 @@ _ROOT_TRACE_METADATA_DATASETS = {
 _TRACE_METADATA_FILE = "trace_metadata.h5"
 _TD_EAGER_MAX_BYTES = 64 * 1024**2
 _TD_LAZY_CHUNK_BYTES = 16 * 1024**2
+
+
+class _LazyH5Dataset:
+    """Keep a read-only file alive for exactly the lifetime of its lazy graph."""
+
+    def __init__(self, file: h5py.File, dataset: h5py.Dataset) -> None:
+        self.file = file
+        self.dataset = dataset
+        self.shape = dataset.shape
+        self.dtype = dataset.dtype
+        self.ndim = dataset.ndim
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        if not self.file.id.valid:
+            raise RuntimeError("Trace reader is closed; reopen the TraceDataset")
+        return self.dataset[key]
+
+    def __dask_tokenize__(self) -> tuple:
+        return (self.file.filename, self.dataset.name, self.dataset.id.id)
 
 
 class TraceSummary(str):
@@ -164,7 +185,7 @@ class TraceStore:
     metadata: Dict[str, Any]
     files: List[str]
     _upscale: int
-    _open_files: List[h5py.File]
+    _open_files: weakref.WeakSet[h5py.File]
     _packed_group_files: Dict[str, Path]
     _packed_segment_entries: List[Dict[str, Any]]
     _consolidated: Optional[Path] = None
@@ -185,7 +206,7 @@ class TraceStore:
         self.upscale = upscale
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
         self._consolidated = None
-        self._open_files = []
+        self._open_files = weakref.WeakSet()
         self._packed_group_files = {}
         self._packed_segment_entries = []
 
@@ -1275,7 +1296,6 @@ class TraceStore:
                         "laplace": float(entry.get("laplace", 0.0)),
                     }
                 )
-            self.close()
             self._packed_segment_entries = normalized
             self._consolidated = Path(normalized[0]["path"])
             return self._consolidated
@@ -1283,7 +1303,6 @@ class TraceStore:
 
         group_files = self._packed_group_file_map(records)
         if group_files:
-            self.close()
             self._packed_group_files = group_files
             self._consolidated = next(iter(group_files.values()))
             return self._consolidated
@@ -1293,7 +1312,6 @@ class TraceStore:
             and records[0].exists()
             and self._is_packed_trace_file(records[0])
         ):
-            self.close()
             self._consolidated = records[0]
             return self._consolidated
 
@@ -1343,59 +1361,68 @@ class TraceStore:
         new_file = self._consolidated_path(output_record, cache_dir=cache_dir)
         new_file.parent.mkdir(parents=True, exist_ok=True)
 
-        self.close()
-        if new_file.exists():
-            new_file.unlink()
+        with NamedTemporaryFile(
+            dir=new_file.parent, suffix=".h5", delete=False
+        ) as temporary:
+            staging = Path(temporary.name)
 
-        with h5py.File(metadata_record, "r") as first, h5py.File(new_file, "w") as nf:
-            nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
-            nf.create_dataset("laplace", data=np.asarray(laplace, dtype=float))
-            if "survey" in first:
-                first.copy("survey", nf)
+        try:
+            with (
+                h5py.File(metadata_record, "r") as first,
+                h5py.File(staging, "w") as nf,
+            ):
+                nf.create_dataset("frequency", data=np.asarray(freqs, dtype=float))
+                nf.create_dataset("laplace", data=np.asarray(laplace, dtype=float))
+                if "survey" in first:
+                    first.copy("survey", nf)
 
-            for group in self.metadata["groups"]:
-                template_path = self._template_dataset_path_for_group(first, group)
-                source = first[template_path]
-                source_shape = source.shape
-                payload_path = _trace_data_tail(template_path)
-                layout = h5py.VirtualLayout(
-                    shape=(len(available),) + source_shape,
-                    dtype=source.dtype,
-                )
-                for index, record in enumerate(available):
-                    with h5py.File(record, "r") as shard:
-                        if payload_path not in shard:
-                            raise KeyError(
-                                f"Dataset '{payload_path}' not found in HDF5 {record}"
-                            )
-                        if shard[payload_path].shape != source_shape:
-                            raise ValueError(
-                                "Trace payload shape does not match metadata "
-                                f"template for group {group!r}: {record}"
-                            )
-                    layout[index] = h5py.VirtualSource(
-                        str(record), payload_path, shape=source_shape
+                for group in self.metadata["groups"]:
+                    template_path = self._template_dataset_path_for_group(first, group)
+                    source = first[template_path]
+                    source_shape = source.shape
+                    payload_path = _trace_data_tail(template_path)
+                    layout = h5py.VirtualLayout(
+                        shape=(len(available),) + source_shape,
+                        dtype=source.dtype,
                     )
-                nf.create_virtual_dataset(group, layout)
+                    for index, record in enumerate(available):
+                        with h5py.File(record, "r") as shard:
+                            if payload_path not in shard:
+                                raise KeyError(
+                                    f"Dataset '{payload_path}' not found in HDF5 {record}"
+                                )
+                            if shard[payload_path].shape != source_shape:
+                                raise ValueError(
+                                    "Trace payload shape does not match metadata "
+                                    f"template for group {group!r}: {record}"
+                                )
+                        layout[index] = h5py.VirtualSource(
+                            str(record), payload_path, shape=source_shape
+                        )
+                    nf.create_virtual_dataset(group, layout)
 
-                dset = nf[group]
-                _copy_h5_attrs(source, dset)
-                # The VDS stores axes in the template's physical HDF5 order.
-                # Layout markers describe the template payload order and would
-                # cause readers to reinterpret the VDS axes a second time.
-                if "layout_kind" in dset.attrs:
-                    del dset.attrs["layout_kind"]
-                dims = [*_trace_axis_dims(source), "frequency"]
-                dset.attrs["dims"] = dims
-                for axis, dim in enumerate(dims[:-1]):
-                    coord = (
-                        source.attrs[dim]
-                        if dim in source.attrs
-                        else np.arange(1, source_shape[axis] + 1)
-                    )
-                    if len(coord) < 10000:
-                        dset.attrs[dim] = coord
-                dset.attrs["frequency"] = freqs
+                    dset = nf[group]
+                    _copy_h5_attrs(source, dset)
+                    # The VDS stores axes in the template's physical HDF5 order.
+                    # Layout markers describe the template payload order and would
+                    # cause readers to reinterpret the VDS axes a second time.
+                    if "layout_kind" in dset.attrs:
+                        del dset.attrs["layout_kind"]
+                    dims = [*_trace_axis_dims(source), "frequency"]
+                    dset.attrs["dims"] = dims
+                    for axis, dim in enumerate(dims[:-1]):
+                        coord = (
+                            source.attrs[dim]
+                            if dim in source.attrs
+                            else np.arange(1, source_shape[axis] + 1)
+                        )
+                        if len(coord) < 10000:
+                            dset.attrs[dim] = coord
+                    dset.attrs["frequency"] = freqs
+
+            staging.replace(new_file)
+        finally:
+            staging.unlink(missing_ok=True)
 
         self._consolidated = Path(new_file)
         return self._consolidated
@@ -1533,7 +1560,7 @@ class TraceStore:
             return self._read_segmented_h5(group, da)
 
         h5 = h5py.File(self._trace_file_for_group(group), "r")
-        self._open_files.append(h5)
+        self._open_files.add(h5)
         indexed_paths: list[str] = []
         indexed_frequencies: list[float] = []
         indexed_laplace: list[float] = []
@@ -1578,11 +1605,13 @@ class TraceStore:
                         "Indexed packed trace datasets for group "
                         f"{group!r} do not have a common shape"
                     )
-                arrays.append(da.from_array(item, chunks=item.shape))
+                arrays.append(
+                    da.from_array(_LazyH5Dataset(h5, item), chunks=item.shape)
+                )
             data = da.stack(arrays, axis=0)
         else:
             chunks = (dset.shape[0], 1, 1, *dset.shape[3:])
-            data = da.from_array(dset, chunks=chunks)
+            data = da.from_array(_LazyH5Dataset(h5, dset), chunks=chunks)
         fd = DataArray(data, dims=dims, coords=coords)
         if "wavenumber" in fd.coords and "wavenumber" in h5:
             for name in ("units", "long_name"):
@@ -1861,7 +1890,7 @@ class TraceStore:
             if h5 is None:
                 h5 = h5py.File(path, "r")
                 handles[path] = h5
-                self._open_files.append(h5)
+                self._open_files.add(h5)
             rows = [
                 row
                 for row in self._indexed_trace_rows(h5, group)
@@ -1881,7 +1910,7 @@ class TraceStore:
                 raise ValueError(
                     "Packed trace segment datasets do not have a common shape"
                 )
-            arrays.append(da.from_array(item, chunks=item.shape))
+            arrays.append(da.from_array(_LazyH5Dataset(h5, item), chunks=item.shape))
             frequencies.append(float(entry["frequency"]))
             laplace.append(float(entry["laplace"]))
 
