@@ -400,6 +400,7 @@ class BaseJob(
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
     _result_path_override: Optional[Path] = field(default=None, repr=False)
+    _cloud_result_binding: Optional[tuple[str, Path]] = field(default=None, repr=False)
 
     supports_trace_packing: ClassVar[bool] = True
     """Whether execution sites should run Sauce's trace-packing phase."""
@@ -702,6 +703,15 @@ class BaseJob(
         if self._file is None:
             return self._local_path / "results"
         return self._file.parent / "results"
+
+    @property
+    def _result_read_path(self) -> Path:
+        """Read the selected accepted Cloud run without moving authored outputs."""
+        if self._cloud_result_binding is not None:
+            run_id, root = self._cloud_result_binding
+            if run_id == self._job_id:
+                return Path(root)
+        return self._result_path
 
     def _remote_path(self, work_dir: Union[Path, str]) -> Path:
         """Get remote job path."""

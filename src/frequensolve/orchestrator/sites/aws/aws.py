@@ -1154,8 +1154,10 @@ class AWSSite(BaseSite):
             )
 
             job._job_id = simulation_id
+            bound_job = self._bind_run_snapshot(run_job, simulation_id)
+            job._cloud_result_binding = bound_job._cloud_result_binding
             return self._make_run_handle(
-                self._bind_run_snapshot(run_job, simulation_id),
+                bound_job,
                 simulation_id,
                 poll_interval=poll_interval,
                 fetch=fetch,
@@ -1269,6 +1271,7 @@ class AWSSite(BaseSite):
         result._result_path_override = authored / "runs" / simulation_id
         result._job_id = simulation_id
         result._cloud_result_run_id = simulation_id
+        result._cloud_result_binding = (simulation_id, result._result_path)
         if isinstance(result, ImagingJob):
             relative = Path(result.save_path).resolve().relative_to(authored)
             result.save_path = result._result_path / relative
