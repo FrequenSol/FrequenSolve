@@ -894,12 +894,14 @@ def plot_vtu(
 
     if show_edges:
         edge_mesh = display_mesh.extract_all_edges()
-        mesh_kwargs = {
-            "color": edge_color,
-            "line_width": edge_width,
-            **add_mesh_kwargs,
-        }
-        plotter.add_mesh(edge_mesh, **mesh_kwargs)
+        # Line-only interfaces may have no additional edges to extract.
+        if edge_mesh.n_points:
+            mesh_kwargs = {
+                "color": edge_color,
+                "line_width": edge_width,
+                **add_mesh_kwargs,
+            }
+            plotter.add_mesh(edge_mesh, **mesh_kwargs)
 
     if zoom is not None:
         if zoom <= 0:
