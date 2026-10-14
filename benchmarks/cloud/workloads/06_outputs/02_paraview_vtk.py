@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/02_paraview_vtk.ipynb
-Source SHA-256: 5e72635cf4ae4786faf8f740c48aef8237d688e5c4eb5649d7d10ab5f43aba07
+Source SHA-256: 9ad8b26bc926c0e0c23eec3ab44b0751ee2812b5604b24fdc55bf799e3965ee9
 """
 
 # %% source cell 4
@@ -109,7 +109,7 @@ result.raise_for_status()
 # %% source cell 12
 volume_files = result.output_files(base="pv_volume", suffix=".vtu", existing=True)
 interface_files = result.output_files(base="pv_interface", suffix=".vtu", existing=True)
-grid_files = result.output_files(base="pv_grid", suffix=".vtu", existing=True)
+grid_files = result.output_files(base="pv_grid", suffix=".vtr", existing=True)
 {
     "volume": [str(path) for path in volume_files],
     "interface": [str(path) for path in interface_files],
