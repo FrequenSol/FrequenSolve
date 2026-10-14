@@ -109,7 +109,7 @@ result.raise_for_status()
 # %% source cell 12
 volume_files = result.output_files(base="pv_volume", suffix=".vtu", existing=True)
 interface_files = result.output_files(base="pv_interface", suffix=".vtu", existing=True)
-grid_files = result.output_files(base="pv_grid", suffix=".vtu", existing=True)
+grid_files = result.output_files(base="pv_grid", suffix=".vtr", existing=True)
 {
     "volume": [str(path) for path in volume_files],
     "interface": [str(path) for path in interface_files],
