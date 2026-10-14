@@ -1196,7 +1196,8 @@ class JobArtifactMixin:
         Returns:
             Path where receiver traces are expected.
         """
-        return self.trace_outputs.path
+        relative = self.trace_outputs.path.relative_to(self._result_path)
+        return self._result_read_path / relative
 
     @property
     def trace_outputs(self) -> TraceOutputSpec:
