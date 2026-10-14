@@ -11,13 +11,13 @@
       "sourceSha256": "de9e0bc6b8db64d5cfbfc809b9f1a6f6459e96d1c132db1f2e6175d838727792"
     },
     {
-      "behaviorSha256": "2f4fbecf3030ccee356a6d5d1740e5baf7ba0796e88a4b8236c03c7f4f54a2da",
+      "behaviorSha256": "c013f9c26dc25c066a39691959b9147d43965dc178f79ab54dffa8d012ed4ae3",
       "expectedSubmissions": 3,
       "id": "01_modeling_basics/02_elastic",
       "script": "01_modeling_basics/02_elastic.py",
-      "scriptSha256": "619d38835deb6678366f7a364a7549c2201a7c88ea2e37dc5a9b89b6d64ff32f",
+      "scriptSha256": "b42fb64c4f1147dc441df98bcb28accf656a8bb38d1aab9d57850f56f6600126",
       "source": "01_modeling_basics/02_elastic.ipynb",
-      "sourceSha256": "f1a04347a94621c215a9a792637f8fb987c2a43f117c37a4fc208de2be6082f1"
+      "sourceSha256": "641542ac61a22fdb29fce609dc04d22bb3bd02d83875fc323d6537789b41ebc8"
     },
     {
       "behaviorSha256": "a8fd24d96ece49c54af806ee193927615f6ef5ae6be2629cf9a60043c13e3061",
@@ -204,9 +204,9 @@
       "expectedSubmissions": 2,
       "id": "06_outputs/03_imaging",
       "script": "06_outputs/03_imaging.py",
-      "scriptSha256": "ef1ebcd9c9d5e9cb7dbff177633f2d8e589f4f03efa4f526dc0444fcd413ce51",
+      "scriptSha256": "c81ff3dc324cf59ddd79aebafd746328e51a9c9bacbf424f320e771c04aa74ab",
       "source": "06_outputs/03_imaging.ipynb",
-      "sourceSha256": "8d282a5126d6be373989d11f5a105b9136e0a4af2cf40961a7c6522db497a59a"
+      "sourceSha256": "903bf51dc755ff4c1eb11e0d587b1bc011b13c0b4459686f5957a2af98b17f99"
     },
     {
       "behaviorSha256": "1c4935c03853b2a0f8711efda47e2118d24e5c16e192a1e0b2ef4c045f07b515",
