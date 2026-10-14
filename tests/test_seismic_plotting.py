@@ -784,6 +784,44 @@ def test_vtu_helpers_read_fields_and_plot(tmp_path):
     plotter.close()
 
 
+@pytest.mark.parametrize("cell_type", ["LINE", "QUAD"])
+def test_vtu_optional_edges_preserve_line_and_surface_geometry(cell_type):
+    pv = pytest.importorskip("pyvista")
+    points = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+    )
+    count = 2 if cell_type == "LINE" else 4
+    mesh = pv.UnstructuredGrid(
+        np.array([count, *range(count)]),
+        np.array([getattr(pv.CellType, cell_type)], dtype=np.uint8),
+        points[:count],
+    )
+    mesh.point_data["vp"] = np.linspace(1500.0, 2600.0, count)
+    has_edges = bool(mesh.extract_all_edges().n_points)
+    assert has_edges == (cell_type == "QUAD")
+    plotter, plotted = plot_vtu(
+        mesh, "vp", show_edges=True, show=False, return_mesh=True, scalar_bar=False
+    )
+    try:
+        assert plotted.n_points == count
+        np.testing.assert_array_equal(plotted.point_data["vp"], mesh.point_data["vp"])
+        assert len(plotter.renderer.actors) == 1 + int(has_edges)
+    finally:
+        plotter.close()
+
+
+def test_vtu_optional_edges_do_not_suppress_empty_input_error():
+    pv = pytest.importorskip("pyvista")
+    mesh = pv.UnstructuredGrid()
+    mesh.point_data["vp"] = np.array([])
+    plotter = pv.Plotter(off_screen=True)
+    try:
+        with pytest.raises(ValueError, match="Empty meshes"):
+            plot_vtu(mesh, "vp", show_edges=True, show=False, plotter=plotter)
+    finally:
+        plotter.close()
+
+
 def test_vtu_base_field_alias_accepts_unique_source_indexed_pressure(tmp_path):
     path = _write_source_indexed_pressure_vtu(tmp_path)
 
