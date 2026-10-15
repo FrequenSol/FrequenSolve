@@ -22,7 +22,8 @@
         "frequency-jobs.v1",
         "usage-evidence.v1",
         "frequency-execution-plan.v1",
-        "paid-layout-planning.v1"
+        "paid-layout-planning.v1",
+        "strict-partial-retry.v1"
       ],
       "runtimeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "aws": {
@@ -105,6 +106,19 @@
           "serviceMemoryMiB": 3890
         },
         "maxSimulations": 12
+      },
+      "solverCertification": {
+        "schema": "managed-slurm-solver-certification.v1",
+        "bundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "solverExecutableSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sdkWheelDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "runtimeWheelDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "fixtureSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "taskResultSchema": "fs-task-result-2",
+        "taskResultSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "receiptVersion": "strict-partial-retry.v1",
+        "receiptSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nativeProducer": "single-frequency-forward.v1"
       },
       "planning": {
         "version": "qualified-planning-installation.v1",
