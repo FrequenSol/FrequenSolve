@@ -218,3 +218,24 @@ def test_automatic_selection_preserves_installed_memory_policy_and_thread_recomm
         selected["requested"]["memory_mib_per_node"]
         == (10 * 1024 * 118 + 99) // 100 + 603
     )
+
+
+def test_shared_private_protocol_digest_matches_cloud_and_controller():
+    import json
+    from pathlib import Path
+
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "contracts/execution-plan/v1/planning-protocol.json"
+        ).read_text()
+    )
+    assert (
+        digest(
+            {
+                "command": fixture["command"],
+                "requests": fixture["command"]["evaluations"],
+            }
+        )
+        == "sha256:" + fixture["submission_digest"]
+    )

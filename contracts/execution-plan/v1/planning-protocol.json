@@ -1,0 +1,468 @@
+{
+  "site": {
+    "version": "compute-site.v1",
+    "revision": "fake-revision-1",
+    "label": "Synthetic lab",
+    "kind": "shared",
+    "health": "ready",
+    "transport": {
+      "commandQueueUrl": "https://sqs.us-east-1.amazonaws.com/000000000000/synthetic-commands.fifo",
+      "resultQueueArn": "arn:aws:sqs:us-east-1:000000000000:synthetic-results"
+    },
+    "commercialPolicy": {
+      "mode": "cloud-credits.v1",
+      "id": "synthetic-policy",
+      "revision": "1",
+      "rateCardFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "registration": {
+      "executionSiteId": "frequensol-shared-us-east-1",
+      "protocolVersion": "execution-site-job.v1",
+      "capabilities": [
+        "frequency-jobs.v1",
+        "usage-evidence.v1",
+        "frequency-execution-plan.v1",
+        "paid-layout-planning.v1"
+      ],
+      "runtimeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "aws": {
+        "gatewayRoleId": "AROAAAAAAAAAAAAAAAAAA",
+        "workerRoleIds": [
+          "AROABBBBBBBBBBBBBBBBB"
+        ],
+        "clusterName": "test-shared-cluster"
+      },
+      "policy": {
+        "version": "site-policy.v1",
+        "registrationRevision": "fake-revision-1",
+        "policyRevision": "fake-policy-1",
+        "owner": {
+          "kind": "platform"
+        },
+        "managementAuthority": "platform-managed",
+        "schedulingPolicy": "tenant-fair-share",
+        "state": "active",
+        "billingMode": "cloud-credits.v1",
+        "grants": [
+          {
+            "accountId": "example-tenant-a",
+            "actions": [
+              "submit"
+            ]
+          }
+        ],
+        "resources": {
+          "maxNodes": 2,
+          "maxMpiRanks": 8,
+          "maxCpu": 128,
+          "maxMemoryMiB": 262144,
+          "maxWallTimeSeconds": 900
+        },
+        "admission": {
+          "maxConcurrentAccountJobs": 4,
+          "maxConcurrentUserJobs": 2
+        }
+      },
+      "sharedInstallation": {
+        "version": "shared-slurm-installation.v1",
+        "executionSiteId": "frequensol-shared-us-east-1",
+        "revision": "test-1",
+        "clusterName": "test-shared-cluster",
+        "dispatch": {
+          "siteJobs": 12,
+          "tenantJobs": 6,
+          "simulationJobs": 2,
+          "serviceJobs": 2
+        },
+        "tenants": [
+          {
+            "accountId": "example-tenant-a",
+            "uid": 50000,
+            "gid": 50000,
+            "name": "fst_056cf93fb1d81baa",
+            "roleArn": "arn:aws:iam::123456789012:role/test-tenant-0",
+            "roleId": "AROA00000000000000000",
+            "runningCpu": 128,
+            "runningMemoryMiB": 262144,
+            "fairShare": 1
+          },
+          {
+            "accountId": "example-tenant-b",
+            "uid": 50001,
+            "gid": 50001,
+            "name": "fst_5a89ce8dea89d886",
+            "roleArn": "arn:aws:iam::123456789012:role/test-tenant-1",
+            "roleId": "AROA11111111111111111",
+            "runningCpu": 8,
+            "runningMemoryMiB": 14000,
+            "fairShare": 1
+          }
+        ],
+        "scheduler": {
+          "solverCpu": 128,
+          "solverMemoryMiB": 262144,
+          "serviceCpu": 2,
+          "serviceMemoryMiB": 3890
+        },
+        "maxSimulations": 12
+      },
+      "planning": {
+        "version": "qualified-planning-installation.v1",
+        "native_bundle_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "runtime_wheel_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sdk_wheel_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "provider_reader": "resource-planning-ledger.v1",
+        "memory_policy": {
+          "calibration_numerator": 118,
+          "calibration_denominator": 100,
+          "worker_overhead_mib": 603,
+          "minimum_memory_mib": 0
+        },
+        "hardware": [
+          {
+            "partition": "cpu",
+            "node_type": "fake.arm",
+            "qualified_layouts": [
+              {
+                "partition": "cpu",
+                "node_type": "fake.arm",
+                "nodes": 2,
+                "ranks_per_node": 1,
+                "cpus_per_rank": 8
+              }
+            ],
+            "recommended_layouts": [
+              {
+                "partition": "cpu",
+                "node_type": "fake.arm",
+                "nodes": 2,
+                "ranks_per_node": 1,
+                "cpus_per_rank": 8
+              }
+            ],
+            "schedulable_cpus": 64,
+            "schedulable_memory_mib": 124518,
+            "max_nodes": 2,
+            "network_fabric": "efa"
+          }
+        ],
+        "qualifications": [
+          {
+            "solver_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "layout": {
+              "partition": "cpu",
+              "node_type": "fake.arm",
+              "nodes": 2,
+              "ranks_per_node": 1,
+              "cpus_per_rank": 8
+            },
+            "receipt_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "numeric_comparison_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "physical_allocation_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "native_schema": "fs-sizing-3",
+            "qualified_at": "2026-01-01T00:00:00.000Z"
+          }
+        ]
+      },
+      "partitionCatalog": {
+        "revision": "fake-catalog",
+        "defaultPartition": "cpu",
+        "allowUnverifiedCompute": false,
+        "partitions": [
+          {
+            "id": "cpu",
+            "label": "CPU",
+            "schedulerPartition": "cpu",
+            "priority": 1,
+            "executionModes": [
+              "independent-frequency.v1"
+            ],
+            "nodeTypes": [
+              {
+                "id": "fake.arm",
+                "architecture": "arm64",
+                "cpuPerNode": 64,
+                "memoryMiBPerNode": 124518,
+                "networkFabric": "efa"
+              }
+            ],
+            "mpi": {
+              "singleNode": true,
+              "multiNode": true,
+              "verified": true
+            },
+            "cpuSharing": false,
+            "limits": {
+              "maxNodes": 2,
+              "maxMpiRanks": 8,
+              "maxCpu": 128,
+              "maxMemoryMiBPerNode": 124518,
+              "maxWallTimeSeconds": 900
+            }
+          }
+        ]
+      }
+    }
+  },
+  "head": {
+    "plan_id": "fake-plan",
+    "owner": {
+      "account_id": "example-tenant-a",
+      "user_id": "fake-user",
+      "project_key": "fake-project"
+    },
+    "revision": 0,
+    "context": {
+      "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "artifacts_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "solver_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "execution_site_id": "frequensol-shared-us-east-1",
+      "site_fingerprint": "sha256:895e3349b7d0c72f49ec231f158f0a03e97a2cfaa69520ced1793cc423cc0588",
+      "runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "memory_policy": {
+        "calibration_numerator": 118,
+        "calibration_denominator": 100,
+        "worker_overhead_mib": 603,
+        "minimum_memory_mib": 0
+      },
+      "sizing_policy_version": "memory-fit-first.v1",
+      "catalog_digest": "sha256:79816c81f96589a397265a88afd15155cf95e314c71790d6de11645a87200e80"
+    },
+    "status": "planning",
+    "operation_id": "fake-operation",
+    "created_at": "2026-01-01T00:00:00.000Z",
+    "updated_at": "2026-01-01T01:00:00.000Z",
+    "paid_operation": {
+      "purpose": "planning",
+      "phase": "queued",
+      "quote": {
+        "version": "planning-resource-quote.v1",
+        "operation_id": "fake-operation",
+        "rate_card_fingerprint": "134b21f7ad0353e4c5e912ff996065c6f9a85aec88cb1c3f6e400687f213d2cc",
+        "allocations": [
+          {
+            "layout": {
+              "partition": "cpu",
+              "node_type": "fake.arm",
+              "nodes": 2,
+              "ranks_per_node": 1,
+              "cpus_per_rank": 8
+            },
+            "memory_mib_per_node": 92000,
+            "wall_time_seconds": 60
+          }
+        ],
+        "maximum_credits": "149.74",
+        "fingerprint": "sha256:76f3852d69c707f585e69788b0fa971cc5418562fdd5849f24dc03197a7e5dea"
+      },
+      "rate_card": {
+        "version": "sandbox-managed-resource-2026-09-23-v1",
+        "effectiveAt": "2026-09-23T00:00:00.000Z",
+        "status": "PUBLISHED",
+        "allocationBasis": "MAX_CPU_MEMORY",
+        "creditUnitId": "frequensol_credits",
+        "baseRateNumerator": "100",
+        "baseRateDenominatorActiveMilliseconds": "3600000",
+        "workerCatalogVersion": "managed-slurm-standard-v1",
+        "workerCatalogFingerprint": "c19704207c095b739bbef227a467b41045a04cc7731039bcf1b6b9ba1724ba42",
+        "providerDecimalScale": 2,
+        "quantizationRule": "AUTHORIZATION_CEIL_CAPTURE_FLOOR_WITH_CARRY",
+        "approver": "owner-authorized-prelaunch-sandbox-redesign",
+        "pricingEvidenceReference": "cloud-amplify#2080",
+        "workers": [
+          {
+            "runtimeId": "managed-slurm-native-v1",
+            "workerClass": "frequency-worker",
+            "vcpu": 2,
+            "memoryMiB": 3891,
+            "factorMicros": "1000000"
+          }
+        ],
+        "allocationBaseline": {
+          "vcpu": 1,
+          "memoryMiB": 2048
+        },
+        "executionPricing": {
+          "version": "managed-resource-v1",
+          "minimumCredits": "10",
+          "efaMinimumCreditsPerNodeHour": "1600",
+          "efaMinimumSeconds": 300,
+          "failedRunReviewThreshold": 3
+        },
+        "fingerprint": "134b21f7ad0353e4c5e912ff996065c6f9a85aec88cb1c3f6e400687f213d2cc"
+      },
+      "authority": {
+        "billingAuthorityVersion": "billing_authority_v1",
+        "accountId": "example-tenant-a",
+        "subscriptionId": "fake-subscription",
+        "sourceItemPriceId": "fake-price",
+        "contractVersion": "chargebee_prepaid_credits_v1",
+        "catalogFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rateCardFingerprint": "134b21f7ad0353e4c5e912ff996065c6f9a85aec88cb1c3f6e400687f213d2cc",
+        "frozenAt": "2026-01-01T01:00:00.000Z",
+        "authorityFingerprint": "50f04052b9af0b37e53dfe705f0d760697e3ee4f0670974d6b1ddba2db77c316"
+      },
+      "provider_snapshot_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "exposure_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cancel_requested": false,
+      "authorized_at": "2026-01-01T01:00:00.000Z"
+    }
+  },
+  "inputs": {
+    "snapshot": {
+      "bucket": "fake-private-inputs",
+      "key": "execution-plan-inputs/example-tenant-a/fake-user/fake-plan/fake-input-operation/manifest.json",
+      "version_id": "fake-provider-version",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "job_file_key": "fake-project/simulation/job.json",
+    "frequencies": [
+      "15",
+      "20"
+    ],
+    "limits": {
+      "max_nodes_per_frequency": 2,
+      "max_concurrent_frequencies": 2,
+      "max_running_cpus": 128,
+      "max_wall_time_seconds": 900,
+      "max_layout_evaluations": 8
+    }
+  },
+  "profile": {
+    "version": "qualified-planning-runtime.v1",
+    "runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalog_digest": "sha256:79816c81f96589a397265a88afd15155cf95e314c71790d6de11645a87200e80",
+    "site_fingerprint": "sha256:895e3349b7d0c72f49ec231f158f0a03e97a2cfaa69520ced1793cc423cc0588",
+    "memory_policy": {
+      "calibration_numerator": 118,
+      "calibration_denominator": 100,
+      "worker_overhead_mib": 603,
+      "minimum_memory_mib": 0
+    },
+    "input_bucket": "fake-private-inputs",
+    "solvers": {
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+        "qualified_layouts": [
+          {
+            "partition": "cpu",
+            "node_type": "fake.arm",
+            "nodes": 2,
+            "ranks_per_node": 1,
+            "cpus_per_rank": 8
+          }
+        ]
+      }
+    },
+    "hardware": [
+      {
+        "partition": "cpu",
+        "node_type": "fake.arm",
+        "qualified_layouts": [
+          {
+            "partition": "cpu",
+            "node_type": "fake.arm",
+            "nodes": 2,
+            "ranks_per_node": 1,
+            "cpus_per_rank": 8
+          }
+        ],
+        "recommended_layouts": [
+          {
+            "partition": "cpu",
+            "node_type": "fake.arm",
+            "nodes": 2,
+            "ranks_per_node": 1,
+            "cpus_per_rank": 8
+          }
+        ],
+        "schedulable_cpus": 64,
+        "schedulable_memory_mib": 124518,
+        "max_nodes": 2,
+        "network_fabric": "efa"
+      }
+    ],
+    "placements": {
+      "cpu/fake.arm": {
+        "partition": "cpu",
+        "constraint": "fake.arm"
+      }
+    }
+  },
+  "command": {
+    "version": "frequency-planning-command.v1",
+    "purpose": "planning",
+    "operation_id": "fake-operation",
+    "authorized_at": "2026-01-01T01:00:00.000Z",
+    "account_id": "example-tenant-a",
+    "user_id": "fake-user",
+    "plan_id": "fake-plan",
+    "revision": 0,
+    "context": {
+      "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "artifacts_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "solver_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "execution_site_id": "frequensol-shared-us-east-1",
+      "site_fingerprint": "sha256:895e3349b7d0c72f49ec231f158f0a03e97a2cfaa69520ced1793cc423cc0588",
+      "runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "memory_policy": {
+        "calibration_numerator": 118,
+        "calibration_denominator": 100,
+        "worker_overhead_mib": 603,
+        "minimum_memory_mib": 0
+      },
+      "sizing_policy_version": "memory-fit-first.v1",
+      "catalog_digest": "sha256:79816c81f96589a397265a88afd15155cf95e314c71790d6de11645a87200e80"
+    },
+    "authority": {
+      "version": "shared-plan-authority.v1",
+      "installation_digest": "sha256:1f91599733a9855882800d356f55ffa656749b37c6e5df0d4f5595834a1edd7e",
+      "account_id": "example-tenant-a",
+      "user_id": "fake-user",
+      "plan_id": "fake-plan",
+      "tenant": {
+        "accountId": "example-tenant-a",
+        "uid": 50000,
+        "gid": 50000,
+        "name": "fst_056cf93fb1d81baa",
+        "roleArn": "arn:aws:iam::123456789012:role/test-tenant-0",
+        "roleId": "AROA00000000000000000",
+        "runningCpu": 128,
+        "runningMemoryMiB": 262144,
+        "fairShare": 1
+      }
+    },
+    "snapshot": {
+      "bucket": "fake-private-inputs",
+      "key": "execution-plan-inputs/example-tenant-a/fake-user/fake-plan/fake-input-operation/manifest.json",
+      "version_id": "fake-provider-version",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "job_file_key": "fake-project/simulation/job.json",
+    "frequencies": [
+      "15",
+      "20"
+    ],
+    "limits": {
+      "max_nodes_per_frequency": 2,
+      "max_concurrent_frequencies": 2,
+      "max_running_cpus": 128,
+      "max_wall_time_seconds": 900,
+      "max_layout_evaluations": 8
+    },
+    "evaluations": [
+      {
+        "layout": {
+          "partition": "cpu",
+          "node_type": "fake.arm",
+          "nodes": 2,
+          "ranks_per_node": 1,
+          "cpus_per_rank": 8
+        },
+        "memory_mib_per_node": 92000,
+        "wall_time_seconds": 60
+      }
+    ],
+    "quote_fingerprint": "sha256:76f3852d69c707f585e69788b0fa971cc5418562fdd5849f24dc03197a7e5dea"
+  },
+  "submission_digest": "ccbac3efe030b789679cc756eb665095fbf11844b25e4d94d5c12e7c16ecbb87"
+}
