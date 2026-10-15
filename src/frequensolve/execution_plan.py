@@ -113,6 +113,7 @@ def memory_request(
     worker_overhead_mib: int,
     safety_numerator: int = 1,
     safety_denominator: int = 1,
+    minimum_memory_mib: int = 0,
 ) -> int:
     """Bound any uniform rank placement using the largest rank-local estimates.
 
@@ -144,11 +145,19 @@ def memory_request(
     positive(safety_denominator, "safety_denominator")
     if safety_numerator < safety_denominator:
         raise PlanError("Runtime calibration cannot reduce native estimates")
+    if (
+        type(minimum_memory_mib) is not int
+        or not 0 <= minimum_memory_mib <= MAX_INTEGER
+    ):
+        raise PlanError("Invalid minimum memory reservation")
     worst_node = sum(sorted(rank_bytes, reverse=True)[: shape["ranks_per_node"]])
     denominator = safety_denominator * MIB
     return positive(
-        (worst_node * safety_numerator + denominator - 1) // denominator
-        + worker_overhead_mib,
+        max(
+            minimum_memory_mib,
+            (worst_node * safety_numerator + denominator - 1) // denominator
+            + worker_overhead_mib,
+        ),
         "requested_memory_mib_per_node",
     )
 
@@ -164,10 +173,13 @@ def validate_request(
     max_wall_time_seconds: int,
     safety_numerator: int = 1,
     safety_denominator: int = 1,
+    minimum_memory_mib: int = 0,
 ) -> dict[str, Any]:
     request = allocation(request)
     shape = request["layout"]
     count = totals(request)
+    if request["wall_time_seconds"] < 60 or request["wall_time_seconds"] % 60:
+        raise PlanError("Slurm time limits must use whole-minute increments")
     for name, value in (
         ("max_nodes", max_nodes),
         ("max_cpus", max_cpus),
@@ -199,6 +211,7 @@ def validate_request(
         worker_overhead_mib=worker_overhead_mib,
         safety_numerator=safety_numerator,
         safety_denominator=safety_denominator,
+        minimum_memory_mib=minimum_memory_mib,
     )
     if request["memory_mib_per_node"] < minimum:
         raise PlanError(
@@ -220,8 +233,31 @@ def choose_allocation(
     max_cpus: int,
     wall_time_seconds: int,
     worker_overhead_mib: int,
+    memory_policy: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Choose deterministically from trusted observations of qualified layouts."""
+    calibration = {
+        "safety_numerator": 1,
+        "safety_denominator": 1,
+        "minimum_memory_mib": 0,
+    }
+    if memory_policy is not None:
+        if (
+            set(memory_policy)
+            != {
+                "calibration_numerator",
+                "calibration_denominator",
+                "worker_overhead_mib",
+                "minimum_memory_mib",
+            }
+            or memory_policy["worker_overhead_mib"] != worker_overhead_mib
+        ):
+            raise PlanError("Memory calibration differs from the frozen policy")
+        calibration = {
+            "safety_numerator": memory_policy["calibration_numerator"],
+            "safety_denominator": memory_policy["calibration_denominator"],
+            "minimum_memory_mib": memory_policy["minimum_memory_mib"],
+        }
     candidates = []
     for observation in observations:
         shape = layout(observation["layout"])
@@ -231,9 +267,14 @@ def choose_allocation(
                 or node.get("partition") != shape["partition"]
             ):
                 continue
+            if shape not in node.get("recommended_layouts", []):
+                continue
             try:
                 memory = memory_request(
-                    observation, shape, worker_overhead_mib=worker_overhead_mib
+                    observation,
+                    shape,
+                    worker_overhead_mib=worker_overhead_mib,
+                    **calibration,
                 )
                 request = {
                     "layout": shape,
@@ -248,6 +289,7 @@ def choose_allocation(
                     max_nodes=max_nodes,
                     max_cpus=max_cpus,
                     max_wall_time_seconds=wall_time_seconds,
+                    **calibration,
                 )
                 key = (
                     shape["nodes"],
@@ -306,7 +348,7 @@ def revise_rows(
             request = deepcopy(row["requested"])
             shape = request["layout"]
             nodes = edit.get("nodes", shape["nodes"])
-            ranks = edit.get("mpi_ranks", nodes * shape["ranks_per_node"])
+            ranks = edit.get("mpi_ranks", shape["nodes"] * shape["ranks_per_node"])
             positive(nodes, "nodes")
             positive(ranks, "mpi_ranks")
             if ranks % nodes:

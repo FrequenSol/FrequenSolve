@@ -179,3 +179,66 @@ def test_new_validation_quote_receives_a_new_authorization_identity():
     client.response = deepcopy(plan.data)
     plan.authorize("20")
     assert client.calls[-1]["idempotency_key"] != previous
+
+
+def test_lost_execution_response_replays_the_exact_intent_without_requoting():
+    class LostResponseClient(Client):
+        lost = False
+
+        def execute(self, _query, values):
+            payload = json.loads(values["input"])
+            self.calls.append(payload)
+            if payload["action"] == "quote_execution":
+                return {
+                    "requestMyExecutionPlan": json.dumps(
+                        {
+                            **data,
+                            "quote": {
+                                "maximum_credits": "10",
+                                "fingerprint": "fake-quote",
+                            },
+                        }
+                    )
+                }
+            if not self.lost:
+                self.lost = True
+                raise ConnectionError("accepted response lost")
+            return {
+                "requestMyExecutionPlan": json.dumps(
+                    {
+                        **data,
+                        "head": {
+                            **data["head"],
+                            "status": "executing",
+                            "execution_id": "fake-run",
+                        },
+                    }
+                )
+            }
+
+    class Site(ExecutionPlanningMixin):
+        def _make_run_handle(self, job, run_id, **kwargs):
+            return SimpleNamespace(id=run_id)
+
+    site = Site()
+    site.graphql_client = LostResponseClient()
+    data = {
+        "head": {
+            "plan_id": "fake-plan",
+            "revision": 1,
+            "status": "review",
+            "owner": {"project_key": "fake-project"},
+        }
+    }
+    plan = PlanHandle(site, deepcopy(data), object())
+    with pytest.raises(ConnectionError):
+        site.execute_plan(plan, maximum_credits="20")
+    assert site.execute_plan(plan, maximum_credits="20").id == "fake-run"
+    assert [call["action"] for call in site.graphql_client.calls] == [
+        "quote_execution",
+        "execute",
+        "execute",
+    ]
+    assert site.graphql_client.calls[1] == site.graphql_client.calls[2]
+    with pytest.raises(PlanError, match="same authorization"):
+        site.execute_plan(plan, maximum_credits="30")

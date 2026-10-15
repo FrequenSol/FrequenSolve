@@ -46,6 +46,7 @@ def hardware():
         max_nodes=4,
         network_fabric="efa",
         qualified_layouts=[shape(1), shape(2), shape(2, 2), shape(4)],
+        recommended_layouts=[shape(1), shape(2), shape(2, 2), shape(4)],
     )
 
 
@@ -188,3 +189,32 @@ def test_published_contract_fixture_and_incomplete_rows_validate_without_fake_al
     validator.validate(example)
     with pytest.raises(PlanError, match="Extend planning"):
         revise_rows(example["rows"], {0: {"memory_mib_per_node": 1024}})
+
+
+def test_automatic_selection_preserves_installed_memory_policy_and_thread_recommendation():
+    node = hardware()
+    alternate = {**shape(1), "cpus_per_rank": 1}
+    node["qualified_layouts"].append(alternate)
+    observations = [
+        observation(1, memory=[10 * 1024**3]),
+        {**observation(1, memory=[10 * 1024**3]), "layout": alternate},
+    ]
+    selected = choose_allocation(
+        observations,
+        [node],
+        max_nodes=2,
+        max_cpus=64,
+        wall_time_seconds=3600,
+        worker_overhead_mib=603,
+        memory_policy={
+            "calibration_numerator": 118,
+            "calibration_denominator": 100,
+            "worker_overhead_mib": 603,
+            "minimum_memory_mib": 0,
+        },
+    )
+    assert selected["requested"]["layout"]["cpus_per_rank"] == 8
+    assert (
+        selected["requested"]["memory_mib_per_node"]
+        == (10 * 1024 * 118 + 99) // 100 + 603
+    )

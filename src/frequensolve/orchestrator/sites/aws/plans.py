@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from frequensolve.execution_plan import PlanError, positive
+from frequensolve.execution_plan import PLAN_VERSION, PlanError, positive
 
 
 def sizing_policy(value: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -31,6 +31,10 @@ def sizing_policy(value: dict[str, Any] | None = None) -> dict[str, Any]:
         raise PlanError(
             "At most eight layout evaluations may be authorized per operation"
         )
+    if "max_wall_time_seconds" in policy and (
+        policy["max_wall_time_seconds"] < 60 or policy["max_wall_time_seconds"] % 60
+    ):
+        raise PlanError("Slurm time ceilings must use whole-minute increments")
     return policy
 
 
@@ -46,10 +50,16 @@ def request(client: Any, action: str, payload: dict[str, Any]) -> dict[str, Any]
         raise PlanError("Cloud returned an invalid execution-plan response")
     if result.get("error"):
         raise PlanError(str(result.get("message") or result["error"]))
+    if result.get("plan") is not None and result["plan"].get("version") != PLAN_VERSION:
+        raise PlanError(
+            "Execution plan version is unsupported; use a compatible client"
+        )
     return result
 
 
 def check_quote(quote: dict[str, Any], maximum_credits: str) -> None:
+    if not isinstance(maximum_credits, str):
+        raise PlanError("maximum_credits must be an explicit decimal string")
     try:
         maximum, quoted = Decimal(maximum_credits), Decimal(quote["maximum_credits"])
     except (InvalidOperation, KeyError, TypeError, ValueError):
@@ -78,6 +88,9 @@ class PlanHandle:
     data: dict[str, Any]
     job: Any = None
     _keys: dict[str, str] = field(default_factory=dict, repr=False)
+    _execute_requests: dict[str, dict[str, Any]] = field(
+        default_factory=dict, repr=False
+    )
 
     @property
     def id(self) -> str:
@@ -167,6 +180,13 @@ class PlanHandle:
         return self
 
     def validate(self, maximum_credits: str | None = None) -> "PlanHandle":
+        if (
+            self.status == "awaiting_authorization"
+            and self.data.get("quote", {}).get("purpose") == "validation"
+        ):
+            return (
+                self.authorize(maximum_credits) if maximum_credits is not None else self
+            )
         result = self._call(
             "validate",
             expected_revision=self.revision,
@@ -319,16 +339,39 @@ class ExecutionPlanningMixin:
 
         if plan.site is not self:
             raise PlanError("Open this plan using the intended authenticated site")
-        quote = plan._call("quote_execution", expected_revision=plan.revision)["quote"]
-        check_quote(quote, maximum_credits)
-        result = plan._call(
-            "execute",
-            expected_revision=plan.revision,
-            accepted_quote_fingerprint=quote["fingerprint"],
-            maximum_credits=maximum_credits,
-            idempotency_key=idempotency_key
-            or plan._keys.setdefault(f"execute-{plan.revision}", uuid.uuid4().hex),
+        key = idempotency_key or plan._keys.setdefault(
+            f"execute-{plan.revision}", uuid.uuid4().hex
         )
+        cached = plan._execute_requests.get(key)
+        if cached:
+            if cached["maximum_credits"] != maximum_credits:
+                raise PlanError(
+                    "A retried execution must reuse the same authorization; inspect the accepted operation first"
+                )
+            result = plan._call("execute", **cached)
+        elif plan.status in {"executing", "executed"} and plan.data["head"].get(
+            "execution_id"
+        ):
+            if idempotency_key is not None:
+                raise PlanError(
+                    "This plan already has an execution; create a new plan revision for an intentional rerun"
+                )
+            result = plan.data
+        else:
+            quote = plan._call("quote_execution", expected_revision=plan.revision)[
+                "quote"
+            ]
+            check_quote(quote, maximum_credits)
+            payload = {
+                "expected_revision": plan.revision,
+                "accepted_quote_fingerprint": quote["fingerprint"],
+                "maximum_credits": maximum_credits,
+                "idempotency_key": key,
+            }
+            # Retain BEFORE the transport call. A lost response must replay the
+            # same execution intent, never request a new quote or solver run.
+            plan._execute_requests[key] = payload
+            result = plan._call("execute", **payload)
         run_id = result["head"]["execution_id"]
         if plan.job is not None:
             return self._make_run_handle(

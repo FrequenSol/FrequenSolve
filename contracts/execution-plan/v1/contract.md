@@ -28,3 +28,18 @@ meaning; automatic capacity ceilings are distinct from exact-layout overrides.
 
 The example files are synthetic conformance vectors. Their copies in the Cloud
 and Runtime test fixtures must remain byte-identical when the contract changes.
+
+The context freezes `memory_policy`: runtime calibration numerator/denominator,
+worker overhead in MiB and the minimum memory reservation. Native safety is
+already applied before these separately recorded allowances. Calibration cannot
+reduce native estimates. Match the installed policy, including its minimum;
+never silently substitute new defaults when replaying a revision.
+
+Automatic selection uses the hardware catalog's `recommended_layouts` subset of
+`qualified_layouts`. Other qualified thread layouts remain available for explicit
+validated overrides. The initial Slurm integration validates whole-minute time
+limits so a scheduler rounding step cannot exceed an authorization unnoticed.
+
+Input digests may bind a service-owned manifest of immutable provider object
+versions; this must not be advertised as a measured SHA-256 of each source file.
+Large manifests and native evidence stay in tenant-scoped service storage.

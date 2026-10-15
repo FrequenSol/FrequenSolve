@@ -10,7 +10,13 @@
     "site_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "catalog_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "execution_site_id": "fake-site",
-    "sizing_policy_version": "memory-fit-first.v1"
+    "sizing_policy_version": "memory-fit-first.v1",
+    "memory_policy": {
+      "calibration_numerator": 1,
+      "calibration_denominator": 1,
+      "worker_overhead_mib": 512,
+      "minimum_memory_mib": 0
+    }
   },
   "limits": {
     "max_nodes_per_frequency": 4,
@@ -56,5 +62,5 @@
       "estimated_runtime_seconds": null
     }
   ],
-  "digest": "sha256:542c937fc726a65db2871da5dec6465692029d0efe761412391de41ff2da56fd"
+  "digest": "sha256:95d8f8eb35e8b0f557f0f5e549f4d72f3dc91309c05babab7cf78e5e3966ca4f"
 }
