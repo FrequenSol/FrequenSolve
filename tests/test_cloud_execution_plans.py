@@ -8,6 +8,7 @@ import pytest
 
 from frequensolve.execution_plan import PlanError
 from frequensolve.orchestrator.sites.aws.plans import (
+    ExecutionPlanningMixin,
     PlanHandle,
     check_quote,
     sizing_policy,
@@ -120,3 +121,61 @@ def test_policy_limits_are_optional_but_bounded_and_typed():
             sizing_policy(policy)
     with pytest.raises(PlanError):
         check_quote({"maximum_credits": "2"}, "3")
+
+
+def test_invalid_planning_policy_and_fixed_topology_are_rejected_before_staging():
+    class Site(ExecutionPlanningMixin):
+        _explicit_execution_resources = True
+
+        def prepare_job(self, *args, **kwargs):
+            raise AssertionError("Invalid policy must not stage inputs")
+
+    site = Site()
+    with pytest.raises(PlanError, match="fixed nodes"):
+        site.plan(object())
+    with pytest.raises(PlanError, match="eight"):
+        site.plan(object(), policy={"max_layout_evaluations": 9})
+    with pytest.raises(PlanError, match="boolean"):
+        site.plan(object(), run_after_planning="yes")
+    with pytest.raises(PlanError, match="maximum_credits"):
+        site.submit_automatically(object(), sizing_policy={})
+
+
+def test_automatic_submission_uses_saved_planning_and_one_bounded_authorization():
+    class Site(ExecutionPlanningMixin):
+        def plan(self, job, **kwargs):
+            self.options = kwargs
+            return SimpleNamespace(
+                id="fake-plan",
+                revision=0,
+                status="planning",
+                data={"head": {"execution_id": "fake-run"}},
+            )
+
+        def _make_run_handle(self, job, run_id, **kwargs):
+            return SimpleNamespace(id=run_id, backend=kwargs["backend"])
+
+    site = Site()
+    run = site.submit_automatically(
+        object(),
+        sizing_policy={"max_nodes_per_frequency": 2},
+        maximum_credits="100",
+        partition="cpu",
+    )
+    assert run.id == "fake-run"
+    assert site.options == {
+        "policy": {"max_nodes_per_frequency": 2},
+        "maximum_credits": "100",
+        "run_after_planning": True,
+        "partition": "cpu",
+    }
+
+
+def test_new_validation_quote_receives_a_new_authorization_identity():
+    plan, client = handle()
+    plan.authorize("20")
+    previous = client.calls[-1]["idempotency_key"]
+    plan.data["quote"]["fingerprint"] = "new-validation-quote"
+    client.response = deepcopy(plan.data)
+    plan.authorize("20")
+    assert client.calls[-1]["idempotency_key"] != previous

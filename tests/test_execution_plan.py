@@ -164,3 +164,27 @@ def test_digest_rejects_float_and_is_order_independent():
     assert digest({"b": 2, "a": 1}) == digest({"a": 1, "b": 2})
     with pytest.raises(PlanError):
         digest({"frequency": 1.0})
+
+
+def test_published_contract_fixture_and_incomplete_rows_validate_without_fake_allocations():
+    import json
+    from pathlib import Path
+
+    from jsonschema import Draft202012Validator
+
+    root = Path(__file__).resolve().parents[1] / "contracts/execution-plan/v1"
+    schema = json.loads((root / "schema.json").read_text())
+    example = json.loads((root / "example.json").read_text())
+    validator = Draft202012Validator(schema)
+    validator.validate(example)
+    unsigned = {key: value for key, value in example.items() if key != "digest"}
+    assert digest(unsigned) == example["digest"]
+    example["rows"][0].update(
+        automatic=None, requested=None, validation={"status": "needs_validation"}
+    )
+    example["digest"] = digest(
+        {key: value for key, value in example.items() if key != "digest"}
+    )
+    validator.validate(example)
+    with pytest.raises(PlanError, match="Extend planning"):
+        revise_rows(example["rows"], {0: {"memory_mib_per_node": 1024}})

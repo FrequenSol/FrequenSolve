@@ -81,117 +81,131 @@
             "pattern": "^-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$"
           },
           "automatic": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "layout": {
+            "anyOf": [
+              {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "partition": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                  "layout": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "partition": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                      },
+                      "node_type": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                      },
+                      "nodes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "ranks_per_node": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "cpus_per_rank": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "partition",
+                      "node_type",
+                      "nodes",
+                      "ranks_per_node",
+                      "cpus_per_rank"
+                    ]
                   },
-                  "node_type": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
-                  },
-                  "nodes": {
+                  "memory_mib_per_node": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 9007199254740991
                   },
-                  "ranks_per_node": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 9007199254740991
-                  },
-                  "cpus_per_rank": {
+                  "wall_time_seconds": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 9007199254740991
                   }
                 },
                 "required": [
-                  "partition",
-                  "node_type",
-                  "nodes",
-                  "ranks_per_node",
-                  "cpus_per_rank"
+                  "layout",
+                  "memory_mib_per_node",
+                  "wall_time_seconds"
                 ]
               },
-              "memory_mib_per_node": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
-              },
-              "wall_time_seconds": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+              {
+                "type": "null"
               }
-            },
-            "required": [
-              "layout",
-              "memory_mib_per_node",
-              "wall_time_seconds"
             ]
           },
           "requested": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "layout": {
+            "anyOf": [
+              {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "partition": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                  "layout": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "partition": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                      },
+                      "node_type": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                      },
+                      "nodes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "ranks_per_node": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "cpus_per_rank": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "partition",
+                      "node_type",
+                      "nodes",
+                      "ranks_per_node",
+                      "cpus_per_rank"
+                    ]
                   },
-                  "node_type": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
-                  },
-                  "nodes": {
+                  "memory_mib_per_node": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 9007199254740991
                   },
-                  "ranks_per_node": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 9007199254740991
-                  },
-                  "cpus_per_rank": {
+                  "wall_time_seconds": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 9007199254740991
                   }
                 },
                 "required": [
-                  "partition",
-                  "node_type",
-                  "nodes",
-                  "ranks_per_node",
-                  "cpus_per_rank"
+                  "layout",
+                  "memory_mib_per_node",
+                  "wall_time_seconds"
                 ]
               },
-              "memory_mib_per_node": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
-              },
-              "wall_time_seconds": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
+              {
+                "type": "null"
               }
-            },
-            "required": [
-              "layout",
-              "memory_mib_per_node",
-              "wall_time_seconds"
             ]
           },
           "overrides": {

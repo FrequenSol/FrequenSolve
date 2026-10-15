@@ -318,6 +318,7 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
                 "Managed Cloud execution settings may only be loaded from a "
                 "named site.toml profile via fs.Site(profile=...)"
             )
+        self._explicit_execution_resources = execution_resources is not None
         self.execution_profile = ManagedExecutionProfile.from_mapping(profile_values)
 
         # Load configuration from domain
@@ -1080,6 +1081,8 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
         Raises:
             RuntimeError: If job submission fails.
         """
+        if "sizing_policy" in kwargs:
+            return self.submit_automatically(job, **kwargs)
         unsupported = kwargs.keys() - {
             "cluster_id",
             "partition",

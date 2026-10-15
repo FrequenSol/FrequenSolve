@@ -299,6 +299,10 @@ def revise_rows(
             row["requested"] = deepcopy(row["automatic"])
             row["overrides"] = {}
         else:
+            if row["requested"] is None:
+                raise PlanError(
+                    "Extend planning before editing a frequency without sizing evidence"
+                )
             request = deepcopy(row["requested"])
             shape = request["layout"]
             nodes = edit.get("nodes", shape["nodes"])

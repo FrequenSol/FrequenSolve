@@ -118,7 +118,9 @@ class PlanHandle:
         self._call(
             "authorize",
             expected_revision=self.revision,
-            idempotency_key=self._keys.setdefault("authorize", uuid.uuid4().hex),
+            idempotency_key=self._keys.setdefault(
+                f"authorize-{quote['fingerprint']}", uuid.uuid4().hex
+            ),
             accepted_quote_fingerprint=quote["fingerprint"],
             maximum_credits=maximum_credits,
         )
@@ -185,7 +187,10 @@ class PlanHandle:
         self._call(
             "cancel",
             expected_revision=self.revision,
-            idempotency_key=self._keys.setdefault("cancel", uuid.uuid4().hex),
+            idempotency_key=self._keys.setdefault(
+                f"cancel-{self.revision}-{self.data['head'].get('operation_id', '')}",
+                uuid.uuid4().hex,
+            ),
         )
         return self
 
@@ -206,7 +211,24 @@ class ExecutionPlanningMixin:
         maximum_credits: str | None = None,
         run_after_planning: bool = False,
         idempotency_key: str | None = None,
+        **compute_options: Any,
     ) -> PlanHandle:
+        from .execution_profile import resolve_compute_options
+
+        if type(run_after_planning) is not bool:
+            raise PlanError("run_after_planning must be a boolean")
+        policy = sizing_policy(policy)
+        if maximum_credits is not None:
+            check_quote(
+                {"maximum_credits": "0", "fingerprint": "unquoted"}, maximum_credits
+            )
+        if getattr(self, "_explicit_execution_resources", False):
+            raise PlanError(
+                "Automatic sizing cannot silently replace explicit execution_resources. Use a named profile without fixed nodes/mpi_ranks settings."
+            )
+        selectors = resolve_compute_options(
+            self.execution_profile.graphql_arguments(), compute_options
+        )
         self.prepare_job(job, sync_project=True, validate=True)
         project = job.project_path.name
         if getattr(job.simulation, "_project", None) is None:
@@ -220,14 +242,13 @@ class ExecutionPlanningMixin:
             self.__class__.__name__, project
         )
         self.sync_s3(local_simulation, remote_simulation)
-        selectors = self.execution_profile.graphql_arguments()
         result = request(
             self.graphql_client,
             "create",
             {
                 "idempotency_key": idempotency_key or uuid.uuid4().hex,
                 "job_file_key": str(key),
-                "policy": sizing_policy(policy),
+                "policy": policy,
                 "run_after_planning": run_after_planning,
                 **{
                     name: selectors[name]
@@ -240,6 +261,44 @@ class ExecutionPlanningMixin:
         if maximum_credits is not None:
             handle.authorize(maximum_credits)
         return handle
+
+    def submit_automatically(self, job: Any, **options: Any):
+        """Submit through the same saved-plan stages with one bounded authorization.
+
+        This opt-in policy does not reinterpret legacy explicit MPI topology.
+        Cloud pauses the saved plan if execution needs additional authorization.
+        """
+        allowed = {
+            "sizing_policy",
+            "maximum_credits",
+            "cluster_id",
+            "partition",
+            "allow_unverified_compute",
+        }
+        if set(options) - allowed:
+            raise PlanError(
+                "Unsupported automatic submission options: "
+                + ", ".join(sorted(set(options) - allowed))
+            )
+        if "maximum_credits" not in options:
+            raise PlanError(
+                "Automatic submission requires a bounded maximum_credits authorization; use site.plan(job) to inspect a planning quote first"
+            )
+        handle = self.plan(
+            job,
+            policy=options.pop("sizing_policy"),
+            maximum_credits=options.pop("maximum_credits"),
+            run_after_planning=True,
+            **options,
+        )
+        run_id = handle.data["head"].get("execution_id")
+        if not run_id:
+            raise PlanError(
+                f"Plan {handle.id} is saved with status {handle.status}; inspect it before execution"
+            )
+        return self._make_run_handle(
+            job, run_id, backend={"planId": handle.id, "planRevision": handle.revision}
+        )
 
     def open_plan(
         self, plan_id: str, *, project_key: str, job: Any = None
