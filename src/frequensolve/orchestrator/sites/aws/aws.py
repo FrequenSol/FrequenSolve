@@ -23,6 +23,7 @@ from frequensolve.orchestrator.sites.aws.cache_paths import (
 from frequensolve.orchestrator.sites.aws.execution_profile import (
     ManagedExecutionProfile,
 )
+from frequensolve.orchestrator.sites.aws.plans import ExecutionPlanningMixin
 from frequensolve.orchestrator.sites.execution import normalize_execution_state
 
 try:
@@ -238,7 +239,7 @@ class AWSSiteConfig(BaseSiteConfig):
             self.region = config_data["region"]
 
 
-class AWSSite(BaseSite):
+class AWSSite(ExecutionPlanningMixin, BaseSite):
     """AWS site for running FrequenSolve simulations.
 
     Automatically authenticates users and configures AWS resources by simply providing
