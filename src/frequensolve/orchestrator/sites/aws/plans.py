@@ -141,7 +141,7 @@ class PlanHandle:
             self._pending_planning_maximum is not None
             and self.status == "awaiting_authorization"
             and self.revision == 0
-            and self.data.get("quote", {}).get("purpose") == "planning"
+            and self.data.get("quote", {}).get("purpose") in {"planning", "automatic"}
         ):
             self.authorize(self._pending_planning_maximum)
         return self
@@ -267,9 +267,13 @@ class PlanExecutionPaused(PlanError):
 
     def __init__(self, plan: PlanHandle):
         self.plan = plan
+        reason = plan.data.get("automatic", {}).get("message")
         super().__init__(
             f"Plan {plan.id} is saved with status {plan.status}. "
-            "Review its validation and Credit quote before continuing; no frequency execution was started."
+            + (
+                reason
+                or "Review its validation and Credit quote before continuing; no frequency execution was started."
+            )
         )
 
 
@@ -331,6 +335,19 @@ class AutomaticRunHandle(RunHandle):
             ):
                 setattr(self, name, getattr(accepted, name))
             return self.status()
+        if (
+            self.plan.status == "review"
+            and self.plan.data.get("automatic", {}).get("phase") == "awaiting_execution"
+        ):
+            return JobStatus(
+                state="pending",
+                message=f"Plan {self.plan.id} is validated; awaiting execution admission",
+                raw={
+                    "stage": "execution_admission",
+                    "plan_id": self.plan.id,
+                    "revision": self.plan.revision,
+                },
+            )
         if self.plan.status in {"review", "incomplete", "awaiting_authorization"}:
             raise PlanExecutionPaused(self.plan)
         if self.plan.status in {"failed", "canceled"}:

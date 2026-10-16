@@ -349,6 +349,46 @@ def test_automatic_handle_cancels_planning_and_reports_pre_execution_failure_as_
     assert site.bound == []
 
 
+def test_automatic_handle_waits_for_server_continuation_without_requesting_another_quote():
+    site, run = pending_automatic_run()
+    site.graphql_client.response["head"].update(status="review", revision=1)
+    site.graphql_client.response["automatic"] = {
+        "phase": "awaiting_execution",
+        "maximum_credits": "100",
+    }
+    assert run.status().raw["stage"] == "execution_admission"
+    assert run.id is None
+    assert [call["action"] for call in site.graphql_client.calls] == ["get"]
+    site.graphql_client.response["automatic"] = {
+        "phase": "paused",
+        "maximum_credits": "100",
+        "message": "Pricing changed; accept a fresh quote.",
+    }
+    with pytest.raises(PlanExecutionPaused, match="Pricing changed"):
+        run.status()
+    assert site.bound == []
+
+
+def test_preparation_authorizes_the_complete_automatic_quote_with_the_original_user_bound():
+    plan, client = handle()
+    plan.data = {"head": {**plan.data["head"], "revision": 0, "status": "preparing"}}
+    plan.authorize("100")
+    client.response = {
+        "head": {**plan.data["head"], "status": "awaiting_authorization"},
+        "quote": {
+            "purpose": "automatic",
+            "fingerprint": "fake-combined-quote",
+            "maximum_credits": "80",
+            "planning_maximum_credits": "10",
+            "execution_maximum_credits": "70",
+        },
+    }
+    plan.refresh()
+    assert [call["action"] for call in client.calls] == ["get", "authorize"]
+    assert client.calls[-1]["accepted_quote_fingerprint"] == "fake-combined-quote"
+    assert client.calls[-1]["maximum_credits"] == "100"
+
+
 def test_new_validation_quote_receives_a_new_authorization_identity():
     plan, client = handle()
     plan.authorize("20")
