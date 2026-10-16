@@ -248,6 +248,30 @@ class PlanHandle:
             self.authorize(maximum_credits)
         return self
 
+    def results(self, *, execution_id: str | None = None):
+        """Inspect one settled execution without changing this plan or running work."""
+        from .plan_results import ExecutionResults
+
+        run = execution_id or self.data["head"].get("execution_id")
+        if not isinstance(run, str):
+            raise PlanError("Choose a completed saved execution before reading results")
+        response = request(
+            self.site.graphql_client,
+            "results",
+            {
+                "plan_id": self.id,
+                "project_key": self.data["head"]["owner"]["project_key"],
+                "execution_id": run,
+            },
+        )
+        return ExecutionResults(
+            self.site,
+            response,
+            plan_id=self.id,
+            execution_id=run,
+            project=self.data["head"]["owner"]["project_key"],
+        )
+
     def quote_execution(self) -> dict[str, Any]:
         """Inspect a fresh execution quote without reserving Credits or compute."""
         result = self._call("quote_execution", expected_revision=self.revision)
