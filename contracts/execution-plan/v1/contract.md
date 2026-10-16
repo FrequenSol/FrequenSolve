@@ -43,3 +43,26 @@ limits so a scheduler rounding step cannot exceed an authorization unnoticed.
 Input digests may bind a service-owned manifest of immutable provider object
 versions; this must not be advertised as a measured SHA-256 of each source file.
 Large manifests and native evidence stay in tenant-scoped service storage.
+
+
+### Controller progress diagnostics
+
+`frequency-plan-progress.v1` (`progress.json`) is a separate bounded diagnostic
+notification for one authenticated planning operation or exact execution. It
+contains the accepted submission digest, monotonically increasing durable
+sequence, UTC observation time, stage, total and complete counts for `ready`,
+`intent`, `uncertain`, `submitted`, `completed`, `failed`, `canceled` and
+`not_started`. Totals are 1–8 planning evaluations or 1–96 frequency jobs.
+The `digest` is SHA-256 over canonical JSON with `digest` omitted.
+Only the installed Root producer may publish it through the registered result
+queue. It is not sizing evidence, actual allocation telemetry or billing proof.
+A submitted job is waiting for compute or results, not necessarily running.
+
+Receivers bind the accepted operation, tenant, plan, registration, physical
+controller and AWS sender before storage. Duplicate or older sequence numbers
+do not replace newer progress; the same sequence with different content is an
+integrity error. A later revision/run or settled operation ignores old progress.
+This record never mutates a plan revision, starts/retries work, captures/releases
+Credits or acknowledges financial completion. The public projection exposes
+counts, stage, observation time and a server-generated message, with no private
+provider or credential identities. Polling is explicit and optional.

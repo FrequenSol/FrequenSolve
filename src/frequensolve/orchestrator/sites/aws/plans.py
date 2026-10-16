@@ -111,6 +111,50 @@ class PlanHandle:
     def rows(self) -> list[dict[str, Any]]:
         return self.data.get("plan", {}).get("rows", [])
 
+    @property
+    def progress(self) -> dict[str, Any] | None:
+        """Last observed controller diagnostics; refresh explicitly for new data.
+
+        Status cannot establish allocation start, trusted sizing or settled usage.
+        Older compatible servers may return no progress snapshot.
+        """
+        value = self.data.get("progress")
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise PlanError("Cloud returned invalid planning progress")
+        counts = value.get("counts")
+        fields = {
+            "ready",
+            "intent",
+            "uncertain",
+            "submitted",
+            "completed",
+            "failed",
+            "canceled",
+            "not_started",
+        }
+        if (
+            value.get("purpose") not in {"planning", "execution"}
+            or not isinstance(counts, dict)
+            or counts.keys() != fields
+            or any(type(number) is not int or number < 0 for number in counts.values())
+            or type(value.get("total")) is not int
+            or not 1 <= value["total"] <= (8 if value["purpose"] == "planning" else 96)
+            or sum(counts.values()) != value["total"]
+            or type(value.get("completed")) is not int
+            or value["completed"]
+            != sum(
+                counts[name]
+                for name in ("completed", "failed", "canceled", "not_started")
+            )
+            or not isinstance(value.get("message"), str)
+            or not isinstance(value.get("observed_at"), str)
+            or not isinstance(value.get("stage"), str)
+        ):
+            raise PlanError("Cloud returned incomplete planning progress")
+        return deepcopy(value)
+
     def _call(self, action: str, **values: Any) -> dict[str, Any]:
         if self.data.get("historical") and action != "get":
             raise PlanError(
@@ -413,13 +457,19 @@ class AutomaticRunHandle(RunHandle):
                     "revision": self.plan.revision,
                 },
             )
+        progress = self.plan.progress
         return JobStatus(
             state="pending" if self.plan.status == "preparing" else "running",
-            message=f"{self.plan.status.capitalize()} resources for plan {self.plan.id}",
+            message=(
+                f"{progress['message']}; {progress['completed']} of {progress['total']} evaluations closed"
+                if progress
+                else f"{self.plan.status.capitalize()} resources for plan {self.plan.id}"
+            ),
             raw={
                 "stage": "planning",
                 "plan_id": self.plan.id,
                 "revision": self.plan.revision,
+                **({"progress": progress} if progress else {}),
             },
         )
 

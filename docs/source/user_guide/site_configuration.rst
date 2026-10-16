@@ -909,6 +909,14 @@ a fabricated failed simulation. Execution logs and solver outputs are unavailabl
 before a real execution exists. Combined automatic authorization and its Cloud
 orchestration must be installed before enabling this workflow.
 
+After ``plan.refresh()``, ``plan.progress`` provides the last controller status,
+completed/failed/canceled evaluation or frequency counts, and an observation
+time. It returns ``None`` when an older server has no compatible status snapshot.
+Reading this property does not poll or launch work. Submitted allocations are
+reported as waiting for compute or results; a scheduler job identity alone does
+not establish that a worker has started. Progress is diagnostic and cannot
+replace validated sizing evidence or settled Credit receipts.
+
 Planning captures a private copy of staged scientific interpretation. Later
 authoring or staging edits cannot change an accepted plan's result reader. Saved
 plans retain their original native input fingerprints while final storage is

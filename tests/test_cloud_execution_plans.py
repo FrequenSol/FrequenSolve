@@ -584,3 +584,63 @@ def test_open_saved_revision_rejects_incompatible_server_or_other_plan_before_au
     with pytest.raises(PlanError):
         site.open_plan(plan.id, project_key="fake-project", revision=0)
     assert len(site.graphql_client.calls) == before
+
+
+def test_progress_is_explicitly_refreshed_copied_and_separate_from_accepted_authority():
+    plan, client = handle()
+    assert plan.progress is None
+    progress = {
+        "purpose": "planning",
+        "stage": "awaiting_compute_results",
+        "completed": 1,
+        "total": 2,
+        "counts": {
+            "ready": 0,
+            "submitted": 1,
+            "intent": 0,
+            "uncertain": 0,
+            "completed": 1,
+            "failed": 0,
+            "canceled": 0,
+            "not_started": 0,
+        },
+        "message": "Waiting for compute or results",
+        "observed_at": "2026-10-16T00:00:00.000Z",
+    }
+    plan.data["progress"] = deepcopy(progress)
+    snapshot = plan.progress
+    snapshot["counts"]["submitted"] = 0
+    assert plan.progress == progress
+    assert client.calls == []
+    assert plan.revision == 1
+    plan.data["progress"]["total"] = 3
+    with pytest.raises(PlanError, match="incomplete planning progress"):
+        _ = plan.progress
+
+
+def test_automatic_planning_status_reports_observed_counts_without_submitting_again():
+    site, run = pending_automatic_run()
+    site.graphql_client.response["head"]["status"] = "planning"
+    site.graphql_client.response["progress"] = {
+        "purpose": "planning",
+        "stage": "awaiting_compute_results",
+        "completed": 0,
+        "total": 1,
+        "counts": {
+            "ready": 0,
+            "submitted": 1,
+            "intent": 0,
+            "uncertain": 0,
+            "completed": 0,
+            "failed": 0,
+            "canceled": 0,
+            "not_started": 0,
+        },
+        "message": "Waiting for compute or results",
+        "observed_at": "2026-10-16T00:00:00.000Z",
+    }
+    status = run.status()
+    assert status.message == "Waiting for compute or results; 0 of 1 evaluations closed"
+    assert status.raw["progress"]["counts"]["submitted"] == 1
+    assert run.id is None and site.bound == []
+    assert all(call["action"] == "get" for call in site.graphql_client.calls)
