@@ -232,6 +232,18 @@ class PlanHandle:
             self.authorize(maximum_credits)
         return self
 
+    def quote_execution(self) -> dict[str, Any]:
+        """Inspect a fresh execution quote without reserving Credits or compute."""
+        result = self._call("quote_execution", expected_revision=self.revision)
+        quote = result.get("quote")
+        if (
+            not isinstance(quote, dict)
+            or quote.get("purpose", "execution") != "execution"
+        ):
+            raise PlanError("Cloud returned no execution quote")
+        check_quote(quote, quote.get("maximum_credits"))
+        return deepcopy(quote)
+
     def execute(self, maximum_credits: str, *, idempotency_key: str | None = None):
         return self.site.execute_plan(
             self, maximum_credits=maximum_credits, idempotency_key=idempotency_key
@@ -542,9 +554,7 @@ class ExecutionPlanningMixin:
                 )
             result = plan.data
         else:
-            quote = plan._call("quote_execution", expected_revision=plan.revision)[
-                "quote"
-            ]
+            quote = plan.quote_execution()
             check_quote(quote, maximum_credits)
             payload = {
                 "expected_revision": plan.revision,

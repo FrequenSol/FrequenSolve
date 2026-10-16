@@ -518,3 +518,21 @@ def test_completed_plan_requires_explicit_new_key_for_an_intentional_rerun():
     with pytest.raises(PlanError, match="active execution"):
         plan.execute("20", idempotency_key="another-new-run")
     assert len(site.graphql_client.calls) == 3
+
+
+def test_execution_quote_is_inspectable_without_authorizing_or_dispatching_and_is_a_copy():
+    plan, client = handle()
+    client.response["quote"] = {
+        "purpose": "execution",
+        "maximum_credits": "12.5",
+        "fingerprint": "fresh-quote",
+    }
+    result = plan.quote_execution()
+    assert [call["action"] for call in client.calls] == ["quote_execution"]
+    assert client.calls[0]["expected_revision"] == 1
+    result["maximum_credits"] = "999"
+    assert plan.data["quote"]["maximum_credits"] == "12.5"
+    assert plan._execute_requests == {}
+    client.response["quote"]["purpose"] = "planning"
+    with pytest.raises(PlanError, match="no execution quote"):
+        plan.quote_execution()

@@ -888,6 +888,17 @@ decimal-string Credit maximum. The handle exposes ``id``, ``revision``,
 sizing quote; it does not silently authorize it. A reviewed execution uses
 ``site.execute_plan(plan, maximum_credits=execution_budget)`` and a fresh quote.
 
+Use ``plan.quote_execution()`` to inspect the current execution Credit maximum
+without reserving Credits or compute. Execute accepts an explicit Credit bound;
+it never prompts repeatedly for work already authorized. For an intentional new
+run of a completed plan, supply a deliberately new ``idempotency_key`` to
+``plan.execute(...)`` or ``site.execute_plan(...)``. This requests a fresh quote,
+authorization and run identity after the server verifies prior settlement.
+Without a new key, execute recovers the existing accepted run. An accepted failed
+solver job is never retried automatically, and a second execution cannot start
+while the same plan is already running.
+
+
 The experimental automatic-submission path returns a ``RunHandle`` even when
 source preparation or planning has not produced a Simulation yet. Its ``id``
 remains ``None`` until the server publishes the actual execution identity;
