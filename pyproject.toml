@@ -162,6 +162,8 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 timeout = 300
+# Preserve record_property timing evidence in JUnit without warning-as-error.
+junit_family = "xunit1"
 filterwarnings = [
     "error",
 ]

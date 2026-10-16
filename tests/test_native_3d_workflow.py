@@ -123,7 +123,7 @@ def test_native_3d_pressure_reciprocity(tmp_path):
         result = site.run(job, force=True, timeout=300, check=True)
     compatibility_warnings = [str(w.message) for w in caught]
     assert all(
-        "does not contain a released preferred FrequenSolver declaration." in w
+        "does not contain a released preferred Solver declaration." in w
         for w in compatibility_warnings
     )
     assert result.status.state == "completed"
