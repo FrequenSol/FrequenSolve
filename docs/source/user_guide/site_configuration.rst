@@ -915,6 +915,34 @@ plans retain their original native input fingerprints while final storage is
 scoped to the accepted run. Cancellation is pinned to that run and revision,
 including after the same user's plan handle is refreshed or reused.
 
+Settled execution outputs
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``plan.results()`` inspects the latest run retained on the handle. Pass
+``execution_id=...`` to inspect an earlier settled run without changing the
+current plan. Reads and downloads do not authorize compute or retry solver work.
+
+.. code-block:: python
+
+   results = plan.results(execution_id=run.id)
+   local_run = results.download("./downloaded-results")
+   artifacts = results.artifact_catalog(local_run, frequency_index=0)
+   traces = results.trace_dataset(local_run, frequency_index=0)
+
+Downloads verify exact provider versions and file digests before publishing a
+new local run directory. Existing directories are never overwritten. Each
+frequency retains its own native files and layout-specific geometry; failed or
+canceled siblings remain in the result index. ``artifact_catalog`` reads the
+producer's logical artifact records. ``trace_dataset`` opens one converged
+receiver frequency with its matching survey metadata, preserving the original
+task index and complex frequency. It rejects changed local data, incompatible
+trace families, missing metadata and nonconverged results. It does not manufacture
+a combined packed sweep or missing multi-node memory measurements. Inspect
+``results.data`` for requested versus actual allocations and scientific status.
+This native-archive workflow also requires compatible, qualified Cloud/Runtime
+readers and remains gated until installation and live acceptance are complete.
+
+
 Saved allocation revisions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
