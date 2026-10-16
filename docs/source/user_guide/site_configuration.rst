@@ -871,3 +871,35 @@ all frequencies, use ``site.submit(job, force=True)``.
 Changed scientific inputs or solver versions also require a full rerun.
 Local and Slurm sites also accept ``retry=True``; they already reuse completed
 task outputs by default, so the flag makes that intent explicit there.
+
+Saved frequency plans (experimental)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Saved-plan APIs require a compatible Cloud service and qualified solver/hardware
+installation. They are currently capability gated and are not enabled by adding
+a site configuration option. Legacy explicit ``nodes`` and ``mpi_ranks`` retain
+their existing meanings; automatic selection uses separate policy ceilings.
+
+``site.plan(job)`` returns a ``PlanHandle``. Preparing private inputs is free;
+paid sizing starts only after accepting the actual quote within an explicit
+decimal-string Credit maximum. The handle exposes ``id``, ``revision``,
+``status``, ``rows``, ``refresh()``, ``wait()``, ``edit()``, ``validate()``,
+``cancel()`` and ``export(path)``. Validation may return an additional paid
+sizing quote; it does not silently authorize it. A reviewed execution uses
+``site.execute_plan(plan, maximum_credits=execution_budget)`` and a fresh quote.
+
+The experimental automatic-submission path returns a ``RunHandle`` even when
+source preparation or planning has not produced a Simulation yet. Its ``id``
+remains ``None`` until the server publishes the actual execution identity;
+``run.plan`` retains the saved plan. Polling does not issue a new execution or
+expand authorization. A pause raises ``PlanExecutionPaused`` with its ``plan``
+attached, so validation or pricing changes remain reviewable rather than becoming
+a fabricated failed simulation. Execution logs and solver outputs are unavailable
+before a real execution exists. Combined automatic authorization and its Cloud
+orchestration must be installed before enabling this workflow.
+
+Planning captures a private copy of staged scientific interpretation. Later
+authoring or staging edits cannot change an accepted plan's result reader. Saved
+plans retain their original native input fingerprints while final storage is
+scoped to the accepted run. Cancellation is pinned to that run and revision,
+including after the same user's plan handle is refreshed or reused.

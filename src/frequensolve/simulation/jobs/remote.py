@@ -69,6 +69,7 @@ class JobRemoteMixin:
         # add dataclass fields or change persisted authoring state.
         _frozen_staged_provenance: Dict[str, Dict[str, Any]]
         _cloud_staged_job_payload: Dict[str, Any]
+        _cloud_saved_plan_inputs: bool
         _cloud_result_run_id: str
         _cloud_output_identity: str
         _frozen_artifact_fingerprints: Optional[Dict[str, str]]

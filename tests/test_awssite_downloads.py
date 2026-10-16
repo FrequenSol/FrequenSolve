@@ -1452,6 +1452,40 @@ def test_cloud_snapshot_rejects_changed_staged_descriptor(tmp_path):
         AWSSite._prepare_run_snapshot(job)
 
 
+@pytest.mark.parametrize("image", [False, True])
+def test_saved_plan_scopes_result_storage_without_rewriting_scientific_fingerprints(
+    tmp_path, image
+):
+    from frequensolve.orchestrator.sites.aws.plans import PlanHandle
+
+    job, payload, staged = staged_cloud_job(tmp_path, image=image)
+    frozen = AWSSite._prepare_run_snapshot(job)
+    frozen._cloud_saved_plan_inputs = True
+    expected = frozen.staged_artifact_fingerprints("AWSSite")
+    authored_result = job._result_path
+    staged.write_text('{"f_list": [99]}')
+    site = make_site(FakeS3Client({}))
+    plan = PlanHandle(
+        site,
+        {
+            "head": {
+                "plan_id": "fake-plan",
+                "revision": 1,
+                "status": "executing",
+                "execution_id": "planned-run",
+                "owner": {"project_key": "fake-project"},
+            }
+        },
+        frozen,
+    )
+    run = site._run_handle_from_plan(plan, "planned-run")
+    assert run.job.staged_artifact_fingerprints("AWSSite") == expected
+    assert run.job._cloud_staged_job_payload == payload
+    assert run.job._result_path == authored_result / "runs/planned-run"
+    assert job._result_path == authored_result
+    assert plan.job._result_path == authored_result
+
+
 def test_native_cloud_result_reads_traces_and_fetches_declared_metadata_and_vtk(
     tmp_path,
 ):

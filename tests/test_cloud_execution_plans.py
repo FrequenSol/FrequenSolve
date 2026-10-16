@@ -8,7 +8,9 @@ import pytest
 
 from frequensolve.execution_plan import PlanError
 from frequensolve.orchestrator.sites.aws.plans import (
+    AutomaticRunHandle,
     ExecutionPlanningMixin,
+    PlanExecutionPaused,
     PlanHandle,
     check_quote,
     sizing_policy,
@@ -145,6 +147,21 @@ def test_exports_metadata_without_credentials(tmp_path):
     assert json.loads(output.read_text()) == plan.data
 
 
+@pytest.mark.parametrize("foreign", ["plan", "project"])
+def test_status_response_cannot_retarget_a_saved_plan_handle(foreign):
+    plan, client = handle()
+    retained = deepcopy(plan.data)
+    if foreign == "plan":
+        client.response["head"]["plan_id"] = "another-plan"
+    else:
+        client.response["head"]["owner"]["project_key"] = "another-project"
+    with pytest.raises(PlanError, match="different saved plan"):
+        plan.refresh()
+    assert plan.data == retained
+    assert client.calls[-1]["plan_id"] == "fake-plan"
+    assert client.calls[-1]["project_key"] == "fake-project"
+
+
 def test_wait_does_not_execute_a_ready_plan():
     plan, client = handle()
     client.response["head"]["status"] = "review"
@@ -209,6 +226,7 @@ def test_automatic_submission_uses_saved_planning_and_one_bounded_authorization(
                 revision=0,
                 status="planning",
                 data={"head": {"execution_id": "fake-run"}},
+                job=job,
             )
 
         def _make_run_handle(self, job, run_id, **kwargs):
@@ -228,6 +246,107 @@ def test_automatic_submission_uses_saved_planning_and_one_bounded_authorization(
         "run_after_planning": True,
         "partition": "cpu",
     }
+
+
+def pending_automatic_run():
+    from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
+
+    class Site(ExecutionPlanningMixin):
+        def __init__(self):
+            self.graphql_client = Client()
+            self.bound = []
+
+        def plan(self, job, **_options):
+            data = {
+                "head": {
+                    "plan_id": "fake-plan",
+                    "revision": 0,
+                    "status": "preparing",
+                    "operation_id": "fake-planning",
+                    "owner": {"project_key": "fake-project"},
+                }
+            }
+            self.graphql_client.response = deepcopy(data)
+            return PlanHandle(self, data, job)
+
+        def _make_run_handle(self, job, run_id, *, backend):
+            self.bound.append(run_id)
+            return RunHandle(
+                site=self,
+                job=job,
+                id=run_id,
+                mode="aws",
+                backend=backend,
+                _status_fn=lambda _run: JobStatus(
+                    state="completed", return_code=0, job_id=run_id
+                ),
+                _cancel_fn=lambda _run: (_ for _ in ()).throw(
+                    AssertionError("Legacy cancellation must not handle saved plans")
+                ),
+            )
+
+    site = Site()
+    return site, site.submit_automatically(object(), maximum_credits="100")
+
+
+def test_automatic_handle_waits_without_a_fake_simulation_or_another_authorization():
+    site, run = pending_automatic_run()
+    assert isinstance(run, AutomaticRunHandle)
+    assert run.id is None
+    assert run.status().state == "pending"
+    assert run.backend == {"planId": "fake-plan", "planRevision": 0}
+    site.graphql_client.response["head"]["status"] = "planning"
+    assert run.status().state == "running"
+    assert run.id is None
+    assert site.bound == []
+    assert all(call["action"] == "get" for call in site.graphql_client.calls)
+    with pytest.raises(PlanError, match="no solver outputs"):
+        run.fetch()
+    with pytest.raises(PlanError, match="no execution logs"):
+        run.logs()
+
+
+def test_automatic_handle_adopts_the_real_run_once_and_pins_its_cancellation():
+    site, run = pending_automatic_run()
+    site.graphql_client.response["head"].update(
+        status="executing", revision=1, execution_id="fake-run"
+    )
+    assert run.wait(timeout=1, poll_interval=0.01, check=False).successful
+    assert run.id == "fake-run"
+    assert site.bound == ["fake-run"]
+    run.plan.data["head"].update(execution_id="a-later-run", revision=3)
+    run.cancel()
+    assert site.graphql_client.calls[-1]["action"] == "cancel"
+    assert site.graphql_client.calls[-1]["expected_execution_id"] == "fake-run"
+    assert site.graphql_client.calls[-1]["expected_revision"] == 1
+
+
+@pytest.mark.parametrize("status", ["review", "incomplete", "awaiting_authorization"])
+def test_automatic_handle_exposes_a_saved_pause_without_executing_or_supplying_another_quote(
+    status,
+):
+    site, run = pending_automatic_run()
+    site.graphql_client.response["head"].update(status=status, revision=1)
+    with pytest.raises(PlanExecutionPaused) as paused:
+        run.status()
+    assert paused.value.plan is run.plan
+    assert run.id is None
+    assert site.bound == []
+    assert [call["action"] for call in site.graphql_client.calls] == ["get"]
+
+
+def test_automatic_handle_cancels_planning_and_reports_pre_execution_failure_as_planning():
+    site, run = pending_automatic_run()
+    run.cancel()
+    assert site.graphql_client.calls[-1]["action"] == "cancel"
+    assert "expected_execution_id" not in site.graphql_client.calls[-1]
+    site.graphql_client.response["head"]["status"] = "failed"
+    status = run.status()
+    assert status.state == "failed"
+    assert status.raw["stage"] == "planning"
+    assert status.job_id is None
+    assert run.id is None
+    assert site.bound == []
 
 
 def test_new_validation_quote_receives_a_new_authorization_identity():

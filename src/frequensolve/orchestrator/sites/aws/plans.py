@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from frequensolve.execution_plan import PLAN_VERSION, PlanError, positive
+from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
 
 
 def sizing_policy(value: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -117,6 +119,17 @@ class PlanHandle:
         }
         result = request(self.site.graphql_client, action, payload)
         if "head" in result:
+            head = result["head"]
+            if (
+                not isinstance(head, dict)
+                or head.get("plan_id") != self.id
+                or not isinstance(head.get("owner"), dict)
+                or head["owner"].get("project_key")
+                != self.data["head"]["owner"]["project_key"]
+            ):
+                raise PlanError(
+                    "Cloud returned a different saved plan identity; refresh the original plan"
+                )
             self.data = result
         return result
 
@@ -249,6 +262,99 @@ class PlanHandle:
         return target
 
 
+class PlanExecutionPaused(PlanError):
+    """Automatic work paused with a retained plan, never a fabricated failed run."""
+
+    def __init__(self, plan: PlanHandle):
+        self.plan = plan
+        super().__init__(
+            f"Plan {plan.id} is saved with status {plan.status}. "
+            "Review its validation and Credit quote before continuing; no frequency execution was started."
+        )
+
+
+class AutomaticRunHandle(RunHandle):
+    """One awaitable handle across planning and the later real execution identity.
+
+    id remains None until Cloud publishes an actual Simulation id. Polling never
+    accepts another quote or submits a solver; PlanHandle only retains the user's
+    already supplied bound for the initial paid planning operation.
+    """
+
+    def __init__(self, plan: PlanHandle):
+        self.plan = plan
+        super().__init__(
+            site=plan.site,
+            job=plan.job,
+            mode="aws",
+            check=False,
+            backend={"planId": plan.id, "planRevision": plan.revision},
+            _status_fn=self._planning_status,
+            _cancel_fn=lambda _run: plan.cancel(),
+            _logs_fn=self._planning_logs,
+        )
+
+    def _planning_logs(self, _run: RunHandle, **_options: Any):
+        raise PlanError(
+            f"Plan {self.plan.id} has no execution logs yet; inspect the saved planning progress"
+        )
+
+    def fetch(self):
+        if self.id is None:
+            raise PlanError(
+                f"Plan {self.plan.id} has not published an execution; no solver outputs are available"
+            )
+        return super().fetch()
+
+    def _planning_status(self, _run: RunHandle) -> JobStatus:
+        self.plan.refresh()
+        self.backend["planRevision"] = self.plan.revision
+        run_id = self.plan.data["head"].get("execution_id")
+        if run_id:
+            accepted = self.site._run_handle_from_plan(self.plan, run_id)
+            # Adopt the ordinary Cloud run behavior only once the real identity
+            # exists. Preserve this object's identity for wait/watch/cancel users.
+            for name in (
+                "id",
+                "job",
+                "mode",
+                "backend",
+                "_logs_fn",
+                "_status_fn",
+                "_cancel_fn",
+                "_pending_fetch_fn",
+                "_finalize_fn",
+                "_wait_fn",
+                "_wait_async_fn",
+                "_timeout_fn",
+                "_generic_wait",
+            ):
+                setattr(self, name, getattr(accepted, name))
+            return self.status()
+        if self.plan.status in {"review", "incomplete", "awaiting_authorization"}:
+            raise PlanExecutionPaused(self.plan)
+        if self.plan.status in {"failed", "canceled"}:
+            return JobStatus(
+                state=self.plan.status,
+                return_code=1,
+                message=f"Planning {self.plan.status}; saved plan {self.plan.id} retains its evidence and charges",
+                raw={
+                    "stage": "planning",
+                    "plan_id": self.plan.id,
+                    "revision": self.plan.revision,
+                },
+            )
+        return JobStatus(
+            state="pending" if self.plan.status == "preparing" else "running",
+            message=f"{self.plan.status.capitalize()} resources for plan {self.plan.id}",
+            raw={
+                "stage": "planning",
+                "plan_id": self.plan.id,
+                "revision": self.plan.revision,
+            },
+        )
+
+
 class ExecutionPlanningMixin:
     """Cloud plan operations share authentication and input staging with AWSSite."""
 
@@ -291,6 +397,10 @@ class ExecutionPlanningMixin:
             self.__class__.__name__, project
         )
         self.sync_s3(local_simulation, remote_simulation)
+        # Retain interpretation AFTER staging, before the asynchronous request.
+        # Later authoring/staging edits must not replace these scientific bytes.
+        frozen_job = self._prepare_run_snapshot(job)
+        frozen_job._cloud_saved_plan_inputs = True
         result = request(
             self.graphql_client,
             "create",
@@ -306,7 +416,7 @@ class ExecutionPlanningMixin:
                 },
             },
         )
-        handle = PlanHandle(self, result, job)
+        handle = PlanHandle(self, result, frozen_job)
         if maximum_credits is not None:
             handle.authorize(maximum_credits)
         return handle
@@ -335,19 +445,44 @@ class ExecutionPlanningMixin:
             )
         handle = self.plan(
             job,
-            policy=options.pop("sizing_policy"),
+            policy=options.pop("sizing_policy", None),
             maximum_credits=options.pop("maximum_credits"),
             run_after_planning=True,
             **options,
         )
         run_id = handle.data["head"].get("execution_id")
         if not run_id:
-            raise PlanError(
-                f"Plan {handle.id} is saved with status {handle.status}; inspect it before execution"
+            return AutomaticRunHandle(handle)
+        return self._run_handle_from_plan(handle, run_id)
+
+    def _run_handle_from_plan(self, plan: PlanHandle, run_id: str) -> RunHandle:
+        source = getattr(plan, "job", None)
+        if source is not None:
+            # Opened saved plans may also attach the original authored job. The
+            # pinned descriptor fingerprint remains unchanged by run scoping.
+            prepare = getattr(self, "_prepare_run_snapshot", None)
+            if callable(prepare):
+                source = prepare(source)
+                source._cloud_saved_plan_inputs = True
+            handle = self._make_run_handle(
+                source,
+                run_id,
+                backend={"planId": plan.id, "planRevision": plan.revision},
             )
-        return self._make_run_handle(
-            job, run_id, backend={"planId": handle.id, "planRevision": handle.revision}
-        )
+        else:
+            handle = RunHandle(
+                site=self,
+                job=None,
+                id=run_id,
+                mode="aws",
+                backend={"planId": plan.id, "planRevision": plan.revision},
+                _status_fn=self._poll_run,
+            )
+        # Bind cancellation to THIS accepted run and revision. Neither a mutable
+        # authoring job nor later reuse of the user's PlanHandle can redirect it.
+        accepted = PlanHandle(self, deepcopy(plan.data), source)
+        handle._cancel_fn = lambda _run: accepted.cancel()
+        return handle
 
     def open_plan(
         self, plan_id: str, *, project_key: str, job: Any = None
@@ -364,8 +499,6 @@ class ExecutionPlanningMixin:
         maximum_credits: str,
         idempotency_key: str | None = None,
     ):
-        from frequensolve.orchestrator.sites.base import RunHandle
-
         if plan.site is not self:
             raise PlanError("Open this plan using the intended authenticated site")
         key = idempotency_key or plan._keys.setdefault(
@@ -402,18 +535,4 @@ class ExecutionPlanningMixin:
             plan._execute_requests[key] = payload
             result = plan._call("execute", **payload)
         run_id = result["head"]["execution_id"]
-        if plan.job is not None:
-            return self._make_run_handle(
-                plan.job,
-                run_id,
-                backend={"planId": plan.id, "planRevision": plan.revision},
-            )
-        return RunHandle(
-            site=self,
-            job=None,
-            id=run_id,
-            mode="aws",
-            backend={"planId": plan.id, "planRevision": plan.revision},
-            _status_fn=self._poll_run,
-            _cancel_fn=lambda run: self.cancel_job(str(run.id)),
-        )
+        return self._run_handle_from_plan(plan, run_id)

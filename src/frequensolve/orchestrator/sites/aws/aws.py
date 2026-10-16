@@ -1349,7 +1349,7 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
                 "AWSSite": deepcopy(job._read_staged_provenance("AWSSite"))
             }
             staged = authored / "_fs_run" / "remote" / "AWSSite" / f"{job.name}.json"
-            if staged.is_file():
+            if staged.is_file() and not getattr(job, "_cloud_saved_plan_inputs", False):
                 descriptor = staged.read_bytes()
                 digest = "sha256:" + hashlib.sha256(descriptor).hexdigest()
                 provenance = snapshot._frozen_staged_provenance["AWSSite"]
@@ -1370,7 +1370,9 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
             )
         authored = Path(result._result_path).resolve()
         payload = getattr(result, "_cloud_staged_job_payload", None)
-        if payload is not None:
+        if payload is not None and not getattr(
+            result, "_cloud_saved_plan_inputs", False
+        ):
             # Managed Slurm verifies the uploaded descriptor, then privately
             # scopes its output paths to the accepted run before invoking the
             # solver. Match those exact bytes, never a fingerprint supplied by
