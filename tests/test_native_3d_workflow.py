@@ -128,17 +128,36 @@ def test_native_3d_pressure_reciprocity(tmp_path):
     )
     assert result.status.state == "completed"
     loaded = BaseJob.load(job.job_file)
-    manifest = loaded.run_metadata.manifest
+    metadata = loaded.run_metadata
+    assert metadata.successful
+    assert metadata.task_status == {1: "success"}
+    # The public metadata object exposes typed task artifacts and Python state.
+    # Build/workflow provenance remains in the fixed native run contract.
+    manifest = json.loads(
+        (loaded._result_path / "_fs_run" / "run_manifest.json").read_text()
+    )
     assert manifest["build"]["git_commit"] == identity.identity.git_commit
     assert len(manifest["build"]["git_commit"]) == 40
     assert manifest["build"]["git_dirty"] is False
     assert manifest["workflow"]["dimension"] == 3
     assert manifest["workflow"]["physics"] == "acoustic"
     assert manifest["workflow"]["finalized_by"] == "pack"
-    assert manifest["task_summary"]["succeeded"] == 1
-    assert manifest["task_summary"]["failed"] == 0
-    assert manifest["solver"]["convergence"]["converged"] is True
-    assert Path(manifest["solver"]["executable"]).name == "fs3d_s"
+    task_summary = {
+        "succeeded": sum(s == "success" for s in metadata.task_status.values()),
+        "failed": sum(s == "failed" for s in metadata.task_status.values()),
+    }
+    assert task_summary == {"succeeded": 1, "failed": 0}
+    task_manifest = json.loads(
+        (
+            loaded._result_path
+            / "_fs_run"
+            / "tasks"
+            / "task_000001"
+            / "run_manifest.json"
+        ).read_text()
+    )
+    assert task_manifest["solver"]["convergence"]["converged"] is True
+    assert Path(task_manifest["solver"]["executable"]).name == "fs3d_s"
     with loaded.traces.open() as traces:
         assert traces.groups == ["reciprocal"]
         data = traces.open_frequency_domain("reciprocal").compute()
@@ -178,7 +197,7 @@ def test_native_3d_pressure_reciprocity(tmp_path):
         "build": manifest["build"],
         "license": manifest.get("license"),
         "workflow": manifest["workflow"],
-        "task_summary": manifest["task_summary"],
+        "task_summary": task_summary,
         "input_hashes": {
             key: value["hash"] for key, value in manifest["inputs"].items()
         },
