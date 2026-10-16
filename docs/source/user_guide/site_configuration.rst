@@ -871,3 +871,98 @@ all frequencies, use ``site.submit(job, force=True)``.
 Changed scientific inputs or solver versions also require a full rerun.
 Local and Slurm sites also accept ``retry=True``; they already reuse completed
 task outputs by default, so the flag makes that intent explicit there.
+
+Saved frequency plans (experimental)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Saved-plan APIs require a compatible Cloud service and qualified solver/hardware
+installation. They are currently capability gated and are not enabled by adding
+a site configuration option. Legacy explicit ``nodes`` and ``mpi_ranks`` retain
+their existing meanings; automatic selection uses separate policy ceilings.
+
+``site.plan(job)`` returns a ``PlanHandle``. Preparing private inputs is free;
+paid sizing starts only after accepting the actual quote within an explicit
+decimal-string Credit maximum. The handle exposes ``id``, ``revision``,
+``status``, ``rows``, ``refresh()``, ``wait()``, ``edit()``, ``validate()``,
+``cancel()`` and ``export(path)``. Validation may return an additional paid
+sizing quote; it does not silently authorize it. A reviewed execution uses
+``site.execute_plan(plan, maximum_credits=execution_budget)`` and a fresh quote.
+
+Use ``plan.quote_execution()`` to inspect the current execution Credit maximum
+without reserving Credits or compute. Execute accepts an explicit Credit bound;
+it never prompts repeatedly for work already authorized. For an intentional new
+run of a completed plan, supply a deliberately new ``idempotency_key`` to
+``plan.execute(...)`` or ``site.execute_plan(...)``. This requests a fresh quote,
+authorization and run identity after the server verifies prior settlement.
+Without a new key, execute recovers the existing accepted run. An accepted failed
+solver job is never retried automatically, and a second execution cannot start
+while the same plan is already running.
+
+
+The experimental automatic-submission path returns a ``RunHandle`` even when
+source preparation or planning has not produced a Simulation yet. Its ``id``
+remains ``None`` until the server publishes the actual execution identity;
+``run.plan`` retains the saved plan. Polling does not issue a new execution or
+expand authorization. A pause raises ``PlanExecutionPaused`` with its ``plan``
+attached, so validation or pricing changes remain reviewable rather than becoming
+a fabricated failed simulation. Execution logs and solver outputs are unavailable
+before a real execution exists. Combined automatic authorization and its Cloud
+orchestration must be installed before enabling this workflow.
+
+After ``plan.refresh()``, ``plan.progress`` provides the last controller status,
+completed/failed/canceled evaluation or frequency counts, and an observation
+time. It returns ``None`` when an older server has no compatible status snapshot.
+Reading this property does not poll or launch work. Submitted allocations are
+reported as waiting for compute or results; a scheduler job identity alone does
+not establish that a worker has started. Progress is diagnostic and cannot
+replace validated sizing evidence or settled Credit receipts.
+
+Planning captures a private copy of staged scientific interpretation. Later
+authoring or staging edits cannot change an accepted plan's result reader. Saved
+plans retain their original native input fingerprints while final storage is
+scoped to the accepted run. Cancellation is pinned to that run and revision,
+including after the same user's plan handle is refreshed or reused.
+
+Settled execution outputs
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``plan.results()`` inspects the latest run retained on the handle. Pass
+``execution_id=...`` to inspect an earlier settled run without changing the
+current plan. Reads and downloads do not authorize compute or retry solver work.
+
+.. code-block:: python
+
+   results = plan.results(execution_id=run.id)
+   local_run = results.download("./downloaded-results")
+   artifacts = results.artifact_catalog(local_run, frequency_index=0)
+   traces = results.trace_dataset(local_run, frequency_index=0)
+
+Downloads verify exact provider versions and file digests before publishing a
+new local run directory. Existing directories are never overwritten. Each
+frequency retains its own native files and layout-specific geometry; failed or
+canceled siblings remain in the result index. ``artifact_catalog`` reads the
+producer's logical artifact records. ``trace_dataset`` opens one converged
+receiver frequency with its matching survey metadata, preserving the original
+task index and complex frequency. It rejects changed local data, incompatible
+trace families, missing metadata and nonconverged results. It does not manufacture
+a combined packed sweep or missing multi-node memory measurements. Inspect
+``results.data`` for requested versus actual allocations and scientific status.
+This native-archive workflow also requires compatible, qualified Cloud/Runtime
+readers and remains gated until installation and live acceptance are complete.
+
+
+Saved allocation revisions
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``site.list_plans(project_key=project_key)`` returns one page of owned saved-plan
+and pending-preparation summaries, an optional opaque ``cursor``, and reader
+availability. Pass that cursor unchanged on the next call to list more. Listing
+does not authorize compute or require a new quote; use an item's ``plan_id`` with
+``site.open_plan(...)`` to inspect the complete revision.
+
+``site.open_plan(plan_id, project_key=project_key, revision=revision)`` opens an
+exact immutable allocation revision for inspection and export. The historical
+handle is read-only; refreshing it keeps that revision selected. Open the plan
+without ``revision`` to return to its current editable state. Historical reads
+require current project membership but do not reserve compute, authorize a
+charge or require a new cluster grant.

@@ -1,0 +1,66 @@
+{
+  "version": "frequency-execution-plan.v1",
+  "plan_id": "fake-plan",
+  "revision": 1,
+  "context": {
+    "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "artifacts_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "solver_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "site_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalog_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "execution_site_id": "fake-site",
+    "sizing_policy_version": "memory-fit-first.v1",
+    "memory_policy": {
+      "calibration_numerator": 1,
+      "calibration_denominator": 1,
+      "worker_overhead_mib": 512,
+      "minimum_memory_mib": 0
+    }
+  },
+  "limits": {
+    "max_nodes_per_frequency": 4,
+    "max_concurrent_frequencies": 4,
+    "max_running_cpus": 128,
+    "max_wall_time_seconds": 3600,
+    "max_layout_evaluations": 8
+  },
+  "rows": [
+    {
+      "frequency_index": 0,
+      "frequency": "15",
+      "automatic": {
+        "layout": {
+          "partition": "cpu",
+          "node_type": "fake.arm",
+          "nodes": 2,
+          "ranks_per_node": 2,
+          "cpus_per_rank": 8
+        },
+        "memory_mib_per_node": 92160,
+        "wall_time_seconds": 900
+      },
+      "requested": {
+        "layout": {
+          "partition": "cpu",
+          "node_type": "fake.arm",
+          "nodes": 2,
+          "ranks_per_node": 2,
+          "cpus_per_rank": 8
+        },
+        "memory_mib_per_node": 92160,
+        "wall_time_seconds": 900
+      },
+      "overrides": {},
+      "validation": {
+        "status": "valid",
+        "sizing_digest": "sha256:24da0a14f0e3d0b3fbad77c579a92f47fd7b3894ab215ccc853079cc4eab7ab1",
+        "allocation_digest": "sha256:1b49cc4d9f1d9b367021fd17d4a2744ff9962fb70e60818be648a7bb1422640b",
+        "minimum_memory_mib_per_node": 72192
+      },
+      "reason": "Fits",
+      "estimated_runtime_seconds": null
+    }
+  ],
+  "digest": "sha256:95d8f8eb35e8b0f557f0f5e549f4d72f3dc91309c05babab7cf78e5e3966ca4f"
+}

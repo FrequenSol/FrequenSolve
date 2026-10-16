@@ -23,6 +23,7 @@ from frequensolve.orchestrator.sites.aws.cache_paths import (
 from frequensolve.orchestrator.sites.aws.execution_profile import (
     ManagedExecutionProfile,
 )
+from frequensolve.orchestrator.sites.aws.plans import ExecutionPlanningMixin
 from frequensolve.orchestrator.sites.execution import normalize_execution_state
 
 try:
@@ -238,7 +239,7 @@ class AWSSiteConfig(BaseSiteConfig):
             self.region = config_data["region"]
 
 
-class AWSSite(BaseSite):
+class AWSSite(ExecutionPlanningMixin, BaseSite):
     """AWS site for running FrequenSolve simulations.
 
     Automatically authenticates users and configures AWS resources by simply providing
@@ -317,6 +318,7 @@ class AWSSite(BaseSite):
                 "Managed Cloud execution settings may only be loaded from a "
                 "named site.toml profile via fs.Site(profile=...)"
             )
+        self._explicit_execution_resources = execution_resources is not None
         self.execution_profile = ManagedExecutionProfile.from_mapping(profile_values)
 
         # Load configuration from domain
@@ -1079,6 +1081,8 @@ class AWSSite(BaseSite):
         Raises:
             RuntimeError: If job submission fails.
         """
+        if "sizing_policy" in kwargs:
+            return self.submit_automatically(job, **kwargs)
         unsupported = kwargs.keys() - {
             "cluster_id",
             "partition",
@@ -1345,7 +1349,7 @@ class AWSSite(BaseSite):
                 "AWSSite": deepcopy(job._read_staged_provenance("AWSSite"))
             }
             staged = authored / "_fs_run" / "remote" / "AWSSite" / f"{job.name}.json"
-            if staged.is_file():
+            if staged.is_file() and not getattr(job, "_cloud_saved_plan_inputs", False):
                 descriptor = staged.read_bytes()
                 digest = "sha256:" + hashlib.sha256(descriptor).hexdigest()
                 provenance = snapshot._frozen_staged_provenance["AWSSite"]
@@ -1366,7 +1370,9 @@ class AWSSite(BaseSite):
             )
         authored = Path(result._result_path).resolve()
         payload = getattr(result, "_cloud_staged_job_payload", None)
-        if payload is not None:
+        if payload is not None and not getattr(
+            result, "_cloud_saved_plan_inputs", False
+        ):
             # Managed Slurm verifies the uploaded descriptor, then privately
             # scopes its output paths to the accepted run before invoking the
             # solver. Match those exact bytes, never a fingerprint supplied by

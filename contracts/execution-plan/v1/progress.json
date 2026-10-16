@@ -1,0 +1,23 @@
+{
+  "version": "frequency-plan-progress.v1",
+  "purpose": "planning",
+  "account_id": "fake-account",
+  "plan_id": "fake-plan",
+  "operation_id": "fake-operation",
+  "submission_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sequence": 1,
+  "observed_at": "2026-10-16T00:00:00.000Z",
+  "stage": "awaiting_compute_results",
+  "counts": {
+    "ready": 1,
+    "intent": 0,
+    "uncertain": 0,
+    "submitted": 1,
+    "completed": 0,
+    "failed": 0,
+    "canceled": 0,
+    "not_started": 0
+  },
+  "total": 2,
+  "digest": "sha256:f577ac58a3d1a28fcb014fb9a8182428ced800acadd75d09bf801d8ad32eb5dc"
+}

@@ -136,6 +136,7 @@ simulations rather than the numerical accuracy of the results.
 import json
 import os
 import shutil
+import warnings
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -157,6 +158,7 @@ from frequensolve.simulation import (
     TimeDomainJob,
     VtkOutput,
 )
+from frequensolve.solver import SolverCompatibilityWarning, query_local_solver_identity
 
 # =============================================================================
 # Test Parameters
@@ -499,7 +501,13 @@ def run_time_domain_simulation(project, simulation):
     """
     from frequensolve.orchestrator.sites.local import LocalSite
 
-    site = LocalSite(solver=_local_solver_from_environment())
+    solver = _local_solver_from_environment()
+    identity = query_local_solver_identity(solver)
+    if identity.identity is None:
+        raise RuntimeError(
+            f"Native acceptance requires a valid solver identity: {identity.error}"
+        )
+    site = LocalSite(solver=solver)
 
     # Define and submit a time-domain simulation
     td_job = TimeDomainJob(
@@ -509,8 +517,17 @@ def run_time_domain_simulation(project, simulation):
     # Capture stdout during job submission
     stdout_capture = StringIO()
     try:
-        with redirect_stdout(stdout_capture):
-            result = site.run(td_job)
+        # An exact candidate has no published compatibility pair yet. Preserve
+        # its warning while still rejecting unknown identities or other pairings.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", SolverCompatibilityWarning)
+            with redirect_stdout(stdout_capture):
+                result = site.run(td_job)
+        assert all(
+            "does not contain a released preferred Solver declaration."
+            in str(w.message)
+            for w in caught
+        )
     except Exception as exc:
         diagnostic_dir, diagnostic_error = _time_domain_failure_diagnostics(
             td_job, error=exc, stdout=stdout_capture.getvalue()
