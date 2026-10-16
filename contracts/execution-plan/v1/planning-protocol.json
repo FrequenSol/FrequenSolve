@@ -163,6 +163,7 @@
         "qualifications": [
           {
             "solver_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "solver_variant": "fs2d_s",
             "layout": {
               "partition": "cpu",
               "node_type": "fake.arm",
@@ -240,7 +241,7 @@
         "minimum_memory_mib": 0
       },
       "sizing_policy_version": "memory-fit-first.v1",
-      "catalog_digest": "sha256:79816c81f96589a397265a88afd15155cf95e314c71790d6de11645a87200e80"
+      "catalog_digest": "sha256:73d8f229c535595fc83b9465b546f163b3377d11eccaaf1527eab67fdb67f984"
     },
     "status": "planning",
     "operation_id": "fake-operation",
@@ -345,7 +346,7 @@
   "profile": {
     "version": "qualified-planning-runtime.v1",
     "runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "catalog_digest": "sha256:79816c81f96589a397265a88afd15155cf95e314c71790d6de11645a87200e80",
+    "catalog_digest": "sha256:73d8f229c535595fc83b9465b546f163b3377d11eccaaf1527eab67fdb67f984",
     "site_fingerprint": "sha256:895e3349b7d0c72f49ec231f158f0a03e97a2cfaa69520ced1793cc423cc0588",
     "memory_policy": {
       "calibration_numerator": 118,
@@ -425,7 +426,7 @@
         "minimum_memory_mib": 0
       },
       "sizing_policy_version": "memory-fit-first.v1",
-      "catalog_digest": "sha256:79816c81f96589a397265a88afd15155cf95e314c71790d6de11645a87200e80"
+      "catalog_digest": "sha256:73d8f229c535595fc83b9465b546f163b3377d11eccaaf1527eab67fdb67f984"
     },
     "authority": {
       "version": "shared-plan-authority.v1",
@@ -478,5 +479,5 @@
     ],
     "quote_fingerprint": "sha256:76f3852d69c707f585e69788b0fa971cc5418562fdd5849f24dc03197a7e5dea"
   },
-  "submission_digest": "ccbac3efe030b789679cc756eb665095fbf11844b25e4d94d5c12e7c16ecbb87"
+  "submission_digest": "709d0bc08f2d8d0986b70dfc1e4ded1c826883b8fd8ddad9e578bc4dfb2bd88c"
 }
