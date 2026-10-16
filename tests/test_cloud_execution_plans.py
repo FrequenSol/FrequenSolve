@@ -13,8 +13,28 @@ from frequensolve.orchestrator.sites.aws.plans import (
     PlanExecutionPaused,
     PlanHandle,
     check_quote,
+    request,
     sizing_policy,
 )
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2])
+def test_plan_transport_accepts_direct_and_awsjson_envelopes(depth):
+    result = {"available": False, "items": [], "cursor": None}
+    encoded = result
+    for _ in range(depth):
+        encoded = json.dumps(encoded)
+    client = SimpleNamespace(execute=lambda *_: {"requestMyExecutionPlan": encoded})
+    assert request(client, "list", {"project_key": "fake-project"}) == result
+
+
+@pytest.mark.parametrize(
+    "value", [None, [], "not-json", json.dumps(json.dumps(json.dumps({"items": []})))]
+)
+def test_plan_transport_rejects_invalid_or_excessively_nested_envelopes(value):
+    client = SimpleNamespace(execute=lambda *_: {"requestMyExecutionPlan": value})
+    with pytest.raises(PlanError, match="invalid execution-plan response"):
+        request(client, "list", {"project_key": "fake-project"})
 
 
 class Client:

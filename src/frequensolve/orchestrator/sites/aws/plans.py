@@ -47,8 +47,17 @@ def request(client: Any, action: str, payload: dict[str, Any]) -> dict[str, Any]
         query, {"input": json.dumps({"action": action, **payload})}
     )
     result = response.get("requestMyExecutionPlan")
-    if isinstance(result, str):
-        result = json.loads(result)
+    # AWSJSON may retain the Lambda's JSON string as one encoded JSON value.
+    # Accept the direct and deployed envelopes, with no unbounded decoding.
+    for _ in range(2):
+        if not isinstance(result, str):
+            break
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            raise PlanError(
+                "Cloud returned an invalid execution-plan response"
+            ) from None
     if not isinstance(result, dict):
         raise PlanError("Cloud returned an invalid execution-plan response")
     if result.get("error"):
