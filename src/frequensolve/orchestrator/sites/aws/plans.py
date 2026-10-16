@@ -91,6 +91,7 @@ class PlanHandle:
     _execute_requests: dict[str, dict[str, Any]] = field(
         default_factory=dict, repr=False
     )
+    _pending_planning_maximum: str | None = field(default=None, repr=False)
 
     @property
     def id(self) -> str:
@@ -121,9 +122,28 @@ class PlanHandle:
 
     def refresh(self) -> "PlanHandle":
         self._call("get")
+        if self.status in {"canceled", "failed"}:
+            self._pending_planning_maximum = None
+        elif (
+            self._pending_planning_maximum is not None
+            and self.status == "awaiting_authorization"
+            and self.revision == 0
+            and self.data.get("quote", {}).get("purpose") == "planning"
+        ):
+            self.authorize(self._pending_planning_maximum)
         return self
 
     def authorize(self, maximum_credits: str) -> "PlanHandle":
+        if self.status == "preparing":
+            # Remember the user's bound while free source copying runs. This
+            # creates no hold and authorizes no unquoted compute. Refresh will
+            # check the actual planning quote against the SAME bound first.
+            check_quote(
+                {"maximum_credits": "0", "fingerprint": "preparation-only"},
+                maximum_credits,
+            )
+            self._pending_planning_maximum = maximum_credits
+            return self
         quote = self.data.get("quote")
         if not isinstance(quote, dict):
             raise PlanError("Refresh the planning quote before authorizing compute")
@@ -137,6 +157,7 @@ class PlanHandle:
             accepted_quote_fingerprint=quote["fingerprint"],
             maximum_credits=maximum_credits,
         )
+        self._pending_planning_maximum = None
         return self
 
     def wait(

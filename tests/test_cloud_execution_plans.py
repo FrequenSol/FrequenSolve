@@ -49,6 +49,51 @@ def test_quote_can_be_inspected_without_authorizing_compute():
     assert client.calls == []
 
 
+def test_source_preparation_defers_authorization_until_a_matching_quote_exists():
+    plan, client = handle()
+    plan.data = {"head": {**plan.data["head"], "revision": 0, "status": "preparing"}}
+    client.response = deepcopy(plan.data)
+    assert plan.authorize("20") is plan
+    assert client.calls == []
+    plan.refresh()
+    assert [call["action"] for call in client.calls] == ["get"]
+    client.response = {
+        "head": {**plan.data["head"], "status": "awaiting_authorization"},
+        "quote": {
+            "purpose": "planning",
+            "maximum_credits": "12.50",
+            "fingerprint": "fake-fingerprint",
+        },
+    }
+    plan.refresh()
+    assert [call["action"] for call in client.calls] == ["get", "get", "authorize"]
+    assert client.calls[-1]["maximum_credits"] == "20"
+    plan.refresh()
+    assert client.calls[-1]["action"] == "get"
+
+
+def test_preparation_cannot_expand_authorization_or_authorize_validation():
+    plan, client = handle()
+    plan.data = {"head": {**plan.data["head"], "revision": 0, "status": "preparing"}}
+    with pytest.raises(PlanError):
+        plan.authorize("Infinity")
+    plan.authorize("1")
+    client.response = {
+        "head": {**plan.data["head"], "status": "awaiting_authorization"},
+        "quote": {
+            "purpose": "planning",
+            "maximum_credits": "12.50",
+            "fingerprint": "fake-fingerprint",
+        },
+    }
+    with pytest.raises(PlanError, match="exceeds"):
+        plan.refresh()
+    assert [call["action"] for call in client.calls] == ["get"]
+    client.response["quote"]["purpose"] = "validation"
+    plan.refresh()
+    assert [call["action"] for call in client.calls] == ["get", "get"]
+
+
 def test_authorization_is_bound_to_quote_and_reuses_request_identity():
     plan, client = handle()
     plan.authorize("20")
