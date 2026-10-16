@@ -914,3 +914,13 @@ authoring or staging edits cannot change an accepted plan's result reader. Saved
 plans retain their original native input fingerprints while final storage is
 scoped to the accepted run. Cancellation is pinned to that run and revision,
 including after the same user's plan handle is refreshed or reused.
+
+Saved allocation revisions
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``site.open_plan(plan_id, project_key=project_key, revision=revision)`` opens an
+exact immutable allocation revision for inspection and export. The historical
+handle is read-only; refreshing it keeps that revision selected. Open the plan
+without ``revision`` to return to its current editable state. Historical reads
+require current project membership but do not reserve compute, authorize a
+charge or require a new cluster grant.

@@ -112,6 +112,10 @@ class PlanHandle:
         return self.data.get("plan", {}).get("rows", [])
 
     def _call(self, action: str, **values: Any) -> dict[str, Any]:
+        if self.data.get("historical") and action != "get":
+            raise PlanError(
+                "This saved revision is read-only; open the current plan before editing or executing"
+            )
         payload = {
             "plan_id": self.id,
             "project_key": self.data["head"]["owner"]["project_key"],
@@ -130,11 +134,22 @@ class PlanHandle:
                 raise PlanError(
                     "Cloud returned a different saved plan identity; refresh the original plan"
                 )
+            if "revision" in values and (
+                head.get("revision") != values["revision"]
+                or head.get("status") != "historical"
+                or result.get("historical", {}).get("revision") != values["revision"]
+            ):
+                raise PlanError(
+                    "Saved-revision history requires a compatible Cloud response"
+                )
             self.data = result
         return result
 
     def refresh(self) -> "PlanHandle":
-        self._call("get")
+        self._call(
+            "get",
+            **({"revision": self.revision} if self.data.get("historical") else {}),
+        )
         if self.status in {"canceled", "failed"}:
             self._pending_planning_maximum = None
         elif (
@@ -188,6 +203,7 @@ class PlanHandle:
                 "canceled",
                 "executing",
                 "executed",
+                "historical",
             }:
                 return self
             if self.status == "awaiting_authorization":
@@ -514,11 +530,38 @@ class ExecutionPlanningMixin:
         return handle
 
     def open_plan(
-        self, plan_id: str, *, project_key: str, job: Any = None
+        self,
+        plan_id: str,
+        *,
+        project_key: str,
+        job: Any = None,
+        revision: int | None = None,
     ) -> PlanHandle:
+        if revision is not None:
+            positive(revision, "saved revision")
         result = request(
-            self.graphql_client, "get", {"plan_id": plan_id, "project_key": project_key}
+            self.graphql_client,
+            "get",
+            {
+                "plan_id": plan_id,
+                "project_key": project_key,
+                **({"revision": revision} if revision is not None else {}),
+            },
         )
+        head = result.get("head", {})
+        if (
+            head.get("plan_id") != plan_id
+            or head.get("owner", {}).get("project_key") != project_key
+        ):
+            raise PlanError("Cloud returned a different saved plan identity")
+        if revision is not None and (
+            head.get("revision") != revision
+            or head.get("status") != "historical"
+            or result.get("historical", {}).get("revision") != revision
+        ):
+            raise PlanError(
+                "Saved-revision history requires a compatible Cloud response"
+            )
         return PlanHandle(self, result, job)
 
     def execute_plan(
@@ -533,6 +576,10 @@ class ExecutionPlanningMixin:
         # it never retries an accepted failed solver job automatically.
         if plan.site is not self:
             raise PlanError("Open this plan using the intended authenticated site")
+        if plan.data.get("historical"):
+            raise PlanError(
+                "This saved revision is read-only; open the current plan before executing"
+            )
         key = idempotency_key or plan._keys.setdefault(
             f"execute-{plan.revision}", uuid.uuid4().hex
         )

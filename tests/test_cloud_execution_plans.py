@@ -536,3 +536,51 @@ def test_execution_quote_is_inspectable_without_authorizing_or_dispatching_and_i
     client.response["quote"]["purpose"] = "planning"
     with pytest.raises(PlanError, match="no execution quote"):
         plan.quote_execution()
+
+
+def test_historical_plan_handle_reads_the_exact_revision_and_cannot_mutate_or_execute():
+    class Site(ExecutionPlanningMixin):
+        pass
+
+    site = Site()
+    site.graphql_client = Client()
+    plan, _client = handle()
+    historical = deepcopy(plan.data)
+    historical["head"]["status"] = "historical"
+    historical["historical"] = {"revision": 1, "current_revision": 3}
+    site.graphql_client.response = historical
+    saved = site.open_plan(plan.id, project_key="fake-project", revision=1)
+    assert saved.status == "historical"
+    saved.refresh()
+    assert all(call.get("revision") == 1 for call in site.graphql_client.calls)
+    before = len(site.graphql_client.calls)
+    with pytest.raises(PlanError, match="read-only"):
+        saved.edit([{"frequency_index": 0, "nodes": 2}])
+    with pytest.raises(PlanError, match="read-only"):
+        saved.validate()
+    with pytest.raises(PlanError, match="read-only"):
+        saved.cancel()
+    with pytest.raises(PlanError, match="read-only"):
+        saved.quote_execution()
+    with pytest.raises(PlanError, match="read-only"):
+        site.execute_plan(saved, maximum_credits="100", idempotency_key="new-run")
+    assert len(site.graphql_client.calls) == before
+    assert saved.wait(timeout=1).status == "historical"
+
+
+def test_open_saved_revision_rejects_incompatible_server_or_other_plan_before_authorization():
+    class Site(ExecutionPlanningMixin):
+        pass
+
+    site = Site()
+    site.graphql_client = Client()
+    plan, _client = handle()
+    site.graphql_client.response = deepcopy(plan.data)
+    with pytest.raises(PlanError, match="compatible Cloud"):
+        site.open_plan(plan.id, project_key="fake-project", revision=1)
+    with pytest.raises(PlanError, match="different saved plan"):
+        site.open_plan("another-plan", project_key="fake-project")
+    before = len(site.graphql_client.calls)
+    with pytest.raises(PlanError):
+        site.open_plan(plan.id, project_key="fake-project", revision=0)
+    assert len(site.graphql_client.calls) == before
