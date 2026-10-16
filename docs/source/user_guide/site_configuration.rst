@@ -954,6 +954,12 @@ readers and remains gated until installation and live acceptance are complete.
 Saved allocation revisions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+``site.list_plans(project_key=project_key)`` returns one page of owned saved-plan
+and pending-preparation summaries, an optional opaque ``cursor``, and reader
+availability. Pass that cursor unchanged on the next call to list more. Listing
+does not authorize compute or require a new quote; use an item's ``plan_id`` with
+``site.open_plan(...)`` to inspect the complete revision.
+
 ``site.open_plan(plan_id, project_key=project_key, revision=revision)`` opens an
 exact immutable allocation revision for inspection and export. The historical
 handle is read-only; refreshing it keeps that revision selected. Open the plan

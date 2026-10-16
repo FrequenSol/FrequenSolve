@@ -644,3 +644,61 @@ def test_automatic_planning_status_reports_observed_counts_without_submitting_ag
     assert status.raw["progress"]["counts"]["submitted"] == 1
     assert run.id is None and site.bound == []
     assert all(call["action"] == "get" for call in site.graphql_client.calls)
+
+
+def test_read_only_plan_listing_pages_do_not_create_handles_or_authorize_compute():
+    plan, client = handle()
+    site = type("Site", (ExecutionPlanningMixin,), {})()
+    site.graphql_client = client
+    cursor = {
+        "phase": "plans",
+        "key": {"scope": "fake-private-list", "id": "fake-plan"},
+    }
+    client.response = {
+        "available": False,
+        "items": [plan.data["head"]],
+        "cursor": cursor,
+    }
+    page = site.list_plans(project_key="fake-project")
+    assert page["available"] is False
+    assert page["items"][0]["plan_id"] == "fake-plan"
+    page["items"][0]["revision"] = 100
+    assert client.response["items"][0]["revision"] == 1
+    client.response = {"available": False, "items": [], "cursor": None}
+    assert site.list_plans(project_key="fake-project", cursor=cursor)["cursor"] is None
+    assert client.calls == [
+        {"action": "list", "project_key": "fake-project"},
+        {"action": "list", "project_key": "fake-project", "cursor": cursor},
+    ]
+
+
+@pytest.mark.parametrize("fault", ["project", "identity", "revision", "size"])
+def test_plan_listing_rejects_foreign_or_invalid_server_summaries(fault):
+    plan, client = handle()
+    site = type("Site", (ExecutionPlanningMixin,), {})()
+    site.graphql_client = client
+    head = deepcopy(plan.data["head"])
+    if fault == "project":
+        head["owner"]["project_key"] = "foreign-project"
+    if fault == "identity":
+        head["plan_id"] = "../foreign-plan"
+    if fault == "revision":
+        head["revision"] = True
+    client.response = {"items": [head] * (151 if fault == "size" else 1)}
+    with pytest.raises(PlanError):
+        site.list_plans(project_key="fake-project")
+    assert client.calls[0]["action"] == "list"
+
+
+def test_invalid_plan_listing_scope_or_cursor_fails_before_any_network_call():
+    plan, client = handle()
+    site = type("Site", (ExecutionPlanningMixin,), {})()
+    site.graphql_client = client
+    for project_key, cursor in [
+        ("", None),
+        ("fake-project", {"phase": "foreign", "key": {}}),
+        ("fake-project", {"phase": "plans", "key": {"scope": "x", "id": 123}}),
+    ]:
+        with pytest.raises(PlanError):
+            site.list_plans(project_key=project_key, cursor=cursor)
+    assert client.calls == []

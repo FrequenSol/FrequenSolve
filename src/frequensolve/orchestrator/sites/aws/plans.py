@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from copy import deepcopy
@@ -602,6 +603,65 @@ class ExecutionPlanningMixin:
         accepted = PlanHandle(self, deepcopy(plan.data), source)
         handle._cancel_fn = lambda _run: accepted.cancel()
         return handle
+
+    def list_plans(
+        self, *, project_key: str, cursor: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Read one page of owned plan/preparation summaries without paid work.
+
+        Pass the returned opaque cursor unchanged to fetch the next page. Open
+        an item with ``open_plan`` to inspect its complete current revision.
+        """
+        if (
+            not isinstance(project_key, str)
+            or not 1 <= len(project_key) <= 1024
+            or any(ord(char) < 32 or ord(char) == 127 for char in project_key)
+        ):
+            raise PlanError("Invalid saved-plan project key")
+        if cursor is not None:
+            try:
+                valid_cursor = (
+                    isinstance(cursor, dict)
+                    and set(cursor) == {"phase", "key"}
+                    and cursor["phase"] in {"preparations", "plans"}
+                    and isinstance(cursor["key"], dict)
+                    and set(cursor["key"]) == {"scope", "id"}
+                    and all(
+                        isinstance(value, str) and 0 < len(value) <= 1024
+                        for value in cursor["key"].values()
+                    )
+                    and len(json.dumps(cursor).encode()) <= 4096
+                )
+            except (TypeError, ValueError):
+                valid_cursor = False
+            if not valid_cursor:
+                raise PlanError("Invalid saved-plan page cursor")
+        result = request(
+            self.graphql_client,
+            "list",
+            {
+                "project_key": project_key,
+                **({"cursor": deepcopy(cursor)} if cursor is not None else {}),
+            },
+        )
+        items = result.get("items")
+        if not isinstance(items, list) or len(items) > 150:
+            raise PlanError("Cloud returned an invalid saved-plan page")
+        for head in items:
+            if (
+                not isinstance(head, dict)
+                or not isinstance(head.get("owner"), dict)
+                or head["owner"].get("project_key") != project_key
+                or not isinstance(head.get("plan_id"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", head["plan_id"])
+                or type(head.get("revision")) is not int
+                or not 0 <= head["revision"] <= 2**53 - 1
+                or not isinstance(head.get("status"), str)
+            ):
+                raise PlanError(
+                    "Cloud returned another project or invalid plan identity"
+                )
+        return deepcopy(result)
 
     def open_plan(
         self,
