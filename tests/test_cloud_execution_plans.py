@@ -152,6 +152,20 @@ def test_wait_does_not_execute_a_ready_plan():
     assert [call["action"] for call in client.calls] == ["get"]
 
 
+def test_execution_cancellation_pins_the_run_and_reuses_the_exact_request():
+    plan, client = handle()
+    plan.data["head"].update(status="executing", execution_id="fake-run")
+    client.response = deepcopy(plan.data)
+    plan.cancel()
+    plan.cancel()
+    assert client.calls[0] == client.calls[1]
+    assert client.calls[0]["expected_execution_id"] == "fake-run"
+    plan.data["head"].pop("execution_id")
+    with pytest.raises(PlanError, match="execution identity"):
+        plan.cancel()
+    assert len(client.calls) == 2
+
+
 def test_policy_limits_are_optional_but_bounded_and_typed():
     assert sizing_policy() == {"max_layout_evaluations": 8}
     assert (

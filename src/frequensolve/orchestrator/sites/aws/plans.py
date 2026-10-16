@@ -225,12 +225,20 @@ class PlanHandle:
         )
 
     def cancel(self) -> "PlanHandle":
+        execution_id = self.data["head"].get("execution_id")
+        if self.status == "executing" and not execution_id:
+            raise PlanError("Refresh the accepted execution identity before canceling")
         self._call(
             "cancel",
             expected_revision=self.revision,
             idempotency_key=self._keys.setdefault(
-                f"cancel-{self.revision}-{self.data['head'].get('operation_id', '')}",
+                f"cancel-{self.revision}-{execution_id or self.data['head'].get('operation_id', '')}",
                 uuid.uuid4().hex,
+            ),
+            **(
+                {"expected_execution_id": execution_id}
+                if self.status == "executing"
+                else {}
             ),
         )
         return self
