@@ -460,3 +460,61 @@ def test_lost_execution_response_replays_the_exact_intent_without_requoting():
     assert site.graphql_client.calls[1] == site.graphql_client.calls[2]
     with pytest.raises(PlanError, match="same authorization"):
         site.execute_plan(plan, maximum_credits="30")
+
+
+def test_completed_plan_requires_explicit_new_key_for_an_intentional_rerun():
+    class Site(ExecutionPlanningMixin):
+        def _run_handle_from_plan(self, plan, run_id):
+            return SimpleNamespace(id=run_id)
+
+    terminal = {
+        "head": {
+            "plan_id": "fake-plan",
+            "revision": 1,
+            "status": "executed",
+            "owner": {"project_key": "fake-project"},
+            "execution_id": "fake-old-run",
+        },
+        "execution": {"phase": "settled", "outcome": "FAILED"},
+    }
+
+    class RerunClient(Client):
+        def execute(self, _query, values):
+            payload = json.loads(values["input"])
+            self.calls.append(payload)
+            if payload["action"] == "quote_execution":
+                response = {
+                    **terminal,
+                    "quote": {"maximum_credits": "10", "fingerprint": "fresh-quote"},
+                }
+            else:
+                response = {
+                    "head": {
+                        **terminal["head"],
+                        "status": "executing",
+                        "execution_id": "fake-new-run",
+                    }
+                }
+            return {"requestMyExecutionPlan": json.dumps(response)}
+
+    site = Site()
+    site.graphql_client = RerunClient()
+    plan = PlanHandle(site, deepcopy(terminal), object())
+    assert plan.execute("20").id == "fake-old-run"
+    assert site.graphql_client.calls == []
+    assert (
+        plan.execute("20", idempotency_key="intentional-new-run").id == "fake-new-run"
+    )
+    assert [call["action"] for call in site.graphql_client.calls] == [
+        "quote_execution",
+        "execute",
+    ]
+    accepted = deepcopy(site.graphql_client.calls[-1])
+    assert accepted["accepted_quote_fingerprint"] == "fresh-quote"
+    assert (
+        plan.execute("20", idempotency_key="intentional-new-run").id == "fake-new-run"
+    )
+    assert site.graphql_client.calls[-1] == accepted
+    with pytest.raises(PlanError, match="active execution"):
+        plan.execute("20", idempotency_key="another-new-run")
+    assert len(site.graphql_client.calls) == 3

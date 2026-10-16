@@ -516,6 +516,9 @@ class ExecutionPlanningMixin:
         maximum_credits: str,
         idempotency_key: str | None = None,
     ):
+        # No new key means recover the accepted run. A deliberately new key on
+        # a completed plan requests a fresh quote/authorization and new identity;
+        # it never retries an accepted failed solver job automatically.
         if plan.site is not self:
             raise PlanError("Open this plan using the intended authenticated site")
         key = idempotency_key or plan._keys.setdefault(
@@ -528,12 +531,14 @@ class ExecutionPlanningMixin:
                     "A retried execution must reuse the same authorization; inspect the accepted operation first"
                 )
             result = plan._call("execute", **cached)
-        elif plan.status in {"executing", "executed"} and plan.data["head"].get(
-            "execution_id"
+        elif (
+            plan.status in {"executing", "executed"}
+            and plan.data["head"].get("execution_id")
+            and (idempotency_key is None or plan.status == "executing")
         ):
             if idempotency_key is not None:
                 raise PlanError(
-                    "This plan already has an execution; create a new plan revision for an intentional rerun"
+                    "This plan already has an active execution; wait for physical and financial completion before an intentional rerun"
                 )
             result = plan.data
         else:
