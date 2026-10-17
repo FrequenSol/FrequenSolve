@@ -10,10 +10,14 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from frequensolve.execution_plan import PLAN_VERSION, PlanError, positive
 from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
+
+if TYPE_CHECKING:
+    from .aws import AWSSite
+    from .plan_results import ExecutionResults
 
 
 def sizing_policy(value: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -96,7 +100,7 @@ class PlanHandle:
     an explicit Credit maximum, never by an unattended interactive prompt.
     """
 
-    site: Any
+    site: AWSSite
     data: dict[str, Any]
     job: Any = None
     _keys: dict[str, str] = field(default_factory=dict, repr=False)
@@ -302,7 +306,7 @@ class PlanHandle:
             self.authorize(maximum_credits)
         return self
 
-    def results(self, *, execution_id: str | None = None):
+    def results(self, *, execution_id: str | None = None) -> ExecutionResults:
         """Inspect one settled execution without changing this plan or running work."""
         from .plan_results import ExecutionResults
 
@@ -335,10 +339,15 @@ class PlanHandle:
             or quote.get("purpose", "execution") != "execution"
         ):
             raise PlanError("Cloud returned no execution quote")
-        check_quote(quote, quote.get("maximum_credits"))
+        maximum = quote.get("maximum_credits")
+        if not isinstance(maximum, str):
+            raise PlanError("maximum_credits must be an explicit decimal string")
+        check_quote(quote, maximum)
         return deepcopy(quote)
 
-    def execute(self, maximum_credits: str, *, idempotency_key: str | None = None):
+    def execute(
+        self, maximum_credits: str, *, idempotency_key: str | None = None
+    ) -> RunHandle:
         return self.site.execute_plan(
             self, maximum_credits=maximum_credits, idempotency_key=idempotency_key
         )
@@ -371,7 +380,7 @@ class PlanHandle:
 class PlanExecutionPaused(PlanError):
     """Automatic work paused with a retained plan, never a fabricated failed run."""
 
-    def __init__(self, plan: PlanHandle):
+    def __init__(self, plan: PlanHandle) -> None:
         self.plan = plan
         reason = plan.data.get("automatic", {}).get("message")
         super().__init__(
@@ -391,7 +400,7 @@ class AutomaticRunHandle(RunHandle):
     already supplied bound for the initial paid planning operation.
     """
 
-    def __init__(self, plan: PlanHandle):
+    def __init__(self, plan: PlanHandle) -> None:
         self.plan = plan
         super().__init__(
             site=plan.site,
@@ -400,16 +409,19 @@ class AutomaticRunHandle(RunHandle):
             check=False,
             backend={"planId": plan.id, "planRevision": plan.revision},
             _status_fn=self._planning_status,
-            _cancel_fn=lambda _run: plan.cancel(),
+            _cancel_fn=self._cancel_planning,
             _logs_fn=self._planning_logs,
         )
 
-    def _planning_logs(self, _run: RunHandle, **_options: Any):
+    def _cancel_planning(self, _run: RunHandle) -> None:
+        self.plan.cancel()
+
+    def _planning_logs(self, _run: RunHandle, **_options: Any) -> NoReturn:
         raise PlanError(
             f"Plan {self.plan.id} has no execution logs yet; inspect the saved planning progress"
         )
 
-    def fetch(self):
+    def fetch(self) -> Any:
         if self.id is None:
             raise PlanError(
                 f"Plan {self.plan.id} has not published an execution; no solver outputs are available"
@@ -421,7 +433,7 @@ class AutomaticRunHandle(RunHandle):
         self.backend["planRevision"] = self.plan.revision
         run_id = self.plan.data["head"].get("execution_id")
         if run_id:
-            accepted = self.site._run_handle_from_plan(self.plan, run_id)
+            accepted = self.plan.site._run_handle_from_plan(self.plan, run_id)
             # Adopt the ordinary Cloud run behavior only once the real identity
             # exists. Preserve this object's identity for wait/watch/cancel users.
             for name in (
@@ -487,6 +499,11 @@ class AutomaticRunHandle(RunHandle):
 class ExecutionPlanningMixin:
     """Cloud plan operations share authentication and input staging with AWSSite."""
 
+    @property
+    def _planning_site(self) -> AWSSite:
+        # This mixin belongs to AWSSite; keep its host dependencies explicit.
+        return cast("AWSSite", self)
+
     def plan(
         self,
         job: Any,
@@ -511,27 +528,27 @@ class ExecutionPlanningMixin:
                 "Automatic sizing cannot silently replace explicit execution_resources. Use a named profile without fixed nodes/mpi_ranks settings."
             )
         selectors = resolve_compute_options(
-            self.execution_profile.graphql_arguments(), compute_options
+            self._planning_site.execution_profile.graphql_arguments(), compute_options
         )
-        self.prepare_job(job, sync_project=True, validate=True)
+        self._planning_site.prepare_job(job, sync_project=True, validate=True)
         project = job.project_path.name
         if getattr(job.simulation, "_project", None) is None:
-            self._sync_loaded_job_inputs(job, project)
-        self._prepare_run_snapshot(job)
+            self._planning_site._sync_loaded_job_inputs(job, project)
+        self._planning_site._prepare_run_snapshot(job)
         local_job, remote_job = job.save_for_remote(
             self.__class__.__name__, project, include_job_id=False
         )
-        key = self.sync_s3(local_job, remote_job)
+        key = self._planning_site.sync_s3(local_job, remote_job)
         local_simulation, remote_simulation = job.save_simulation_for_remote(
             self.__class__.__name__, project
         )
-        self.sync_s3(local_simulation, remote_simulation)
+        self._planning_site.sync_s3(local_simulation, remote_simulation)
         # Retain interpretation AFTER staging, before the asynchronous request.
         # Later authoring/staging edits must not replace these scientific bytes.
-        frozen_job = self._prepare_run_snapshot(job)
+        frozen_job = self._planning_site._prepare_run_snapshot(job)
         frozen_job._cloud_saved_plan_inputs = True
         result = request(
-            self.graphql_client,
+            self._planning_site.graphql_client,
             "create",
             {
                 "idempotency_key": idempotency_key or uuid.uuid4().hex,
@@ -545,12 +562,12 @@ class ExecutionPlanningMixin:
                 },
             },
         )
-        handle = PlanHandle(self, result, frozen_job)
+        handle = PlanHandle(self._planning_site, result, frozen_job)
         if maximum_credits is not None:
             handle.authorize(maximum_credits)
         return handle
 
-    def submit_automatically(self, job: Any, **options: Any):
+    def submit_automatically(self, job: Any, **options: Any) -> RunHandle:
         """Submit through the same saved-plan stages with one bounded authorization.
 
         This opt-in policy does not reinterpret legacy explicit MPI topology.
@@ -593,24 +610,28 @@ class ExecutionPlanningMixin:
             if callable(prepare):
                 source = prepare(source)
                 source._cloud_saved_plan_inputs = True
-            handle = self._make_run_handle(
+            handle = self._planning_site._make_run_handle(
                 source,
                 run_id,
                 backend={"planId": plan.id, "planRevision": plan.revision},
             )
         else:
             handle = RunHandle(
-                site=self,
+                site=self._planning_site,
                 job=None,
                 id=run_id,
                 mode="aws",
                 backend={"planId": plan.id, "planRevision": plan.revision},
-                _status_fn=self._poll_run,
+                _status_fn=self._planning_site._poll_run,
             )
         # Bind cancellation to THIS accepted run and revision. Neither a mutable
         # authoring job nor later reuse of the user's PlanHandle can redirect it.
-        accepted = PlanHandle(self, deepcopy(plan.data), source)
-        handle._cancel_fn = lambda _run: accepted.cancel()
+        accepted = PlanHandle(self._planning_site, deepcopy(plan.data), source)
+
+        def cancel_accepted(_run: RunHandle) -> None:
+            accepted.cancel()
+
+        handle._cancel_fn = cancel_accepted
         return handle
 
     def list_plans(
@@ -646,7 +667,7 @@ class ExecutionPlanningMixin:
             if not valid_cursor:
                 raise PlanError("Invalid saved-plan page cursor")
         result = request(
-            self.graphql_client,
+            self._planning_site.graphql_client,
             "list",
             {
                 "project_key": project_key,
@@ -683,7 +704,7 @@ class ExecutionPlanningMixin:
         if revision is not None:
             positive(revision, "saved revision")
         result = request(
-            self.graphql_client,
+            self._planning_site.graphql_client,
             "get",
             {
                 "plan_id": plan_id,
@@ -705,7 +726,7 @@ class ExecutionPlanningMixin:
             raise PlanError(
                 "Saved-revision history requires a compatible Cloud response"
             )
-        return PlanHandle(self, result, job)
+        return PlanHandle(self._planning_site, result, job)
 
     def execute_plan(
         self,
@@ -713,7 +734,7 @@ class ExecutionPlanningMixin:
         *,
         maximum_credits: str,
         idempotency_key: str | None = None,
-    ):
+    ) -> RunHandle:
         # No new key means recover the accepted run. A deliberately new key on
         # a completed plan requests a fresh quote/authorization and new identity;
         # it never retries an accepted failed solver job automatically.

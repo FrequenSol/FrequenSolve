@@ -9,9 +9,15 @@ import re
 import tempfile
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any, BinaryIO, overload
 
 from frequensolve.execution_plan import PlanError, digest
+
+if TYPE_CHECKING:
+    from frequensolve.seismic.traces import TraceDataset
+    from frequensolve.simulation.artifact_contract import ArtifactCatalog
+
+    from .aws import AWSSite
 
 
 def _relative(value: Any) -> str:
@@ -42,7 +48,15 @@ class ExecutionResults:
     legacy combined packed product or missing memory telemetry is available.
     """
 
-    def __init__(self, site, response, *, plan_id, execution_id, project):
+    def __init__(
+        self,
+        site: AWSSite,
+        response: dict[str, Any],
+        *,
+        plan_id: str,
+        execution_id: str,
+        project: str,
+    ) -> None:
         head, value = response.get("head"), response.get("results")
         location = response.get("result_location")
         if (
@@ -124,11 +138,11 @@ class ExecutionResults:
         )
 
     @property
-    def data(self):
+    def data(self) -> dict[str, Any]:
         return deepcopy(self._data)
 
     @staticmethod
-    def _reference(ref, bucket, key):
+    def _reference(ref: Any, bucket: str, key: str) -> dict[str, Any]:
         if (
             not isinstance(ref, dict)
             or set(ref) != {"bucket", "key", "version_id", "digest"}
@@ -142,7 +156,34 @@ class ExecutionResults:
         _digest(ref["digest"])
         return ref
 
-    def _download(self, ref, *, maximum, output=None, expected_size=None):
+    @overload
+    def _download(
+        self,
+        ref: dict[str, Any],
+        *,
+        maximum: int,
+        output: None = None,
+        expected_size: int | None = None,
+    ) -> bytes: ...
+
+    @overload
+    def _download(
+        self,
+        ref: dict[str, Any],
+        *,
+        maximum: int,
+        output: BinaryIO,
+        expected_size: int | None = None,
+    ) -> None: ...
+
+    def _download(
+        self,
+        ref: dict[str, Any],
+        *,
+        maximum: int,
+        output: BinaryIO | None = None,
+        expected_size: int | None = None,
+    ) -> bytes | None:
         try:
             response = self.site.s3_client.get_object(
                 Bucket=ref["bucket"], Key=ref["key"], VersionId=ref["version_id"]
@@ -193,7 +234,9 @@ class ExecutionResults:
             if body is not None:
                 body.close()
 
-    def _local_archive(self, directory, frequency_index):
+    def _local_archive(
+        self, directory: str | Path, frequency_index: int
+    ) -> tuple[Path, dict[str, Any], dict[str, dict[str, Any]]]:
         if type(frequency_index) is not int or not 0 <= frequency_index < len(
             self._data["frequencies"]
         ):
@@ -229,7 +272,9 @@ class ExecutionResults:
         return folder / "files", row, files
 
     @staticmethod
-    def _verified_file(root, files, relative):
+    def _verified_file(
+        root: Path, files: dict[str, dict[str, Any]], relative: str
+    ) -> Path:
         relative = _relative(relative)
         item = files.get(relative)
         if item is None:
@@ -248,7 +293,9 @@ class ExecutionResults:
             raise PlanError("Local native artifact bytes changed")
         return path
 
-    def artifact_catalog(self, directory: str | Path, *, frequency_index: int):
+    def artifact_catalog(
+        self, directory: str | Path, *, frequency_index: int
+    ) -> ArtifactCatalog:
         """Read one retained frequency's producer-authored logical artifacts."""
         import math
 
@@ -285,7 +332,9 @@ class ExecutionResults:
                 raise PlanError("Native artifact catalog refers to unretained files")
         return catalog
 
-    def trace_dataset(self, directory: str | Path, *, frequency_index: int):
+    def trace_dataset(
+        self, directory: str | Path, *, frequency_index: int
+    ) -> TraceDataset:
         """Open a converged receiver gather with its own layout-specific metadata.
 
         Frequencies stay independent. This does not merge unlike survey metadata
