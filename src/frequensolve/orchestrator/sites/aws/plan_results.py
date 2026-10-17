@@ -143,9 +143,23 @@ class ExecutionResults:
         return ref
 
     def _download(self, ref, *, maximum, output=None, expected_size=None):
-        response = self.site.s3_client.get_object(
-            Bucket=ref["bucket"], Key=ref["key"], VersionId=ref["version_id"]
-        )
+        try:
+            response = self.site.s3_client.get_object(
+                Bucket=ref["bucket"], Key=ref["key"], VersionId=ref["version_id"]
+            )
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") not in {
+                "AccessDenied",
+                "403",
+            }:
+                raise
+            # Standard Cloud credentials may only read current objects. S3
+            # returns the atomically selected VersionId with the bytes; the
+            # checks below still require the exact saved version AND digest.
+            # A moved alias cannot substitute another revision's results.
+            response = self.site.s3_client.get_object(
+                Bucket=ref["bucket"], Key=ref["key"]
+            )
         body = response.get("Body")
         try:
             size = response.get("ContentLength")

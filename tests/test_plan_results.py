@@ -449,3 +449,79 @@ def test_native_payload_header_cannot_select_another_task_or_frequency(
     root = result.download(tmp_path / "downloads")
     with pytest.raises(PlanError, match="saved frequency/task/survey"):
         result.trace_dataset(root, frequency_index=0)
+
+
+class FakeVersionAccessDenied(Exception):
+    response = {"Error": {"Code": "AccessDenied"}}
+
+
+def test_current_read_fallback_still_requires_saved_provider_version_and_digest(
+    tmp_path,
+):
+    f = fixture()
+    original = f.site.s3_client.get_object
+    attempts = []
+
+    def current_only(**request):
+        attempts.append(request)
+        if "VersionId" in request:
+            raise FakeVersionAccessDenied()
+        versions = [version for key, version in f.payloads if key == request["Key"]]
+        assert len(versions) == 1
+        return original(**request, VersionId=versions[0])
+
+    f.site.s3_client.get_object = current_only
+    root = f.read().download(tmp_path)
+    assert (
+        root / "frequency-000000/files/traces/data.h5"
+    ).read_bytes() == b"fake traces"
+    assert len(attempts) == 8
+    assert all("VersionId" not in row for row in attempts[1::2])
+
+
+@pytest.mark.parametrize("fault", ["version", "digest", "missing-version"])
+def test_current_read_fallback_never_accepts_moved_alias_or_corrupt_bytes(
+    tmp_path, fault
+):
+    f = fixture()
+    bodies = []
+
+    def current_only(**request):
+        if "VersionId" in request:
+            raise FakeVersionAccessDenied()
+        key, version = next(
+            (key, version) for key, version in f.payloads if key == request["Key"]
+        )
+        raw = f.payloads[key, version]
+        if fault == "digest":
+            raw += b"corrupt"
+        body = io.BytesIO(raw)
+        bodies.append(body)
+        return {
+            "VersionId": (
+                "foreign"
+                if fault == "version"
+                else None if fault == "missing-version" else version
+            ),
+            "Body": body,
+            "ContentLength": len(raw),
+        }
+
+    f.site.s3_client.get_object = current_only
+    with pytest.raises(PlanError, match="immutable provider|content digest"):
+        f.read().download(tmp_path)
+    assert all(body.closed for body in bodies)
+
+
+def test_other_provider_failures_never_trigger_current_read_fallback(tmp_path):
+    f = fixture()
+    calls = []
+
+    def fail(**request):
+        calls.append(request)
+        raise RuntimeError("provider unavailable")
+
+    f.site.s3_client.get_object = fail
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        f.read().download(tmp_path)
+    assert len(calls) == 1
