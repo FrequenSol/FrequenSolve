@@ -369,6 +369,19 @@ def test_automatic_handle_cancels_planning_and_reports_pre_execution_failure_as_
     assert site.bound == []
 
 
+def test_pending_automatic_cancellation_stays_with_the_original_plan():
+    site, run = pending_automatic_run()
+    replacement = deepcopy(run.plan.data)
+    replacement["head"]["plan_id"] = "a-different-plan"
+    run.plan = PlanHandle(site, replacement)
+
+    run.cancel()
+
+    assert site.graphql_client.calls[-1]["action"] == "cancel"
+    assert site.graphql_client.calls[-1]["plan_id"] == "fake-plan"
+    assert "expected_execution_id" not in site.graphql_client.calls[-1]
+
+
 def test_automatic_handle_waits_for_server_continuation_without_requesting_another_quote():
     site, run = pending_automatic_run()
     site.graphql_client.response["head"].update(status="review", revision=1)

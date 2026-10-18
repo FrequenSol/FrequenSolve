@@ -402,6 +402,10 @@ class AutomaticRunHandle(RunHandle):
 
     def __init__(self, plan: PlanHandle) -> None:
         self.plan = plan
+
+        def cancel_planning(_run: RunHandle) -> None:
+            plan.cancel()
+
         super().__init__(
             site=plan.site,
             job=plan.job,
@@ -409,12 +413,9 @@ class AutomaticRunHandle(RunHandle):
             check=False,
             backend={"planId": plan.id, "planRevision": plan.revision},
             _status_fn=self._planning_status,
-            _cancel_fn=self._cancel_planning,
+            _cancel_fn=cancel_planning,
             _logs_fn=self._planning_logs,
         )
-
-    def _cancel_planning(self, _run: RunHandle) -> None:
-        self.plan.cancel()
 
     def _planning_logs(self, _run: RunHandle, **_options: Any) -> NoReturn:
         raise PlanError(
@@ -433,7 +434,9 @@ class AutomaticRunHandle(RunHandle):
         self.backend["planRevision"] = self.plan.revision
         run_id = self.plan.data["head"].get("execution_id")
         if run_id:
-            accepted = self.plan.site._run_handle_from_plan(self.plan, run_id)
+            accepted = cast("AWSSite", self.site)._run_handle_from_plan(
+                self.plan, run_id
+            )
             # Adopt the ordinary Cloud run behavior only once the real identity
             # exists. Preserve this object's identity for wait/watch/cancel users.
             for name in (
