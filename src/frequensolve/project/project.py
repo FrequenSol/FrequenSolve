@@ -21,7 +21,7 @@ from typing import Any, Dict, Mapping, Optional, Union
 # without importing execution sites during ordinary project construction.
 import frequensolve as _fs
 from frequensolve._version import get_versions
-from frequensolve.project_identity import ProjectIdentity, local_identity
+from frequensolve.project_identity import COPY_RECOVERY, ProjectIdentity, local_identity
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.units import UnitConfig
 from frequensolve.util.atomic import atomic_write_json
@@ -212,6 +212,9 @@ class Project:
         """
 
         dest = Path(dest).expanduser().resolve()
+        claim = dest / ".fs-copy.lock"
+        if claim.exists() or claim.is_symlink():
+            raise FileExistsError(COPY_RECOVERY)
         if kwargs.get("load_if_exists", False):
             existing = cls._load_existing_project(dest)
             if existing is not None:
@@ -219,12 +222,15 @@ class Project:
 
         if (dest / ".frequensolve").exists() or (dest / ".frequensolve").is_symlink():
             raise FileExistsError(
-                "Copy destination already has an immutable project identity"
+                "Copy destination already has an immutable project identity. "
+                "Use Project.load to continue it, or a different empty destination to fork."
             )
         dest.mkdir(parents=True, exist_ok=True)
-        claim = dest / ".fs-copy.lock"
-        with claim.open("x") as marker:
-            marker.write("Project.copy in progress\n")
+        try:
+            with claim.open("x") as marker:
+                marker.write("Project.copy in progress\n")
+        except FileExistsError:
+            raise FileExistsError(COPY_RECOVERY) from None
         completed = False
         try:
             if (dest / ".frequensolve").exists() or (

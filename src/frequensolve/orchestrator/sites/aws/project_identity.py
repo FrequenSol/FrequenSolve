@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from frequensolve.project_identity import ProjectIdentity, local_identity
+from frequensolve.project_identity import COPY_RECOVERY, ProjectIdentity, local_identity
 
 
 class ProjectIdentityMixin:
@@ -16,8 +16,9 @@ class ProjectIdentityMixin:
     def _ensure_project_identity(
         self, root: str | Path, display_name: str
     ) -> ProjectIdentity | None:
-        if (Path(root) / ".fs-copy.lock").exists():
-            raise RuntimeError("Finish the project copy before uploading inputs")
+        claim = Path(root) / ".fs-copy.lock"
+        if claim.exists() or claim.is_symlink():
+            raise RuntimeError(COPY_RECOVERY)
         identity = local_identity(root)
         if identity is None:
             return None

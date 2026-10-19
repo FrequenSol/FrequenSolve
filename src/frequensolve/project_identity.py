@@ -22,6 +22,13 @@ SCHEMA_VERSION = "project-identity.v1"
 DIRECTORY = ".frequensolve"
 FILENAME = "project-identity.json"
 MAX_BYTES = 4096
+COPY_RECOVERY = (
+    "Finish the project copy before uploading or loading it as a completed copy. "
+    "The destination has an active or incomplete copy claim. Wait for its writer; "
+    "if it failed, keep the partial folder for inspection and retry Project.copy "
+    "from the intact source into a different new, empty destination. Do not "
+    "remove the claim or replace its project ID to bypass this check."
+)
 _UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )

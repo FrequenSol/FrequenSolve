@@ -169,6 +169,32 @@ class PlanHandle:
             raise PlanError("Cloud returned incomplete planning progress")
         return deepcopy(value)
 
+    def snapshot(self) -> dict[str, Any]:
+        """Detach the last observed response for review before an edit.
+
+        This is not trusted evidence and cannot revise or execute a plan. No
+        refresh occurs, even when this handle has a pending Credit maximum.
+        """
+        return deepcopy(self.data)
+
+    def summary(self, *, details: bool = False) -> str:
+        """Read resource requests, validation and recorded quotes offline."""
+        from frequensolve.plan_review import format_review
+
+        return format_review(self.data, details=details)
+
+    def diff(self, previous: dict[str, Any]) -> str:
+        """Compare an earlier snapshot of this same plan/owner, offline."""
+        from frequensolve.plan_review import format_diff
+
+        return format_diff(previous, self.data)
+
+    def recovery(self) -> str:
+        """Explain safe reopening/recovery; never retry, refresh or authorize."""
+        from frequensolve.plan_review import recovery_guidance
+
+        return recovery_guidance(self.data)
+
     def _call(self, action: str, **values: Any) -> dict[str, Any]:
         if self.data.get("historical") and action != "get":
             raise PlanError(
