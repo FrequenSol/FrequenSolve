@@ -77,3 +77,9 @@ retain the ID and exact revision; mismatched response owners are rejected.
 This candidate depends on the unmerged planning pilot and Cloud #2298. It is
 not stable publication or general activation. It does not migrate old projects,
 move retained objects, change billing or launch tests automatically.
+
+Copying claims the destination before writing inputs and reserves a fresh UUID
+before any immutable inputs are copied. A concurrent copy is rejected. A stopped
+copy leaves its claim for explicit recovery; uploads refuse an unfinished copy.
+After moving a project, use `Project.load(new_path).load_job(...)` so saved jobs
+receive the relocated project context.

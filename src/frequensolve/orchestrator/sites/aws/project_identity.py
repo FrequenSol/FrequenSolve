@@ -16,6 +16,8 @@ class ProjectIdentityMixin:
     def _ensure_project_identity(
         self, root: str | Path, display_name: str
     ) -> ProjectIdentity | None:
+        if (Path(root) / ".fs-copy.lock").exists():
+            raise RuntimeError("Finish the project copy before uploading inputs")
         identity = local_identity(root)
         if identity is None:
             return None

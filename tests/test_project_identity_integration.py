@@ -113,3 +113,41 @@ def test_sync_binds_before_writing_and_uses_stable_remote_root(tmp_path):
     with pytest.raises(RuntimeError, match="disabled"):
         RealAWSSite.sync(site, project)
     site.put.assert_not_called()
+
+
+def test_concurrent_copies_reject_before_writing_inputs(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    source = Project(name="source", path=tmp_path / "source")
+    source.enable_identity()
+    target = tmp_path / "target"
+    entered, release = Event(), Event()
+    original = Project._copy_project_inputs
+    calls = []
+
+    def blocked_copy(src, dest):
+        calls.append((src, dest))
+        entered.set()
+        assert release.wait(timeout=5)
+        return original(src, dest)
+
+    monkeypatch.setattr(Project, "_copy_project_inputs", staticmethod(blocked_copy))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(Project.copy, source.path, target)
+        try:
+            assert entered.wait(timeout=5)
+            site = ProjectIdentityMixin()
+            site.graphql_client = SimpleNamespace(request_project_identity=Mock())
+            with pytest.raises(RuntimeError, match="Finish the project copy"):
+                site._ensure_project_identity(target, "incomplete")
+            site.graphql_client.request_project_identity.assert_not_called()
+            second = pool.submit(Project.copy, source.path, target)
+            with pytest.raises(FileExistsError):
+                second.result(timeout=2)
+        finally:
+            release.set()
+        copied = first.result(timeout=5)
+    assert len(calls) == 1
+    assert copied.project_id != source.project_id
+    assert ProjectIdentity.load(target).project_id == copied.project_id

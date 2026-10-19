@@ -221,38 +221,56 @@ class Project:
             raise FileExistsError(
                 "Copy destination already has an immutable project identity"
             )
-        src_file = cls._project_file(src)
-        source = cls.load(src_file)
-        source_root = src_file.parent
         dest.mkdir(parents=True, exist_ok=True)
-        cls._copy_project_inputs(source_root, dest)
+        claim = dest / ".fs-copy.lock"
+        with claim.open("x") as marker:
+            marker.write("Project.copy in progress\n")
+        try:
+            if (dest / ".frequensolve").exists() or (
+                dest / ".frequensolve"
+            ).is_symlink():
+                raise FileExistsError(
+                    "Copy destination already has an immutable project identity"
+                )
+            src_file = cls._project_file(src)
+            source = cls.load(src_file)
+            source_root = src_file.parent
+            reserved = None
+            if source.project_id is not None:
+                if any(path.name != ".fs-copy.lock" for path in dest.iterdir()):
+                    raise FileExistsError(
+                        "Immutable copies require a new or empty destination"
+                    )
+                reserved = ProjectIdentity.new()
+                reserved.save_new(dest)
+            cls._copy_project_inputs(source_root, dest)
 
-        copied = cls(
-            name=kwargs.get("name", source.name),
-            pretty_name=kwargs.get("pretty_name", source.pretty_name),
-            path=dest,
-            version=kwargs.get("version", source.version),
-            log_level=kwargs.get("log_level", source.log_level),
-            log_file=kwargs.get("log_file", source.log_file),
-            log_to_console=kwargs.get("log_to_console", source.log_to_console),
-            dependency_log_level=kwargs.get(
-                "dependency_log_level", source.dependency_log_level
-            ),
-            jupyter_logging=kwargs.get("jupyter_logging", source.jupyter_logging),
-            simulations=source.simulations,
-            extras=source.extras,
-        )
-        if source.project_id is not None:
-            if copied.project_id is not None:
-                raise ValueError("Copy destination already has an immutable identity")
-            copied.enable_identity()
-        copied.save()
-        cls._rewrite_copied_input_files(
-            dest,
-            source_project=source_root,
-            target_project=dest,
-        )
-        return cls.load(dest / f"{copied.name}.json")
+            copied = cls(
+                name=kwargs.get("name", source.name),
+                pretty_name=kwargs.get("pretty_name", source.pretty_name),
+                path=dest,
+                version=kwargs.get("version", source.version),
+                log_level=kwargs.get("log_level", source.log_level),
+                log_file=kwargs.get("log_file", source.log_file),
+                log_to_console=kwargs.get("log_to_console", source.log_to_console),
+                dependency_log_level=kwargs.get(
+                    "dependency_log_level", source.dependency_log_level
+                ),
+                jupyter_logging=kwargs.get("jupyter_logging", source.jupyter_logging),
+                simulations=source.simulations,
+                extras=source.extras,
+            )
+            if reserved is not None and copied.project_id != reserved.project_id:
+                raise ValueError("Copy destination identity changed")
+            copied.save()
+            cls._rewrite_copied_input_files(
+                dest,
+                source_project=source_root,
+                target_project=dest,
+            )
+            return cls.load(dest / f"{copied.name}.json")
+        finally:
+            claim.unlink()
 
     def save(self, file: Optional[Union[str, Path]] = None, **json_kwargs) -> Path:
         """Save the project and all attached simulations.
