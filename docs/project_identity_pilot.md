@@ -1,9 +1,13 @@
-# Project identity foundation (opt-in, not Cloud-active)
+# Immutable project identity pilot (explicit opt-in)
 
-This module is the first bounded slice of Cloud #2273 and SDK #303. It is not
-a released change to Cloud project identity. Existing `Project`, upload,
-planning, result and Trash behavior remains unchanged. Do not send the new ID
-as an existing `project_key` or use it to construct S3 paths.
+This coordinated candidate implements Cloud #2273/#2298 and SDK #305. It is
+not a stable release or a historical migration. The capability is enabled only
+for the selected Sandbox participant; all other projects retain legacy behavior.
+Use `Project.enable_identity()` and the AWS adapter to establish the binding.
+Do not substitute a UUID for a `project_key` or construct remote storage paths
+yourself. The adapter obtains and verifies the authoritative Cloud prefix.
+
+## Local manifest contract
 
 The local manifest contains only a version and a lowercase UUIDv4. It is stored
 at `.frequensolve/project-identity.json` inside the project folder. Display names
@@ -44,21 +48,22 @@ versions. No site config or credentials are written.
 
 The Cloud registration core must verify the authenticated account and user,
 conditionally claim the ID and require expected revisions/idempotency receipts.
-Knowing, editing or copying a UUID never grants access. The coordinated gate
-remains off until uploads, saved plans, project summaries and deletion fences
-all use the same authoritative binding. No historical storage or record mapping
+Knowing, editing or copying a UUID never grants access. The source configuration defaults off. The coordinated pilot enables only an
+explicit participant after uploads, saved plans, project summaries and deletion
+fences use the same authoritative binding. No historical storage or record mapping
 is performed by these helpers.
 
 `legacy_reference` and `reference_token` provide the shared tagged contract.
 They do not normalize old keys or infer immutable identity from UUID-shaped
 text. Exact structured contract vectors live under
 `tests/contracts/project-identity-v1.json` and match Cloud's fixture byte-for-byte.
-Normal `Project.copy` continues copying its existing authoring inputs and does
-not copy/activate this manifest. Use the explicit identity methods only when
-participating in the coordinated future pilot.
+For a legacy project, `Project.copy` keeps its prior behavior. For an opted-in
+project, it creates a fresh identity before copying authoring inputs. Do not use
+a filesystem copy as a fork: copying a manifest explicitly preserves identity
+and represents continuation of the same study.
 
 
-## Coordinated Cloud binding candidate
+## SDK and Cloud workflow
 
 With the coordinated Cloud capability enabled for the authenticated participant,
 `project.enable_identity()` creates and saves the manifest before the first
