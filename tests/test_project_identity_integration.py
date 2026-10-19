@@ -151,3 +151,28 @@ def test_concurrent_copies_reject_before_writing_inputs(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert copied.project_id != source.project_id
     assert ProjectIdentity.load(target).project_id == copied.project_id
+
+
+def test_failed_copy_keeps_upload_fence(tmp_path, monkeypatch):
+    source = Project(name="source", path=tmp_path / "source")
+    source.enable_identity()
+    target = tmp_path / "target"
+
+    def fail_after_partial_write(src, dest):
+        (dest / "partial-input.json").write_text("{}")
+        raise OSError("simulated input-copy failure")
+
+    monkeypatch.setattr(
+        Project, "_copy_project_inputs", staticmethod(fail_after_partial_write)
+    )
+    with pytest.raises(OSError, match="simulated input-copy failure"):
+        Project.copy(source.path, target)
+    assert ProjectIdentity.load(target).project_id != source.project_id
+    assert (target / ".fs-copy.lock").exists()
+    site = ProjectIdentityMixin()
+    site.graphql_client = SimpleNamespace(request_project_identity=Mock())
+    with pytest.raises(RuntimeError, match="Finish the project copy"):
+        site._ensure_project_identity(target, "incomplete")
+    site.graphql_client.request_project_identity.assert_not_called()
+    with pytest.raises(FileExistsError):
+        Project.copy(source.path, target)

@@ -225,6 +225,7 @@ class Project:
         claim = dest / ".fs-copy.lock"
         with claim.open("x") as marker:
             marker.write("Project.copy in progress\n")
+        completed = False
         try:
             if (dest / ".frequensolve").exists() or (
                 dest / ".frequensolve"
@@ -268,9 +269,12 @@ class Project:
                 source_project=source_root,
                 target_project=dest,
             )
-            return cls.load(dest / f"{copied.name}.json")
+            result = cls.load(dest / f"{copied.name}.json")
+            completed = True
+            return result
         finally:
-            claim.unlink()
+            if completed:
+                claim.unlink()
 
     def save(self, file: Optional[Union[str, Path]] = None, **json_kwargs) -> Path:
         """Save the project and all attached simulations.

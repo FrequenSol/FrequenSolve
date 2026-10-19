@@ -84,7 +84,7 @@ not stable publication or general activation. It does not migrate old projects,
 move retained objects, change billing or launch tests automatically.
 
 Copying claims the destination before writing inputs and reserves a fresh UUID
-before any immutable inputs are copied. A concurrent copy is rejected. A stopped
+before any immutable inputs are copied. A concurrent copy is rejected. A failed or interrupted
 copy leaves its claim for explicit recovery; uploads refuse an unfinished copy.
 After moving a project, use `Project.load(new_path).load_job(...)` so saved jobs
 receive the relocated project context.
