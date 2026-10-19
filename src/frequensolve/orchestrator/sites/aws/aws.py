@@ -239,7 +239,10 @@ class AWSSiteConfig(BaseSiteConfig):
             self.region = config_data["region"]
 
 
-class AWSSite(ExecutionPlanningMixin, BaseSite):
+from .project_identity import ProjectIdentityMixin, local_identity
+
+
+class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
     """AWS site for running FrequenSolve simulations.
 
     Automatically authenticates users and configures AWS resources by simply providing
@@ -969,6 +972,9 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
         self._ensure_storage_bucket()
 
         self._emit(f"Syncing project '{project.name}' to S3")
+        self._ensure_project_identity(
+            project.path, getattr(project, "pretty_name", None) or project.name
+        )
         project._transfer(self)
         self._emit(f"Project '{project.name}' synced to S3")
 
@@ -1155,7 +1161,13 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
         ]
         self.prepare_job(job, validate=validate)
         reusable_execution = False
-        if not fresh_run and not retry and job._job_id and job.is_run_current():
+        if (
+            not fresh_run
+            and not retry
+            and local_identity(job.project_path) is None
+            and job._job_id
+            and job.is_run_current()
+        ):
             previous = self.graphql_client.get_simulation_status_details(
                 str(job._job_id)
             )
@@ -1180,7 +1192,13 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
 
         self.prepare_job(job, sync_project=True, validate=False)
 
-        project = job.project_path.name
+        identity = self._ensure_project_identity(
+            job.project_path,
+            self._authored_project_metadata(job)[1]
+            or self._authored_project_metadata(job)[0]
+            or job.project_path.name,
+        )
+        project = self.project_storage_key(job.project_path)
         if getattr(job.simulation, "_project", None) is None:
             self._sync_loaded_job_inputs(job, project)
 
@@ -1207,9 +1225,13 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
 
             # Freeze and validate the result layout before admitting remote work.
             run_job = self._prepare_run_snapshot(job)
+            project_identity_arguments: Dict[str, Any] = (
+                {"project_id": identity.project_id} if identity else {}
+            )
             result = self.graphql_client.submit_job(
                 job_file_s3_key=str(s3_job_key),
                 job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
+                **project_identity_arguments,
                 project_name=authored_project_name,
                 project_display_name=authored_project_display_name,
                 simulation_name=job.simulation.name,
@@ -1344,6 +1366,9 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
         # weights and regularization). Copy the complete job graph with one
         # memo so later authoring edits cannot alter an earlier run's reader.
         snapshot = deepcopy(job, memo)
+        identity = local_identity(job.project_path)
+        if identity:
+            snapshot._cloud_project_prefix = identity.storage_prefix
         if hasattr(job, "_read_staged_provenance"):
             snapshot._frozen_staged_provenance = {
                 "AWSSite": deepcopy(job._read_staged_provenance("AWSSite"))
@@ -1381,7 +1406,9 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
             authored_relative = authored.relative_to(project).as_posix()
 
             def project_relative(value: str) -> str:
-                return value.strip("/").removeprefix(project.name + "/")
+                return value.strip("/").removeprefix(
+                    getattr(result, "_cloud_project_prefix", project.name) + "/"
+                )
 
             if (
                 project_relative(payload.get("result_path", "results"))
@@ -1718,7 +1745,7 @@ class AWSSite(ExecutionPlanningMixin, BaseSite):
                 self._frequency_task(item, frequency) if frequency is not None else task
             )
             remote = (
-                f"s3://{self.config.s3_bucket}/{item.project_path.name}/jobs/"
+                f"s3://{self.config.s3_bucket}/{self.project_storage_key(item.project_path)}/jobs/"
                 f"{item.simulation.name}/{item.name}/logs/{run_id}/"
             )
             if requested_local_dir is None:

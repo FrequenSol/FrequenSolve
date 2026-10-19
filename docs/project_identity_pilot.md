@@ -56,3 +56,24 @@ text. Exact structured contract vectors live under
 Normal `Project.copy` continues copying its existing authoring inputs and does
 not copy/activate this manifest. Use the explicit identity methods only when
 participating in the coordinated future pilot.
+
+
+## Coordinated Cloud binding candidate
+
+With the coordinated Cloud capability enabled for the authenticated participant,
+`project.enable_identity()` creates and saves the manifest before the first
+upload. `Project.load` retains it; a missing or conflicting expected manifest
+fails closed. Moving the whole folder preserves the ID. `Project.copy` forks an
+opt-in project's ID and rejects an existing identity at the destination before
+copying files. Legacy projects keep their previous paths and behavior.
+
+The AWS adapter binds the UUID before transferring any inputs, verifies the
+server's exact storage prefix, and stages new objects under `pi_<uuid>`. Folder
+names never change that binding. Unknown/disabled backends and foreign or
+conflicting bindings fail rather than falling back to folder identity. Direct
+submission and plan creation send the explicit ID. Saved-plan edits and reads
+retain the ID and exact revision; mismatched response owners are rejected.
+
+This candidate depends on the unmerged planning pilot and Cloud #2298. It is
+not stable publication or general activation. It does not migrate old projects,
+move retained objects, change billing or launch tests automatically.

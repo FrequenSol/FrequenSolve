@@ -177,6 +177,11 @@ class PlanHandle:
         payload = {
             "plan_id": self.id,
             "project_key": self.data["head"]["owner"]["project_key"],
+            **(
+                {"project_id": self.data["head"]["owner"]["project_id"]}
+                if "project_id" in self.data["head"]["owner"]
+                else {}
+            ),
             **values,
         }
         result = request(self.site.graphql_client, action, payload)
@@ -188,6 +193,8 @@ class PlanHandle:
                 or not isinstance(head.get("owner"), dict)
                 or head["owner"].get("project_key")
                 != self.data["head"]["owner"]["project_key"]
+                or head["owner"].get("project_id")
+                != self.data["head"]["owner"].get("project_id")
             ):
                 raise PlanError(
                     "Cloud returned a different saved plan identity; refresh the original plan"
@@ -319,6 +326,11 @@ class PlanHandle:
             {
                 "plan_id": self.id,
                 "project_key": self.data["head"]["owner"]["project_key"],
+                **(
+                    {"project_id": self.data["head"]["owner"]["project_id"]}
+                    if "project_id" in self.data["head"]["owner"]
+                    else {}
+                ),
                 "execution_id": run,
             },
         )
@@ -534,7 +546,13 @@ class ExecutionPlanningMixin:
             self._planning_site.execution_profile.graphql_arguments(), compute_options
         )
         self._planning_site.prepare_job(job, sync_project=True, validate=True)
-        project = job.project_path.name
+        identity = self._planning_site._ensure_project_identity(
+            job.project_path,
+            self._planning_site._authored_project_metadata(job)[1]
+            or self._planning_site._authored_project_metadata(job)[0]
+            or job.project_path.name,
+        )
+        project = self._planning_site.project_storage_key(job.project_path)
         if getattr(job.simulation, "_project", None) is None:
             self._planning_site._sync_loaded_job_inputs(job, project)
         self._planning_site._prepare_run_snapshot(job)
@@ -556,6 +574,7 @@ class ExecutionPlanningMixin:
             {
                 "idempotency_key": idempotency_key or uuid.uuid4().hex,
                 "job_file_key": str(key),
+                **({"project_id": identity.project_id} if identity else {}),
                 "policy": policy,
                 "run_after_planning": run_after_planning,
                 **{
@@ -565,6 +584,15 @@ class ExecutionPlanningMixin:
                 },
             },
         )
+        if identity is not None and (
+            result.get("head", {}).get("owner", {}).get("project_id")
+            != identity.project_id
+            or result.get("head", {}).get("owner", {}).get("project_key")
+            != identity.storage_prefix
+        ):
+            raise PlanError(
+                "Cloud returned a different immutable project for the saved plan"
+            )
         handle = PlanHandle(self._planning_site, result, frozen_job)
         if maximum_credits is not None:
             handle.authorize(maximum_credits)

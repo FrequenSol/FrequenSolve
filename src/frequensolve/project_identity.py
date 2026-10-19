@@ -1,6 +1,6 @@
 """Opt-in local project identity; this document is not Cloud access authority.
 
-Existing Project creation, uploads and saved-plan ownership are unchanged.
+Legacy projects are unchanged. Opt-in Projects bind Cloud storage and saved plans.
 Import this module explicitly while the coordinated Cloud capability is gated.
 """
 
@@ -123,6 +123,10 @@ class ProjectIdentity:
     def to_dict(self) -> dict[str, str]:
         return {"schema_version": SCHEMA_VERSION, "project_id": self.project_id}
 
+    @property
+    def storage_prefix(self) -> str:
+        return "pi_" + self.project_id
+
     def reference(self) -> dict[str, str]:
         return {"kind": "immutable", "project_id": self.project_id}
 
@@ -179,3 +183,27 @@ class ProjectIdentity:
         fork = type(self).new()
         fork.save_new(project_root)
         return fork
+
+
+def local_identity(root: str | Path) -> ProjectIdentity | None:
+    root = Path(root)
+    manifest = root / ".frequensolve" / "project-identity.json"
+    if os.path.lexists(manifest):
+        return ProjectIdentity.load(root)
+    if os.path.lexists(root / DIRECTORY):
+        raise ValueError(
+            "Project identity manifest is missing; restore it before uploading"
+        )
+    # Saved projects retain the expectation even if a manifest was lost.
+    for path in root.glob("*.json"):
+        if path.stat().st_size > 1048576:
+            continue
+        try:
+            value = json.loads(path.read_text())
+        except (ValueError, UnicodeError):
+            continue
+        if isinstance(value, dict) and value.get("project_id") is not None:
+            raise ValueError(
+                "Project identity manifest is missing; restore it before uploading"
+            )
+    return None

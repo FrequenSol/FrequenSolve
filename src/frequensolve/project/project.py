@@ -21,6 +21,7 @@ from typing import Any, Dict, Mapping, Optional, Union
 # without importing execution sites during ordinary project construction.
 import frequensolve as _fs
 from frequensolve._version import get_versions
+from frequensolve.project_identity import ProjectIdentity, local_identity
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.units import UnitConfig
 from frequensolve.util.atomic import atomic_write_json
@@ -79,6 +80,7 @@ class Project:
     """
 
     name: str
+    project_id: Optional[str] = None
     pretty_name: Optional[str] = None
     path: Union[str, Path]
     version: str = field(default_factory=_current_sdk_version)
@@ -108,7 +110,32 @@ class Project:
 
         self._configure_logging()
         self.path.mkdir(parents=True, exist_ok=True)
+        identity = local_identity(self.path)
+        if self.project_id is not None and (
+            identity is None or identity.project_id != self.project_id
+        ):
+            raise ValueError(
+                "Project identity manifest is missing or conflicts with the saved project"
+            )
+        if identity is not None:
+            self.project_id = identity.project_id
         self._bind_simulations_to_project()
+
+    def enable_identity(self) -> ProjectIdentity:
+        """Opt into a durable identity before the first Cloud upload."""
+
+        if self.project_id is not None:
+            identity = ProjectIdentity.load(self.path)
+            if identity.project_id != self.project_id:
+                raise ValueError(
+                    "Project identity manifest conflicts with this project"
+                )
+            return identity
+        identity = ProjectIdentity.new()
+        identity.save_new(self.path)
+        self.project_id = identity.project_id
+        self.save()
+        return identity
 
     @classmethod
     def load(cls, file: Union[str, Path]) -> "Project":
@@ -146,6 +173,7 @@ class Project:
             project = cls(
                 name=name,
                 pretty_name=data.get("pretty_name"),
+                project_id=data.get("project_id"),
                 path=project_file.parent,
                 version=str(version),
                 log_level=logging_config.get("level", logging.INFO),
@@ -189,6 +217,10 @@ class Project:
             if existing is not None:
                 return existing
 
+        if (dest / ".frequensolve").exists() or (dest / ".frequensolve").is_symlink():
+            raise FileExistsError(
+                "Copy destination already has an immutable project identity"
+            )
         src_file = cls._project_file(src)
         source = cls.load(src_file)
         source_root = src_file.parent
@@ -210,6 +242,10 @@ class Project:
             simulations=source.simulations,
             extras=source.extras,
         )
+        if source.project_id is not None:
+            if copied.project_id is not None:
+                raise ValueError("Copy destination already has an immutable identity")
+            copied.enable_identity()
         copied.save()
         cls._rewrite_copied_input_files(
             dest,
@@ -237,6 +273,7 @@ class Project:
 
         payload: Dict[str, Any] = {
             "name": self.name,
+            **({"project_id": self.project_id} if self.project_id is not None else {}),
             "path": str(self.path),
             **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
             "version": str(self.version),
@@ -274,6 +311,7 @@ class Project:
 
         return {
             "name": self.name,
+            **({"project_id": self.project_id} if self.project_id is not None else {}),
             **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
             "version": str(self.version),
             "simulations": [sim.to_fs() for sim in self.simulations],
@@ -863,7 +901,8 @@ class Project:
     def _remote_project_root(self, site: _fs.BaseSite) -> Path:
         site_class = site.__class__
         if site_class.__name__ == "AWSSite" and ".aws" in site_class.__module__:
-            return site.work_dir / self.path.name
+            resolver = getattr(site, "project_storage_key", None)
+            return site.work_dir / (resolver(self.path) if resolver else self.path.name)
         return site.work_dir
 
     def _job_files(

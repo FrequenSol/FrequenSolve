@@ -360,6 +360,18 @@ class GraphQLClient:
             )
         return resolved
 
+    def request_project_identity(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.execute(
+            "mutation ProjectIdentity($input: AWSJSON!) { requestMyProjectIdentity(input: $input) }",
+            {"input": json.dumps(payload)},
+        )
+        value = result.get("requestMyProjectIdentity")
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            raise RuntimeError("Cloud project identity is unavailable")
+        return value
+
     def submit_job(
         self,
         job_file_s3_key: str,
@@ -368,6 +380,7 @@ class GraphQLClient:
         send_simulation_status_email: Optional[bool] = None,
         fresh: bool = False,
         retry: bool = False,
+        project_id: Optional[str] = None,
         project_name: Optional[str] = None,
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
@@ -407,6 +420,15 @@ class GraphQLClient:
                 }
             }
         """
+        if project_id is not None:
+            from frequensolve.project_identity import ProjectIdentity
+
+            ProjectIdentity(project_id)
+            mutation = mutation.replace(
+                "$forceRun: Boolean", "$projectId: String, $forceRun: Boolean"
+            ).replace(
+                "forceRun: $forceRun)", "projectId: $projectId, forceRun: $forceRun)"
+            )
         if retry:
             # Ordinary submissions remain compatible with backends predating retries.
             mutation = mutation.replace(
@@ -416,6 +438,7 @@ class GraphQLClient:
                 "forceRun: $forceRun, retry: $retry)",
             )
         variables = {
+            **({"projectId": project_id} if project_id is not None else {}),
             "jobFileS3Key": job_file_s3_key,
             "jobName": job_name,
             "sendSimulationStatusEmail": send_simulation_status_email,
