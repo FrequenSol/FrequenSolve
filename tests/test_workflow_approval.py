@@ -11,7 +11,13 @@ import pytest
 from mcp import Client
 from mcp.types import ElicitResult
 
-from frequensolve.workflow.approval import VERSION, PaidApproval, confirm_paid, envelope
+from frequensolve.workflow.approval import (
+    VERSION,
+    PaidApproval,
+    PaidApprovalInputError,
+    confirm_paid,
+    envelope,
+)
 from frequensolve.workflow.auth import Connection, WorkflowAuth, WorkflowError
 from frequensolve.workflow.client import WorkflowClient, create_project
 from frequensolve.workflow.journal import IntentJournal
@@ -106,6 +112,19 @@ def test_confirmed_exact_stage_uses_one_saved_request_then_recovers_without_form
         prompts.append((message, schema))
         assert "PAID " + stage.upper() in message and "10.25" in message
         assert "default" not in schema["properties"]["choice"]
+        assert "10.25" in schema["properties"]["maximum_credits"]["description"]
+        assert (
+            "do not repeat approve_paid_stage"
+            in schema["properties"]["maximum_credits"]["description"]
+        )
+        assert (
+            "leave empty when approving" in schema["properties"]["note"]["description"]
+        )
+        # Preserve the full proposal while keeping fields visible in short TUIs.
+        assert (
+            json.dumps(current["proposal"], sort_keys=True, separators=(",", ":"))
+            in message
+        )
         return {
             "action": "accept",
             "content": {"choice": "approve_paid_stage", "maximum_credits": "10.25"},
@@ -143,6 +162,39 @@ def test_confirmed_exact_stage_uses_one_saved_request_then_recovers_without_form
     assert calls[0]["stage"] == stage and calls[0]["expected_revision"] == 2
     with pytest.raises(ValueError):
         approval(tmp_path, "foreign-user").read("one")
+
+
+@pytest.mark.parametrize("maximum", ["approve_paid_stage", "", None])
+def test_wrong_credit_field_reports_safe_actionable_failure(tmp_path, maximum):
+    current = review()
+
+    async def fetch():
+        return current
+
+    async def elicit(*_):
+        return {
+            "action": "accept",
+            "content": {"choice": "approve_paid_stage", "maximum_credits": maximum},
+        }
+
+    def never_send(*_):
+        raise AssertionError("An incorrect Credit maximum cannot authorize work")
+
+    with pytest.raises(PaidApprovalInputError, match="enter exactly 10.25"):
+        anyio.run(
+            confirm_paid,
+            approval(tmp_path),
+            "wrong-field",
+            current,
+            current["proposal_fingerprint"],
+            fetch,
+            elicit,
+            never_send,
+        )
+    result = approval(tmp_path).recover("wrong-field", never_send)
+    assert result["state"] == "incomplete"
+    assert result["failure_code"] == "credit_limit_not_confirmed"
+    assert not result["backend_authorized"]
 
 
 @pytest.mark.parametrize(

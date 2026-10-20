@@ -23,6 +23,7 @@ FORM: dict[str, Any] = {
         "choice": {
             "type": "string",
             "title": "Paid-stage decision",
+            "description": "Choose one action for this paid stage.",
             "enum": ["cancel", "request_changes", "approve_paid_stage"],
         },
         "maximum_credits": {
@@ -33,11 +34,16 @@ FORM: dict[str, Any] = {
         "note": {
             "type": "string",
             "title": "Requested changes or note",
+            "description": "Optional note: leave empty when approving. Describe the requested changes only if you chose request_changes.",
             "maxLength": 1024,
         },
     },
     "required": ["choice"],
 }
+
+
+class PaidApprovalInputError(ValueError):
+    """A safe form diagnostic created locally, never from a transport response."""
 
 
 def envelope(value: dict, ids: dict, stage: str) -> dict:
@@ -251,19 +257,31 @@ async def confirm_paid(
         return saved
     snapshot = current["proposal"]
     state, note = "incomplete", ""
+    failure_code = "client_form_failed"
     try:
         with anyio.fail_after(timeout):
+            maximum = snapshot["quote"]["maximum_credits"]
+            form = deepcopy(FORM)
+            # Codex CLI uses description for text prompts; title alone can be
+            # invisible. Keep the exact amount on the field being answered.
+            form["properties"]["maximum_credits"]["description"] = (
+                f"Credit maximum: type {maximum} to approve up to {maximum} Credits for {snapshot['stage']}. "
+                "Enter the number only; do not repeat approve_paid_stage. Leave empty if you are not approving."
+            )
             message = (
                 f"PAID {snapshot['stage'].upper()} APPROVAL. This can start paid compute.\n"
                 "Review the complete authoritative proposal below. To approve only this stage, choose approve_paid_stage and enter "
                 f"exactly {snapshot['quote']['maximum_credits']} in maximum_credits. Cancellation does not imply immediate termination or refund. "
                 "Allocated failed/canceled work may be charged; execution minimum/failure policy is in quote.pricing. "
                 "The client reports your response; this is not independent proof that a human answered.\n"
-                + json.dumps(snapshot, sort_keys=True, indent=2, ensure_ascii=False)
+                + json.dumps(
+                    snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                )
                 + "\nCloud proposal fingerprint: "
                 + current["proposal_fingerprint"]
             )
-            response = await elicit(message, deepcopy(FORM))
+            response = await elicit(message, form)
+            failure_code = "invalid_form_response"
             action, content = response.get("action"), response.get("content")
             if action in ("cancel", "decline") and content is None:
                 state = "canceled" if action == "cancel" else "declined"
@@ -276,31 +294,44 @@ async def confirm_paid(
                     or not isinstance(note, str)
                     or len(note) > 1024
                 ):
-                    raise ValueError("Invalid paid-stage client response")
+                    raise PaidApprovalInputError(
+                        "The paid-stage decision or optional note was invalid. No paid request was sent."
+                    )
                 state = {
                     "cancel": "canceled",
                     "request_changes": "changes_requested",
                     "approve_paid_stage": "client_confirmed",
                 }[choice]
                 if state == "changes_requested" and not note.strip():
-                    raise ValueError("Describe the requested change")
+                    failure_code = "missing_change_note"
+                    raise PaidApprovalInputError(
+                        "Describe the requested change in the optional note. No paid request was sent."
+                    )
                 if (
                     state == "client_confirmed"
                     and content.get("maximum_credits")
                     != snapshot["quote"]["maximum_credits"]
                 ):
-                    raise ValueError(
-                        "The exact maximum Credits must be entered in the form"
+                    failure_code = "credit_limit_not_confirmed"
+                    raise PaidApprovalInputError(
+                        f"The Credit maximum was not confirmed: enter exactly {maximum} in the Credit maximum field, not approve_paid_stage. No paid request was sent."
                     )
             else:
-                raise ValueError("Invalid paid-stage client response")
+                raise PaidApprovalInputError(
+                    "The client did not return a complete paid-stage decision. No paid request was sent."
+                )
+            failure_code = "proposal_recheck_failed"
             if state == "client_confirmed" and await fetch() != current:
                 state = "stale"
     except BaseException:
         with anyio.CancelScope(shield=True):
             await anyio.to_thread.run_sync(
                 lambda: approval.transition(
-                    intent, saved["evidence_id"], ("awaiting_input",), "incomplete"
+                    intent,
+                    saved["evidence_id"],
+                    ("awaiting_input",),
+                    "incomplete",
+                    failure_code=failure_code,
                 )
             )
         raise

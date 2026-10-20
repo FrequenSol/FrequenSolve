@@ -650,7 +650,12 @@ def build_server(
     ) -> Reply:
         from frequensolve.project_identity import ProjectIdentity
 
-        from .approval import PaidApproval, confirm_paid, envelope
+        from .approval import (
+            PaidApproval,
+            PaidApprovalInputError,
+            confirm_paid,
+            envelope,
+        )
 
         try:
             if not native_approval or not client.auth.connection.native_approval:
@@ -736,6 +741,8 @@ def build_server(
             if len(canonical(result)) > 120000:
                 raise ValueError("Approval response exceeds its bounded limit")
             return Reply(ok=True, payload=canonical(result).decode())
+        except PaidApprovalInputError as error:
+            return Reply(ok=False, diagnostic=str(error))
         except Exception:
             return Reply(
                 ok=False,
