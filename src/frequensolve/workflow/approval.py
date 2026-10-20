@@ -26,17 +26,6 @@ FORM: dict[str, Any] = {
             "description": "Choose one action for this paid stage.",
             "enum": ["cancel", "request_changes", "approve_paid_stage"],
         },
-        "maximum_credits": {
-            "type": "string",
-            "title": "To approve, enter the exact maximum Credits shown above",
-            "maxLength": 25,
-        },
-        "note": {
-            "type": "string",
-            "title": "Requested changes or note",
-            "description": "Optional note: leave empty when approving. Describe the requested changes only if you chose request_changes.",
-            "maxLength": 1024,
-        },
     },
     "required": ["choice"],
 }
@@ -44,6 +33,17 @@ FORM: dict[str, Any] = {
 
 class PaidApprovalInputError(ValueError):
     """A safe form diagnostic created locally, never from a transport response."""
+
+
+def form_answer(response: dict, field: str) -> tuple[str, Any]:
+    action, content = response.get("action"), response.get("content")
+    if action in ("cancel", "decline") and content is None:
+        return ("canceled" if action == "cancel" else "declined"), None
+    if action == "accept" and isinstance(content, dict) and set(content) == {field}:
+        return "accepted", content[field]
+    raise PaidApprovalInputError(
+        "The client did not return the requested form field. No paid request was sent."
+    )
 
 
 def envelope(value: dict, ids: dict, stage: str) -> dict:
@@ -261,13 +261,6 @@ async def confirm_paid(
     try:
         with anyio.fail_after(timeout):
             maximum = snapshot["quote"]["maximum_credits"]
-            form = deepcopy(FORM)
-            # Codex CLI uses description for text prompts; title alone can be
-            # invisible. Keep the exact amount on the field being answered.
-            form["properties"]["maximum_credits"]["description"] = (
-                f"Credit maximum: type {maximum} to approve up to {maximum} Credits for {snapshot['stage']}. "
-                "Enter the number only; do not repeat approve_paid_stage. Leave empty if you are not approving."
-            )
             message = (
                 f"PAID {snapshot['stage'].upper()} APPROVAL. This can start paid compute.\n"
                 "Review the complete authoritative proposal below. To approve only this stage, choose approve_paid_stage and enter "
@@ -280,46 +273,66 @@ async def confirm_paid(
                 + "\nCloud proposal fingerprint: "
                 + current["proposal_fingerprint"]
             )
-            response = await elicit(message, form)
+            state, choice = form_answer(await elicit(message, deepcopy(FORM)), "choice")
             failure_code = "invalid_form_response"
-            action, content = response.get("action"), response.get("content")
-            if action in ("cancel", "decline") and content is None:
-                state = "canceled" if action == "cancel" else "declined"
-            elif action == "accept" and isinstance(content, dict):
-                choice, note = content.get("choice"), content.get("note", "")
-                if (
-                    set(content) - {"choice", "maximum_credits", "note"}
-                    or not isinstance(choice, str)
-                    or choice not in FORM["properties"]["choice"]["enum"]
-                    or not isinstance(note, str)
-                    or len(note) > 1024
-                ):
+            if state == "accepted":
+                if choice not in FORM["properties"]["choice"]["enum"]:
                     raise PaidApprovalInputError(
-                        "The paid-stage decision or optional note was invalid. No paid request was sent."
+                        "The paid-stage decision was invalid. No paid request was sent."
                     )
-                state = {
-                    "cancel": "canceled",
-                    "request_changes": "changes_requested",
-                    "approve_paid_stage": "client_confirmed",
-                }[choice]
-                if state == "changes_requested" and not note.strip():
-                    failure_code = "missing_change_note"
-                    raise PaidApprovalInputError(
-                        "Describe the requested change in the optional note. No paid request was sent."
+                if choice == "cancel":
+                    state = "canceled"
+                else:
+                    field = (
+                        "maximum_credits" if choice == "approve_paid_stage" else "note"
                     )
-                if (
-                    state == "client_confirmed"
-                    and content.get("maximum_credits")
-                    != snapshot["quote"]["maximum_credits"]
-                ):
-                    failure_code = "credit_limit_not_confirmed"
-                    raise PaidApprovalInputError(
-                        f"The Credit maximum was not confirmed: enter exactly {maximum} in the Credit maximum field, not approve_paid_stage. No paid request was sent."
+                    description = (
+                        f"Credit maximum: type exactly {maximum} to approve up to {maximum} Credits for {snapshot['stage']}. Enter the number only; do not repeat approve_paid_stage."
+                        if field == "maximum_credits"
+                        else "Describe the requested changes. This does not authorize paid work."
                     )
-            else:
-                raise PaidApprovalInputError(
-                    "The client did not return a complete paid-stage decision. No paid request was sent."
-                )
+                    detail_form = {
+                        "type": "object",
+                        "properties": {
+                            field: {
+                                "type": "string",
+                                "title": (
+                                    "Credit maximum"
+                                    if field == "maximum_credits"
+                                    else "Requested changes"
+                                ),
+                                "description": description,
+                                "minLength": 1,
+                                "maxLength": 25 if field == "maximum_credits" else 1024,
+                            }
+                        },
+                        "required": [field],
+                    }
+                    failure_code = (
+                        "credit_limit_not_confirmed"
+                        if field == "maximum_credits"
+                        else "missing_change_note"
+                    )
+                    state, value = form_answer(
+                        await elicit(message + "\n" + description, detail_form), field
+                    )
+                    if state == "accepted":
+                        if field == "maximum_credits":
+                            if value != maximum:
+                                raise PaidApprovalInputError(
+                                    f"The Credit maximum was not confirmed: enter exactly {maximum} in the Credit maximum field, not approve_paid_stage. No paid request was sent."
+                                )
+                            state = "client_confirmed"
+                        else:
+                            if (
+                                not isinstance(value, str)
+                                or not value.strip()
+                                or len(value) > 1024
+                            ):
+                                raise PaidApprovalInputError(
+                                    "Describe the requested change. No paid request was sent."
+                                )
+                            state, note = "changes_requested", value
             failure_code = "proposal_recheck_failed"
             if state == "client_confirmed" and await fetch() != current:
                 state = "stale"

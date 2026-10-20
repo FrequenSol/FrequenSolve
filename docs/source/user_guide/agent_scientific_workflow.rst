@@ -169,7 +169,9 @@ Call ``workflow_approve`` with ``action="preview"``, ``root_id``,
 opaque ``proposal_fingerprint``. Call ``action="request_input"`` with that
 fingerprint as ``expected_fingerprint`` and a deliberate stable ``intent``.
 The client form contains the full proposal. To approve, the user chooses
-``approve_paid_stage`` and enters its exact ``maximum_credits``. These decisions
+``approve_paid_stage``, then enters its exact ``maximum_credits`` in a separate
+required prompt. Approval does not ask for an optional note. Choosing
+``request_changes`` instead opens a required change-description prompt. These decisions
 cannot be supplied as tool arguments. Cancellation, incomplete responses and
 change requests send no paid mutation. Changes are returned for review, never
 automatically applied. A rehearsal confirmation cannot be converted into paid

@@ -54,6 +54,21 @@ def review(stage="planning", ids=None):
     )
 
 
+def client_response(response, schema):
+    """Supply only the current field in this synthetic multi-prompt client."""
+    content = response.get("content")
+    if response.get("action") != "accept" or not isinstance(content, dict):
+        return response
+    if "choice" not in content or set(content) - {"choice", "maximum_credits", "note"}:
+        return response
+    return {
+        "action": "accept",
+        "content": {
+            key: content[key] for key in schema["properties"] if key in content
+        },
+    }
+
+
 def approval(path, user="fake-user"):
     return PaidApproval(IntentJournal(PrivateStore(path), {"subject": user}))
 
@@ -111,24 +126,33 @@ def test_confirmed_exact_stage_uses_one_saved_request_then_recovers_without_form
     async def elicit(message, schema):
         prompts.append((message, schema))
         assert "PAID " + stage.upper() in message and "10.25" in message
-        assert "default" not in schema["properties"]["choice"]
-        assert "10.25" in schema["properties"]["maximum_credits"]["description"]
-        assert (
-            "do not repeat approve_paid_stage"
-            in schema["properties"]["maximum_credits"]["description"]
-        )
-        assert (
-            "leave empty when approving" in schema["properties"]["note"]["description"]
-        )
+        if "choice" in schema["properties"]:
+            assert set(schema["properties"]) == {"choice"}
+            assert "default" not in schema["properties"]["choice"]
+        else:
+            assert set(schema["properties"]) == {"maximum_credits"}
+            assert schema["required"] == ["maximum_credits"]
+            assert "10.25" in schema["properties"]["maximum_credits"]["description"]
+            assert (
+                "do not repeat approve_paid_stage"
+                in schema["properties"]["maximum_credits"]["description"]
+            )
         # Preserve the full proposal while keeping fields visible in short TUIs.
         assert (
             json.dumps(current["proposal"], sort_keys=True, separators=(",", ":"))
             in message
         )
-        return {
-            "action": "accept",
-            "content": {"choice": "approve_paid_stage", "maximum_credits": "10.25"},
-        }
+        return client_response(
+            {
+                "action": "accept",
+                "content": {
+                    "choice": "approve_paid_stage",
+                    "maximum_credits": "10.25",
+                    "note": "No note",
+                },
+            },
+            schema,
+        )
 
     def send(operation, arguments):
         assert operation == "native_approve"
@@ -155,10 +179,11 @@ def test_confirmed_exact_stage_uses_one_saved_request_then_recovers_without_form
         send,
     )
     assert result["state"] == "backend_accepted" and result["backend_authorized"]
+    assert result["note"] == ""
     assert not result["human_approval_verified"]
     assert result["evidence_origin"] == "native_client_reported"
     assert approval(tmp_path).recover("one", send) == result
-    assert len(calls) == len(prompts) == 1
+    assert len(calls) == 1 and len(prompts) == 2
     assert calls[0]["stage"] == stage and calls[0]["expected_revision"] == 2
     with pytest.raises(ValueError):
         approval(tmp_path, "foreign-user").read("one")
@@ -171,11 +196,14 @@ def test_wrong_credit_field_reports_safe_actionable_failure(tmp_path, maximum):
     async def fetch():
         return current
 
-    async def elicit(*_):
-        return {
-            "action": "accept",
-            "content": {"choice": "approve_paid_stage", "maximum_credits": maximum},
-        }
+    async def elicit(message, schema):
+        return client_response(
+            {
+                "action": "accept",
+                "content": {"choice": "approve_paid_stage", "maximum_credits": maximum},
+            },
+            schema,
+        )
 
     def never_send(*_):
         raise AssertionError("An incorrect Credit maximum cannot authorize work")
@@ -194,6 +222,60 @@ def test_wrong_credit_field_reports_safe_actionable_failure(tmp_path, maximum):
     result = approval(tmp_path).recover("wrong-field", never_send)
     assert result["state"] == "incomplete"
     assert result["failure_code"] == "credit_limit_not_confirmed"
+    assert not result["backend_authorized"]
+
+
+@pytest.mark.parametrize("action", ["cancel", "decline", "timeout"])
+def test_decision_alone_never_authorizes_when_credit_prompt_is_interrupted(
+    tmp_path, action
+):
+    current, fields = review(), []
+
+    async def fetch():
+        return current
+
+    async def elicit(message, schema):
+        fields.append(list(schema["properties"]))
+        if "choice" in schema["properties"]:
+            return {"action": "accept", "content": {"choice": "approve_paid_stage"}}
+        if action == "timeout":
+            raise TimeoutError()
+        return {"action": action, "content": None}
+
+    def never_send(*_):
+        raise AssertionError("A stage decision alone cannot authorize paid work")
+
+    if action == "timeout":
+        with pytest.raises(TimeoutError):
+            anyio.run(
+                confirm_paid,
+                approval(tmp_path),
+                "second",
+                current,
+                current["proposal_fingerprint"],
+                fetch,
+                elicit,
+                never_send,
+            )
+    else:
+        anyio.run(
+            confirm_paid,
+            approval(tmp_path),
+            "second",
+            current,
+            current["proposal_fingerprint"],
+            fetch,
+            elicit,
+            never_send,
+        )
+    result = approval(tmp_path).recover("second", never_send)
+    assert fields == [["choice"], ["maximum_credits"]]
+    assert (
+        result["state"]
+        == {"cancel": "canceled", "decline": "declined", "timeout": "incomplete"}[
+            action
+        ]
+    )
     assert not result["backend_authorized"]
 
 
@@ -233,8 +315,8 @@ def test_unconfirmed_and_rehearsal_responses_never_send_paid_mutations(
     async def fetch():
         return current
 
-    async def elicit(*_):
-        return response
+    async def elicit(message, schema):
+        return client_response(response, schema)
 
     def send(*_):
         raise AssertionError("No paid mutation is permitted")
@@ -264,11 +346,14 @@ def test_lost_response_recovers_original_paid_identity_after_settlement(tmp_path
     async def fetch():
         return current
 
-    async def elicit(*_):
-        return {
-            "action": "accept",
-            "content": {"choice": "approve_paid_stage", "maximum_credits": "10.25"},
-        }
+    async def elicit(message, schema):
+        return client_response(
+            {
+                "action": "accept",
+                "content": {"choice": "approve_paid_stage", "maximum_credits": "10.25"},
+            },
+            schema,
+        )
 
     def lost(operation, args):
         calls.append(deepcopy(args))
@@ -333,15 +418,18 @@ def test_stale_or_interrupted_form_fails_without_paid_authority(tmp_path, failur
         changed["proposal_fingerprint"] = "sha256:" + "4" * 64
         return changed
 
-    async def elicit(*_):
+    async def elicit(message, schema):
         if failure == "unsupported":
             raise ValueError("unsupported")
         if failure == "timeout":
             await anyio.sleep(1)
-        return {
-            "action": "accept",
-            "content": {"choice": "approve_paid_stage", "maximum_credits": "10.25"},
-        }
+        return client_response(
+            {
+                "action": "accept",
+                "content": {"choice": "approve_paid_stage", "maximum_credits": "10.25"},
+            },
+            schema,
+        )
 
     def send(*_):
         raise AssertionError("No paid mutation is permitted")
@@ -420,10 +508,14 @@ def test_real_mcp_paid_form_has_no_model_approval_argument(tmp_path):
 
     async def on_elicit(context, params):
         forms.append(params)
-        return ElicitResult(
-            action="accept",
-            content={"choice": "approve_paid_stage", "maximum_credits": "10.25"},
+        response = client_response(
+            {
+                "action": "accept",
+                "content": {"choice": "approve_paid_stage", "maximum_credits": "10.25"},
+            },
+            params.requested_schema,
         )
+        return ElicitResult(**response)
 
     async def run():
         server = build_server(
@@ -475,12 +567,12 @@ def test_real_mcp_paid_form_has_no_model_approval_argument(tmp_path):
                 value["state"] == "backend_accepted"
                 and not value["human_approval_verified"]
             )
-            assert len(forms) == 1
+            assert len(forms) == 2
             assert [op for op, _ in calls].count("native_approve") == 1
             before = len(calls)
             repeat = await client.call_tool(APPROVAL_TOOL, {"request": request})
             assert json.loads(repeat.structured_content["payload"]) == value
-            assert len(calls) == before and len(forms) == 1
+            assert len(calls) == before and len(forms) == 2
             wrong = await client.call_tool(
                 APPROVAL_TOOL,
                 {
