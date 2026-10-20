@@ -1,0 +1,32 @@
+{
+  "schema": "fs-job-1",
+  "_type": "FrequencyDomainJob",
+  "name": "frequency",
+  "project_path": ".",
+  "simulation": "simulations/acoustic_3d/acoustic_3d.json",
+  "workflow": "forward",
+  "f_list": [
+    2.0,
+    20.0
+  ],
+  "Outputs": {
+    "traces": {
+      "_type": "TraceOutput",
+      "path": "traces"
+    }
+  },
+  "artifact_contract": {
+    "schema": "fs-job-artifact-metadata-1",
+    "versions": {
+      "task_result": "fs-task-result-2",
+      "operation_result": "fs-operation-result-1",
+      "task_index": "fs-task-index-1",
+      "collection": "fs-sharded-array-1"
+    },
+    "output_request": {
+      "schema": "fs-output-request-fingerprint-1",
+      "digest": "sha256:3b3362fea3c4cda5e4f6a9179cd34b3e859e01e92d450a938abcab7675810c86"
+    }
+  },
+  "result_path": "jobs/acoustic_3d/frequency/results"
+}

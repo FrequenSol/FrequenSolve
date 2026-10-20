@@ -1,0 +1,15 @@
+{
+  "version": "frequensolve-agent-workflow.v1",
+  "profile": "local-scientific-workflow",
+  "transport": "stdio",
+  "tools": ["workflow_discover", "workflow_create_project", "workflow_plan", "workflow_results"],
+  "oauth_scope_suffixes": ["read", "workflow-prepare", "workflow-results"],
+  "paid_authority": false,
+  "human_confirmation": "signed-in Cloud review of each paid stage",
+  "scientific_template": "qualified-acoustic-3d-2-20.v1",
+  "execution_environment": "sandbox",
+  "result_representation": "per-frequency native archives",
+  "download_maximum_bytes": 16777216,
+  "capacity_observations": "unavailable until a supported observation source exists",
+  "notebook_execution": "analysis-only local replay; no service attestation"
+}

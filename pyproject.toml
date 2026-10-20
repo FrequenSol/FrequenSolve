@@ -49,6 +49,7 @@ dependencies = [
 [project.scripts]
 frequensolve = "frequensolve.commands.cli:main"
 frequensolve-mcp = "frequensolve.mcp_server.cli:main"
+frequensolve-workflow = "frequensolve.workflow.cli:main"
 frequensolve-adaptive-scheduler = "frequensolve.adaptive:main"
 
 [project.urls]
@@ -57,6 +58,12 @@ Documentation = "https://docs.frequensol.com"
 Support = "https://frequensol.com/support"
 
 [project.optional-dependencies]
+notebook = [
+    "nbformat>=5.10,<6",
+    "nbclient>=0.10,<0.11",
+    "ipykernel>=6.29.5,<7",
+]
+
 fast-fft = [
     "pyfftw>=0.14,<0.16",
 ]
@@ -143,6 +150,7 @@ include = ["frequensolve*"]
 "frequensolve" = ["solver_compatibility.json"]
 "frequensolve.knowledge" = ["*.json"]
 "frequensolve.mcp_server" = ["contracts/*.json"]
+"frequensolve.workflow" = ["templates/*.json", "contracts/*.json"]
 "frequensolve.orchestrator.sites" = ["site_presets.toml"]
 "frequensolve.orchestrator.sites.hpc" = ["templates/**/*.sh", "templates/**/*.py"]
 
