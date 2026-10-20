@@ -2,8 +2,8 @@ Agent scientific workflow (Sandbox pilot)
 =========================================
 
 This separate local MCP profile prepares and analyzes the curated 3D,
-double-precision acoustic example at 2 and 20 Hz. It serves Codex and Claude
-Code over stdio. The existing simulation-assistant and read-only Cloud profiles
+double-precision acoustic example at 2 and 20 Hz. The current pilot uses OpenAI
+Codex over stdio. The existing simulation-assistant and read-only Cloud profiles
 keep their current grants and behavior. Pilot availability requires a separately
 deployed Sandbox gateway and an eligible participant; installing this package
 does not establish live acceptance.
@@ -23,23 +23,17 @@ requires login again; it never falls back to another credential source.
 Cloud Settings can disconnect grants. New transfer tickets stop after
 revocation; previously issued tickets expire after 60 seconds.
 
-Configure both clients with the same absolute executable, explicit profile,
-allowed root and Sandbox product origin. A generic stdio configuration is::
+Configure Codex with an absolute executable, explicit profile, allowed root
+and Sandbox product origin. Its MCP configuration uses TOML::
 
-    {
-      "mcpServers": {
-        "frequensolve-workflow": {
-          "command": "/absolute/environment/bin/frequensolve-workflow",
-          "args": ["serve", "--profile", "sandbox",
-                   "--allow-root", "pilot=/absolute/existing/pilot-directory",
-                   "--cloud-url", "http://127.0.0.1:5173"]
-        }
-      }
-    }
+    [mcp_servers.frequensolve-workflow]
+    command = "/absolute/environment/bin/frequensolve-workflow"
+    args = ["serve", "--profile", "sandbox",
+            "--allow-root", "pilot=/absolute/existing/pilot-directory",
+            "--cloud-url", "http://127.0.0.1:5173"]
 
-Apply this entry to the client's supported MCP configuration format. Use one
-explicit root per working area; symlinks, traversal and replacement of existing
-files are rejected. Selected local scientific data can be returned to the model
+Use one explicit root per working area; symlinks, traversal and replacement of
+existing files are rejected. Selected local scientific data can be returned to the model
 provider chosen in that client. The adapter's restricted scope does not constrain
 an agent separately allowed to read broad credentials or control a signed-in
 browser. Acceptance must exclude those alternative authorities.
@@ -67,6 +61,11 @@ before sending. On timeout or restart, reuse the same project and intent. A new
 intent expresses new work. Browser approvals retain their own identity through
 reloads, including retries after a completed execution. Cancellation remains in
 Cloud; it is not immediate termination or a refund.
+
+Pilot acceptance includes reopening the same saved workflow in a fresh Codex
+process and preserving its operation identities. The adapter remains a standard
+stdio MCP server; other clients require separate acceptance before joining the
+pilot.
 
 Observation never resumes remembered authorization. Interpret scientific
 outcome, output publication and financial settlement independently. Discovery
