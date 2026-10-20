@@ -65,6 +65,33 @@ def accepted(arguments):
     }
 
 
+def test_recover_absent_intent_is_explicit_and_never_sends(tmp_path):
+    def never_send(*_):
+        raise AssertionError("Absent evidence must never authorize paid work")
+
+    result = approval(tmp_path).recover("first-use", never_send)
+    assert result["state"] == "absent"
+    assert not result["backend_authorized"]
+    assert not result["human_approval_verified"]
+    assert approval(tmp_path).lookup("first-use") is None
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_recovery_does_not_treat_foreign_or_unreadable_evidence_as_absent(tmp_path):
+    saved, _ = approval(tmp_path).begin("existing", review())
+
+    def never_send(*_):
+        raise AssertionError("Invalid evidence must never authorize paid work")
+
+    with pytest.raises(ValueError, match="unavailable for this connection"):
+        approval(tmp_path, "foreign-user").recover("existing", never_send)
+    record = tmp_path / (approval(tmp_path).key("existing") + ".json")
+    record.write_text("{broken")
+    with pytest.raises(json.JSONDecodeError):
+        approval(tmp_path).recover("existing", never_send)
+    assert saved["state"] == "awaiting_input"
+
+
 @pytest.mark.parametrize("stage", ["planning", "validation", "execution"])
 def test_confirmed_exact_stage_uses_one_saved_request_then_recovers_without_form(
     tmp_path, stage
@@ -369,6 +396,27 @@ def test_real_mcp_paid_form_has_no_model_approval_argument(tmp_path):
                 APPROVAL_TOOL, {"request": {**request, "approved": True}}
             )
             assert invalid.is_error and not calls
+            initial = await client.call_tool(
+                APPROVAL_TOOL,
+                {"request": {**request, "action": "recover"}},
+            )
+            assert initial.structured_content["ok"]
+            absent = json.loads(initial.structured_content["payload"])
+            assert absent["state"] == "absent"
+            assert not absent["backend_authorized"]
+            assert not calls and not forms
+            preview = await client.call_tool(
+                APPROVAL_TOOL,
+                {"request": {**request, "action": "preview"}},
+            )
+            assert preview.structured_content["ok"]
+            assert (
+                json.loads(preview.structured_content["payload"])[
+                    "proposal_fingerprint"
+                ]
+                == request["expected_fingerprint"]
+            )
+            assert len(calls) == 1 and not forms
             result = await client.call_tool(APPROVAL_TOOL, {"request": request})
             value = json.loads(result.structured_content["payload"])
             assert (

@@ -175,7 +175,17 @@ class PaidApproval:
             return saved
 
     def recover(self, intent: str, send: Callable[[str, dict], dict]) -> dict:
-        saved = self.read(intent)
+        saved = self.lookup(intent)
+        if saved is None:
+            # First use is a normal recovery outcome, not failed confirmation.
+            # Do not create evidence or a paid request until the client form.
+            return {
+                "version": VERSION,
+                "state": "absent",
+                "backend_authorized": False,
+                "human_approval_verified": False,
+                "next_action": "Preview the same stage, then request_input with this same intent and the exact proposal fingerprint.",
+            }
         if saved["state"] not in ("client_confirmed", "sending"):
             return saved
         try:
