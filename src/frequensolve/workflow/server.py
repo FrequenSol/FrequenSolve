@@ -12,7 +12,7 @@ from urllib.parse import urlencode, urlsplit
 
 import anyio
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from frequensolve.mcp_server._sdk_v2 import SafeMCPServer
 
@@ -72,8 +72,13 @@ class PlanRequest(Closed):
         "prepare", "create", "get", "list", "revise", "validate", "quote", "credits"
     ]
     root_id: str
-    local_project: str | None = None
-    project_key: str | None = None
+    local_project: str | None = Field(
+        default=None, description="Local project path; also supplies identity on reads."
+    )
+    project_key: str | None = Field(
+        default=None,
+        description="Owned project key, required for reads without local_project.",
+    )
     project_id: str | None = None
     plan_id: str | None = None
     cluster_id: str | None = None
@@ -81,7 +86,23 @@ class PlanRequest(Closed):
     revision: int | None = Field(default=None, ge=1)
     intent: str | None = Field(default=None, min_length=1, max_length=100)
     edits: list[ResourceEdit] | None = Field(default=None, max_length=96)
-    cursor: PlanCursor | None = None
+    cursor: PlanCursor | None = Field(
+        default=None,
+        description="Reuse only a cursor returned by this same list operation.",
+    )
+
+    @model_validator(mode="after")
+    def required_identity(self) -> PlanRequest:
+        if self.action in ("get", "list", "credits"):
+            if not self.local_project and not self.project_key:
+                raise ValueError(
+                    "Supply local_project or project_key on every plan read"
+                )
+        elif not self.local_project:
+            raise ValueError("This action requires the existing local_project path")
+        if self.action not in ("prepare", "create", "list") and not self.plan_id:
+            raise ValueError("Supply the saved plan_id for this action")
+        return self
 
 
 class ResultRequest(Closed):
@@ -277,12 +298,19 @@ def build_server(
                 if saved is not None:
                     if saved["request"]["operation"] != "plan_create":
                         raise ValueError("Intent belongs to a different operation")
+                    if (
+                        request.cluster_id
+                        and request.cluster_id
+                        != saved["request"]["arguments"]["cluster_id"]
+                    ):
+                        raise ValueError("Intent belongs to a different cluster")
                     return review(
                         journal.perform(
                             request.intent,
                             "plan_create",
                             saved["request"]["arguments"],
                             client.call,
+                            reconcile=True,
                         )
                     )
             prepared = client.prepare(project)
@@ -352,7 +380,7 @@ def build_server(
 
     @server.tool(
         name="workflow_plan",
-        description="Prepare inputs, create plan-only requests, read/edit/validate exact saved revisions, request quotes, or scan Credit history. Paid planning, paid validation and execution always require separate human Cloud review. Retain intent on retries.",
+        description="Prepare inputs, create plan-only requests, read/edit/validate exact saved revisions, request quotes, or scan Credit history. Every call needs local_project, or project_key for reads. Repeating create with the same intent reconciles the original input preparation; it cannot approve compute. Only reuse returned cursors. Paid stages always require separate human Cloud review.",
         annotations=ToolAnnotations(
             read_only_hint=False,
             destructive_hint=False,

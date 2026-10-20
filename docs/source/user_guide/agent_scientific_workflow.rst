@@ -80,7 +80,9 @@ The backend decides whether existing qualification evidence suffices.
 
 Every mutation saves the exact request, expected revision and idempotency key
 before sending. On timeout or restart, reuse the same project and intent. A new
-intent expresses new work. Browser approvals retain their own identity through
+intent expresses new work. To resume paused input preparation, repeat ``create``
+with the original intent; the adapter reconciles the exact saved request with
+Cloud. Read calls remain observation only. Browser approvals retain their own identity through
 reloads, including retries after a completed execution. Cancellation remains in
 Cloud; it is not immediate termination or a refund.
 

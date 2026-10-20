@@ -91,6 +91,36 @@ def test_lost_response_restart_preserves_exact_intent(tmp_path):
         recovered.perform("create", "plan_create", {"project_key": "changed"}, send)
 
 
+def test_reconcile_accepted_preparation_retains_identity_on_uncertainty(tmp_path):
+    calls = []
+
+    def send(operation, arguments):
+        calls.append((operation, arguments))
+        if len(calls) == 2:
+            raise TimeoutError()
+        return {
+            "plan_id": "fake-plan",
+            "status": "paused" if len(calls) == 1 else "quoted",
+        }
+
+    journal = IntentJournal(
+        PrivateStore(tmp_path / "journal"), {"project": "fake-project"}
+    )
+    arguments = {"project_key": "fake-project"}
+    assert (
+        journal.perform("create", "plan_create", arguments, send)["status"] == "paused"
+    )
+    with pytest.raises(TimeoutError):
+        journal.perform("create", "plan_create", arguments, send, reconcile=True)
+    assert journal.inspect("create")["status"] == "pending"
+    restarted = IntentJournal(journal.store, journal.binding)
+    assert (
+        restarted.perform("create", "plan_create", arguments, send)["status"]
+        == "quoted"
+    )
+    assert len(calls) == 3 and calls[0] == calls[1] == calls[2]
+
+
 def auth(tmp_path, request):
     connection = Connection(
         "https://workflow.example.test",

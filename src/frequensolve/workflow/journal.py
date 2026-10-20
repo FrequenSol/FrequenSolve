@@ -20,6 +20,8 @@ class IntentJournal:
         operation: str,
         arguments: dict,
         send: Callable[[str, dict], dict],
+        *,
+        reconcile: bool = False,
     ) -> dict:
         """An intentional repeat needs a new intent; retries retain exact bytes."""
         request = {"operation": operation, "arguments": deepcopy(arguments)}
@@ -41,8 +43,12 @@ class IntentJournal:
                 raise ValueError(
                     "Intent already belongs to a different request or connection"
                 )
-            if saved.get("status") == "complete":
+            if saved.get("status") == "complete" and not reconcile:
                 return deepcopy(saved["response"])
+            # Reconcile accepted preparation with the authoritative service,
+            # retaining the exact original bytes and request identity.
+            saved["status"] = "pending"
+            record.write(saved)
             payload = {**arguments, "idempotency_key": saved["idempotency_key"]}
             # A transport error deliberately leaves the original pending intent.
             response = send(operation, payload)

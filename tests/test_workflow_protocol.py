@@ -75,9 +75,72 @@ def test_workflow_profile_protocol_and_local_authoring(tmp_path):
                 "workflow_discover", {"request": {"account_id": "foreign"}}
             )
             assert forged.is_error
+            missing_project = await session.call_tool(
+                "workflow_plan",
+                {
+                    "request": {
+                        "action": "get",
+                        "root_id": "pilot",
+                        "plan_id": "fake-plan",
+                    }
+                },
+            )
+            assert missing_project.is_error
             assert calls == [("discover", {})]
 
     anyio.run(exercise)
+
+
+def test_repeated_creation_reconciles_original_remote_preparation(tmp_path):
+    from frequensolve.workflow.client import create_project
+    from frequensolve.workflow.journal import IntentJournal
+    from frequensolve.workflow.storage import PrivateStore
+
+    root = tmp_path.resolve()
+    project = create_project(root, "fresh", "Protocol recovery fixture")
+    journal = IntentJournal(
+        PrivateStore(root / "journal"), {"project": project["project_id"]}
+    )
+    arguments = {"project_key": project["project_key"], "cluster_id": "fake-cluster"}
+    journal.perform(
+        "create", "plan_create", arguments, lambda *_: {"status": "preparing"}
+    )
+    original_key = journal.inspect("create")["idempotency_key"]
+    calls = []
+
+    class RecoveryClient:
+        def journal(self, path):
+            assert path == root / "fresh"
+            return journal
+
+        def call(self, operation, payload):
+            calls.append((operation, payload))
+            return {"status": "quoted", "paid_authority": False}
+
+    async def exercise():
+        server = build_server(
+            RecoveryClient(), {"pilot": root}, "http://127.0.0.1:5173"
+        )
+        async with Client(server, cache=None) as session:
+            request = {
+                "action": "create",
+                "root_id": "pilot",
+                "local_project": "fresh",
+                "intent": "create",
+                "cluster_id": "fake-cluster",
+            }
+            result = await session.call_tool("workflow_plan", {"request": request})
+            assert result.structured_content["ok"]
+            assert (
+                json.loads(result.structured_content["payload"])["status"] == "quoted"
+            )
+            changed = await session.call_tool(
+                "workflow_plan", {"request": {**request, "cluster_id": "changed"}}
+            )
+            assert not changed.structured_content["ok"]
+
+    anyio.run(exercise)
+    assert calls == [("plan_create", {**arguments, "idempotency_key": original_key})]
 
 
 def test_credit_scan_resumes_pages_and_counts_each_operation_once(tmp_path):
