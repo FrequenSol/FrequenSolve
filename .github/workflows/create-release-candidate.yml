@@ -56,7 +56,7 @@ jobs:
 
       - name: Generate evidence-read token
         id: generate-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -148,7 +148,7 @@ jobs:
 
       - name: Generate dependency resolution token
         id: resolve-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -178,7 +178,7 @@ jobs:
 
       - name: Generate downstream dispatch token
         id: dispatch-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -261,7 +261,7 @@ jobs:
 
       - name: Generate first downstream wait token
         id: wait-token-1
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -283,7 +283,7 @@ jobs:
       - name: Generate second downstream wait token
         if: ${{ steps.wait-1.outputs.completed != 'true' }}
         id: wait-token-2
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -306,7 +306,7 @@ jobs:
       - name: Generate third downstream wait token
         if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' }}
         id: wait-token-3
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -329,7 +329,7 @@ jobs:
       - name: Generate fourth downstream wait token
         if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' && steps.wait-3.outputs.completed != 'true' }}
         id: wait-token-4
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -357,7 +357,7 @@ jobs:
 
       - name: Generate downstream evidence token
         id: evidence-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -469,7 +469,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Preserve validated evidence in the caller run
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: frequensolve-test-evidence
           path: .solver-evidence/
@@ -510,7 +510,7 @@ jobs:
 
       - name: Download solver-backed test evidence
         if: ${{ inputs.validation_profile == 'solver-backed' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: frequensolve-test-evidence
           path: .solver-evidence
@@ -713,7 +713,7 @@ jobs:
 
       - name: Preserve standard release evidence in the workflow run
         if: ${{ inputs.validation_profile == 'standard' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-evidence-${{ needs.prepare-evidence.outputs.target_sha }}
           path: release-evidence.json
@@ -722,7 +722,7 @@ jobs:
 
       - name: Preserve solver-backed release evidence in the workflow run
         if: ${{ inputs.validation_profile == 'solver-backed' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-evidence-${{ needs.prepare-evidence.outputs.target_sha }}
           path: |
