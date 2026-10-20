@@ -97,6 +97,9 @@ contains analysis only and needs no live Cloud credential. The official replay
 uses a fresh kernel, cleared outputs, an explicit interpreter and finite timeout,
 and records incomplete evidence on failure. Edited notebooks remain ordinary
 Jupyter documents; generate a fresh official bundle for new checked evidence.
+Use ``frequensolve.workflow.notebooks.verify_replay(path)`` to check whether
+retained evidence still applies after code, input, output or environment changes.
+It preserves the historical receipt and reports current mismatches.
 Local replay, verified input identity, service origin, operation version,
 convergence/qualification and agent interpretation are separate assurances.
 Notebook trust does not establish scientific correctness. See NBClient's

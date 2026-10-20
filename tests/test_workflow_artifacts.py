@@ -191,13 +191,33 @@ def test_clean_notebook_and_failed_execution_evidence(tmp_path, monkeypatch):
     pytest.importorskip("ipykernel")
     import nbclient
 
-    from frequensolve.workflow.notebooks import create_notebook, replay_notebook
+    import frequensolve.workflow.notebooks as operations
+    from frequensolve.workflow.notebooks import (
+        create_notebook,
+        replay_notebook,
+        verify_replay,
+    )
 
     source = tmp_path / "pressure.json"
     source.write_text(json.dumps(snapshot([3 + 4j])))
     notebook = create_notebook(tmp_path / "complete", source)
     receipt = replay_notebook(notebook, timeout=30)
     assert receipt["status"] == "complete" and receipt["origin"] == "local"
+    assert verify_replay(notebook)["valid"]
+    original = notebook.read_bytes()
+    notebook.write_bytes(original + b"\n")
+    assert "notebook_changed" in verify_replay(notebook)["mismatches"]
+    notebook.write_bytes(original)
+    local_input = notebook.parent / "pressure-0.json"
+    original_input = local_input.read_bytes()
+    local_input.write_text("{}")
+    assert "input_changed" in verify_replay(notebook)["mismatches"]
+    local_input.write_bytes(original_input)
+    with monkeypatch.context() as changed:
+        changed.setattr(
+            operations.importlib.metadata, "version", lambda name: "changed-environment"
+        )
+        assert "environment_changed" in verify_replay(notebook)["mismatches"]
     assert json.loads((notebook.parent / "report.json").read_text())["magnitude"] == [
         [5.0]
     ]

@@ -205,9 +205,83 @@ def replay_notebook(path: Path, *, timeout: int = 120) -> dict:
             + html.escape(json.dumps(result, indent=2, allow_nan=False))
             + "</pre>"
         )
+        receipt["report_html_sha256"] = _digest(
+            (path.parent / "report.html").read_bytes()
+        )
     finally:
         executed = nbformat.writes(notebook).encode()
         receipt["executed_notebook_sha256"] = _digest(executed)
         (path.parent / "executed.ipynb").write_bytes(executed)
         (path.parent / "replay.json").write_bytes(canonical(receipt))
     return receipt
+
+
+def verify_replay(path: Path) -> dict:
+    """Check whether retained local execution evidence still applies here.
+
+    Historical receipts remain unchanged. Editing a notebook/input/output or
+    changing its environment invalidates the current claim, not that history.
+    This checks identities; it is not service or scientific attestation.
+    """
+    import nbformat
+
+    path = Path(path)
+    mismatches = []
+
+    def bounded(name: str, maximum: int = 16 * 1024 * 1024) -> bytes:
+        file = path.parent / name
+        if file.is_symlink() or not file.is_file() or file.stat().st_size > maximum:
+            raise ValueError("Missing or unsupported local evidence")
+        return file.read_bytes()
+
+    try:
+        receipt = json.loads(bounded("replay.json", 2 * 1024 * 1024))
+        if receipt.get("status") != "complete" or receipt.get("origin") != "local":
+            return {
+                "valid": False,
+                "origin": "local",
+                "mismatches": ["execution_incomplete"],
+            }
+        original = bounded(path.name, 1024 * 1024)
+        if _digest(original) != receipt["notebook_sha256"]:
+            mismatches.append("notebook_changed")
+        notebook = nbformat.reads(original.decode(), as_version=4)
+        inputs = notebook.metadata["frequensolve_workflow"]["inputs"]
+        if inputs != receipt["inputs"] or any(
+            item.get("path") != f"pressure-{index}.json"
+            for index, item in enumerate(inputs)
+        ):
+            raise ValueError("Input identity changed")
+        if len(inputs) not in (1, 2):
+            raise ValueError("Unsupported input selection")
+        for item in inputs:
+            if _digest(bounded(item["path"])) != item["sha256"]:
+                mismatches.append("input_changed")
+        if (
+            _digest(Path(__file__).with_name("analysis.py").read_bytes())
+            != receipt["operation_source_sha256"]
+        ):
+            mismatches.append("operation_changed")
+        if (
+            receipt["interpreter"] != sys.executable
+            or receipt["python"] != sys.version.split()[0]
+            or any(
+                importlib.metadata.version(name) != version
+                for name, version in receipt["dependencies"].items()
+            )
+        ):
+            mismatches.append("environment_changed")
+        for name, key in (
+            ("executed.ipynb", "executed_notebook_sha256"),
+            ("report.json", "report_sha256"),
+            ("report.html", "report_html_sha256"),
+        ):
+            if _digest(bounded(name)) != receipt[key]:
+                mismatches.append("output_changed")
+    except Exception:
+        mismatches.append("evidence_unavailable_or_changed")
+    return {
+        "valid": not mismatches,
+        "origin": "local",
+        "mismatches": sorted(set(mismatches)),
+    }
