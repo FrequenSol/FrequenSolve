@@ -11,6 +11,7 @@ from typing import Any, Callable, Literal
 from urllib.parse import urlencode, urlsplit
 
 import anyio
+from mcp.server.context import ServerRequestContext
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -31,6 +32,7 @@ TOOLS = (
 )
 RESOURCE = "frequensolve://workflow/capabilities"
 PROMPT = "curated_3d_workflow"
+REVIEW_TOOL = "workflow_review"
 
 
 class Closed(BaseModel):
@@ -105,6 +107,25 @@ class PlanRequest(Closed):
         return self
 
 
+class ReviewRequest(Closed):
+    action: Literal["preview", "request_input", "recover"]
+    root_id: str
+    local_project: str
+    plan_id: str
+    intent: str | None = Field(default=None, min_length=1, max_length=100)
+    expected_fingerprint: str | None = Field(
+        default=None, pattern=r"^sha256:[a-f0-9]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def required_review_identity(self) -> ReviewRequest:
+        if self.action != "preview" and not self.intent:
+            raise ValueError("Retain a durable local review intent")
+        if self.action == "request_input" and not self.expected_fingerprint:
+            raise ValueError("Use the exact fingerprint returned by preview")
+        return self
+
+
 class ResultRequest(Closed):
     action: Literal["list", "download", "analyze", "notebook"]
     root_id: str
@@ -126,7 +147,11 @@ class Reply(Closed):
 
 
 def build_server(
-    client: WorkflowClient, roots: dict[str, Path], cloud_url: str
+    client: WorkflowClient,
+    roots: dict[str, Path],
+    cloud_url: str,
+    *,
+    interactive_review: bool = False,
 ) -> SafeMCPServer:
     origin = urlsplit(cloud_url)
     if (
@@ -141,6 +166,7 @@ def build_server(
     if origin.scheme == "http" and origin.hostname not in ("127.0.0.1", "localhost"):
         raise ValueError("Human review requires HTTPS or local Sandbox")
     cloud_url = cloud_url.rstrip("/")
+    tools = TOOLS + (REVIEW_TOOL,) if interactive_review else TOOLS
     limiter = anyio.CapacityLimiter(2)
     server = SafeMCPServer(
         name="FrequenSolve scientific workflow",
@@ -149,7 +175,7 @@ def build_server(
         "All paid stages require human review in Cloud. Never invent results or submit using other credentials. "
         "Retain intent IDs on uncertainty; intentional new work requires a new intent. Capacity may be unavailable. "
         "Selected local data may be sent to the user's chosen model provider. Notebook replay is analysis only.",
-        allowed_tool_names=TOOLS,
+        allowed_tool_names=tools,
         allowed_resource_uris=(RESOURCE,),
         allowed_prompt_names=(PROMPT,),
     )
@@ -174,6 +200,13 @@ def build_server(
             {
                 **manifest,
                 "allowed_root_ids": sorted(roots),
+                "native_review": {
+                    "enabled": interactive_review,
+                    "mode": "rehearsal_only",
+                    "paid_authority": False,
+                    "requires": "elicitation.form",
+                    "evidence_origin": "client_reported_unattested",
+                },
                 "package_version": versions["version"],
                 "source_revision": versions["full-revisionid"],
                 "source_dirty": versions["dirty"],
@@ -467,8 +500,107 @@ def build_server(
     async def results(request: ResultRequest) -> Reply:
         return await bounded(result_operation, request)
 
+    @server.tool(
+        name=REVIEW_TOOL,
+        description="Preview an authoritative saved proposal, request structured user input through the MCP client's form, or recover local review evidence. Opt-in no-spend rehearsal only: never authorizes or launches paid work. No approval decision may be supplied in tool arguments. Retain the same intent on retry; client responses are not attested human approval.",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+        with_context=True,
+    )
+    async def native_review(
+        request: ReviewRequest, context: ServerRequestContext[dict[str, Any]]
+    ) -> Reply:
+        from frequensolve.project_identity import ProjectIdentity
+
+        from .review import ReviewEvidence, digest, proposal, request_input
+
+        try:
+            project = root(request.root_id) / relative(request.local_project)
+            identity = ProjectIdentity.from_dict(
+                json.loads(read_local(project, ".frequensolve/project-identity.json"))
+            )
+            arguments = {
+                "project_key": identity.storage_prefix,
+                "project_id": identity.project_id,
+                "plan_id": request.plan_id,
+            }
+
+            async def fetch() -> dict:
+                with anyio.fail_after(60):
+                    value = await anyio.to_thread.run_sync(
+                        lambda: client.call("plan_get", arguments),
+                        limiter=limiter,
+                        abandon_on_cancel=True,
+                    )
+                return proposal(value, identity.storage_prefix, request.plan_id)
+
+            if request.action == "preview":
+                snapshot = await fetch()
+                result = {
+                    "proposal": snapshot,
+                    "proposal_fingerprint": digest(snapshot),
+                    "mode": "rehearsal_only",
+                    "paid_authority": False,
+                }
+            else:
+                assert request.intent is not None
+                journal = await anyio.to_thread.run_sync(client.journal, project)
+                evidence = ReviewEvidence(journal)
+                if request.action == "recover":
+                    result = await anyio.to_thread.run_sync(
+                        evidence.recover, request.intent
+                    )
+                else:
+                    assert request.expected_fingerprint is not None
+                    snapshot = await fetch()
+
+                    async def elicit(message: str, schema: dict) -> dict:
+                        capabilities = context.session.client_capabilities
+                        if (
+                            not capabilities
+                            or not capabilities.elicitation
+                            or capabilities.elicitation.form is None
+                        ):
+                            raise ValueError(
+                                "This client does not advertise form elicitation"
+                            )
+                        response = await context.session.elicit_form(
+                            message, schema, related_request_id=context.request_id
+                        )
+                        return response.model_dump(mode="json")
+
+                    result = await request_input(
+                        evidence,
+                        request.intent,
+                        snapshot,
+                        request.expected_fingerprint,
+                        fetch,
+                        elicit,
+                    )
+            result = {
+                **result,
+                "review_url": cloud_url
+                + "/agent-review?"
+                + urlencode(
+                    {"project_key": identity.storage_prefix, "plan_id": request.plan_id}
+                ),
+            }
+            if len(canonical(result)) > 120000:
+                raise ValueError("Review response exceeds its bounded limit")
+            return Reply(ok=True, payload=canonical(result).decode())
+        except Exception:
+            return Reply(
+                ok=False,
+                diagnostic="Native review could not be confirmed. Preview the current proposal or recover the same local intent. Paid work still requires Cloud review.",
+            )
+
     server.finalize_safety_contract(
-        tool_names=TOOLS, prompt_names=(PROMPT,), resource_uris=(RESOURCE,)
+        tool_names=tools, prompt_names=(PROMPT,), resource_uris=(RESOURCE,)
     )
     return server
 

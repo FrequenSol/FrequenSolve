@@ -91,6 +91,53 @@ process and preserving its operation identities. The adapter remains a standard
 stdio MCP server; other clients require separate acceptance before joining the
 pilot.
 
+Native review rehearsal
+-----------------------
+
+An optional fifth tool, ``workflow_review``, can display an authoritative
+proposal and request structured input directly through an MCP client's form.
+Start the server with ``--interactive-review`` and add ``workflow_review`` to
+the client's enabled tools. Use an interactive client with MCP elicitation
+enabled, a human approval reviewer and a tool timeout of at least 240 seconds.
+Keep other servers, shell, browser and app authorities excluded during acceptance.
+The default server still exposes only the original four tools.
+
+This increment is a **no-spend rehearsal**. A client response never authorizes
+planning, validation or execution, and the restricted Cloud gateway continues to
+reject paid actions. Initial account login and actual paid approval still use
+Cloud. A general tool-permission setting does not substitute for stage approval.
+
+Call ``workflow_review`` with ``action="preview"``, the allowed ``root_id``,
+``local_project`` and existing ``plan_id``. Present the returned scientific
+assumptions, input identity, target, resource bounds/revision, quote and charging
+implications in the conversation. Then call ``action="request_input"`` with
+the returned ``expected_fingerprint`` and a durable local ``intent``. The tool
+itself sends the complete proposal through the MCP form; tool arguments cannot
+contain an approval decision. The form allows cancellation, a resource-change
+request, or confirmation of this rehearsal. Requested changes are returned as
+input and are not automatically applied.
+
+The tool reads the authoritative proposal before and after input. Material
+changes invalidate the response. Timeout, lost connection, malformed input or
+missing form support leave incomplete evidence and a Cloud review link. Reuse
+the same intent after uncertainty, or call ``action="recover"`` to read its
+original local evidence. A repeated intent never silently opens another prompt.
+An interrupted pending prompt is not acceptance; a deliberate new rehearsal
+requires a new intent. Local evidence is bound to the explicit connection,
+principal, project and exact proposal and contains no transfer credentials.
+
+Receipts explicitly report ``paid_authority=false``,
+``backend_authorized=false`` and ``human_approval_verified=false``. Even a
+successful client confirmation has origin ``client_reported_unattested``.
+MCP clients can answer forms programmatically. Transport tests or an accepting
+test harness therefore do not prove that a human saw or approved the request.
+Qualify the exact client, display and policy before designing any native paid
+authority; retain Cloud review when that boundary cannot be established.
+The existing paid receipts, idempotency and dispatch machinery remain authoritative.
+
+Codex's documented elicitation request is described at
+https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests.
+
 Observation never resumes remembered authorization. Interpret scientific
 outcome, output publication and financial settlement independently. Discovery
 reports scheduler/configuration observations separately from capacity; free/busy

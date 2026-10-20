@@ -97,7 +97,14 @@ def logout(profile: str) -> None:
     required=True,
     help="Exact Sandbox product origin for human review links.",
 )
-def serve(profile: str, root_specs: tuple[str, ...], cloud_url: str) -> None:
+@click.option(
+    "--interactive-review",
+    is_flag=True,
+    help="Enable no-spend native MCP review rehearsal; grants no paid authority.",
+)
+def serve(
+    profile: str, root_specs: tuple[str, ...], cloud_url: str, interactive_review: bool
+) -> None:
     """Serve the separate scientific workflow profile over stdio."""
     from frequensolve.mcp_server.cli import _parse_roots
 
@@ -106,7 +113,10 @@ def serve(profile: str, root_specs: tuple[str, ...], cloud_url: str) -> None:
 
     try:
         server = build_server(
-            WorkflowClient(profile_auth(profile)), _parse_roots(root_specs), cloud_url
+            WorkflowClient(profile_auth(profile)),
+            _parse_roots(root_specs),
+            cloud_url,
+            interactive_review=interactive_review,
         )
         server.run_stdio()
     except Exception:

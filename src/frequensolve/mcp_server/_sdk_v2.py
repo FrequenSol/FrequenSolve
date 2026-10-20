@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any, TypeVar, get_type_hints
+from typing import Any, TypeVar, get_origin, get_type_hints
 from urllib.parse import urlsplit
 
 import anyio
@@ -78,9 +78,10 @@ class _UnsafeRequest(ValueError):
 @dataclass(frozen=True)
 class _ToolRegistration:
     tool: Tool
-    function: Callable[[BaseModel], Awaitable[BaseModel]]
+    function: Callable[..., Awaitable[BaseModel]]
     request_model: type[BaseModel]
     output_model: type[BaseModel]
+    with_context: bool = False
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ class SafeMCPServer(Server[dict[str, Any]]):
         description: str,
         annotations: ToolAnnotations,
         structured_output: bool,
+        with_context: bool = False,
     ) -> Callable[[_CallableT], _CallableT]:
         """Register one strict single-request-model structured tool."""
 
@@ -171,9 +173,14 @@ class SafeMCPServer(Server[dict[str, Any]]):
             parameters = list(signature.parameters.values())
             hints = get_type_hints(function)
             if (
-                len(parameters) != 1
+                len(parameters) != (2 if with_context else 1)
                 or parameters[0].name != "request"
                 or not inspect.iscoroutinefunction(function)
+                or with_context
+                and (
+                    parameters[1].name != "context"
+                    or get_origin(hints.get("context")) is not ServerRequestContext
+                )
             ):
                 raise AdapterCompatibilityError(
                     "MCP tools must be async functions with one request parameter"
@@ -204,6 +211,7 @@ class SafeMCPServer(Server[dict[str, Any]]):
                 function=function,
                 request_model=request_model,
                 output_model=output_model,
+                with_context=with_context,
             )
             return function
 
@@ -386,7 +394,6 @@ class SafeMCPServer(Server[dict[str, Any]]):
         context: ServerRequestContext[dict[str, Any]],
         params: CallToolRequestParams,
     ) -> CallToolResult:
-        del context
         self._require_finalized()
         registration = self._tools.get(params.name)
         if registration is None:
@@ -405,7 +412,11 @@ class SafeMCPServer(Server[dict[str, Any]]):
                 "Invalid tool arguments; use the published input schema."
             )
         try:
-            raw_result = await registration.function(request)
+            raw_result = await (
+                registration.function(request, context)
+                if registration.with_context
+                else registration.function(request)
+            )
             result = registration.output_model.model_validate(raw_result)
             structured = result.model_dump(mode="json", by_alias=True)
             text = json.dumps(

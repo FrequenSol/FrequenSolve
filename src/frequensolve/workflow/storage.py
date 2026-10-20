@@ -56,9 +56,20 @@ class PrivateStore:
             info = os.fstat(fd)
             if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise ValueError("Workflow storage must be private to its owner")
-            lock = os.open(
-                name + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=fd
-            )
+            # Concurrent first creation can transiently return ENOENT on macOS.
+            # Keep the anchored directory and every no-follow check on retry.
+            for attempt in range(3):
+                try:
+                    lock = os.open(
+                        name + ".lock",
+                        os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=fd,
+                    )
+                    break
+                except FileNotFoundError:
+                    if attempt == 2:
+                        raise
             try:
                 if not stat.S_ISREG(os.fstat(lock).st_mode):
                     raise ValueError("Invalid workflow lock")
