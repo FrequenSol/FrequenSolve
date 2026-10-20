@@ -68,6 +68,7 @@ class Connection:
     resource: str
     client_id: str
     callback: str = "http://127.0.0.1:43881/callback"
+    native_approval: bool = False
 
     def __post_init__(self) -> None:
         issuer, resource = urlsplit(self.issuer), urlsplit(self.resource)
@@ -86,19 +87,27 @@ class Connection:
             or resource.fragment
             or self.callback != "http://127.0.0.1:43881/callback"
             or not self.client_id
+            or type(self.native_approval) is not bool
         ):
             raise ValueError("Invalid workflow connection")
 
     @property
     def scopes(self) -> frozenset[str]:
-        return frozenset(
+        scopes = frozenset(
             self.resource + suffix
             for suffix in ("/read", "/workflow-prepare", "/workflow-results")
+        )
+        return scopes | (
+            {self.resource + "/workflow-approve"} if self.native_approval else set()
         )
 
     @property
     def binding(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        # Preserve existing explicit connection and journal identities.
+        if not self.native_approval:
+            value.pop("native_approval")
+        return value
 
 
 class WorkflowAuth:

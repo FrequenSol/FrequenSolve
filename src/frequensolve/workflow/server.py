@@ -1,4 +1,4 @@
-"""Finite local MCP workflow tools. Paid authority exists only in Cloud review."""
+"""Finite local workflow tools with explicitly opted-in paid client review."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ TOOLS = (
 RESOURCE = "frequensolve://workflow/capabilities"
 PROMPT = "curated_3d_workflow"
 REVIEW_TOOL = "workflow_review"
+APPROVAL_TOOL = "workflow_approve"
 
 
 class Closed(BaseModel):
@@ -126,6 +127,10 @@ class ReviewRequest(Closed):
         return self
 
 
+class ApprovalRequest(ReviewRequest):
+    stage: Literal["planning", "validation", "execution"]
+
+
 class ResultRequest(Closed):
     action: Literal["list", "download", "analyze", "notebook"]
     root_id: str
@@ -152,6 +157,7 @@ def build_server(
     cloud_url: str,
     *,
     interactive_review: bool = False,
+    native_approval: bool = False,
 ) -> SafeMCPServer:
     origin = urlsplit(cloud_url)
     if (
@@ -166,13 +172,26 @@ def build_server(
     if origin.scheme == "http" and origin.hostname not in ("127.0.0.1", "localhost"):
         raise ValueError("Human review requires HTTPS or local Sandbox")
     cloud_url = cloud_url.rstrip("/")
-    tools = TOOLS + (REVIEW_TOOL,) if interactive_review else TOOLS
+    if native_approval and not client.auth.connection.native_approval:
+        raise ValueError(
+            "A separate explicitly consented native approval profile is required"
+        )
+    tools = (
+        TOOLS
+        + ((REVIEW_TOOL,) if interactive_review else ())
+        + ((APPROVAL_TOOL,) if native_approval else ())
+    )
     limiter = anyio.CapacityLimiter(2)
     server = SafeMCPServer(
         name="FrequenSolve scientific workflow",
         version="1.0.0",
         instructions="Restricted curated 3D acoustic workflow. Discover, prepare, review and analyze owned work. "
-        "All paid stages require human review in Cloud. Never invent results or submit using other credentials. "
+        + (
+            "Paid stages may use workflow_approve only after a fresh native client form and exact Credit confirmation. "
+            if native_approval
+            else "All paid stages require human review in Cloud. "
+        )
+        + "Never invent results or submit using other credentials. "
         "Retain intent IDs on uncertainty; intentional new work requires a new intent. Capacity may be unavailable. "
         "Selected local data may be sent to the user's chosen model provider. Notebook replay is analysis only.",
         allowed_tool_names=tools,
@@ -199,6 +218,14 @@ def build_server(
         return canonical(
             {
                 **manifest,
+                "paid_authority": native_approval,
+                "human_confirmation": (
+                    "separate client-reported MCP form per exact paid stage"
+                    if native_approval
+                    else manifest["human_confirmation"]
+                ),
+                "oauth_scope_suffixes": manifest["oauth_scope_suffixes"]
+                + (["workflow-approve"] if native_approval else []),
                 "allowed_root_ids": sorted(roots),
                 "native_review": {
                     "enabled": interactive_review,
@@ -206,6 +233,13 @@ def build_server(
                     "paid_authority": False,
                     "requires": "elicitation.form",
                     "evidence_origin": "client_reported_unattested",
+                },
+                "native_paid_approval": {
+                    "enabled": native_approval,
+                    "tool": APPROVAL_TOOL if native_approval else None,
+                    "evidence_origin": "native_client_reported",
+                    "human_approval_verified": False,
+                    "separate_connection_consent_required": True,
                 },
                 "package_version": versions["version"],
                 "source_revision": versions["full-revisionid"],
@@ -597,6 +631,115 @@ def build_server(
             return Reply(
                 ok=False,
                 diagnostic="Native review could not be confirmed. Preview the current proposal or recover the same local intent. Paid work still requires Cloud review.",
+            )
+
+    @server.tool(
+        name=APPROVAL_TOOL,
+        description="Preview and confirm exactly one paid planning, validation or execution stage through the native MCP client form, or recover the same approval intent. Requires a separately consented paid profile. This tool can start paid compute only after the client returns approve_paid_stage and the exact Credit maximum. No approval decision or maximum may be supplied by the model in tool arguments. Client confirmation is not independently attested human approval. Cancellation/change requests never authorize compute. Reuse the intent after uncertainty; only an explicit new run uses a new intent.",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+        with_context=True,
+    )
+    async def native_paid_approval(
+        request: ApprovalRequest, context: ServerRequestContext[dict[str, Any]]
+    ) -> Reply:
+        from frequensolve.project_identity import ProjectIdentity
+
+        from .approval import PaidApproval, confirm_paid, envelope
+
+        try:
+            if not native_approval or not client.auth.connection.native_approval:
+                raise ValueError("Native paid approval is disabled")
+            project = root(request.root_id) / relative(request.local_project)
+            identity = ProjectIdentity.from_dict(
+                json.loads(read_local(project, ".frequensolve/project-identity.json"))
+            )
+            ids = {
+                "project_key": identity.storage_prefix,
+                "project_id": identity.project_id,
+                "plan_id": request.plan_id,
+            }
+
+            async def fetch() -> dict:
+                value = await anyio.to_thread.run_sync(
+                    lambda: client.call(
+                        "native_review", {**ids, "stage": request.stage}
+                    ),
+                    limiter=limiter,
+                )
+                return envelope(value, ids, request.stage)
+
+            if request.action == "preview":
+                result = {
+                    **await fetch(),
+                    "backend_authorized": False,
+                    "human_approval_verified": False,
+                }
+            else:
+                assert request.intent is not None
+                journal = await anyio.to_thread.run_sync(client.journal, project)
+                approval = PaidApproval(journal)
+                saved = await anyio.to_thread.run_sync(approval.lookup, request.intent)
+                if saved:
+                    if any(
+                        saved["request"].get(k) != v
+                        for k, v in {**ids, "stage": request.stage}.items()
+                    ):
+                        raise ValueError(
+                            "Approval intent belongs to another paid stage"
+                        )
+                if request.action == "recover":
+                    result = await anyio.to_thread.run_sync(
+                        approval.recover, request.intent, client.call
+                    )
+                elif saved:
+                    if (
+                        saved["review"]["proposal_fingerprint"]
+                        != request.expected_fingerprint
+                    ):
+                        raise ValueError("Intent already belongs to another proposal")
+                    # Accepted work may have no current quote. Recovery must not
+                    # depend on obtaining a replacement proposal or confirmation.
+                    result = saved
+                else:
+                    assert request.expected_fingerprint is not None
+
+                    async def elicit(message: str, schema: dict) -> dict:
+                        capabilities = context.session.client_capabilities
+                        if (
+                            not capabilities
+                            or not capabilities.elicitation
+                            or capabilities.elicitation.form is None
+                        ):
+                            raise ValueError(
+                                "This client does not advertise form elicitation"
+                            )
+                        response = await context.session.elicit_form(
+                            message, schema, related_request_id=context.request_id
+                        )
+                        return response.model_dump(mode="json")
+
+                    result = await confirm_paid(
+                        approval,
+                        request.intent,
+                        await fetch(),
+                        request.expected_fingerprint,
+                        fetch,
+                        elicit,
+                        client.call,
+                    )
+            if len(canonical(result)) > 120000:
+                raise ValueError("Approval response exceeds its bounded limit")
+            return Reply(ok=True, payload=canonical(result).decode())
+        except Exception:
+            return Reply(
+                ok=False,
+                diagnostic="Native paid approval could not be confirmed. Recover the same saved intent; do not create replacement work. If no confirmation was recorded, review a fresh proposal in the client or Cloud.",
             )
 
     server.finalize_safety_contract(

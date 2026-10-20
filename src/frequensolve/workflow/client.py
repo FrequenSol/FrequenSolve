@@ -20,7 +20,14 @@ from .journal import IntentJournal
 from .storage import PrivateStore, canonical, directory
 
 MUTATIONS = frozenset(
-    {"bind_project", "upload_begin", "plan_create", "plan_revise", "plan_validate"}
+    {
+        "bind_project",
+        "upload_begin",
+        "plan_create",
+        "plan_revise",
+        "plan_validate",
+        "native_approve",
+    }
 )
 OPERATIONS = MUTATIONS | {
     "discover",
@@ -33,6 +40,7 @@ OPERATIONS = MUTATIONS | {
     "plan_files",
     "result_ticket",
     "credit_history",
+    "native_review",
 }
 
 
@@ -233,6 +241,13 @@ class WorkflowClient:
     def call(self, operation: str, arguments: dict) -> dict:
         if operation not in OPERATIONS:
             raise WorkflowError("Unsupported restricted workflow operation")
+        if (
+            operation in ("native_review", "native_approve")
+            and not self.auth.connection.native_approval
+        ):
+            raise WorkflowError(
+                "Native paid approval requires a separate explicitly consented profile"
+            )
         credentials = self.auth.credentials()
         response = self.request(
             self.auth.connection.issuer.rstrip("/") + "/workflow",

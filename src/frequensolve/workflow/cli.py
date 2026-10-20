@@ -33,16 +33,29 @@ def main() -> None:
 @click.option("--profile", required=True)
 @click.option("--issuer", required=True)
 @click.option("--client-id", required=True)
-def login(profile: str, issuer: str, client_id: str) -> None:
+@click.option(
+    "--native-approval",
+    is_flag=True,
+    help="Request a separate grant trusting this local client with paid-stage confirmations.",
+)
+def login(profile: str, issuer: str, client_id: str, native_approval: bool) -> None:
     """Approve a restricted connection in the browser. Never accepts passwords."""
     try:
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", profile):
             raise ValueError()
         connection = Connection(
-            issuer.rstrip("/"), issuer.rstrip("/") + "/cloud", client_id
+            issuer.rstrip("/"),
+            issuer.rstrip("/") + "/cloud",
+            client_id,
+            native_approval=native_approval,
         )
         store = PrivateStore(Path.home() / ".frequensolve" / "workflow")
         with store.locked(profile + "-connection") as record:
+            previous = record.read()
+            if native_approval and previous and previous != connection.binding:
+                raise WorkflowError(
+                    "Use a new profile name for the separate paid approval connection; the existing profile was preserved"
+                )
             record.write(connection.binding)
         WorkflowAuth(connection, store, profile + "-tokens").login(webbrowser.open)
         click.echo("Restricted workflow connection approved.")
@@ -67,7 +80,7 @@ def status(profile: str) -> None:
                     "connected": True,
                     "issuer": auth.connection.issuer,
                     "scopes": sorted(auth.connection.scopes),
-                    "paid_authority": False,
+                    "paid_authority": auth.connection.native_approval,
                     "expires_at": credentials["expires_at"],
                 }
             )
@@ -102,8 +115,17 @@ def logout(profile: str) -> None:
     is_flag=True,
     help="Enable no-spend native MCP review rehearsal; grants no paid authority.",
 )
+@click.option(
+    "--native-approval",
+    is_flag=True,
+    help="Enable paid-stage forms only with a separately consented approval profile.",
+)
 def serve(
-    profile: str, root_specs: tuple[str, ...], cloud_url: str, interactive_review: bool
+    profile: str,
+    root_specs: tuple[str, ...],
+    cloud_url: str,
+    interactive_review: bool,
+    native_approval: bool,
 ) -> None:
     """Serve the separate scientific workflow profile over stdio."""
     from frequensolve.mcp_server.cli import _parse_roots
@@ -117,6 +139,7 @@ def serve(
             _parse_roots(root_specs),
             cloud_url,
             interactive_review=interactive_review,
+            native_approval=native_approval,
         )
         server.run_stdio()
     except Exception:

@@ -1,0 +1,304 @@
+"""Client-mediated paid-stage forms; Cloud receipts remain authoritative."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
+from uuid import uuid4
+
+import anyio
+
+from .journal import IntentJournal
+from .review import digest
+from .storage import canonical
+
+VERSION = "native-workflow-paid-review.v1"
+FORM: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "choice": {
+            "type": "string",
+            "title": "Paid-stage decision",
+            "enum": ["cancel", "request_changes", "approve_paid_stage"],
+        },
+        "maximum_credits": {
+            "type": "string",
+            "title": "To approve, enter the exact maximum Credits shown above",
+            "maxLength": 25,
+        },
+        "note": {
+            "type": "string",
+            "title": "Requested changes or note",
+            "maxLength": 1024,
+        },
+    },
+    "required": ["choice"],
+}
+
+
+def envelope(value: dict, ids: dict, stage: str) -> dict:
+    snapshot, fingerprint = value.get("proposal"), value.get("proposal_fingerprint")
+    if (
+        not isinstance(snapshot, dict)
+        or not isinstance(fingerprint, str)
+        or not re.fullmatch(r"sha256:[a-f0-9]{64}", fingerprint)
+    ):
+        raise ValueError("Cloud did not return an authoritative review")
+    quote = snapshot.get("quote", {})
+    if (
+        snapshot.get("version") != VERSION
+        or snapshot.get("stage") != stage
+        or any(snapshot.get(k) != v for k, v in ids.items())
+        or type(snapshot.get("revision")) is not int
+        or snapshot["revision"] < 0
+        or not isinstance(quote, dict)
+        or quote.get("purpose") != stage
+        or not isinstance(quote.get("maximum_credits"), str)
+        or not re.fullmatch(r"(0|[1-9]\d{0,17})(\.\d{1,6})?", quote["maximum_credits"])
+        or not isinstance(quote.get("fingerprint"), str)
+        or not re.fullmatch(r"sha256:[a-f0-9]{64}", quote["fingerprint"])
+        or not snapshot.get("input_digest")
+        or not snapshot.get("scientific_inputs")
+        or stage == "execution"
+        and not snapshot.get("plan")
+        or stage != "execution"
+        and not snapshot.get("compute_review")
+        or len(canonical(snapshot)) > 64000
+    ):
+        raise ValueError("The complete exact paid-stage proposal is required")
+    # The service generates the fingerprint. Preserve a separate local digest
+    # rather than pretending Python/JavaScript float serialization is identical.
+    return {
+        "proposal": deepcopy(snapshot),
+        "proposal_fingerprint": fingerprint,
+        "local_digest": digest(snapshot),
+    }
+
+
+class PaidApproval:
+    def __init__(self, journal: IntentJournal):
+        self.journal, self.store, self.binding = (
+            journal,
+            journal.store,
+            digest(journal.binding),
+        )
+
+    def key(self, intent: str) -> str:
+        if not intent or len(intent) > 100:
+            raise ValueError("Retain a bounded native approval intent")
+        return "native-paid-" + hashlib.sha256(intent.encode()).hexdigest()
+
+    def lookup(self, intent: str) -> dict | None:
+        with self.store.locked(self.key(intent)) as record:
+            value = record.read()
+        if value and value.get("binding") != self.binding:
+            raise ValueError(
+                "Paid approval evidence is unavailable for this connection"
+            )
+        return value
+
+    def read(self, intent: str) -> dict:
+        value = self.lookup(intent)
+        if value is None:
+            raise ValueError(
+                "Paid approval evidence is unavailable for this connection"
+            )
+        return value
+
+    def begin(self, intent: str, current: dict) -> tuple[dict, bool]:
+        with self.store.locked(self.key(intent)) as record:
+            saved = record.read()
+            if saved:
+                if (
+                    saved.get("binding") != self.binding
+                    or saved.get("review") != current
+                ):
+                    raise ValueError(
+                        "Intent already belongs to another proposal or connection"
+                    )
+                return saved, False
+            snapshot, quote = current["proposal"], current["proposal"]["quote"]
+            evidence_id = uuid4().hex
+            request = {
+                k: snapshot[k]
+                for k in ("project_key", "project_id", "plan_id", "stage")
+            }
+            request.update(
+                expected_revision=snapshot["revision"],
+                proposal_fingerprint=current["proposal_fingerprint"],
+                accepted_quote_fingerprint=quote["fingerprint"],
+                maximum_credits=quote["maximum_credits"],
+                evidence_id=evidence_id,
+            )
+            saved = {
+                "version": VERSION,
+                "binding": self.binding,
+                "evidence_id": evidence_id,
+                "review": current,
+                "request": request,
+                "state": "awaiting_input",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "evidence_origin": "native_client_reported",
+                "human_approval_verified": False,
+                "backend_authorized": False,
+            }
+            record.write(saved)
+            return saved, True
+
+    def transition(
+        self,
+        intent: str,
+        evidence_id: str,
+        allowed: tuple[str, ...],
+        state: str,
+        **updates: Any,
+    ) -> dict:
+        with self.store.locked(self.key(intent)) as record:
+            saved = record.read()
+            if (
+                not saved
+                or saved.get("binding") != self.binding
+                or saved.get("evidence_id") != evidence_id
+                or saved.get("state") not in allowed
+            ):
+                raise ValueError("Paid review state changed; recover the same intent")
+            saved.update(
+                state=state,
+                observed_at=datetime.now(timezone.utc).isoformat(),
+                **updates,
+            )
+            record.write(saved)
+            return saved
+
+    def recover(self, intent: str, send: Callable[[str, dict], dict]) -> dict:
+        saved = self.read(intent)
+        if saved["state"] not in ("client_confirmed", "sending"):
+            return saved
+        try:
+            self.transition(
+                intent, saved["evidence_id"], ("client_confirmed", "sending"), "sending"
+            )
+        except ValueError:
+            current = self.read(intent)
+            if current["state"] == "backend_accepted":
+                return current
+            raise
+        # This stores the exact request and one idempotency key before transport.
+        # A lost response retries only this request; the service owns paid state.
+        result = self.journal.perform(
+            "native-paid:" + intent, "native_approve", saved["request"], send
+        )
+        receipt = result.get("native_approval", {})
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("accepted") is not True
+            or receipt.get("evidence_id") != saved["evidence_id"]
+            or receipt.get("proposal_fingerprint")
+            != saved["review"]["proposal_fingerprint"]
+            or receipt.get("human_approval_verified") is not False
+            or receipt.get("evidence_origin") != "native_client_reported"
+        ):
+            raise ValueError("Cloud did not confirm the existing paid authorization")
+        # Concurrent recoveries share the same domain receipt and may finish first.
+        current = self.read(intent)
+        if current["state"] == "backend_accepted":
+            return current
+        try:
+            return self.transition(
+                intent,
+                saved["evidence_id"],
+                ("sending",),
+                "backend_accepted",
+                backend_authorized=True,
+                response=result,
+            )
+        except ValueError:
+            current = self.read(intent)
+            if current["state"] == "backend_accepted":
+                return current
+            raise
+
+
+async def confirm_paid(
+    approval: PaidApproval,
+    intent: str,
+    current: dict,
+    expected_fingerprint: str,
+    fetch: Callable[[], Awaitable[dict]],
+    elicit: Callable[[str, dict], Awaitable[dict]],
+    send: Callable[[str, dict], dict],
+    *,
+    timeout: float = 180,
+) -> dict:
+    if current["proposal_fingerprint"] != expected_fingerprint:
+        raise ValueError("Proposal changed; preview the exact paid stage again")
+    saved, created = await anyio.to_thread.run_sync(approval.begin, intent, current)
+    if not created:
+        return saved
+    snapshot = current["proposal"]
+    state, note = "incomplete", ""
+    try:
+        with anyio.fail_after(timeout):
+            message = (
+                f"PAID {snapshot['stage'].upper()} APPROVAL. This can start paid compute.\n"
+                "Review the complete authoritative proposal below. To approve only this stage, choose approve_paid_stage and enter "
+                f"exactly {snapshot['quote']['maximum_credits']} in maximum_credits. Cancellation does not imply immediate termination or refund. "
+                "Allocated failed/canceled work may be charged; execution minimum/failure policy is in quote.pricing. "
+                "The client reports your response; this is not independent proof that a human answered.\n"
+                + json.dumps(snapshot, sort_keys=True, indent=2, ensure_ascii=False)
+                + "\nCloud proposal fingerprint: "
+                + current["proposal_fingerprint"]
+            )
+            response = await elicit(message, deepcopy(FORM))
+            action, content = response.get("action"), response.get("content")
+            if action in ("cancel", "decline") and content is None:
+                state = "canceled" if action == "cancel" else "declined"
+            elif action == "accept" and isinstance(content, dict):
+                choice, note = content.get("choice"), content.get("note", "")
+                if (
+                    set(content) - {"choice", "maximum_credits", "note"}
+                    or not isinstance(choice, str)
+                    or choice not in FORM["properties"]["choice"]["enum"]
+                    or not isinstance(note, str)
+                    or len(note) > 1024
+                ):
+                    raise ValueError("Invalid paid-stage client response")
+                state = {
+                    "cancel": "canceled",
+                    "request_changes": "changes_requested",
+                    "approve_paid_stage": "client_confirmed",
+                }[choice]
+                if state == "changes_requested" and not note.strip():
+                    raise ValueError("Describe the requested change")
+                if (
+                    state == "client_confirmed"
+                    and content.get("maximum_credits")
+                    != snapshot["quote"]["maximum_credits"]
+                ):
+                    raise ValueError(
+                        "The exact maximum Credits must be entered in the form"
+                    )
+            else:
+                raise ValueError("Invalid paid-stage client response")
+            if state == "client_confirmed" and await fetch() != current:
+                state = "stale"
+    except BaseException:
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(
+                lambda: approval.transition(
+                    intent, saved["evidence_id"], ("awaiting_input",), "incomplete"
+                )
+            )
+        raise
+    saved = await anyio.to_thread.run_sync(
+        lambda: approval.transition(
+            intent, saved["evidence_id"], ("awaiting_input",), state, note=note
+        )
+    )
+    if state == "client_confirmed":
+        return await anyio.to_thread.run_sync(approval.recover, intent, send)
+    return saved

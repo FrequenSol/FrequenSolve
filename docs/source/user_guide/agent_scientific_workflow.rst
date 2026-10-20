@@ -102,10 +102,9 @@ enabled, a human approval reviewer and a tool timeout of at least 240 seconds.
 Keep other servers, shell, browser and app authorities excluded during acceptance.
 The default server still exposes only the original four tools.
 
-This increment is a **no-spend rehearsal**. A client response never authorizes
-planning, validation or execution, and the restricted Cloud gateway continues to
-reject paid actions. Initial account login and actual paid approval still use
-Cloud. A general tool-permission setting does not substitute for stage approval.
+This tool is a **no-spend rehearsal**. Its response never authorizes planning,
+validation or execution. Ordinary workflow grants continue to reject paid
+actions. A general tool-permission setting does not substitute for stage approval.
 
 Call ``workflow_review`` with ``action="preview"``, the allowed ``root_id``,
 ``local_project`` and existing ``plan_id``. Present the returned scientific
@@ -131,12 +130,72 @@ Receipts explicitly report ``paid_authority=false``,
 successful client confirmation has origin ``client_reported_unattested``.
 MCP clients can answer forms programmatically. Transport tests or an accepting
 test harness therefore do not prove that a human saw or approved the request.
-Qualify the exact client, display and policy before designing any native paid
-authority; retain Cloud review when that boundary cannot be established.
+Qualify the exact client, display and policy before enabling native paid
+authority; retain Cloud review when the client cannot be trusted.
 The existing paid receipts, idempotency and dispatch machinery remain authoritative.
 
 Codex's documented elicitation request is described at
 https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests.
+
+Native paid-stage approval
+--------------------------
+
+Native paid approval is a separate opt-in capability. It trusts the local MCP
+client and adapter to report the user's form response. FrequenSol cannot
+independently attest that a human answered: anyone possessing the new connection's
+credentials can exercise its paid permission. The one-time connection consent
+discloses this change of authority. Existing read, preparation and result grants
+are never upgraded. Keep those profiles when this trust boundary is unsuitable.
+
+Use the dedicated Sandbox native-approval client registration and a **new**
+profile name. The normal preparation client cannot request the additional scope::
+
+    frequensolve-workflow login --profile sandbox-native \
+      --issuer https://your-sandbox-gateway \
+      --client-id YOUR_NATIVE_APPROVAL_CLIENT_ID --native-approval
+
+This login requests ``workflow-approve`` in addition to the existing workflow
+scopes. Review and explicitly allow client paid approvals on the signed-in
+connection page. No stage is authorized by connecting. To expose
+``workflow_approve``, run ``serve --profile sandbox-native --native-approval``
+with the usual allowed root and Cloud origin, and add only that tool to the
+client's enabled tool list. Keep MCP elicitation enabled with a human reviewer;
+exclude shell, browser and other authorities during acceptance. Ordinary
+``serve`` still exposes the unchanged four-tool profile.
+
+Call ``workflow_approve`` with ``action="preview"``, ``root_id``,
+``local_project``, ``plan_id`` and one ``stage``: ``planning``, ``validation`` or
+``execution``. The service returns the complete authoritative proposal and its
+opaque ``proposal_fingerprint``. Call ``action="request_input"`` with that
+fingerprint as ``expected_fingerprint`` and a deliberate stable ``intent``.
+The client form contains the full proposal. To approve, the user chooses
+``approve_paid_stage`` and enters its exact ``maximum_credits``. These decisions
+cannot be supplied as tool arguments. Cancellation, incomplete responses and
+change requests send no paid mutation. Changes are returned for review, never
+automatically applied. A rehearsal confirmation cannot be converted into paid
+approval.
+
+Each stage needs its own proposal and form; ``run_after_planning`` remains false.
+Backend-generated fingerprints bind scientific inputs, revision, target,
+resources, quote and Credit maximum. Before a new paid request, the service
+checks the current proposal and appends immutable client attribution linked to
+the existing domain receipt. That record is neither an approval token nor a
+dispatch state machine. Existing services still enforce ownership, admission,
+current pricing/context, reservations, idempotency and settlement.
+
+The adapter saves evidence before displaying the form and the exact paid request
+and idempotency key before transport. ``action="recover"`` reuses an already
+confirmed request through restart or an uncertain response, including after
+settlement. It does not open another form or allocate a new execution identity.
+Only an explicit new run uses a new intent and receives a fresh form. Interrupted
+or canceled prompts cannot be promoted into confirmation. Local evidence stays
+bound to the explicit connection, user, project and proposal.
+
+An accepted server response records ``backend_authorized=true`` separately from
+``human_approval_verified=false`` and ``evidence_origin=native_client_reported``.
+Authorization does not establish solver success, downloadable results or settled
+charges. Revoking the connection prevents new requests; Cloud review and
+cancellation remain available independently.
 
 Observation never resumes remembered authorization. Interpret scientific
 outcome, output publication and financial settlement independently. Discovery
