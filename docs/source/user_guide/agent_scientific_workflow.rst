@@ -31,6 +31,28 @@ and Sandbox product origin. Its MCP configuration uses TOML::
     args = ["serve", "--profile", "sandbox",
             "--allow-root", "pilot=/absolute/existing/pilot-directory",
             "--cloud-url", "http://127.0.0.1:5173"]
+    required = true
+    enabled_tools = ["workflow_discover", "workflow_create_project",
+                     "workflow_plan", "workflow_results"]
+
+The combined plan and result tools include preparation and local file writes,
+so Codex can request tool approval even for a read action. For unattended use of
+this restricted profile, explicitly approve only these four tools in the client
+configuration; leave other servers and tools excluded. For example::
+
+    [mcp_servers.frequensolve-workflow.tools.workflow_discover]
+    approval_mode = "approve"
+    [mcp_servers.frequensolve-workflow.tools.workflow_create_project]
+    approval_mode = "approve"
+    [mcp_servers.frequensolve-workflow.tools.workflow_plan]
+    approval_mode = "approve"
+    [mcp_servers.frequensolve-workflow.tools.workflow_results]
+    approval_mode = "approve"
+
+These client settings allow the adapter's bounded operations. They do not grant
+paid-stage authority: planning, paid validation and execution still require the
+human's separate Cloud review. See the official Codex MCP configuration at
+https://learn.chatgpt.com/docs/extend/mcp?surface=cli.
 
 Use one explicit root per working area; symlinks, traversal and replacement of
 existing files are rejected. Selected local scientific data can be returned to the model
