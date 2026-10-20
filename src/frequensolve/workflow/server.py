@@ -36,6 +36,11 @@ REVIEW_TOOL = "workflow_review"
 APPROVAL_TOOL = "workflow_approve"
 
 
+class _IncompleteNotebookReplay(Exception):
+    def __init__(self, evidence: dict) -> None:
+        self.evidence = evidence
+
+
 class Closed(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -296,6 +301,12 @@ def build_server(
                     "Result exceeds the bounded response limit; use local artifacts"
                 )
             return Reply(ok=True, payload=canonical(value).decode())
+        except _IncompleteNotebookReplay as error:
+            return Reply(
+                ok=False,
+                payload=canonical(error.evidence).decode(),
+                diagnostic="Notebook replay did not complete. Inspect the retained local evidence; no successful report was published. Preserve this attempt before choosing a new notebook destination.",
+            )
         except Exception:
             return Reply(
                 ok=False,
@@ -504,14 +515,51 @@ def build_server(
                 second = Path(temp) / "reference.json"
                 second.write_bytes(canonical(reference))
             notebook = create_notebook(Path(temp) / "bundle", first, second)
-            receipt = replay_notebook(notebook)
+            # Reserve the exact destination before starting a kernel. The initial
+            # evidence survives interruption, while replay.json is published last.
             with directory(allowed / Path(destination).parent) as fd:
                 os.mkdir(Path(destination).name, mode=0o700, dir_fd=fd)
-            # Publish only generated files through anchored no-overwrite operations.
-            for file in sorted(
-                notebook.parent.iterdir(), key=lambda item: item.name == "replay.json"
-            ):
+            initial = {
+                "version": "initial-notebook-attempt.v1",
+                "status": "incomplete",
+                "origin": "local",
+                "notebook_sha256": hashlib.sha256(notebook.read_bytes()).hexdigest(),
+                "inputs": json.loads(notebook.read_bytes())["metadata"][
+                    "frequensolve_workflow"
+                ]["inputs"],
+                "completion_requires": "A complete replay.json and current identity verification",
+            }
+            write_local(allowed, destination + "/attempt.json", canonical(initial))
+            for file in notebook.parent.iterdir():
                 write_local(allowed, destination + "/" + file.name, file.read_bytes())
+            failed = False
+            try:
+                receipt = replay_notebook(notebook)
+            except Exception:
+                failed = True
+                receipt_path = notebook.parent / "replay.json"
+                receipt = (
+                    json.loads(receipt_path.read_bytes())
+                    if receipt_path.is_file()
+                    else {**initial, "version": "local-notebook-replay.v1"}
+                )
+                receipt["status"] = "incomplete"
+                receipt_path.write_bytes(canonical(receipt))
+            # Inputs are already retained. Publish only generated execution files,
+            # with the completion receipt last, and never replace existing files.
+            for name in ("executed.ipynb", "report.json", "report.html", "replay.json"):
+                file = notebook.parent / name
+                if file.is_file():
+                    write_local(allowed, destination + "/" + name, file.read_bytes())
+            if failed:
+                raise _IncompleteNotebookReplay(
+                    {
+                        "relative_path": destination + "/analysis.ipynb",
+                        "evidence_path": destination + "/replay.json",
+                        "replay_status": "incomplete",
+                        "assurance": "incomplete local evidence; no service attestation",
+                    }
+                )
         return {
             "relative_path": destination + "/analysis.ipynb",
             "report_path": destination + "/report.html",

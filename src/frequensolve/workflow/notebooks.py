@@ -195,7 +195,6 @@ def replay_notebook(path: Path, *, timeout: int = 120) -> dict:
             raise ValueError(
                 "Kernel output differs from the inspected analysis operation"
             )
-        receipt["status"] = "complete"
         receipt["report_sha256"] = _digest(canonical(result))
         (path.parent / "report.json").write_bytes(canonical(result))
         # Only escaped, static text; no imported notebook HTML, scripts or widgets.
@@ -208,7 +207,13 @@ def replay_notebook(path: Path, *, timeout: int = 120) -> dict:
         receipt["report_html_sha256"] = _digest(
             (path.parent / "report.html").read_bytes()
         )
+        receipt["status"] = "complete"
     finally:
+        if receipt["status"] != "complete":
+            # These locations were checked absent before execution. A failed
+            # export must not retain a report that appears successfully replayed.
+            for name in ("report.json", "report.html"):
+                (path.parent / name).unlink(missing_ok=True)
         executed = nbformat.writes(notebook).encode()
         receipt["executed_notebook_sha256"] = _digest(executed)
         (path.parent / "executed.ipynb").write_bytes(executed)

@@ -226,7 +226,14 @@ The generated directory contains editable ``analysis.ipynb``, verified input
 snapshots, ``executed.ipynb``, ``replay.json`` and static JSON/HTML reports. Run All
 contains analysis only and needs no live Cloud credential. The official replay
 uses a fresh kernel, cleared outputs, an explicit interpreter and finite timeout,
-and records incomplete evidence on failure. Edited notebooks remain ordinary
+and records incomplete evidence on failure. The MCP operation reserves the new
+destination and retains its notebook, inputs and initial ``attempt.json`` before
+starting a kernel. That initial record remains incomplete; a complete
+``replay.json`` and current identity verification establish local replay success.
+Failed replay returns an explicit incomplete status and evidence path, preserves
+available execution evidence, and publishes no successful report. Preserve the
+failed attempt before choosing a new destination; repeating its path cannot
+overwrite evidence or start another kernel. Edited notebooks remain ordinary
 Jupyter documents; generate a fresh official bundle for new checked evidence.
 Use ``frequensolve.workflow.notebooks.verify_replay(path)`` to check whether
 retained evidence still applies after code, input, output or environment changes.

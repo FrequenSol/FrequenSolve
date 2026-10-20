@@ -236,3 +236,101 @@ def test_clean_notebook_and_failed_execution_evidence(tmp_path, monkeypatch):
         == "incomplete"
     )
     assert not (failed.parent / "report.html").exists()
+
+
+def test_failed_report_publication_cannot_leave_complete_replay(tmp_path, monkeypatch):
+    pytest.importorskip("nbclient")
+    pytest.importorskip("nbformat")
+    pytest.importorskip("ipykernel")
+    from pathlib import Path
+
+    from frequensolve.workflow.notebooks import create_notebook, replay_notebook
+
+    source = tmp_path / "pressure.json"
+    source.write_text(json.dumps(snapshot([3 + 4j])))
+    notebook = create_notebook(tmp_path / "report-failure", source)
+    original_write = Path.write_text
+
+    def fail_report(path, *args, **kwargs):
+        if path.name == "report.html":
+            raise OSError("synthetic report publication failure")
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_report)
+    with pytest.raises(OSError, match="report publication"):
+        replay_notebook(notebook, timeout=30)
+    receipt = json.loads((notebook.parent / "replay.json").read_text())
+    assert receipt["status"] == "incomplete"
+    assert (notebook.parent / "executed.ipynb").is_file()
+    assert not (notebook.parent / "report.html").exists()
+    assert not (notebook.parent / "report.json").exists()
+
+
+def test_mcp_preserves_incomplete_notebook_and_rejects_collision(tmp_path, monkeypatch):
+    pytest.importorskip("nbclient")
+    pytest.importorskip("nbformat")
+    pytest.importorskip("ipykernel")
+    import anyio
+    import nbclient
+    from mcp import Client
+
+    from frequensolve.workflow import server as operations
+
+    calls = []
+
+    class LocalOnly:
+        def call(self, *args):
+            raise AssertionError("Notebook analysis cannot call Cloud")
+
+    def fail_kernel(*args, **kwargs):
+        destination = tmp_path / "failed-replay"
+        assert (
+            json.loads((destination / "attempt.json").read_text())["status"]
+            == "incomplete"
+        )
+        assert (destination / "analysis.ipynb").is_file()
+        assert (destination / "pressure-0.json").is_file()
+        calls.append("kernel")
+        raise RuntimeError("synthetic-private-diagnostic-not-for-the-tool-response")
+
+    monkeypatch.setattr(
+        operations, "snapshot_from_bundle", lambda *_: snapshot([3 + 4j])
+    )
+    monkeypatch.setattr(nbclient.NotebookClient, "execute", fail_kernel)
+
+    async def run():
+        server = operations.build_server(
+            LocalOnly(), {"pilot": tmp_path.resolve()}, "http://127.0.0.1:5173"
+        )
+        async with Client(server, cache=None) as client:
+            arguments = {
+                "request": {
+                    "action": "notebook",
+                    "root_id": "pilot",
+                    "bundle": "synthetic.zip",
+                    "destination": "failed-replay",
+                }
+            }
+            reply = (
+                await client.call_tool("workflow_results", arguments)
+            ).structured_content
+            assert not reply["ok"]
+            assert "synthetic-private" not in json.dumps(reply)
+            evidence = json.loads(reply["payload"])
+            assert evidence["replay_status"] == "incomplete"
+            assert evidence["evidence_path"] == "failed-replay/replay.json"
+            destination = tmp_path / "failed-replay"
+            receipt = (destination / "replay.json").read_bytes()
+            assert json.loads(receipt)["status"] == "incomplete"
+            assert (destination / "analysis.ipynb").is_file()
+            assert (destination / "executed.ipynb").is_file()
+            assert (destination / "pressure-0.json").is_file()
+            assert not (destination / "report.html").exists()
+            collision = (
+                await client.call_tool("workflow_results", arguments)
+            ).structured_content
+            assert not collision["ok"]
+            assert (destination / "replay.json").read_bytes() == receipt
+            assert calls == ["kernel"]
+
+    anyio.run(run)
