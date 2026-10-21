@@ -61,6 +61,75 @@ def table(headers: tuple[str, ...], rows: list[list[object]]) -> str:
     )
 
 
+def present_saved_plans(value: dict, *, continued: bool = False) -> Presentation:
+    """Navigation from a successful scoped list; availability is not absence."""
+    items = value.get("items")
+    if not isinstance(items, list) or len(items) > 100 or "cursor" not in value:
+        raise ValueError("Saved-plan history could not be confirmed")
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("plan_id"), str)
+            or not item["plan_id"]
+            or type(item.get("revision")) is not int
+            or item["revision"] < 0
+            or not isinstance(item.get("status"), str)
+            or not item["status"]
+        ):
+            raise ValueError("Invalid saved-plan navigation record")
+    lines = ["**Saved plans for this project**"]
+    if items:
+        lines.append(
+            table(
+                ("Choice", "Revision", "Recorded plan state", "Last recorded update"),
+                [
+                    [i, item["revision"], item["status"], item.get("updated_at")]
+                    for i, item in enumerate(items, 1)
+                ],
+            )
+        )
+        lines.append(
+            "A terminal plan state does not establish successful science. Inspect the execution outcome, published results and settlement separately."
+        )
+        next_action = "open_saved_plan"
+        next_text = (
+            "Open the selected saved study to inspect its question, model and results."
+        )
+    elif value["cursor"] is not None:
+        lines.append(
+            "No saved plans are shown on this page; the lookup has another page."
+        )
+        next_action = "read_next_saved_plan_page"
+        next_text = "Read the next page of this project's saved history."
+    elif continued:
+        lines.append("This final page has no additional saved plans.")
+        next_action = "finish_saved_plan_lookup"
+        next_text = (
+            "Review the saved entries from this lookup before choosing the next step."
+        )
+    else:
+        lines.append("No saved plans are recorded for this project.")
+        next_action = "choose_whether_to_prepare_study"
+        next_text = "Choose whether to prepare a new study."
+    if value["cursor"] is not None and items:
+        lines.append("Another page of saved history is available.")
+    lines.extend(
+        [
+            "This is saved history; check current execution eligibility and capacity separately. The lookup does not approve or start work.",
+            "**Next:** " + next_text,
+        ]
+    )
+    return Presentation(
+        "\n\n".join(lines),
+        {
+            **value,
+            "paid_request_sent": False,
+            "next_action": next_action,
+            "navigation": "Use returned plan IDs and the same project's cursor; displayed choice numbers refer only to this page.",
+        },
+    )
+
+
 def current_reports(view: dict) -> tuple[list[dict], str]:
     """Recalculate plotted values; never silently attach a stale saved analysis.
 

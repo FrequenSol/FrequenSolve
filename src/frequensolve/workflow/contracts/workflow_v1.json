@@ -9,7 +9,8 @@
     "workflow_results",
     "workflow_study",
     "workflow_present",
-    "workflow_workspace"
+    "workflow_workspace",
+    "workflow_saved_plans"
   ],
   "oauth_scope_suffixes": [
     "read",
@@ -59,6 +60,13 @@
     "maximum_folder_entries": 1000,
     "page_size": 25,
     "cloud_ownership": "confirmed by subsequent scoped plan reads",
+    "saved_plans": {
+      "tool": "workflow_saved_plans",
+      "read_only": true,
+      "identity": "existing local immutable project",
+      "pagination": "reuse only the same project's returned cursor",
+      "preparation_or_paid_authority": false
+    },
     "notebooks": "latest generated bundle and recorded context; use reproduce for exact selected-study matching; saved-byte checks do not verify the current environment"
   }
 }

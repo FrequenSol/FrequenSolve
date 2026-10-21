@@ -20,7 +20,7 @@ def client_config(
     native_approval: bool = False,
 ) -> str:
     """Only the configured adapter is declared; never embed tokens or identities."""
-    from .server import APPROVAL_TOOL, REVIEW_TOOL, TOOLS
+    from .server import APPROVAL_TOOL, OBSERVATION_TOOLS, REVIEW_TOOL, TOOLS
 
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", profile) or not roots:
         raise ValueError("Choose an explicit profile and workspace")
@@ -64,7 +64,10 @@ def client_config(
         f"args = {json.dumps(args, ensure_ascii=False)}\n"
         f"enabled_tools = {json.dumps(tools)}\n"
         "required = true\nstartup_timeout_sec = 30\ntool_timeout_sec = 300\n"
-        '\n[mcp_servers.frequensolve-workflow.tools.workflow_workspace]\napproval_mode = "approve"\n'
-        '\n[mcp_servers.frequensolve-workflow.tools.workflow_present]\napproval_mode = "approve"\n'
-        '\n[mcp_servers.frequensolve-workflow.tools.workflow_discover]\napproval_mode = "approve"\n'
+        + "".join(
+            "\n[mcp_servers.frequensolve-workflow.tools."
+            + tool
+            + ']\napproval_mode = "approve"\n'
+            for tool in OBSERVATION_TOOLS
+        )
     )

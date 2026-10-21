@@ -34,7 +34,8 @@ Returning to a study
 
 Ask, for example, "Reopen my acoustic study and show only the 20 Hz results."
 The assistant uses ``workflow_workspace`` to find named projects in your allowed
-workspace, then lists their owned saved plans. If names are ambiguous, it asks
+workspace, then uses read-only ``workflow_saved_plans`` to list their owned saved
+plans. Reopening needs no permission to use a plan-editing tool. If names are ambiguous, it asks
 which one you mean. It does not create another project or run to recover old
 work. Local metadata is a navigation hint; Cloud still checks access on reads.
 Folder browsing is explicit, does not follow symlinks and is limited to 1,000
@@ -109,7 +110,7 @@ This writes a new file and preserves all existing client settings. Add its MCP
 server section through your client's supported configuration workflow. Keep the
 configuration private: it names your local working area but contains no tokens.
 The generator excludes native paid approval and rehearsal tools unless explicitly
-requested. Only the three observation tools are pre-approved at the client tool
+requested. Only the four observation tools are pre-approved at the client tool
 layer. This setting grants no paid authority.
 
 The generated configuration uses an absolute Python executable and module
@@ -123,7 +124,8 @@ entrypoint. An equivalent configuration with the installed console script is::
     required = true
     enabled_tools = ["workflow_discover", "workflow_create_project",
                      "workflow_plan", "workflow_results", "workflow_study",
-                     "workflow_present", "workflow_workspace"]
+                     "workflow_present", "workflow_workspace",
+                     "workflow_saved_plans"]
 
 The combined plan and result tools include preparation and local file writes,
 so Codex can request tool approval even for a read action. For unattended use of
@@ -144,6 +146,8 @@ configuration; leave other servers and tools excluded. For example::
     approval_mode = "approve"
     [mcp_servers.frequensolve-workflow.tools.workflow_workspace]
     approval_mode = "approve"
+    [mcp_servers.frequensolve-workflow.tools.workflow_saved_plans]
+    approval_mode = "approve"
 
 These client settings allow the adapter's bounded operations. They do not grant
 paid-stage authority: planning, paid validation and execution still require the
@@ -163,6 +167,11 @@ Read ``frequensolve://workflow/capabilities`` for the versioned manifest. The co
 tools are ``workflow_discover``, ``workflow_create_project``, ``workflow_plan``
 and ``workflow_results``; ``workflow_study`` persists the scientific narrative
 and generates its notebook, and ``workflow_present`` presents it in the client.
+``workflow_workspace`` finds named local projects, and the dedicated read-only
+``workflow_saved_plans`` lists their owned saved plans without exposing editing
+actions. It accepts the local project and returned pagination cursor; a failed
+or unconfirmed read does not mean history is empty. Recorded plan state and its
+last update do not establish successful scientific execution or current capacity.
 Tool arguments use a ``request`` object. Replies have ``ok`` and a JSON
 ``payload`` string. Presentation replies also contain readable narrative and
 ordinary MCP image blocks; they do not duplicate image bytes in structured JSON.

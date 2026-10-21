@@ -8,7 +8,7 @@ from click.testing import CliRunner
 
 from frequensolve.workflow.cli import main
 from frequensolve.workflow.codex import client_config
-from frequensolve.workflow.server import TOOLS
+from frequensolve.workflow.server import OBSERVATION_TOOLS, TOOLS
 
 try:
     import tomllib
@@ -37,6 +37,11 @@ def test_config_round_trip_for_unicode_and_shell_metacharacters(tmp_path):
         "https://example.test",
     ]
     assert server["enabled_tools"] == list(TOOLS)
+    assert set(server["tools"]) == set(OBSERVATION_TOOLS)
+    assert all(
+        settings == {"approval_mode": "approve"}
+        for settings in server["tools"].values()
+    )
     assert "workflow_approve" not in json.dumps(config)
 
 

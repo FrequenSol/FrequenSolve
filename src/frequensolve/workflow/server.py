@@ -28,7 +28,7 @@ from .client import (
     write_local,
 )
 from .notebooks import create_notebook, replay_notebook
-from .presentation import Chapter, present, render_content
+from .presentation import Chapter, present, present_saved_plans, render_content
 from .results import download_results, public_results, snapshot_from_bundle
 from .storage import PrivateStore, canonical, directory
 
@@ -40,6 +40,13 @@ TOOLS = (
     "workflow_study",
     "workflow_present",
     "workflow_workspace",
+    "workflow_saved_plans",
+)
+OBSERVATION_TOOLS = (
+    "workflow_discover",
+    "workflow_workspace",
+    "workflow_saved_plans",
+    "workflow_present",
 )
 RESOURCE = "frequensolve://workflow/capabilities"
 PROMPT = "curated_3d_workflow"
@@ -103,6 +110,15 @@ class CursorKey(Closed):
 class PlanCursor(Closed):
     phase: Literal["plans", "preparations"]
     key: CursorKey
+
+
+class SavedPlansRequest(Closed):
+    root_id: str
+    local_project: str
+    cursor: PlanCursor | None = Field(
+        default=None,
+        description="Reuse only the cursor returned for this same project lookup.",
+    )
 
 
 class PlanRequest(Closed):
@@ -254,7 +270,7 @@ def build_server(
         name="FrequenSolve scientific workflow",
         version="1.0.0",
         instructions="Restricted curated 3D acoustic workflow. The primary experience is a scientific conversation in this MCP client. "
-        "Start with workflow_workspace to find existing projects by name and their saved local identities. List their owned plans with workflow_plan before reopening a study; never guess a plan ID or create replacement work. "
+        "Start with workflow_workspace to find existing projects by name and their saved local identities. Use read-only workflow_saved_plans to list their owned plans before reopening a study; never guess a plan ID or create replacement work. "
         "Use workflow_present to show a relevant chapter and its returned figures as the study progresses: question, model/estimates, plan, progress/Credits, results and reproduction. "
         "Explain the science and one next step in plain language. Manage operational IDs, intents and fingerprints yourself; do not ask the customer to copy them. "
         "Display returned scientific figures when the client supports them; otherwise use the included numeric/coordinate tables. "
@@ -331,7 +347,7 @@ def build_server(
     async def workflow_prompt() -> str:
         return (
             "Use plain customer language. Manage technical identifiers yourself; never ask the customer to copy plan IDs, fingerprints or recovery commands. Explain one next step at a time. "
-            "For returning customers, use workflow_workspace to find the project by name, then workflow_plan list for its owned saved plans. Clarify ambiguous names rather than choosing silently. Use workflow_present reproduce to reopen the matching notebook and report; do not regenerate when its existing binding matches. Use workflow_workspace artifacts to recover an older or different-context notebook without presenting it as current-study evidence. "
+            "For returning customers, use workflow_workspace to find the project by name, then read-only workflow_saved_plans for its owned saved plans. Clarify ambiguous names rather than choosing silently. Reuse returned IDs/cursors yourself; do not request editing-tool permission for this lookup. Use workflow_present reproduce to reopen the matching notebook and report; do not regenerate when its existing binding matches. Use workflow_workspace artifacts to recover an older or different-context notebook without presenting it as current-study evidence. "
             "Start by agreeing a scientific question and success criterion for the supported 3D acoustic 2/20 Hz study. Discover the accessible CPU cluster and report unknown capacity. Create a fresh curated project. "
             "Prepare a plan with a stable intent and read saved progress. For each paid stage, use the native approval tool if this profile exposes it; otherwise provide the signed-in Cloud review. Do not describe an approval rehearsal as paid authority. "
             "Save the question with workflow_study and explain model assumptions, geometry and units. Inspect recommended resources; edits are optional. Validate any changed resources and obtain separate approval if compute is required. "
@@ -428,7 +444,7 @@ def build_server(
 
     @server.tool(
         name="workflow_workspace",
-        description="Find local scientific projects by display name without asking the customer for internal IDs, or reopen a project's latest notebook/report links. Reads bounded metadata in explicitly allowed folders only, without recursion or symlinks. Then use workflow_plan list with the returned root_id/local_project to discover owned saved plans. Duplicate names require clarification. No Cloud call, paid authorization or notebook execution.",
+        description="Find local scientific projects by display name without asking the customer for internal IDs, or reopen a project's latest notebook/report links. Reads bounded metadata in explicitly allowed folders only, without recursion or symlinks. Then use read-only workflow_saved_plans with the returned root_id/local_project to discover owned saved plans. Duplicate names require clarification. No Cloud call, paid authorization or notebook execution.",
         annotations=ToolAnnotations(
             read_only_hint=True,
             destructive_hint=False,
@@ -616,6 +632,43 @@ def build_server(
             "credits": "credit_history",
         }.get(request.action)
         return await bounded(plan_operation, request, read_operation=observation)
+
+    @server.tool(
+        name="workflow_saved_plans",
+        description="Read owned saved plans for a local project found by name through workflow_workspace. Returns readable recorded states/updates and exact saved IDs with bounded pagination. Reuse the same project's returned cursor; retain IDs yourself and use workflow_present to open the selected study. No edits, preparation, paid approval, compute, transfers or notebook execution. Empty history is distinct from an unconfirmed read; terminal plan state is not scientific success.",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+        content_renderer=render_content,
+    )
+    async def saved_plans(request: SavedPlansRequest) -> PresentationReply:
+        observed = await bounded(
+            plan_operation,
+            PlanRequest(action="list", **request.model_dump()),
+            read_operation="plan_list",
+        )
+        if not observed.ok:
+            return PresentationReply(**observed.model_dump())
+        try:
+            value = json.loads(observed.payload)
+            if value.get("cursor") is not None:
+                PlanCursor.model_validate(value["cursor"])
+            presentation = present_saved_plans(
+                value, continued=request.cursor is not None
+            )
+            return PresentationReply(
+                ok=True,
+                narrative=presentation.narrative,
+                payload=canonical(presentation.provenance).decode(),
+            )
+        except Exception:
+            return PresentationReply(
+                **read_failure(WorkflowReadUnconfirmed("plan_list")).model_dump()
+            )
 
     def result_operation(request: ResultRequest) -> dict:
         allowed = root(request.root_id)
