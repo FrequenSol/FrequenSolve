@@ -79,11 +79,10 @@ def _latest(project: Path) -> tuple[dict | None, bool]:
                 MAX_METADATA_BYTES,
             )
         )
-        bookmark_id(value)
-        return value, False
+        return validate_record(value), False
     except FileNotFoundError:
         return None, False
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, KeyError):
         return None, True
 
 
@@ -150,6 +149,7 @@ def page(project: Path, after: str | None = None, *, limit: int = PAGE_SIZE) -> 
             unreadable += 1
     return {
         "records": records,
+        "latest_notebook_id": bookmark_id(latest) if latest is not None else None,
         "after": after,
         "next_after": remaining[limit - 1] if len(remaining) > limit else None,
         "unreadable_entries": unreadable,

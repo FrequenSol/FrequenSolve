@@ -64,6 +64,13 @@ bounded local history. If several copies match, the assistant asks which folder
 or copy you want, then checks that copy's saved files and current result identity.
 It keeps the selection details for you; no IDs need to be copied.
 
+For "Open the latest saved notebook and report," the assistant checks the
+project's existing latest registration directly, without asking you to choose
+among copies. The history marks that saved bookmark explicitly. This means
+latest registered, not newest by file date or replay time; its recorded context
+and saved bytes still need checking. Missing or unreadable bookmarks remain
+unknown rather than selecting a copy by its folder name.
+
 Ask "Show my saved notebooks" to browse registered entries and reopen an older
 or different-context copy. The history is local and paginated. Unregistered
 folders are not searched recursively, and an incomplete or unreadable history

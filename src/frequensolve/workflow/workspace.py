@@ -201,6 +201,7 @@ def notebook_artifacts(root: Path, project: Path, selected: str | None = None) -
             binding = None
     return {
         "notebook_id": bookmark_id(saved),
+        "selection_origin": "explicit_copy" if selected else "latest_registered",
         "artifacts": links if unchanged else [],
         "recorded_replay_status": saved["recorded_replay_status"],
         "binding": binding,
@@ -217,7 +218,14 @@ def notebook_history(project: Path, after: str | None = None) -> dict:
     result = page(project, after)
     return {
         **{k: v for k, v in result.items() if k != "records"},
-        "notebooks": [summary(entry) for entry in result["records"]],
+        "notebooks": [
+            {
+                **summary(entry),
+                "is_latest_registration": entry["bookmark_id"]
+                == result["latest_notebook_id"],
+            }
+            for entry in result["records"]
+        ],
         "paid_request_sent": False,
         "current_environment_checked": False,
         "service_attestation": False,
@@ -244,6 +252,7 @@ def narrative(value: dict) -> str:
                         "Choice",
                         "Notebook",
                         "Folder",
+                        "Registration",
                         "Selected frequencies",
                         "Recorded replay",
                     ),
@@ -252,6 +261,11 @@ def narrative(value: dict) -> str:
                             i,
                             item["label"],
                             item["folder"],
+                            (
+                                "Latest registered"
+                                if item["is_latest_registration"]
+                                else "Saved copy"
+                            ),
                             item["frequency_label"],
                             item["recorded_replay_status"],
                         ]
@@ -273,6 +287,11 @@ def narrative(value: dict) -> str:
             lines.append(
                 "Some registered entries could not be checked; the history remains unconfirmed."
             )
+        lines.append(
+            "The latest registered copy comes from the project's saved bookmark, not file dates or replay time. Its saved files still need checking."
+            if value.get("latest_notebook_id")
+            else "The latest registered copy could not be confirmed. Do not infer it from folder names or catalog order."
+        )
         lines.append(
             "This catalog covers local registrations only; unregistered folders have not been searched. Choose a notebook to check its files. Recorded replay state is not a new environment check or service attestation."
         )
@@ -325,6 +344,10 @@ def narrative(value: dict) -> str:
             )
         return "\n".join(lines)
     lines = ["Your saved analysis notebook", ""]
+    if value.get("selection_origin") == "latest_registered":
+        lines.append(
+            "Selected the project's latest registered copy. This is a saved bookmark, not a claim about creation time or the most recent replay."
+        )
     for item in value["artifacts"]:
         labels = {
             "analysis.ipynb": "Editable notebook",

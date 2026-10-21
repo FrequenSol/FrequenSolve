@@ -16,6 +16,7 @@ from frequensolve.workflow.notebook_recovery import recover
 from frequensolve.workflow.server import build_server
 from frequensolve.workflow.storage import canonical
 from frequensolve.workflow.workspace import (
+    narrative,
     notebook_artifacts,
     notebook_history,
     remember_notebook,
@@ -188,8 +189,15 @@ def test_history_pages_keep_all_entries_and_cursor_scoped_reads(tmp_path):
         register(root, project, value, f"notebook-{i:02}", [i % 2]) for i in range(30)
     }
     before = snapshot(root)
+    latest = notebook_artifacts(root, project)["notebook_id"]
     first = notebook_history(project)
     final = notebook_history(project, first["next_after"])
+    assert first["latest_notebook_id"] == final["latest_notebook_id"] == latest
+    assert [
+        item["notebook_id"]
+        for item in first["notebooks"] + final["notebooks"]
+        if item["is_latest_registration"]
+    ] == [latest]
     assert len(first["notebooks"]) == 25 and len(final["notebooks"]) == 5
     assert not final["next_after"] and final["after"] == first["next_after"]
     assert {
@@ -199,6 +207,120 @@ def test_history_pages_keep_all_entries_and_cursor_scoped_reads(tmp_path):
     for invalid in ("../tokens", "/tmp", "not-a-returned-cursor"):
         with pytest.raises(ValueError):
             notebook_history(project, invalid)
+
+
+def test_latest_registration_uses_saved_pointer_not_catalog_order(tmp_path):
+    root = tmp_path.resolve()
+    project, value = setup(root)
+    ids = [register(root, project, value, f"saved-copy-{i}", [0]) for i in range(3)]
+    # A valid saved bookmark deliberately points to the middle catalog identity.
+    selected = sorted(ids)[1]
+    saved = catalog.get(project, selected)["bookmark"]
+    remember_notebook(
+        root,
+        project,
+        saved["destination"],
+        saved["recorded_replay_status"],
+        binding=saved["binding"],
+        label=saved["label"],
+    )
+    before = snapshot(root)
+    history = notebook_history(project)
+    assert history["latest_notebook_id"] == selected
+    assert [
+        item["notebook_id"]
+        for item in history["notebooks"]
+        if item["is_latest_registration"]
+    ] == [selected]
+    assert "Latest registered" in narrative(history)
+    current = notebook_artifacts(root, project)
+    assert current["notebook_id"] == selected
+    assert current["selection_origin"] == "latest_registered"
+    assert current["saved_bytes_unchanged"]
+    explicit = notebook_artifacts(root, project, ids[0])
+    assert explicit["selection_origin"] == "explicit_copy"
+    assert snapshot(root) == before
+
+
+@pytest.mark.parametrize("case", ["missing", "invalid_json", "schema", "symlink"])
+def test_unknown_latest_never_promotes_an_archived_copy(tmp_path, case):
+    root = tmp_path.resolve()
+    project, value = setup(root)
+    first = register(root, project, value, "older", [0])
+    second = register(root, project, value, "newer", [0])
+    path = project / ".frequensolve/workflow/latest-notebook.json"
+    path.unlink()
+    if case == "invalid_json":
+        path.write_text("not JSON")
+    elif case == "schema":
+        path.write_text('{"destination":"newer","files":[]}')
+    elif case == "symlink":
+        (root / "private.json").write_text('{"private":"do not read"}')
+        path.symlink_to(root / "private.json")
+    before = snapshot(root)
+    history = notebook_history(project)
+    assert history["latest_notebook_id"] is None
+    assert not any(item["is_latest_registration"] for item in history["notebooks"])
+    assert {item["notebook_id"] for item in history["notebooks"]} == {first, second}
+    assert history["unreadable_entries"] == (0 if case == "missing" else 1)
+    assert "could not be confirmed" in narrative(history)
+    assert snapshot(root) == before
+
+
+def test_changed_latest_files_do_not_fall_back_to_an_older_copy(tmp_path):
+    root = tmp_path.resolve()
+    project, value = setup(root)
+    register(root, project, value, "older", [0])
+    latest = register(root, project, value, "latest", [0])
+    (root / "latest/analysis.ipynb").write_text("changed")
+    before = snapshot(root)
+    result = notebook_artifacts(root, project)
+    assert result["notebook_id"] == latest
+    assert result["selection_origin"] == "latest_registered"
+    assert not result["saved_bytes_unchanged"] and not result["artifacts"]
+    assert snapshot(root) == before
+
+
+def test_mcp_latest_read_needs_no_copy_id_cloud_or_kernel(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    project, value = setup(root)
+    register(root, project, value, "older", [0, 1])
+    latest = register(root, project, value, "latest", [0, 1])
+
+    class Reader:
+        def call(self, *_):
+            pytest.fail("Local bookmark recovery called Cloud")
+
+        def journal(self, *_):
+            pytest.fail("Read created a mutation journal")
+
+    monkeypatch.setattr(
+        "frequensolve.workflow.study.replay_study_notebook",
+        lambda *_: pytest.fail("Read ran a kernel"),
+    )
+    before = snapshot(root)
+
+    async def read():
+        async with Client(
+            build_server(Reader(), {"root": root}, "https://example.test"), cache=None
+        ) as client:
+            reply = await client.call_tool(
+                "workflow_workspace",
+                {"request": {"action": "artifacts", "local_project": "project"}},
+            )
+            assert reply.structured_content["ok"]
+            return (
+                json.loads(reply.structured_content["payload"]),
+                reply.content[0].text,
+            )
+
+    result, text = anyio.run(read)
+    assert result["notebook_id"] == latest and result["saved_bytes_unchanged"]
+    assert result["selection_origin"] == "latest_registered"
+    assert all("/latest/" in item["path"] for item in result["artifacts"])
+    assert "latest registered copy" in text and "Editable notebook" in text
+    assert not result["paid_request_sent"] and not result["service_attestation"]
+    assert snapshot(root) == before
 
 
 @pytest.mark.parametrize(
