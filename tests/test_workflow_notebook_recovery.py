@@ -333,6 +333,7 @@ def test_notebook_creation_saves_the_verified_context_for_a_fresh_client(
         if case == "incomplete":
             raise RuntimeError("synthetic interrupted kernel")
         (path.parent / "report.html").write_text("synthetic fixture")
+        (path.parent / "report.json").write_text('{"origin":"synthetic_test"}')
         return {"status": "complete"}
 
     monkeypatch.setattr(

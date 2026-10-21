@@ -76,6 +76,18 @@
       "file_verification": "selected notebook only; maximum 32 files and 64 MiB",
       "current_study_evidence": "exact context and current owned result manifest; unbound or uncertain records never attach"
     },
+    "notebook_generation": {
+      "version": "notebook-attempt.v1",
+      "tool": "workflow_study notebook",
+      "request_bytes": 8192,
+      "record_bytes": 65536,
+      "intent": "exact request and local project identity before authoring; destination-bound nonblocking writer lock",
+      "recovery": "same request recovers the original receipt after registered saved-byte checks; no Cloud read or kernel",
+      "uncertainty": "active, failed, interrupted or edited attempts never automatically replay or overwrite files",
+      "partial_artifact": "only an unchanged authored notebook file; input/output bundle completeness remains unconfirmed",
+      "legacy": "older generation receipts are not invented; use registered notebook history",
+      "attestation": "original local replay, not a current environment check or service attestation"
+    },
     "saved_plans": {
       "tool": "workflow_saved_plans",
       "read_only": true,

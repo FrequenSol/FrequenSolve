@@ -68,6 +68,20 @@ does not establish that earlier work is missing. Browsing and opening never run
 a kernel, regenerate notebooks or authorize compute. Older unbound bookmarks
 remain recoverable without being presented as current-study evidence.
 
+If the connection drops while creating a new study notebook, ask the assistant
+to recover that same attempt. It retains the exact request and destination
+before authoring files. A completed attempt returns its original local receipt
+after checking the registered saved bytes, without another Cloud call or kernel.
+Active, failed or interrupted attempts remain explicitly incomplete or unknown;
+recovery never automatically reruns them or overwrites their files. A verified
+editable notebook may be available even when its data or outputs are incomplete.
+Choosing a different new attempt is a separate deliberate action.
+
+These generation receipts apply to newly recorded study-notebook attempts.
+Older notebooks still use the registered-history recovery above. A recovered
+receipt describes the original local replay; it is not a fresh check of the
+current environment or a service attestation.
+
 The notebook and static report explain their saved Credit observations in a
 table: quoted maximum, authorized maximum, captured charges, settlement and
 observation time. An incomplete history withholds the total; missing amounts

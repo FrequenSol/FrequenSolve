@@ -47,7 +47,7 @@ class PrivateStore:
         self.root = Path(root)
 
     @contextmanager
-    def locked(self, name: str) -> Iterator["LockedRecord"]:
+    def locked(self, name: str, *, blocking: bool = True) -> Iterator["LockedRecord"]:
         import fcntl
 
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", name):
@@ -73,7 +73,7 @@ class PrivateStore:
             try:
                 if not stat.S_ISREG(os.fstat(lock).st_mode):
                     raise ValueError("Invalid workflow lock")
-                fcntl.flock(lock, fcntl.LOCK_EX)
+                fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
                 yield LockedRecord(fd, name + ".json")
             finally:
                 os.close(lock)
@@ -85,7 +85,9 @@ class LockedRecord:
 
     def read(self) -> dict | None:
         try:
-            fd = os.open(self.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.fd)
+            fd = os.open(
+                self.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd
+            )
         except FileNotFoundError:
             return None
         with os.fdopen(fd, "rb") as stream:

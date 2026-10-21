@@ -100,7 +100,7 @@ def remember_notebook(
     *,
     binding: dict | None = None,
     label: str | None = None,
-) -> None:
+) -> str:
     """Bookmark the latest notebook without replacing any notebook content."""
     target = root / relative(destination)
     if binding is not None:
@@ -127,7 +127,7 @@ def remember_notebook(
                 "sha256": hashlib.sha256(data).hexdigest(),
             }
         )
-    from .notebook_catalog import archive, validate_record
+    from .notebook_catalog import archive, bookmark_id, validate_record
 
     saved = validate_record(
         {
@@ -143,6 +143,7 @@ def remember_notebook(
         archive(store, record.read())
         archive(store, saved)
         record.write(saved)
+    return bookmark_id(saved)
 
 
 def notebook_artifacts(root: Path, project: Path, selected: str | None = None) -> dict:
@@ -319,7 +320,7 @@ def narrative(value: dict) -> str:
                 "To reopen earlier work, choose its existing parent folder within an allowed workspace, or restore its local project files and retry discovery."
             )
         return "\n".join(lines)
-    lines = ["Your latest analysis notebook", ""]
+    lines = ["Your saved analysis notebook", ""]
     for item in value["artifacts"]:
         labels = {
             "analysis.ipynb": "Editable notebook",
