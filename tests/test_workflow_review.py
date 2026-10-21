@@ -172,7 +172,12 @@ def test_native_responses_remain_unattested_and_recover_without_reprompt(
             )
             == saved
         )
-        assert len(prompts) == 1
+        assert len(prompts) == (
+            2
+            if response
+            == {"action": "accept", "content": {"choice": "request_changes"}}
+            else 1
+        )
 
     anyio.run(exercise)
     with pytest.raises(ValueError):

@@ -196,10 +196,12 @@ Call ``workflow_review`` with ``action="preview"``, the allowed ``root_id``,
 assumptions, input identity, target, resource bounds/revision, quote and charging
 implications in the conversation. Then call ``action="request_input"`` with
 the returned ``expected_fingerprint`` and a durable local ``intent``. The tool
-itself sends the complete proposal through the MCP form; tool arguments cannot
-contain an approval decision. The form allows cancellation, a resource-change
-request, or confirmation of this rehearsal. Requested changes are returned as
-input and are not automatically applied.
+itself sends a readable scientific/resource/Credit summary followed by every
+exact proposal setting through the MCP form; tool arguments cannot
+contain an approval decision. The form offers ``Cancel``, ``Request changes`` and ``Confirm rehearsal``.
+Only a change request opens a note prompt; cancellation and confirmation do not
+ask for an optional note. Existing protocol labels remain accepted. Requested
+changes are returned as input and are not automatically applied.
 
 The tool reads the authoritative proposal before and after input. Material
 changes invalidate the response. Timeout, lost connection, malformed input or
@@ -253,7 +255,15 @@ Call ``workflow_approve`` with ``action="preview"``, ``root_id``,
 ``execution``. The service returns the complete authoritative proposal and its
 opaque ``proposal_fingerprint``. Call ``action="request_input"`` with that
 fingerprint as ``expected_fingerprint`` and a deliberate stable ``intent``.
-The client form contains the full proposal. To approve, the user chooses
+The client form leads with the exact stage and Credit maximum, scientific
+assumptions, resource rows and changes from automatic sizing. Charging and
+cancellation terms follow, including the quoted minimum and failure policy.
+Every authoritative setting, including unknown fields, is then shown in exact
+path/value tables. Missing values remain explicit. Oversized or unsupported
+reviews fail safely rather than silently truncating settings. The underlying
+proposal and its fingerprints are unchanged.
+
+To approve, the user chooses
 ``Approve this stage``, then enters its exact Credit maximum in a separate
 required prompt. Approval does not ask for an optional note. Choosing
 ``Request changes`` instead opens a required change-description prompt. These decisions

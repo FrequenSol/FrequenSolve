@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -13,6 +12,7 @@ from uuid import uuid4
 import anyio
 
 from .journal import IntentJournal
+from .review_display import render
 from .storage import canonical
 
 VERSION = "native-workflow-review-rehearsal.v1"
@@ -23,12 +23,7 @@ FORM: dict[str, Any] = {
         "choice": {
             "type": "string",
             "title": "Review decision (no paid authorization)",
-            "enum": ["cancel", "request_changes", "confirm_rehearsal"],
-        },
-        "note": {
-            "type": "string",
-            "title": "Requested resource changes or review note",
-            "maxLength": 1024,
+            "enum": ["Cancel", "Request changes", "Confirm rehearsal"],
         },
     },
     "required": ["choice"],
@@ -100,15 +95,7 @@ def proposal(value: dict, project_key: str, plan_id: str) -> dict:
 
 def display(snapshot: dict) -> str:
     """The host receives the same complete snapshot returned by preview."""
-    return (
-        "NO-SPEND REVIEW REHEARSAL. This prompt cannot authorize or launch paid work.\n"
-        "Review this Cloud-owned proposal. Choose request_changes to provide input, "
-        "confirm_rehearsal to record a local client response, or cancel. "
-        "Confirmation is client-reported evidence, not verified human or service authorization.\n"
-        + json.dumps(snapshot, sort_keys=True, indent=2, ensure_ascii=False)
-        + "\nProposal fingerprint: "
-        + digest(snapshot)
-    )
+    return render(snapshot, digest(snapshot), paid=False)
 
 
 class ReviewEvidence:
@@ -202,10 +189,16 @@ async def request_input(
                 state = "declined" if action == "decline" else "canceled"
             elif action == "accept" and isinstance(content, dict):
                 choice, note = content.get("choice"), content.get("note", "")
+                if isinstance(choice, str):
+                    choice = {
+                        "Cancel": "cancel",
+                        "Request changes": "request_changes",
+                        "Confirm rehearsal": "confirm_rehearsal",
+                    }.get(choice, choice)
                 if (
                     set(content) - {"choice", "note"}
                     or not isinstance(choice, str)
-                    or choice not in FORM["properties"]["choice"]["enum"]
+                    or choice not in ("cancel", "request_changes", "confirm_rehearsal")
                     or not isinstance(note, str)
                     or len(note) > 1024
                 ):
@@ -216,7 +209,38 @@ async def request_input(
                     "cancel": "canceled",
                 }[choice]
                 if choice == "request_changes" and not note.strip():
-                    raise ValueError("Describe the requested change")
+                    response = await elicit(
+                        "NO-SPEND REVIEW REHEARSAL · Requested resource changes\nDescribe the change you want. This does not authorize paid work.",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "note": {
+                                    "type": "string",
+                                    "title": "Requested changes",
+                                    "minLength": 1,
+                                    "maxLength": 1024,
+                                }
+                            },
+                            "required": ["note"],
+                        },
+                    )
+                    action, content = response.get("action"), response.get("content")
+                    if action in ("decline", "cancel") and content is None:
+                        state, note = (
+                            ("declined" if action == "decline" else "canceled"),
+                            "",
+                        )
+                    elif (
+                        action == "accept"
+                        and isinstance(content, dict)
+                        and set(content) == {"note"}
+                        and isinstance(content["note"], str)
+                        and 0 < len(content["note"]) <= 1024
+                        and content["note"].strip()
+                    ):
+                        note = content["note"]
+                    else:
+                        raise ValueError("Describe the requested change")
             else:
                 raise ValueError("Invalid client response")
             if digest(await fetch()) != expected_fingerprint:

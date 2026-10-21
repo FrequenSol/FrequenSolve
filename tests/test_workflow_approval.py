@@ -144,10 +144,10 @@ def test_confirmed_exact_stage_uses_one_saved_request_then_recovers_without_form
                 "Request changes",
                 "Approve this stage",
             ]
-            assert (
-                json.dumps(current["proposal"], sort_keys=True, separators=(",", ":"))
-                in message
-            )
+            assert "Exact proposal details" in message
+            assert "acoustic" in message and "1e-06" in message
+            assert current["proposal"]["input_digest"] in message
+            assert current["proposal"]["quote"]["fingerprint"] in message
         else:
             assert current["proposal_fingerprint"] in message
             assert len(message) < 1000

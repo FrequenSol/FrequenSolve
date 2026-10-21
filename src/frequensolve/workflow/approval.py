@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -14,6 +13,7 @@ import anyio
 
 from .journal import IntentJournal
 from .review import digest
+from .review_display import render
 from .storage import canonical
 
 VERSION = "native-workflow-paid-review.v1"
@@ -261,18 +261,7 @@ async def confirm_paid(
     try:
         with anyio.fail_after(timeout):
             maximum = snapshot["quote"]["maximum_credits"]
-            message = (
-                f"PAID {snapshot['stage'].upper()} APPROVAL. This can start paid compute.\n"
-                "Review the complete authoritative proposal below. To approve only this stage, choose Approve this stage. A second prompt asks for "
-                f"exactly {maximum} Credits (enter only the number). Cancellation does not imply immediate termination or refund. "
-                "Allocated failed/canceled work may be charged; execution minimum/failure policy is in quote.pricing. "
-                "The client reports your response; this is not independent proof that a human answered.\n"
-                + json.dumps(
-                    snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                )
-                + "\nCloud proposal fingerprint: "
-                + current["proposal_fingerprint"]
-            )
+            message = render(snapshot, current["proposal_fingerprint"], paid=True)
             state, choice = form_answer(await elicit(message, deepcopy(FORM)), "choice")
             failure_code = "invalid_form_response"
             if state == "accepted":
@@ -325,7 +314,13 @@ async def confirm_paid(
                     )
                     state, value = form_answer(
                         await elicit(
-                            f"PAID {snapshot['stage'].upper()} · Confirm the Credit limit\n"
+                            f"PAID {snapshot['stage'].upper()} · "
+                            + (
+                                "Confirm the Credit limit"
+                                if field == "maximum_credits"
+                                else "Requested resource changes"
+                            )
+                            + "\n"
                             f"{description}\nThe exact proposal you just reviewed remains bound to revision {snapshot['revision']}. "
                             f"Proposal fingerprint: {current['proposal_fingerprint']}. No other stage is approved.",
                             detail_form,
