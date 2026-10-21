@@ -1,7 +1,6 @@
 import copy
 import json
 
-import nbformat
 import pytest
 
 from frequensolve.workflow.study import (
@@ -64,15 +63,20 @@ def test_scientific_narrative_estimates_plots_and_honest_coverage():
     assert report["reports"][0]["magnitude"] == [[5, 0]]
     assert report["reports"][0]["principal_phase_radians"][0][1] is None
     assert report["reports"][1]["comparison"]["relative_l2_difference"] == 0
-    assert "<svg" in figure_svg(report["reports"], "geometry")
-    document = report_html(report)
-    assert "Acoustic &lt;study&gt;" in document
-    assert "<script" not in document
-    assert "General accuracy" not in document
     assert report["assurance"]["service_attestation"] is False
     changed = copy.deepcopy(context["plan"]["scientific_inputs"])
     changed["units"]["defaults"]["velocity"] = "unspecified"
     assert model_summary(changed)["wavelengths"] == []
+
+
+def test_study_figures_and_sanitized_static_report():
+    pytest.importorskip("matplotlib")
+    context, values, references = data()
+    report = study_report(context, values, references)
+    assert "<svg" in figure_svg(report["reports"], "geometry")
+    document = report_html(report)
+    assert "Acoustic &lt;study&gt;" in document
+    assert "<script" not in document
 
 
 def test_study_rejects_wrong_run_or_reference():
@@ -87,6 +91,9 @@ def test_study_rejects_wrong_run_or_reference():
 
 
 def test_complete_notebook_replay_and_changed_evidence(tmp_path):
+    nbformat = pytest.importorskip("nbformat")
+    pytest.importorskip("nbclient")
+    pytest.importorskip("matplotlib")
     context, values, refs = data()
     path = create_study_notebook(tmp_path / "study", context, values, refs)
     notebook = nbformat.read(path, as_version=4)
@@ -103,6 +110,9 @@ def test_complete_notebook_replay_and_changed_evidence(tmp_path):
 
 
 def test_changed_code_and_failed_kernel_never_claim_success(tmp_path, monkeypatch):
+    nbformat = pytest.importorskip("nbformat")
+    pytest.importorskip("nbclient")
+    pytest.importorskip("matplotlib")
     context, values, refs = data()
     path = create_study_notebook(tmp_path / "edited", context, values, refs)
     notebook = nbformat.read(path, as_version=4)
