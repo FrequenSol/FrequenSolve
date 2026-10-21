@@ -41,6 +41,12 @@ work. Local metadata is a navigation hint; Cloud still checks access on reads.
 Folder browsing is explicit, does not follow symlinks and is limited to 1,000
 entries per folder, with 25 folders/projects per page. Contents can change
 between pages, so clients should deduplicate by identity and local path.
+An empty page can precede a later page containing your study. The assistant
+continues through the returned pages, keeps earlier results and asks which
+subfolder to inspect when needed. Missing or unreadable local metadata does not
+establish that saved Cloud work is missing. To recover earlier work, select the
+existing allowed folder containing the project, or restore its local project
+files and repeat discovery.
 
 After generating a notebook, ask "Open my notebook." The ``reproduce`` chapter
 reopens its clickable paths when its saved files and exact study, project, plan

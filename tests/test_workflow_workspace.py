@@ -31,12 +31,99 @@ def test_projects_keep_duplicate_names_and_exact_identities_across_pages(tmp_pat
     assert len({p["display_name"] for p in found}) == 1
 
 
+def test_empty_page_does_not_hide_a_project_on_a_later_page(tmp_path):
+    root = tmp_path.resolve()
+    for i in range(30):
+        (root / f"folder-{i:02}").mkdir()
+    identity = create_project(root, "zz-retained-study", "Retained acoustic study")
+    first = projects(root, "workspace", None, None)
+    assert not first["projects"] and first["next_after"] == "folder-24"
+    assert first["after"] is None and first["entries_checked"] == 25
+    assert first["search_scope"] == "direct_local_subfolders"
+    message = narrative(first)
+    assert "No curated projects were found on this page." in message
+    assert "Continue to the next page" in message
+    assert "Other folders and saved Cloud work have not been searched." in message
+    second = projects(root, "workspace", None, first["next_after"])
+    assert second["after"] == "folder-24" and second["entries_checked"] == 6
+    assert second["next_after"] is None
+    assert second["projects"][0]["project_id"] == identity["project_id"]
+    assert "Retained acoustic study" in narrative(second)
+
+
+def test_empty_final_page_retains_earlier_project_results(tmp_path):
+    root = tmp_path.resolve()
+    create_project(root, "a-study", "Earlier study")
+    for i in range(25):
+        (root / f"folder-{i:02}").mkdir()
+    first = projects(root, "workspace", None, None)
+    assert len(first["projects"]) == 1 and first["next_after"]
+    final = projects(root, "workspace", None, first["next_after"])
+    assert not final["projects"] and final["next_after"] is None
+    assert final["entries_checked"] == 1
+    message = narrative(final)
+    assert "No curated projects were found on this final page." in message
+    assert "Keep projects found on earlier pages." in message
+    assert "Other folders and saved Cloud work have not been searched." in message
+
+
+@pytest.mark.parametrize("with_local_file", [False, True])
+def test_empty_local_scan_has_bounded_scope_and_existing_work_recovery(
+    tmp_path, with_local_file
+):
+    root = tmp_path.resolve()
+    if with_local_file:
+        (root / "unrelated.txt").write_text("preserve")
+    value = projects(root, "workspace", None, None)
+    assert value["entries_checked"] == 0 and value["next_after"] is None
+    assert not value["projects"] and not value["folders"]
+    message = narrative(value)
+    assert "No curated projects or inspectable subfolders" in message
+    assert "directly in this local folder" in message
+    assert "Other folders and saved Cloud work have not been searched." in message
+    assert "existing parent folder within an allowed workspace" in message
+    assert "restore its local project files" in message
+
+
+@pytest.mark.parametrize("identity_file", ["missing", "invalid"])
+def test_incomplete_project_metadata_remains_unconfirmed(tmp_path, identity_file):
+    root = tmp_path.resolve()
+    create_project(root, "retained-study", "Retained study")
+    identity = root / "retained-study/.frequensolve/project-identity.json"
+    if identity_file == "missing":
+        identity.unlink()
+    else:
+        identity.write_text("{}")
+    value = projects(root, "workspace", None, None)
+    assert value["unreadable_entries"] == 1
+    assert not value["projects"] and not value["folders"]
+    message = narrative(value)
+    assert "readable entries" in message and "remain unconfirmed" in message
+    assert "Other folders and saved Cloud work have not been searched." in message
+
+
+def test_unreadable_metadata_does_not_imply_an_empty_folder(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    (root / "retained-study").mkdir()
+
+    def denied(*_args):
+        raise PermissionError("synthetic permission failure")
+
+    monkeypatch.setattr("frequensolve.workflow.workspace.read_local", denied)
+    value = projects(root, "workspace", None, None)
+    assert value["unreadable_entries"] == 1
+    assert "remain unconfirmed" in narrative(value)
+    assert "synthetic permission" not in narrative(value)
+
+
 def test_folder_navigation_is_explicit_and_never_follows_links(tmp_path):
     root = tmp_path.resolve()
     (root / "nested").mkdir()
     create_project(root / "nested", "study", "Nested study")
     (root / "linked").symlink_to(root / "nested", target_is_directory=True)
-    assert projects(root, "workspace", None, None)["folders"] == ["nested"]
+    first = projects(root, "workspace", None, None)
+    assert first["folders"] == ["nested"] and not first["projects"]
+    assert "Choose a folder to inspect explicitly:\n- nested" in narrative(first)
     found = projects(root, "workspace", "nested", None)["projects"]
     assert found[0]["local_project"] == "nested/study"
     for unsafe in ("../nested", "/tmp", "linked"):
@@ -164,3 +251,44 @@ def test_multiple_roots_are_a_choice_not_an_implicit_search(tmp_path):
             ]
 
     anyio.run(run)
+
+
+def test_fresh_mcp_client_continues_discovery_without_cloud_or_mutation(tmp_path):
+    root = tmp_path.resolve()
+    for i in range(25):
+        (root / f"folder-{i:02}").mkdir()
+    identity = create_project(root, "zz-study", "Existing study")
+
+    def snapshot():
+        return {
+            str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    before = snapshot()
+
+    class NoCloud:
+        def call(self, *_args):
+            pytest.fail("Local discovery must not contact Cloud")
+
+    async def page(request):
+        async with Client(
+            build_server(NoCloud(), {"workspace": root}, "https://example.test"),
+            cache=None,
+        ) as client:
+            reply = await client.call_tool("workflow_workspace", {"request": request})
+            assert reply.structured_content["ok"]
+            return (
+                json.loads(reply.structured_content["payload"]),
+                reply.content[0].text,
+            )
+
+    first, first_text = anyio.run(page, {})
+    assert not first["projects"] and "on this page" in first_text
+    final, final_text = anyio.run(page, {"after": first["next_after"]})
+    assert final["projects"][0]["project_id"] == identity["project_id"]
+    assert "Existing study" in final_text and final["next_after"] is None
+    assert not final["paid_request_sent"] and not final["cloud_ownership_checked"]
+    assert snapshot() == before
+    assert not (root / "zz-study/.frequensolve/workflow").exists()

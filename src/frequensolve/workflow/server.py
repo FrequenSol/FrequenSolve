@@ -271,6 +271,7 @@ def build_server(
         version="1.0.0",
         instructions="Restricted curated 3D acoustic workflow. The primary experience is a scientific conversation in this MCP client. "
         "Start with workflow_workspace to find existing projects by name and their saved local identities. Use read-only workflow_saved_plans to list their owned plans before reopening a study; never guess a plan ID or create replacement work. "
+        "Workspace discovery is local and paginated: follow returned next_after cursors, retain earlier results and inspect subfolders only when explicitly selected. An empty page or unreadable entry does not establish missing Cloud work. Help returning customers choose the existing allowed folder or restore local project files. "
         "Use workflow_present to show a relevant chapter and its returned figures as the study progresses: question, model/estimates, plan, progress/Credits, results and reproduction. "
         "Explain the science and one next step in plain language. Manage operational IDs, intents and fingerprints yourself; do not ask the customer to copy them. "
         "Display returned scientific figures when the client supports them; otherwise use the included numeric/coordinate tables. "
@@ -444,7 +445,7 @@ def build_server(
 
     @server.tool(
         name="workflow_workspace",
-        description="Find local scientific projects by display name without asking the customer for internal IDs, or reopen a project's latest notebook/report links. Reads bounded metadata in explicitly allowed folders only, without recursion or symlinks. Then use read-only workflow_saved_plans with the returned root_id/local_project to discover owned saved plans. Duplicate names require clarification. No Cloud call, paid authorization or notebook execution.",
+        description="Find local scientific projects by display name without asking the customer for internal IDs, or reopen a project's latest notebook/report links. Reads one bounded page in an explicitly allowed folder, without recursion or symlinks. Follow returned next_after cursors and keep earlier results; choose subfolders explicitly. Empty or unreadable local entries do not establish missing Cloud work. Then use read-only workflow_saved_plans with the returned root_id/local_project to discover owned saved plans. Duplicate names require clarification. No Cloud call, paid authorization or notebook execution.",
         annotations=ToolAnnotations(
             read_only_hint=True,
             destructive_hint=False,

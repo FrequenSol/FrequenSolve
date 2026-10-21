@@ -40,9 +40,17 @@ def projects(root: Path, root_id: str, folder: str | None, after: str | None) ->
     for name in names[:PAGE_SIZE]:
         path = f"{folder}/{name}" if folder else name
         try:
-            metadata = json.loads(
-                read_local(root / path, ".frequensolve/workflow-project.json", 4096)
+            metadata_bytes = read_local(
+                root / path, ".frequensolve/workflow-project.json", 4096
             )
+        except FileNotFoundError:
+            folders.append(path)
+            continue
+        except (OSError, ValueError):
+            unreadable += 1
+            continue
+        try:
+            metadata = json.loads(metadata_bytes)
             identity = ProjectIdentity.from_dict(
                 json.loads(
                     read_local(root / path, ".frequensolve/project-identity.json", 4096)
@@ -56,8 +64,6 @@ def projects(root: Path, root_id: str, folder: str | None, after: str | None) ->
                 or len(label) > 128
             ):
                 raise ValueError("Invalid project metadata")
-        except FileNotFoundError:
-            folders.append(path)
         except (OSError, ValueError, KeyError, TypeError):
             unreadable += 1
         else:
@@ -75,6 +81,9 @@ def projects(root: Path, root_id: str, folder: str | None, after: str | None) ->
         "folders": folders,
         "root_id": root_id,
         "folder": folder,
+        "after": after,
+        "entries_checked": min(PAGE_SIZE, len(names)),
+        "search_scope": "direct_local_subfolders",
         "next_after": names[PAGE_SIZE - 1] if len(names) > PAGE_SIZE else None,
         "unreadable_entries": unreadable,
         "cloud_ownership_checked": False,
@@ -193,21 +202,51 @@ def narrative(value: dict) -> str:
             + "."
         )
     if "projects" in value:
-        lines = ["Your local scientific projects", ""]
+        lines = ["Your local scientific projects on this page", ""]
         lines.extend("- " + text(p["display_name"]) for p in value["projects"])
         if not value["projects"]:
-            lines.append("No curated projects were found in this folder.")
+            if value["next_after"]:
+                lines.append("No curated projects were found on this page.")
+            elif value.get("after") is not None:
+                lines.append("No curated projects were found on this final page.")
+            elif value["unreadable_entries"]:
+                lines.append(
+                    "No curated projects could be identified from the readable entries in this local folder."
+                )
+            elif value["folders"]:
+                lines.append(
+                    "No curated projects were identified directly in this local folder."
+                )
+            else:
+                lines.append(
+                    "No curated projects or inspectable subfolders were found directly in this local folder."
+                )
         if value["folders"]:
-            lines.append(
-                "Other folders are available to inspect within this workspace."
-            )
+            lines.append("\nChoose a folder to inspect explicitly:")
+            lines.extend("- " + text(folder) for folder in value["folders"])
         if value["next_after"]:
-            lines.append("More entries are available on the next page.")
+            lines.append(
+                "\nMore entries remain. Continue to the next page and keep earlier results."
+            )
+        elif value.get("after") is not None:
+            lines.append(
+                "\nThis is the final page. Keep projects found on earlier pages."
+            )
         if value["unreadable_entries"]:
-            lines.append("Some local entries could not be read safely.")
+            lines.append(
+                "Some local project metadata is missing, unreadable or unsupported; those entries remain unconfirmed."
+            )
         lines.append(
-            "\nOpen a project's owned saved plans to resume it. Local project metadata does not establish Cloud access."
+            "\nThis view covers only direct local subfolders. Other folders and saved Cloud work have not been searched."
         )
+        if value["projects"]:
+            lines.append(
+                "Open a project's owned saved plans to resume it. Cloud checks access on those reads."
+            )
+        else:
+            lines.append(
+                "To reopen earlier work, choose its existing parent folder within an allowed workspace, or restore its local project files and retry discovery."
+            )
         return "\n".join(lines)
     lines = ["Your latest analysis notebook", ""]
     for item in value["artifacts"]:

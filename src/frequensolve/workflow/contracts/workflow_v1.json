@@ -60,6 +60,9 @@
     "recursive": false,
     "maximum_folder_entries": 1000,
     "page_size": 25,
+    "pagination": "one page of direct local subfolders; retain earlier results and follow returned next_after cursors",
+    "empty_or_unreadable": "page-local observation only; does not establish missing Cloud work",
+    "recovery": "choose the existing allowed parent folder or restore local project files; no replacement project",
     "cloud_ownership": "confirmed by subsequent scoped plan reads",
     "saved_plans": {
       "tool": "workflow_saved_plans",
