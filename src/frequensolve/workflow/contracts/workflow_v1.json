@@ -42,6 +42,7 @@
       "image/png"
     ],
     "fallback": "readable scientific text and bounded numeric tables",
+    "figure_labels": "input-order geometry labels with exact colocation; native result identities and small-selection magnitude values; no interpolation or rescaling",
     "notebook_recovery": {
       "binding_version": "study-notebook-binding.v1",
       "matches": "study, project, plan revision, run, input/result fingerprints and exact frequency selection",

@@ -323,6 +323,20 @@ def geometry(science: dict) -> dict | None:
         return None
 
 
+def geometry_labels(model: dict) -> list[dict]:
+    """Input-order labels, grouped only at exactly equal coordinates."""
+    if len(model["sources"]) + len(model["receivers"]) > 12:
+        return []
+    labels: dict[tuple[float, ...], list[str]] = {}
+    for prefix, key in (("S", "sources"), ("R", "receivers")):
+        for index, xyz in enumerate(model[key], 1):
+            point = tuple(float(value) for value in xyz)
+            labels.setdefault(point, []).append(f"{prefix}{index}")
+    return [
+        {"point": point, "label": " / ".join(names)} for point, names in labels.items()
+    ]
+
+
 def figure_png(
     *, model: dict | None = None, reports: list[dict] | None = None
 ) -> bytes:
@@ -357,8 +371,17 @@ def figure_png(
             ax.scatter(
                 *model["sources"].T, marker="*", color="#ad6414", s=100, label="Sources"
             )
-            for i, xyz in enumerate(model["sources"], 1):
-                ax.text(*xyz, f"  S{i}", fontsize=9)
+            point_labels = geometry_labels(model)
+            for item in point_labels:
+                ax.text(*item["point"], "  " + item["label"], fontsize=9)
+            if not point_labels:
+                ax.text2D(
+                    0.02,
+                    0.02,
+                    "Point labels are listed in the coordinate table",
+                    transform=ax.transAxes,
+                    fontsize=8,
+                )
             for axis, low, high in zip("xyz", model["low"], model["high"]):
                 getattr(ax, f"set_{axis}lim")(low, high)
                 getattr(ax, f"set_{axis}label")(
@@ -395,7 +418,14 @@ def figure_png(
                 ):
                     ax = axes[row, col]
                     values = np.array(report[field], dtype=float).reshape(-1)
-                    ax.scatter(range(size), values, s=48, color="#18776c", zorder=3)
+                    ax.scatter(
+                        range(size),
+                        values,
+                        s=48,
+                        color="#18776c",
+                        zorder=3,
+                        clip_on=False,
+                    )
                     ax.set_xticks(
                         range(size), labels, rotation=25, ha="right", fontsize=9
                     )
@@ -405,6 +435,21 @@ def figure_png(
                         fontsize=12,
                     )
                     ax.set_ylabel(text(units, 32))
+                    if col == 0:
+                        ax.margins(x=0.12, y=0.2)
+                        ax.set_ylim(bottom=0)
+                        if size <= 8:
+                            for i, value in enumerate(values):
+                                if math.isfinite(value):
+                                    ax.annotate(
+                                        number(float(value)),
+                                        (i, value),
+                                        xytext=(0, 9),
+                                        textcoords="offset points",
+                                        ha="center",
+                                        fontsize=8,
+                                        color="#17443e",
+                                    )
                     ax.grid(axis="y", alpha=0.2)
                     ax.spines[["top", "right"]].set_visible(False)
                     if col == 1:
@@ -478,17 +523,25 @@ def present(
             )
             lines.append(
                 table(
-                    ("Kind", "X", "Y", "Z", "Units"),
+                    ("Point", "X", "Y", "Z", "Units"),
                     [
-                        [kind, *[number(x) for x in point], model["units"]]
-                        for kind, key in (
-                            ("Source", "sources"),
-                            ("Receiver", "receivers"),
+                        [
+                            f"{prefix}{i} ({kind})",
+                            *[number(x) for x in point],
+                            model["units"],
+                        ]
+                        for prefix, kind, key in (
+                            ("S", "source", "sources"),
+                            ("R", "receiver", "receivers"),
                         )
-                        for point in model[key]
+                        for i, point in enumerate(model[key], 1)
                     ],
                 )
             )
+            lines.append(
+                "S and R labels follow source and receiver order in this input table. Shared labels mark exactly colocated positions. Larger selections keep point labels in the table to avoid crowding the diagram."
+            )
+            provenance["geometry_label_origin"] = "input_order"
             if figures:
                 try:
                     images.append(figure_png(model=model))

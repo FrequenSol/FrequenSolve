@@ -73,6 +73,12 @@ controls the final rendering: these are not embedded interactive widgets, and
 an image-capable desktop client and a text terminal need not look identical.
 Custom MCP Apps components require separate client support and acceptance.
 
+Model point labels follow source and receiver order in the coordinate table;
+only exactly colocated points share a label. Pressure-result labels use the
+saved result's source/receiver identities. Small pressure selections also show
+numerical magnitudes, so a small finite value is distinguishable from zero on
+the linear plot. Larger selections use the numeric table to avoid extra labels.
+
 The presentation reads existing owned state and cannot authorize compute.
 Saved analysis must match the current input, plan revision and execution.
 Pressure magnitude and phase are recalculated from its recorded complex values;
