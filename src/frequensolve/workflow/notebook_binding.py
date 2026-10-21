@@ -92,13 +92,17 @@ def validate(value: dict, *, allow_unknown_result: bool = False) -> None:
         or any(not isinstance(pair, list) or len(pair) != 2 for pair in coordinates)
     ):
         raise ValueError("Invalid notebook frequency context")
-    if any(
-        isinstance(v, bool)
-        or not isinstance(v, (str, int, float))
-        or not math.isfinite(float(v))
-        for pair in coordinates
-        for v in pair
-    ):
+    try:
+        invalid_coordinates = any(
+            isinstance(v, bool)
+            or not isinstance(v, (str, int, float))
+            or not math.isfinite(float(v))
+            for pair in coordinates
+            for v in pair
+        )
+    except (ValueError, OverflowError):
+        invalid_coordinates = True
+    if invalid_coordinates:
         raise ValueError("Invalid notebook frequency coordinates")
 
 

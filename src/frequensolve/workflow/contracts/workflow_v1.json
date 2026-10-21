@@ -64,6 +64,18 @@
     "empty_or_unreadable": "page-local observation only; does not establish missing Cloud work",
     "recovery": "choose the existing allowed parent folder or restore local project files; no replacement project",
     "cloud_ownership": "confirmed by subsequent scoped plan reads",
+    "notebook_history": {
+      "version": "notebook-history.v1",
+      "registration": "archive immutable previous and new bookmarks under the existing latest lock; preserve latest compatibility",
+      "discovery": "registered metadata only; no recursive scan of unregistered notebook folders",
+      "metadata_bytes_per_record": 16384,
+      "page_size": 25,
+      "automatic_candidate_limit": 128,
+      "directory_entry_limit": 1000,
+      "selection": "returned content-derived notebook_id; multiple matches require a choice",
+      "file_verification": "selected notebook only; maximum 32 files and 64 MiB",
+      "current_study_evidence": "exact context and current owned result manifest; unbound or uncertain records never attach"
+    },
     "saved_plans": {
       "tool": "workflow_saved_plans",
       "read_only": true,

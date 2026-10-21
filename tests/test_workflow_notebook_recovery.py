@@ -118,6 +118,11 @@ def test_unknown_results_old_bookmarks_and_unsupported_versions_remain_unknown()
     malformed["frequency_coordinates"][0][0] = float("nan")
     with pytest.raises(ValueError):
         validate(malformed)
+    malformed = deepcopy(saved)
+    malformed["frequency_coordinates"][0][0] = 10**1000
+    with pytest.raises(ValueError, match="frequency coordinates"):
+        validate(malformed)
+    assert match(malformed, saved)["status"] == "unbound"
 
 
 @pytest.mark.parametrize(
@@ -248,6 +253,10 @@ def test_reproduce_reopens_only_matching_notebooks_without_writes_or_kernel(
         assert "Open static report" not in text
     elif case == "missing":
         assert result["next_action"] == "create_or_verify_analysis_notebook"
+    elif case == "corrupt":
+        assert not book["artifacts"] and book["history_incomplete"]
+        assert result["next_action"] == "choose_saved_notebook"
+        assert "history could not be checked completely" in text
     else:
         assert not book["artifacts"]
         assert result["next_action"] == "inspect_notebook_context"

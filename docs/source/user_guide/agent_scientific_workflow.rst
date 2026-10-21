@@ -55,6 +55,19 @@ adapter process can recover the same bookmark without regenerating the notebook
 or running a kernel. The chapter reads current owned result metadata; it does
 not request transfer tickets or download contents.
 
+A newer notebook for another frequency or study does not hide an earlier
+registered match. New registrations retain the previous latest bookmark in a
+bounded local history. If several copies match, the assistant asks which folder
+or copy you want, then checks that copy's saved files and current result identity.
+It keeps the selection details for you; no IDs need to be copied.
+
+Ask "Show my saved notebooks" to browse registered entries and reopen an older
+or different-context copy. The history is local and paginated. Unregistered
+folders are not searched recursively, and an incomplete or unreadable history
+does not establish that earlier work is missing. Browsing and opening never run
+a kernel, regenerate notebooks or authorize compute. Older unbound bookmarks
+remain recoverable without being presented as current-study evidence.
+
 The notebook and static report explain their saved Credit observations in a
 table: quoted maximum, authorized maximum, captured charges, settlement and
 observation time. An incomplete history withholds the total; missing amounts

@@ -11,7 +11,7 @@ from urllib.parse import quote
 from frequensolve.project_identity import ProjectIdentity
 
 from .client import read_local, relative
-from .presentation import text
+from .presentation import number, table, text
 from .storage import PrivateStore, directory
 
 MAX_ENTRIES = 1000
@@ -99,6 +99,7 @@ def remember_notebook(
     status: str,
     *,
     binding: dict | None = None,
+    label: str | None = None,
 ) -> None:
     """Bookmark the latest notebook without replacing any notebook content."""
     target = root / relative(destination)
@@ -126,31 +127,45 @@ def remember_notebook(
                 "sha256": hashlib.sha256(data).hexdigest(),
             }
         )
-    with PrivateStore(project / ".frequensolve" / "workflow").locked(
-        "latest-notebook"
-    ) as record:
-        record.write(
-            {
-                "destination": destination,
-                "recorded_replay_status": status,
-                "files": files,
-                **({"binding": binding} if binding is not None else {}),
-            }
-        )
+    from .notebook_catalog import archive, validate_record
 
-
-def notebook_artifacts(root: Path, project: Path) -> dict:
-    """Check saved bytes, without executing a kernel or claiming current environment proof."""
-    try:
-        saved = json.loads(
-            read_local(project, ".frequensolve/workflow/latest-notebook.json", 16384)
-        )
-    except FileNotFoundError:
-        return {
-            "artifacts": [],
-            "recorded_replay_status": "unavailable",
-            "paid_request_sent": False,
+    saved = validate_record(
+        {
+            "destination": destination,
+            "recorded_replay_status": status,
+            "files": files,
+            **({"binding": binding} if binding is not None else {}),
+            **({"label": label} if label is not None else {}),
         }
+    )
+    store = PrivateStore(project / ".frequensolve" / "workflow")
+    with store.locked("latest-notebook") as record:
+        archive(store, record.read())
+        archive(store, saved)
+        record.write(saved)
+
+
+def notebook_artifacts(root: Path, project: Path, selected: str | None = None) -> dict:
+    """Check saved bytes, without executing a kernel or claiming current environment proof."""
+    from .notebook_catalog import bookmark_id, get, validate_record
+
+    if selected is not None:
+        saved = get(project, selected)["bookmark"]
+    else:
+        try:
+            saved = validate_record(
+                json.loads(
+                    read_local(
+                        project, ".frequensolve/workflow/latest-notebook.json", 16384
+                    )
+                )
+            )
+        except FileNotFoundError:
+            return {
+                "artifacts": [],
+                "recorded_replay_status": "unavailable",
+                "paid_request_sent": False,
+            }
     destination = relative(saved["destination"])
     files = saved["files"]
     if not isinstance(files, list) or not 1 <= len(files) <= 32:
@@ -184,6 +199,7 @@ def notebook_artifacts(root: Path, project: Path) -> dict:
         except (ValueError, TypeError):
             binding = None
     return {
+        "notebook_id": bookmark_id(saved),
         "artifacts": links if unchanged else [],
         "recorded_replay_status": saved["recorded_replay_status"],
         "binding": binding,
@@ -194,6 +210,19 @@ def notebook_artifacts(root: Path, project: Path) -> dict:
     }
 
 
+def notebook_history(project: Path, after: str | None = None) -> dict:
+    from .notebook_catalog import page, summary
+
+    result = page(project, after)
+    return {
+        **{k: v for k, v in result.items() if k != "records"},
+        "notebooks": [summary(entry) for entry in result["records"]],
+        "paid_request_sent": False,
+        "current_environment_checked": False,
+        "service_attestation": False,
+    }
+
+
 def narrative(value: dict) -> str:
     if "roots" in value:
         return (
@@ -201,6 +230,48 @@ def narrative(value: dict) -> str:
             + ", ".join(text(r) for r in value["roots"])
             + "."
         )
+    if "notebooks" in value:
+        lines = ["Your registered analysis notebooks", ""]
+        if value["notebooks"]:
+            lines.append(
+                table(
+                    (
+                        "Choice",
+                        "Notebook",
+                        "Folder",
+                        "Selected frequencies",
+                        "Recorded replay",
+                    ),
+                    [
+                        [
+                            i,
+                            item["label"],
+                            item["folder"],
+                            item["frequency_label"],
+                            item["recorded_replay_status"],
+                        ]
+                        for i, item in enumerate(value["notebooks"], 1)
+                    ],
+                )
+            )
+        else:
+            lines.append("No registered notebooks were confirmed on this page.")
+        if value["next_after"]:
+            lines.append(
+                "More registered entries remain. Continue to the next page and retain earlier choices."
+            )
+        elif value.get("after") is not None:
+            lines.append(
+                "This is the final page; retain choices found on earlier pages."
+            )
+        if value["unreadable_entries"]:
+            lines.append(
+                "Some registered entries could not be checked; the history remains unconfirmed."
+            )
+        lines.append(
+            "This catalog covers local registrations only; unregistered folders have not been searched. Choose a notebook to check its files. Recorded replay state is not a new environment check or service attestation."
+        )
+        return "\n\n".join(lines)
     if "projects" in value:
         lines = ["Your local scientific projects on this page", ""]
         lines.extend("- " + text(p["display_name"]) for p in value["projects"])
@@ -265,12 +336,12 @@ def narrative(value: dict) -> str:
         if value.get("binding"):
             binding = value["binding"]
             lines.append(
-                "Recorded notebook context: plan "
-                + text(binding.get("plan_id"))
-                + ", revision "
+                "Recorded notebook context: plan revision "
                 + text(binding.get("plan_revision"))
-                + ", run "
-                + text(binding.get("execution_id"))
+                + "; selected frequencies "
+                + ", ".join(
+                    number(p[0]) + " Hz" for p in binding["frequency_coordinates"]
+                )
                 + ". This project-only view has not compared it with a current study."
             )
         else:

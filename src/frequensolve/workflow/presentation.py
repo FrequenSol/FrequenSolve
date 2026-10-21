@@ -771,7 +771,44 @@ def present(
         lines = [
             f"**{title} · reproduce and explore**",
         ]
-        if match_status == "match" and book.get("saved_bytes_unchanged"):
+        if book.get("selection_required") or book.get("history_incomplete"):
+            lines.append(
+                "Several registered notebooks carry this exact study context. Choose a copy to check its saved files."
+                if book.get("selection_required")
+                else "The registered notebook history could not be checked completely. The listed entries are potential choices; select an existing copy or retry the same read."
+            )
+            choices = book.get("candidates", [])
+            if choices:
+                lines.append(
+                    table(
+                        (
+                            "Choice",
+                            "Notebook",
+                            "Folder",
+                            "Selected frequencies",
+                            "Recorded replay",
+                        ),
+                        [
+                            [
+                                i,
+                                item["label"],
+                                item["folder"],
+                                item["frequency_label"],
+                                item["recorded_replay_status"],
+                            ]
+                            for i, item in enumerate(choices, 1)
+                        ],
+                    )
+                )
+            if book.get("additional_candidates"):
+                lines.append(
+                    "More choices are available through the project's registered notebook history."
+                )
+            lines.append(
+                "Files have not been checked for these choices. Selecting a notebook performs read-only identity and saved-file checks; it does not run a kernel or create replacement work."
+            )
+            provenance["next_action"] = "choose_saved_notebook"
+        elif match_status == "match" and book.get("saved_bytes_unchanged"):
             complete = book.get("recorded_replay_status") == "complete"
             lines.append(
                 "Your saved notebook matches this exact study, plan revision, run, input/result fingerprints and frequency selection. Its saved files are unchanged."
@@ -807,7 +844,7 @@ def present(
                 )
             elif match_status == "mismatch":
                 lines.append(
-                    "The project's latest notebook belongs to a different study context or frequency selection. It has not been attached to this run. Its recorded context remains recoverable from the workspace."
+                    "The selected saved notebook belongs to a different study context or frequency selection. It has not been attached to this run. Its recorded context remains recoverable from the workspace."
                 )
             elif match_status == "unbound":
                 lines.append(
@@ -844,6 +881,7 @@ def present(
             "open_saved_notebook": "Open the saved notebook above; no regeneration is needed.",
             "inspect_incomplete_notebook": "Inspect the incomplete notebook before deciding how to replay it.",
             "inspect_notebook_context": "Inspect the existing notebook context or retry the same observation.",
+            "choose_saved_notebook": "Choose a registered notebook copy, or browse its saved history; no regeneration is needed.",
         }[provenance["next_action"]]
     )
     return Presentation("\n\n".join(lines), provenance, tuple(images))
