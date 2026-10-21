@@ -1,0 +1,213 @@
+"""Bounded local navigation; saved identities are hints, never Cloud authority."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from urllib.parse import quote
+
+from frequensolve.project_identity import ProjectIdentity
+
+from .client import read_local, relative
+from .presentation import text
+from .storage import PrivateStore, directory
+
+MAX_ENTRIES = 1000
+PAGE_SIZE = 25
+
+
+def projects(root: Path, root_id: str, folder: str | None, after: str | None) -> dict:
+    """Inspect one explicit folder, never recurse or follow filesystem links."""
+    parent = root / relative(folder) if folder else root
+    if after is not None and ("/" in relative(after)):
+        raise ValueError("Use the returned single-folder cursor")
+    with directory(parent) as fd, os.scandir(fd) as entries:
+        names: list[str] = []
+        for count, entry in enumerate(entries):
+            if count >= MAX_ENTRIES:
+                raise ValueError("Folder exceeds the navigation limit")
+            if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+                continue
+            try:
+                relative(entry.name)
+            except ValueError:
+                continue
+            names.append(entry.name)
+    names = sorted(name for name in names if after is None or name > after)
+    found, folders, unreadable = [], [], 0
+    for name in names[:PAGE_SIZE]:
+        path = f"{folder}/{name}" if folder else name
+        try:
+            metadata = json.loads(
+                read_local(root / path, ".frequensolve/workflow-project.json", 4096)
+            )
+            identity = ProjectIdentity.from_dict(
+                json.loads(
+                    read_local(root / path, ".frequensolve/project-identity.json", 4096)
+                )
+            )
+            label = metadata["display_name"]
+            if (
+                metadata.get("template") != "qualified-acoustic-3d-2-20.v1"
+                or not isinstance(label, str)
+                or not label.strip()
+                or len(label) > 128
+            ):
+                raise ValueError("Invalid project metadata")
+        except FileNotFoundError:
+            folders.append(path)
+        except (OSError, ValueError, KeyError, TypeError):
+            unreadable += 1
+        else:
+            found.append(
+                {
+                    "display_name": label,
+                    "root_id": root_id,
+                    "local_project": path,
+                    "project_id": identity.project_id,
+                    "project_key": identity.storage_prefix,
+                }
+            )
+    return {
+        "projects": found,
+        "folders": folders,
+        "root_id": root_id,
+        "folder": folder,
+        "next_after": names[PAGE_SIZE - 1] if len(names) > PAGE_SIZE else None,
+        "unreadable_entries": unreadable,
+        "cloud_ownership_checked": False,
+        "paid_request_sent": False,
+        "pagination": "Folder contents may change between pages; deduplicate by project identity and local path.",
+    }
+
+
+def remember_notebook(root: Path, project: Path, destination: str, status: str) -> None:
+    """Bookmark the latest notebook without replacing any notebook content."""
+    target = root / relative(destination)
+    files = []
+    total = 0
+    with directory(target) as fd, os.scandir(fd) as entries:
+        names: list[str] = []
+        for entry in entries:
+            if len(names) >= 32:
+                raise ValueError("Notebook has too many files")
+            names.append(entry.name)
+    for name in sorted(names):
+        data = read_local(target, name)
+        total += len(data)
+        if total > 64 * 1024 * 1024:
+            raise ValueError("Notebook exceeds the navigation limit")
+        files.append(
+            {
+                "name": name,
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+    with PrivateStore(project / ".frequensolve" / "workflow").locked(
+        "latest-notebook"
+    ) as record:
+        record.write(
+            {
+                "destination": destination,
+                "recorded_replay_status": status,
+                "files": files,
+            }
+        )
+
+
+def notebook_artifacts(root: Path, project: Path) -> dict:
+    """Check saved bytes, without executing a kernel or claiming current environment proof."""
+    try:
+        saved = json.loads(
+            read_local(project, ".frequensolve/workflow/latest-notebook.json", 16384)
+        )
+    except FileNotFoundError:
+        return {
+            "artifacts": [],
+            "recorded_replay_status": "unavailable",
+            "paid_request_sent": False,
+        }
+    destination = relative(saved["destination"])
+    files = saved["files"]
+    if not isinstance(files, list) or not 1 <= len(files) <= 32:
+        raise ValueError("Invalid notebook bookmark")
+    unchanged, total, links = True, 0, []
+    for item in files:
+        name = relative(item["name"])
+        if "/" in name:
+            raise ValueError("Invalid notebook file")
+        try:
+            data = read_local(root, destination + "/" + name)
+        except (OSError, ValueError):
+            unchanged = False
+        else:
+            total += len(data)
+            if total > 64 * 1024 * 1024:
+                raise ValueError("Notebook exceeds the navigation limit")
+            unchanged &= (
+                len(data) == item["bytes"]
+                and hashlib.sha256(data).hexdigest() == item["sha256"]
+            )
+        if name in ("analysis.ipynb", "executed.ipynb", "report.html"):
+            # Only verified, unchanged bookmarks receive clickable file links.
+            links.append({"name": name, "path": str(root / destination / name)})
+    return {
+        "artifacts": links if unchanged else [],
+        "recorded_replay_status": saved["recorded_replay_status"],
+        "saved_bytes_unchanged": bool(unchanged),
+        "current_environment_checked": False,
+        "service_attestation": False,
+        "paid_request_sent": False,
+    }
+
+
+def narrative(value: dict) -> str:
+    if "roots" in value:
+        return (
+            "Choose a scientific workspace: "
+            + ", ".join(text(r) for r in value["roots"])
+            + "."
+        )
+    if "projects" in value:
+        lines = ["Your local scientific projects", ""]
+        lines.extend("- " + text(p["display_name"]) for p in value["projects"])
+        if not value["projects"]:
+            lines.append("No curated projects were found in this folder.")
+        if value["folders"]:
+            lines.append(
+                "Other folders are available to inspect within this workspace."
+            )
+        if value["next_after"]:
+            lines.append("More entries are available on the next page.")
+        if value["unreadable_entries"]:
+            lines.append("Some local entries could not be read safely.")
+        lines.append(
+            "\nOpen a project's owned saved plans to resume it. Local project metadata does not establish Cloud access."
+        )
+        return "\n".join(lines)
+    lines = ["Your latest analysis notebook", ""]
+    for item in value["artifacts"]:
+        labels = {
+            "analysis.ipynb": "Editable notebook",
+            "executed.ipynb": "Notebook with recorded outputs",
+            "report.html": "Static report",
+        }
+        lines.append(f"- [{labels[item['name']]}]({quote(item['path'], safe='/')})")
+    if value.get("saved_bytes_unchanged"):
+        lines.append(
+            "\nRecorded replay: "
+            + text(value["recorded_replay_status"])
+            + ". Saved files are unchanged; the current environment has not been checked. Local evidence is not service attestation."
+        )
+    elif value.get("recorded_replay_status") == "unavailable":
+        lines.append(
+            "No notebook bookmark is saved for this project yet. Create an analysis notebook from verified results."
+        )
+    else:
+        lines.append(
+            "The saved notebook files have changed or are missing. Replay and verify them before relying on earlier execution evidence."
+        )
+    return "\n".join(lines)

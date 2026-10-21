@@ -39,6 +39,7 @@ TOOLS = (
     "workflow_results",
     "workflow_study",
     "workflow_present",
+    "workflow_workspace",
 )
 RESOURCE = "frequensolve://workflow/capabilities"
 PROMPT = "curated_3d_workflow"
@@ -57,6 +58,25 @@ class Closed(BaseModel):
 
 class Empty(Closed):
     pass
+
+
+class WorkspaceRequest(Closed):
+    action: Literal["projects", "artifacts"] = "projects"
+    root_id: str | None = None
+    folder: str | None = None
+    after: str | None = None
+    local_project: str | None = None
+
+    @model_validator(mode="after")
+    def navigation(self) -> WorkspaceRequest:
+        if self.action == "artifacts":
+            if not self.local_project or self.folder or self.after:
+                raise ValueError("Choose one saved project for its notebook artifacts")
+        elif self.local_project:
+            raise ValueError(
+                "Use folder and the returned cursor for project navigation"
+            )
+        return self
 
 
 class ProjectRequest(Closed):
@@ -234,6 +254,7 @@ def build_server(
         name="FrequenSolve scientific workflow",
         version="1.0.0",
         instructions="Restricted curated 3D acoustic workflow. The primary experience is a scientific conversation in this MCP client. "
+        "Start with workflow_workspace to find existing projects by name and their saved local identities. List their owned plans with workflow_plan before reopening a study; never guess a plan ID or create replacement work. "
         "Use workflow_present to show a relevant chapter and its returned figures as the study progresses: question, model/estimates, plan, progress/Credits, results and reproduction. "
         "Explain the science and one next step in plain language. Manage operational IDs, intents and fingerprints yourself; do not ask the customer to copy them. "
         "Display returned scientific figures when the client supports them; otherwise use the included numeric/coordinate tables. "
@@ -309,6 +330,7 @@ def build_server(
     async def workflow_prompt() -> str:
         return (
             "Use plain customer language. Manage technical identifiers yourself; never ask the customer to copy plan IDs, fingerprints or recovery commands. Explain one next step at a time. "
+            "For returning customers, use workflow_workspace to find the project by name, then workflow_plan list for its owned saved plans. Clarify ambiguous names rather than choosing silently. Use workflow_workspace artifacts to reopen the latest notebook and report. "
             "Start by agreeing a scientific question and success criterion for the supported 3D acoustic 2/20 Hz study. Discover the accessible CPU cluster and report unknown capacity. Create a fresh curated project. "
             "Prepare a plan with a stable intent and read saved progress. For each paid stage, use the native approval tool if this profile exposes it; otherwise provide the signed-in Cloud review. Do not describe an approval rehearsal as paid authority. "
             "Save the question with workflow_study and explain model assumptions, geometry and units. Inspect recommended resources; edits are optional. Validate any changed resources and obtain separate approval if compute is required. "
@@ -402,6 +424,49 @@ def build_server(
     )
     async def discover(request: Empty) -> Reply:
         return await bounded(client.call, "discover", {}, read_operation="discover")
+
+    @server.tool(
+        name="workflow_workspace",
+        description="Find local scientific projects by display name without asking the customer for internal IDs, or reopen a project's latest notebook/report links. Reads bounded metadata in explicitly allowed folders only, without recursion or symlinks. Then use workflow_plan list with the returned root_id/local_project to discover owned saved plans. Duplicate names require clarification. No Cloud call, paid authorization or notebook execution.",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+        content_renderer=render_content,
+    )
+    async def workspace(request: WorkspaceRequest) -> PresentationReply:
+        from .workspace import narrative, notebook_artifacts, projects
+
+        def inspect() -> dict:
+            selected = request.root_id
+            if selected is None:
+                if len(roots) != 1:
+                    return {"roots": sorted(roots), "paid_request_sent": False}
+                selected = next(iter(roots))
+            allowed = root(selected)
+            if request.action == "projects":
+                return projects(allowed, selected, request.folder, request.after)
+            assert request.local_project
+            return notebook_artifacts(
+                allowed, allowed / relative(request.local_project)
+            )
+
+        try:
+            with anyio.fail_after(15):
+                value = await anyio.to_thread.run_sync(
+                    inspect, limiter=limiter, abandon_on_cancel=True
+                )
+            return PresentationReply(
+                ok=True, narrative=narrative(value), payload=canonical(value).decode()
+            )
+        except Exception:
+            return PresentationReply(
+                ok=False,
+                diagnostic="The workspace could not be inspected safely. Select an existing allowed folder containing at most 1,000 entries, or retry the same read. No Cloud request or paid work was sent.",
+            )
 
     @server.tool(
         name="workflow_create_project",
@@ -674,6 +739,7 @@ def build_server(
         from frequensolve.project_identity import ProjectIdentity
 
         from .study import create_study_notebook, replay_study_notebook
+        from .workspace import remember_notebook
 
         allowed = root(request.root_id)
         project_path = allowed / relative(request.local_project)
@@ -850,14 +916,17 @@ def build_server(
                         (notebook.parent / name).read_bytes(),
                     )
             if failed:
+                remember_notebook(allowed, project_path, destination, "incomplete")
                 raise _IncompleteNotebookReplay(
                     {
                         "relative_path": destination + "/analysis.ipynb",
                         "replay_status": "incomplete",
                     }
                 )
+        remember_notebook(allowed, project_path, destination, receipt["status"])
         return {
             "relative_path": destination + "/analysis.ipynb",
+            "notebook_path": str(allowed / destination / "analysis.ipynb"),
             "report_path": destination + "/report.html",
             "replay_status": receipt["status"],
             "study_url": url,

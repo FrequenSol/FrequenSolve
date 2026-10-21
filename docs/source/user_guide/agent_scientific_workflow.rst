@@ -29,6 +29,27 @@ Follow progress, captured Credits, receiver plots and reference comparisons in
 the same conversation. Finish by asking for an editable analysis notebook.
 Cloud remains an optional place to inspect the saved study.
 
+Returning to a study
+~~~~~~~~~~~~~~~~~~~~
+
+Ask, for example, "Reopen my acoustic study and show only the 20 Hz results."
+The assistant uses ``workflow_workspace`` to find named projects in your allowed
+workspace, then lists their owned saved plans. If names are ambiguous, it asks
+which one you mean. It does not create another project or run to recover old
+work. Local metadata is a navigation hint; Cloud still checks access on reads.
+Folder browsing is explicit, does not follow symlinks and is limited to 1,000
+entries per folder, with 25 folders/projects per page. Contents can change
+between pages, so clients should deduplicate by identity and local path.
+
+After generating a notebook, ask "Open my notebook." The workspace tool returns
+clickable paths for the latest generated notebook, its recorded outputs and
+static report. A fresh adapter process can recover those bookmarks. Changed or
+missing saved files withhold the links and invalidate that byte-check evidence.
+Unchanged bytes do not establish that the current environment matches, and a
+local replay is not service attestation. Earlier, unbookmarked notebooks remain
+on disk. Editable cells inside the client require separate host support; an
+``ipynb`` link alone does not establish that capability.
+
 ``workflow_present`` supplies one focused chapter at a time: ``overview``,
 ``model`` (including estimates), ``plan``, ``progress``, ``results`` or
 ``reproduce``. It returns ordinary MCP text and PNG image blocks, plus structured
@@ -63,8 +84,22 @@ requires login again; it never falls back to another credential source.
 Cloud Settings can disconnect grants. New transfer tickets stop after
 revocation; previously issued tickets expire after 60 seconds.
 
-Configure Codex with an absolute executable, explicit profile, allowed root
-and Sandbox product origin. Its MCP configuration uses TOML::
+Generate the exact configuration for your installed environment::
+
+    frequensolve-workflow codex-config --profile sandbox \
+      --allow-root studies=/absolute/existing/studies \
+      --cloud-url https://YOUR-SANDBOX-CLOUD-ORIGIN \
+      --output /absolute/new/frequensolve-codex.toml
+
+This writes a new file and preserves all existing client settings. Add its MCP
+server section through your client's supported configuration workflow. Keep the
+configuration private: it names your local working area but contains no tokens.
+The generator excludes native paid approval and rehearsal tools unless explicitly
+requested. Only the three observation tools are pre-approved at the client tool
+layer. This setting grants no paid authority.
+
+The generated configuration uses an absolute Python executable and module
+entrypoint. An equivalent configuration with the installed console script is::
 
     [mcp_servers.frequensolve-workflow]
     command = "/absolute/environment/bin/frequensolve-workflow"
@@ -74,7 +109,7 @@ and Sandbox product origin. Its MCP configuration uses TOML::
     required = true
     enabled_tools = ["workflow_discover", "workflow_create_project",
                      "workflow_plan", "workflow_results", "workflow_study",
-                     "workflow_present"]
+                     "workflow_present", "workflow_workspace"]
 
 The combined plan and result tools include preparation and local file writes,
 so Codex can request tool approval even for a read action. For unattended use of
@@ -92,6 +127,8 @@ configuration; leave other servers and tools excluded. For example::
     [mcp_servers.frequensolve-workflow.tools.workflow_study]
     approval_mode = "approve"
     [mcp_servers.frequensolve-workflow.tools.workflow_present]
+    approval_mode = "approve"
+    [mcp_servers.frequensolve-workflow.tools.workflow_workspace]
     approval_mode = "approve"
 
 These client settings allow the adapter's bounded operations. They do not grant

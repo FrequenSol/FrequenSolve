@@ -8,7 +8,8 @@
     "workflow_plan",
     "workflow_results",
     "workflow_study",
-    "workflow_present"
+    "workflow_present",
+    "workflow_workspace"
   ],
   "oauth_scope_suffixes": [
     "read",
@@ -27,10 +28,29 @@
   "client_presentation": {
     "version": "scientific-conversation.v1",
     "tool": "workflow_present",
-    "chapters": ["overview", "model", "plan", "progress", "results", "reproduce"],
-    "content": ["text", "image/png"],
+    "chapters": [
+      "overview",
+      "model",
+      "plan",
+      "progress",
+      "results",
+      "reproduce"
+    ],
+    "content": [
+      "text",
+      "image/png"
+    ],
     "fallback": "readable scientific text and bounded numeric tables",
     "host_ui_required": false,
     "paid_authority": false
+  },
+  "workspace_navigation": {
+    "tool": "workflow_workspace",
+    "local_metadata_only": true,
+    "recursive": false,
+    "maximum_folder_entries": 1000,
+    "page_size": 25,
+    "cloud_ownership": "confirmed by subsequent scoped plan reads",
+    "notebooks": "latest generated bundle; saved-byte checks do not verify the current environment"
   }
 }

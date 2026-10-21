@@ -100,6 +100,54 @@ def logout(profile: str) -> None:
         raise click.ClickException(str(error)) from None
 
 
+@main.command("codex-config")
+@click.option("--profile", required=True)
+@click.option(
+    "--allow-root", "root_specs", multiple=True, required=True, metavar="ID=PATH"
+)
+@click.option("--cloud-url", required=True)
+@click.option("--output", type=click.Path(path_type=Path), required=True)
+@click.option(
+    "--interactive-review", is_flag=True, help="Include the no-spend rehearsal tool."
+)
+@click.option(
+    "--native-approval",
+    is_flag=True,
+    help="Include paid forms; requires separate connection consent.",
+)
+def codex_config(
+    profile: str,
+    root_specs: tuple[str, ...],
+    cloud_url: str,
+    output: Path,
+    interactive_review: bool,
+    native_approval: bool,
+) -> None:
+    """Write a new Codex MCP configuration for this installed environment."""
+    from frequensolve.mcp_server.cli import _parse_roots
+
+    from .client import write_local
+    from .codex import client_config
+
+    try:
+        content = client_config(
+            profile,
+            _parse_roots(root_specs),
+            cloud_url,
+            interactive_review=interactive_review,
+            native_approval=native_approval,
+        )
+        output = output.absolute()
+        write_local(output.parent, output.name, content.encode())
+    except (OSError, ValueError):
+        raise click.ClickException(
+            "Choose valid explicit connection settings, an existing workspace and a new configuration filename. Existing files were preserved."
+        ) from None
+    click.echo(
+        f"Codex MCP configuration saved to {output}. Existing client settings were preserved."
+    )
+
+
 @main.command()
 @click.option("--profile", required=True)
 @click.option(
