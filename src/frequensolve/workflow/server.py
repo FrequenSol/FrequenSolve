@@ -19,7 +19,14 @@ from frequensolve.mcp_server._sdk_v2 import SafeMCPServer
 
 from . import CONTRACT
 from .analysis import analyze_pressure
-from .client import WorkflowClient, create_project, read_local, relative, write_local
+from .client import (
+    WorkflowClient,
+    WorkflowReadUnconfirmed,
+    create_project,
+    read_local,
+    relative,
+    write_local,
+)
 from .notebooks import create_notebook, replay_notebook
 from .results import download_results, public_results, snapshot_from_bundle
 from .storage import PrivateStore, canonical, directory
@@ -290,7 +297,24 @@ def build_server(
             }
         return value
 
-    async def bounded(function: Callable[..., Any], *args: Any) -> Reply:
+    def read_failure(error: WorkflowReadUnconfirmed) -> Reply:
+        return Reply(
+            ok=False,
+            diagnostic=str(error),
+            payload=canonical(
+                {
+                    "failure_code": error.failure_code,
+                    "operation": error.operation,
+                    "read_outcome": "unknown",
+                    "next_action": "retry_same_read_with_same_saved_ids",
+                    "paid_request_sent": False,
+                }
+            ).decode(),
+        )
+
+    async def bounded(
+        function: Callable[..., Any], *args: Any, read_operation: str | None = None
+    ) -> Reply:
         try:
             with anyio.fail_after(60):
                 value = await anyio.to_thread.run_sync(
@@ -307,7 +331,11 @@ def build_server(
                 payload=canonical(error.evidence).decode(),
                 diagnostic="Notebook replay did not complete. Inspect the retained local evidence; no successful report was published. Preserve this attempt before choosing a new notebook destination.",
             )
+        except WorkflowReadUnconfirmed as error:
+            return read_failure(error)
         except Exception:
+            if read_operation is not None:
+                return read_failure(WorkflowReadUnconfirmed(read_operation))
             return Reply(
                 ok=False,
                 diagnostic="Workflow operation could not be confirmed. Retain its intent and saved IDs; check the explicit connection, local artifacts or Cloud review. Do not create replacement paid work.",
@@ -325,7 +353,7 @@ def build_server(
         structured_output=True,
     )
     async def discover(request: Empty) -> Reply:
-        return await bounded(client.call, "discover", {})
+        return await bounded(client.call, "discover", {}, read_operation="discover")
 
     @server.tool(
         name="workflow_create_project",
@@ -468,7 +496,12 @@ def build_server(
         structured_output=True,
     )
     async def plan(request: PlanRequest) -> Reply:
-        return await bounded(plan_operation, request)
+        observation = {
+            "get": "plan_get",
+            "list": "plan_list",
+            "credits": "credit_history",
+        }.get(request.action)
+        return await bounded(plan_operation, request, read_operation=observation)
 
     def result_operation(request: ResultRequest) -> dict:
         allowed = root(request.root_id)
@@ -580,7 +613,11 @@ def build_server(
         structured_output=True,
     )
     async def results(request: ResultRequest) -> Reply:
-        return await bounded(result_operation, request)
+        return await bounded(
+            result_operation,
+            request,
+            read_operation="plan_results" if request.action == "list" else None,
+        )
 
     @server.tool(
         name=REVIEW_TOOL,

@@ -44,6 +44,34 @@ OPERATIONS = MUTATIONS | {
 }
 
 
+READ_OPERATIONS = frozenset(
+    {
+        "discover",
+        "plan_get",
+        "plan_list",
+        "plan_results",
+        "plan_files",
+        "credit_history",
+    }
+)
+
+
+class WorkflowReadUnconfirmed(WorkflowError):
+    """Unknown observation outcome, never mutation or paid-request recovery."""
+
+    failure_code = "read_unconfirmed"
+
+    def __init__(self, operation: str) -> None:
+        if operation not in READ_OPERATIONS:
+            raise ValueError("Only an explicit observation can use read retry guidance")
+        self.operation = operation
+        super().__init__(
+            "Cloud read could not be confirmed. Check the connection, saved project "
+            "identity or result availability, then retry the same read with the same "
+            "saved IDs. This read cannot authorize or resume paid work."
+        )
+
+
 def relative(value: str) -> str:
     if (
         not value
@@ -249,20 +277,25 @@ class WorkflowClient:
                 "Native paid approval requires a separate explicitly consented profile"
             )
         credentials = self.auth.credentials()
-        response = self.request(
-            self.auth.connection.issuer.rstrip("/") + "/workflow",
-            {"version": CONTRACT, "operation": operation, "arguments": arguments},
-            token=credentials["access_token"],
-        )
-        if (
-            response.get("version") != CONTRACT
-            or response.get("ok") is not True
-            or not isinstance(response.get("value"), dict)
-        ):
-            raise WorkflowError(
-                "Cloud could not confirm the request; recover the same saved intent"
+        try:
+            response = self.request(
+                self.auth.connection.issuer.rstrip("/") + "/workflow",
+                {"version": CONTRACT, "operation": operation, "arguments": arguments},
+                token=credentials["access_token"],
             )
-        return response["value"]
+            if (
+                response.get("version") != CONTRACT
+                or response.get("ok") is not True
+                or not isinstance(response.get("value"), dict)
+            ):
+                raise WorkflowError(
+                    "Cloud could not confirm the request; recover the same saved intent"
+                )
+            return response["value"]
+        except Exception:
+            if operation in READ_OPERATIONS:
+                raise WorkflowReadUnconfirmed(operation) from None
+            raise
 
     def journal(self, project: Path) -> IntentJournal:
         credentials = self.auth.credentials()

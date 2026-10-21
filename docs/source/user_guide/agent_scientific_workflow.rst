@@ -209,6 +209,15 @@ explicitly unavailable in this historical projection, never a Chargebee hold.
 Chargebee remains authoritative. Refresh after settlement to obtain current
 complete history; balance differences cannot establish workflow cost.
 
+A failed discovery, saved-plan/result listing or Credit-history read reports
+``failure_code="read_unconfirmed"`` and an unknown observation outcome. Check the
+explicit connection, saved project identity or result availability, then retry
+that same read with the same saved IDs. The read cannot authorize or resume paid
+work, and failure does not establish that an operation or result is absent.
+Preparation, quotation, transfer-ticket and mutation requests remain outside
+this observation retry path; preserve their existing request/intent identities
+when their outcomes are uncertain.
+
 Analysis and notebooks
 ----------------------
 
