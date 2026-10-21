@@ -1,6 +1,7 @@
 """FrequenSol cloud execution site backed by Cognito, AppSync, S3, and managed Slurm."""
 
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from frequensolve.orchestrator.sites.aws.cache_paths import (
 from frequensolve.orchestrator.sites.aws.execution_profile import (
     ManagedExecutionProfile,
 )
+from frequensolve.orchestrator.sites.aws.plans import ExecutionPlanningMixin
 from frequensolve.orchestrator.sites.execution import normalize_execution_state
 
 try:
@@ -103,7 +105,9 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
-    execution_site_id: str = "managed-slurm"
+    partition: Optional[str] = None
+    allow_unverified_compute: Optional[bool] = None
+    cluster_id: Optional[str] = None
     execution_resources: Optional[dict[str, int]] = None
 
     @classmethod
@@ -235,7 +239,10 @@ class AWSSiteConfig(BaseSiteConfig):
             self.region = config_data["region"]
 
 
-class AWSSite(BaseSite):
+from .project_identity import ProjectIdentityMixin, local_identity
+
+
+class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
     """AWS site for running FrequenSolve simulations.
 
     Automatically authenticates users and configures AWS resources by simply providing
@@ -268,7 +275,9 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
-        execution_site_id: Optional[str] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
+        cluster_id: Optional[str] = None,
         execution_resources: Optional[dict[str, int]] = None,
     ):
         """Initialize AWS site with domain-based authentication.
@@ -300,7 +309,9 @@ class AWSSite(BaseSite):
         profile_values = {
             name: value
             for name, value in {
-                "execution_site_id": execution_site_id,
+                "partition": partition,
+                "allow_unverified_compute": allow_unverified_compute,
+                "cluster_id": cluster_id,
                 "execution_resources": execution_resources,
             }.items()
             if value is not None
@@ -310,6 +321,7 @@ class AWSSite(BaseSite):
                 "Managed Cloud execution settings may only be loaded from a "
                 "named site.toml profile via fs.Site(profile=...)"
             )
+        self._explicit_execution_resources = execution_resources is not None
         self.execution_profile = ManagedExecutionProfile.from_mapping(profile_values)
 
         # Load configuration from domain
@@ -317,7 +329,11 @@ class AWSSite(BaseSite):
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
-        config.execution_site_id = self.execution_profile.execution_site_id
+        config.partition = self.execution_profile.partition
+        config.allow_unverified_compute = (
+            self.execution_profile.allow_unverified_compute
+        )
+        config.cluster_id = self.execution_profile.cluster_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
 
         # Store domain for potential config refresh
@@ -490,7 +506,11 @@ class AWSSite(BaseSite):
 
         # A domain-config refresh replaces the dataclass instance, so reapply
         # the immutable named-profile selection before exposing it.
-        config.execution_site_id = self.execution_profile.execution_site_id
+        config.partition = self.execution_profile.partition
+        config.allow_unverified_compute = (
+            self.execution_profile.allow_unverified_compute
+        )
+        config.cluster_id = self.execution_profile.cluster_id
         config.execution_resources = dict(self.execution_profile.execution_resources)
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
@@ -750,6 +770,21 @@ class AWSSite(BaseSite):
             requests=(
                 ArtifactRequest(role="visualization"),
                 ArtifactRequest(role="visualization_data"),
+                # Native solver v2 catalogs use format-specific roles.
+                *(
+                    ArtifactRequest(role=role)
+                    for role in (
+                        "vtk",
+                        "vtu",
+                        "vtr",
+                        "vtp",
+                        "vts",
+                        "xmf",
+                        "xdmf",
+                        "acquisition_sources",
+                        "acquisition_receivers",
+                    )
+                ),
             ),
             include_defaults=False,
             project_path=path,
@@ -937,6 +972,9 @@ class AWSSite(BaseSite):
         self._ensure_storage_bucket()
 
         self._emit(f"Syncing project '{project.name}' to S3")
+        self._ensure_project_identity(
+            project.path, getattr(project, "pretty_name", None) or project.name
+        )
         project._transfer(self)
         self._emit(f"Project '{project.name}' synced to S3")
 
@@ -1018,7 +1056,7 @@ class AWSSite(BaseSite):
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
-        Uses the registered managed Slurm execution site.
+        Resolves the selected Cloud cluster and partition before preparing or reusing work.
 
         Submits through the authenticated GraphQL API.
 
@@ -1029,11 +1067,17 @@ class AWSSite(BaseSite):
                 default for failed runs, or ``validate=False`` to skip SDK
                 pre-run validation. Pass ``allow_cpu_sharing=True`` to allow up to
                 two eligible single-CPU frequency jobs per vCPU; defaults to False.
+                ``cluster_id``, ``partition`` and ``allow_unverified_compute``
+                override site configuration defaults independently. Compatibility
+                checks are best effort; allow_unverified_compute=True overrides
+                incomplete or incorrect findings on an explicit partition.
+                Standard usage charges apply even if compatibility issues cause failure.
+                Access, enforced limits and execution protocols remain checked.
                 Memory reservations remain unchanged. Pass ``retry=True`` with
                 the authored job to reuse verified completed frequencies from the
                 latest compatible terminal, settled Cloud run. Strict retries require unchanged
                 scientific inputs, outputs, runtime version and execution topology.
-                Resource budgets may change through the selected profile. A retry
+                Resource budgets may change through the site configuration. A retry
                 creates a new run; its ordinary rates and minimum charge apply only
                 to newly performed work. ``force=True`` runs every frequency.
 
@@ -1043,7 +1087,12 @@ class AWSSite(BaseSite):
         Raises:
             RuntimeError: If job submission fails.
         """
+        if "sizing_policy" in kwargs:
+            return self.submit_automatically(job, **kwargs)
         unsupported = kwargs.keys() - {
+            "cluster_id",
+            "partition",
+            "allow_unverified_compute",
             "name",
             "send_simulation_status_email",
             "allow_cpu_sharing",
@@ -1067,6 +1116,11 @@ class AWSSite(BaseSite):
         if type(allow_cpu_sharing) is not bool:
             raise ValueError("allow_cpu_sharing must be a boolean")
         execution_arguments = self.execution_profile.graphql_arguments()
+        from .execution_profile import resolve_compute_options
+
+        execution_arguments = resolve_compute_options(execution_arguments, kwargs)
+        for key in ("cluster_id", "partition", "allow_unverified_compute"):
+            kwargs.pop(key, None)
         resources = execution_arguments["execution_resources"]
         if allow_cpu_sharing and (
             resources["nodes"] != 1 or resources["mpiRanks"] != 1
@@ -1093,8 +1147,39 @@ class AWSSite(BaseSite):
                 "FrequenSolve Cloud requires Cognito authentication and the "
                 "GraphQL API. Recreate this Site with a current Cloud profile."
             )
+        # Resolve before any local reuse decision. The server revalidates at submit.
+        resolved_compute = self.graphql_client.resolve_compute_cluster(
+            cluster_id=execution_arguments.get("cluster_id"),
+            execution_resources=execution_arguments.get("execution_resources"),
+            partition=execution_arguments.get("partition"),
+            allow_unverified_compute=execution_arguments.get(
+                "allow_unverified_compute"
+            ),
+        )
+        execution_arguments["expected_compute_identity"] = resolved_compute[
+            "executionIdentity"
+        ]
         self.prepare_job(job, validate=validate)
-        if not fresh_run and not retry and job.is_run_current():
+        reusable_execution = False
+        if (
+            not fresh_run
+            and not retry
+            and local_identity(job.project_path) is None
+            and job._job_id
+            and job.is_run_current()
+        ):
+            previous = self.graphql_client.get_simulation_status_details(
+                str(job._job_id)
+            )
+            reusable_execution = (
+                previous.get("executionSiteId") == resolved_compute["executionSiteId"]
+                and previous.get("executionRegistrationFingerprint")
+                == resolved_compute["executionIdentity"]
+                and previous.get("computePlacement")
+                == resolved_compute.get("computePlacement")
+                and previous.get("status") in {"SUCCEEDED", "COMPLETED"}
+            )
+        if reusable_execution:
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
             result_job = (
@@ -1107,7 +1192,13 @@ class AWSSite(BaseSite):
 
         self.prepare_job(job, sync_project=True, validate=False)
 
-        project = job.project_path.name
+        identity = self._ensure_project_identity(
+            job.project_path,
+            self._authored_project_metadata(job)[1]
+            or self._authored_project_metadata(job)[0]
+            or job.project_path.name,
+        )
+        project = self.project_storage_key(job.project_path)
         if getattr(job.simulation, "_project", None) is None:
             self._sync_loaded_job_inputs(job, project)
 
@@ -1135,9 +1226,13 @@ class AWSSite(BaseSite):
             # Freeze and validate the result layout before admitting remote work.
             run_job = self._prepare_run_snapshot(job)
             retry_arguments: dict[str, Any] = {"retry": True} if retry else {}
+            project_identity_arguments: Dict[str, Any] = (
+                {"project_id": identity.project_id} if identity else {}
+            )
             result = self.graphql_client.submit_job(
                 job_file_s3_key=str(s3_job_key),
                 job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
+                **project_identity_arguments,
                 project_name=authored_project_name,
                 project_display_name=authored_project_display_name,
                 simulation_name=job.simulation.name,
@@ -1165,7 +1260,11 @@ class AWSSite(BaseSite):
                 backend={
                     key: value
                     for key, value in {
-                        "executionSiteId": self.execution_profile.execution_site_id,
+                        "executionSiteId": result.get("executionSiteId")
+                        or resolved_compute["executionSiteId"],
+                        "executionRegistrationFingerprint": result.get(
+                            "executionRegistrationFingerprint"
+                        ),
                         "logicalAttemptId": result.get("logicalAttemptId")
                         or f"{simulation_id}:1",
                         "providerJobId": result.get("providerJobId"),
@@ -1182,6 +1281,21 @@ class AWSSite(BaseSite):
 
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {e}")
+
+    def handle(
+        self, job: BaseJob, job_id: Optional[str] = None, mode: str = "attached"
+    ) -> RunHandle:
+        """Attach to an existing Cloud run with its own frozen result location."""
+        selected_id = job_id or getattr(job, "_job_id", None)
+        if selected_id is None:
+            raise ValueError("Cannot create a run handle without a job id")
+        run = self._make_run_handle(
+            job,
+            str(selected_id),
+            poll_interval=getattr(getattr(self, "config", None), "poll_interval", 5),
+        )
+        run.mode = mode
+        return run
 
     def _make_run_handle(
         self,
@@ -1200,8 +1314,7 @@ class AWSSite(BaseSite):
             mode="aws",
             poll_interval=poll_interval,
             check=check,
-            backend=backend
-            or {"executionSiteId": "managed-slurm", "logicalAttemptId": f"{job_id}:1"},
+            backend=backend or {"logicalAttemptId": f"{job_id}:1"},
             _logs_fn=lambda run, **options: self.fetch_logs(
                 run.job, simulation_id=str(run.id), **options
             ),
@@ -1254,10 +1367,24 @@ class AWSSite(BaseSite):
         # weights and regularization). Copy the complete job graph with one
         # memo so later authoring edits cannot alter an earlier run's reader.
         snapshot = deepcopy(job, memo)
+        identity = local_identity(job.project_path)
+        if identity:
+            snapshot._cloud_project_prefix = identity.storage_prefix
         if hasattr(job, "_read_staged_provenance"):
             snapshot._frozen_staged_provenance = {
                 "AWSSite": deepcopy(job._read_staged_provenance("AWSSite"))
             }
+            staged = authored / "_fs_run" / "remote" / "AWSSite" / f"{job.name}.json"
+            if staged.is_file() and not getattr(job, "_cloud_saved_plan_inputs", False):
+                descriptor = staged.read_bytes()
+                digest = "sha256:" + hashlib.sha256(descriptor).hexdigest()
+                provenance = snapshot._frozen_staged_provenance["AWSSite"]
+                if provenance.get("job", {}).get("digest") != digest:
+                    raise RuntimeError(
+                        "Cloud staged descriptor does not match its provenance; "
+                        "prepare the job again before submitting"
+                    )
+                snapshot._cloud_staged_job_payload = json.loads(descriptor)
         return snapshot
 
     @staticmethod
@@ -1268,10 +1395,58 @@ class AWSSite(BaseSite):
                 "Cloud results require a valid simulation id from submission"
             )
         authored = Path(result._result_path).resolve()
+        payload = getattr(result, "_cloud_staged_job_payload", None)
+        if payload is not None and not getattr(
+            result, "_cloud_saved_plan_inputs", False
+        ):
+            # Managed Slurm verifies the uploaded descriptor, then privately
+            # scopes its output paths to the accepted run before invoking the
+            # solver. Match those exact bytes, never a fingerprint supplied by
+            # the remote result itself. Other staged fingerprints stay intact.
+            project = Path(result.project_path).resolve()
+            authored_relative = authored.relative_to(project).as_posix()
+
+            def project_relative(value: str) -> str:
+                return value.strip("/").removeprefix(
+                    getattr(result, "_cloud_project_prefix", project.name) + "/"
+                )
+
+            if (
+                project_relative(payload.get("result_path", "results"))
+                != authored_relative
+            ):
+                raise ValueError(
+                    "Cloud staged result path differs from the authored job"
+                )
+            scoped = deepcopy(payload)
+            scoped["result_path"] = f"{authored_relative}/runs/{simulation_id}"
+            image = scoped.get("Image")
+            if isinstance(image, dict) and image.get("save_path"):
+                image_path = project_relative(image["save_path"])
+                if not image_path.startswith(authored_relative + "/"):
+                    raise ValueError(
+                        "Cloud staged imaging path escapes the job results"
+                    )
+                image["save_path"] = (
+                    scoped["result_path"]
+                    + "/"
+                    + image_path.removeprefix(authored_relative + "/")
+                )
+            descriptor = (json.dumps(scoped, sort_keys=True) + "\n").encode()
+            result._frozen_staged_provenance["AWSSite"]["job"] = {
+                "digest": "sha256:" + hashlib.sha256(descriptor).hexdigest()
+            }
         result._result_path_override = authored / "runs" / simulation_id
         result._job_id = simulation_id
         result._cloud_result_run_id = simulation_id
         result._cloud_result_binding = (simulation_id, result._result_path)
+        if hasattr(result, "staged_artifact_fingerprints"):
+            result._frozen_artifact_fingerprints = result.staged_artifact_fingerprints(
+                "AWSSite"
+            )
+            result._frozen_task_fingerprints = getattr(
+                result, "staged_task_fingerprints", result.staged_artifact_fingerprints
+            )("AWSSite")
         if isinstance(result, ImagingJob):
             relative = Path(result.save_path).resolve().relative_to(authored)
             result.save_path = result._result_path / relative
@@ -1318,6 +1493,7 @@ class AWSSite(BaseSite):
             "requestedResources",
             "allocatedResources",
             "executionSiteId",
+            "executionRegistrationFingerprint",
             "logicalAttemptId",
             "providerJobId",
             "executionState",
@@ -1392,6 +1568,7 @@ class AWSSite(BaseSite):
                             ),
                             retention="durable",
                         ),
+                        ArtifactRequest(role="traces_metadata", retention="durable"),
                     ),
                     include_defaults=False,
                     project_path=path,
@@ -1569,7 +1746,7 @@ class AWSSite(BaseSite):
                 self._frequency_task(item, frequency) if frequency is not None else task
             )
             remote = (
-                f"s3://{self.config.s3_bucket}/{item.project_path.name}/jobs/"
+                f"s3://{self.config.s3_bucket}/{self.project_storage_key(item.project_path)}/jobs/"
                 f"{item.simulation.name}/{item.name}/logs/{run_id}/"
             )
             if requested_local_dir is None:

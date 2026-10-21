@@ -1052,7 +1052,8 @@ async def _safe_process_call(
             identity,
             "mcp.execution.timeout",
             "The bounded validation worker timed out.",
-            "Reduce the input size or inspect the setup in smaller steps.",
+            "Try again. If the same bounded starter still fails, validate locally "
+            "with the version-matched Python package and contact support.",
         )
     except Exception:
         return _failure(

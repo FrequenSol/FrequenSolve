@@ -529,6 +529,9 @@ class JobRunStateMixin:
         this mapping once and pass it through the batch.
         """
 
+        frozen = getattr(self, "_frozen_artifact_fingerprints", None)
+        if frozen is not None:
+            return dict(frozen)
         job_file = getattr(self, "_file", None)
         simulation_file = getattr(self.simulation, "_file", None)
         if job_file is None or simulation_file is None:
@@ -650,6 +653,9 @@ class JobRunStateMixin:
 
     def _task_reuse_fingerprints(self) -> Optional[Mapping[str, str]]:
         """Select the explicitly requested retry policy for task consumers."""
+        frozen = getattr(self, "_frozen_task_fingerprints", None)
+        if frozen is not None:
+            return dict(frozen)
         if self.preserve_task_outputs:
             digest = self._retry_compatibility_hash()
             if digest is not None:

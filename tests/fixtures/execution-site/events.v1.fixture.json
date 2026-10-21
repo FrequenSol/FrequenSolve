@@ -5,7 +5,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "123",
@@ -53,7 +53,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "slurm:test-cluster:123_0",
@@ -105,7 +105,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "123",
@@ -153,7 +153,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "slurm:test-cluster:123_0",
@@ -205,7 +205,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "123",
@@ -253,7 +253,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "slurm:test-cluster:123_0",
@@ -305,7 +305,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "123",
@@ -353,7 +353,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "slurm:test-cluster:123_0",
@@ -405,7 +405,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "123",
@@ -453,7 +453,7 @@
       "version": "aws-execution-site-result.v1",
       "event": {
         "version": "execution-site-event.v1",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "simulationId": "simulation-test-1",
         "logicalAttemptId": "simulation-test-1:1",
         "providerJobId": "slurm:test-cluster:123_0",

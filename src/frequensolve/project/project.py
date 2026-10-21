@@ -17,9 +17,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
+# Postponed public annotations resolve through the lazy root when reflected,
+# without importing execution sites during ordinary project construction.
+import frequensolve as _fs
 from frequensolve._version import get_versions
-from frequensolve.orchestrator.sites.base import BaseSite
-from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
+from frequensolve.project_identity import COPY_RECOVERY, ProjectIdentity, local_identity
 from frequensolve.simulation.simulation import BaseSimulation, SeismicSimulation
 from frequensolve.units import UnitConfig
 from frequensolve.util.atomic import atomic_write_json
@@ -78,6 +80,7 @@ class Project:
     """
 
     name: str
+    project_id: Optional[str] = None
     pretty_name: Optional[str] = None
     path: Union[str, Path]
     version: str = field(default_factory=_current_sdk_version)
@@ -107,7 +110,32 @@ class Project:
 
         self._configure_logging()
         self.path.mkdir(parents=True, exist_ok=True)
+        identity = local_identity(self.path)
+        if self.project_id is not None and (
+            identity is None or identity.project_id != self.project_id
+        ):
+            raise ValueError(
+                "Project identity manifest is missing or conflicts with the saved project"
+            )
+        if identity is not None:
+            self.project_id = identity.project_id
         self._bind_simulations_to_project()
+
+    def enable_identity(self) -> ProjectIdentity:
+        """Opt into a durable identity before the first Cloud upload."""
+
+        if self.project_id is not None:
+            identity = ProjectIdentity.load(self.path)
+            if identity.project_id != self.project_id:
+                raise ValueError(
+                    "Project identity manifest conflicts with this project"
+                )
+            return identity
+        identity = ProjectIdentity.new()
+        identity.save_new(self.path)
+        self.project_id = identity.project_id
+        self.save()
+        return identity
 
     @classmethod
     def load(cls, file: Union[str, Path]) -> "Project":
@@ -145,6 +173,7 @@ class Project:
             project = cls(
                 name=name,
                 pretty_name=data.get("pretty_name"),
+                project_id=data.get("project_id"),
                 path=project_file.parent,
                 version=str(version),
                 log_level=logging_config.get("level", logging.INFO),
@@ -183,39 +212,75 @@ class Project:
         """
 
         dest = Path(dest).expanduser().resolve()
+        claim = dest / ".fs-copy.lock"
+        if claim.exists() or claim.is_symlink():
+            raise FileExistsError(COPY_RECOVERY)
         if kwargs.get("load_if_exists", False):
             existing = cls._load_existing_project(dest)
             if existing is not None:
                 return existing
 
-        src_file = cls._project_file(src)
-        source = cls.load(src_file)
-        source_root = src_file.parent
+        if (dest / ".frequensolve").exists() or (dest / ".frequensolve").is_symlink():
+            raise FileExistsError(
+                "Copy destination already has an immutable project identity. "
+                "Use Project.load to continue it, or a different empty destination to fork."
+            )
         dest.mkdir(parents=True, exist_ok=True)
-        cls._copy_project_inputs(source_root, dest)
+        try:
+            with claim.open("x") as marker:
+                marker.write("Project.copy in progress\n")
+        except FileExistsError:
+            raise FileExistsError(COPY_RECOVERY) from None
+        completed = False
+        try:
+            if (dest / ".frequensolve").exists() or (
+                dest / ".frequensolve"
+            ).is_symlink():
+                raise FileExistsError(
+                    "Copy destination already has an immutable project identity"
+                )
+            src_file = cls._project_file(src)
+            source = cls.load(src_file)
+            source_root = src_file.parent
+            reserved = None
+            if source.project_id is not None:
+                if any(path.name != ".fs-copy.lock" for path in dest.iterdir()):
+                    raise FileExistsError(
+                        "Immutable copies require a new or empty destination"
+                    )
+                reserved = ProjectIdentity.new()
+                reserved.save_new(dest)
+            cls._copy_project_inputs(source_root, dest)
 
-        copied = cls(
-            name=kwargs.get("name", source.name),
-            pretty_name=kwargs.get("pretty_name", source.pretty_name),
-            path=dest,
-            version=kwargs.get("version", source.version),
-            log_level=kwargs.get("log_level", source.log_level),
-            log_file=kwargs.get("log_file", source.log_file),
-            log_to_console=kwargs.get("log_to_console", source.log_to_console),
-            dependency_log_level=kwargs.get(
-                "dependency_log_level", source.dependency_log_level
-            ),
-            jupyter_logging=kwargs.get("jupyter_logging", source.jupyter_logging),
-            simulations=source.simulations,
-            extras=source.extras,
-        )
-        copied.save()
-        cls._rewrite_copied_input_files(
-            dest,
-            source_project=source_root,
-            target_project=dest,
-        )
-        return cls.load(dest / f"{copied.name}.json")
+            copied = cls(
+                name=kwargs.get("name", source.name),
+                pretty_name=kwargs.get("pretty_name", source.pretty_name),
+                path=dest,
+                version=kwargs.get("version", source.version),
+                log_level=kwargs.get("log_level", source.log_level),
+                log_file=kwargs.get("log_file", source.log_file),
+                log_to_console=kwargs.get("log_to_console", source.log_to_console),
+                dependency_log_level=kwargs.get(
+                    "dependency_log_level", source.dependency_log_level
+                ),
+                jupyter_logging=kwargs.get("jupyter_logging", source.jupyter_logging),
+                simulations=source.simulations,
+                extras=source.extras,
+            )
+            if reserved is not None and copied.project_id != reserved.project_id:
+                raise ValueError("Copy destination identity changed")
+            copied.save()
+            cls._rewrite_copied_input_files(
+                dest,
+                source_project=source_root,
+                target_project=dest,
+            )
+            result = cls.load(dest / f"{copied.name}.json")
+            completed = True
+            return result
+        finally:
+            if completed:
+                claim.unlink()
 
     def save(self, file: Optional[Union[str, Path]] = None, **json_kwargs) -> Path:
         """Save the project and all attached simulations.
@@ -236,6 +301,7 @@ class Project:
 
         payload: Dict[str, Any] = {
             "name": self.name,
+            **({"project_id": self.project_id} if self.project_id is not None else {}),
             "path": str(self.path),
             **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
             "version": str(self.version),
@@ -273,6 +339,7 @@ class Project:
 
         return {
             "name": self.name,
+            **({"project_id": self.project_id} if self.project_id is not None else {}),
             **({"pretty_name": self.pretty_name} if self.pretty_name else {}),
             "version": str(self.version),
             "simulations": [sim.to_fs() for sim in self.simulations],
@@ -555,7 +622,7 @@ class Project:
         except Exception:
             pass
 
-    def _transfer(self, site: BaseSite) -> None:
+    def _transfer(self, site: _fs.BaseSite) -> None:
         """Transfer project files to a remote site with path substitution."""
 
         self.save()
@@ -584,7 +651,11 @@ class Project:
                 site.put(staged_path, remote / staged_path.name)
 
     @staticmethod
-    def _transfer_host_tmp_dir(site: BaseSite) -> Path:
+    def _transfer_host_tmp_dir(site: _fs.BaseSite) -> Path:
+        from frequensolve.orchestrator.sites.config_file import (
+            _host_tmp_path_for_config,
+        )
+
         path = _host_tmp_path_for_config(getattr(site, "_site_config_path", None))
         path.mkdir(parents=True, exist_ok=True)
         return path
@@ -849,16 +920,17 @@ class Project:
                 )
 
     @staticmethod
-    def _site_is_local(site: BaseSite) -> bool:
+    def _site_is_local(site: _fs.BaseSite) -> bool:
         site_class = site.__class__
         return site_class.__name__ == "LocalSite" and site_class.__module__.endswith(
             ".local"
         )
 
-    def _remote_project_root(self, site: BaseSite) -> Path:
+    def _remote_project_root(self, site: _fs.BaseSite) -> Path:
         site_class = site.__class__
         if site_class.__name__ == "AWSSite" and ".aws" in site_class.__module__:
-            return site.work_dir / self.path.name
+            resolver = getattr(site, "project_storage_key", None)
+            return site.work_dir / (resolver(self.path) if resolver else self.path.name)
         return site.work_dir
 
     def _job_files(

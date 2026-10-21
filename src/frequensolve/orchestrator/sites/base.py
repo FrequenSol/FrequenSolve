@@ -585,8 +585,8 @@ class RunResult:
         Args:
             kind: Optional artifact kind filter.
             suffix: Optional filename suffix or suffixes to include.
-            base: Optional base directory used to resolve relative artifact
-                paths.
+            base: Optional output request name or filename stem to filter,
+                such as ``"pressure"`` for ``pressure_00000.vtu``.
             existing: If ``True``, return only files that currently exist.
             fetch_missing: If ``True`` and this run is remote-backed, ask the
                 site to fetch filesystem outputs when no matching files are

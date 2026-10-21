@@ -86,6 +86,8 @@ def test_simulation_status_details_include_customer_safe_failure_message():
         "failureCode": "SCU_BALANCE_INSUFFICIENT",
         "failureMessage": "This simulation needs more SCUs.",
         "executionSiteId": None,
+        "computePlacement": None,
+        "executionRegistrationFingerprint": None,
         "logicalAttemptId": None,
         "providerJobId": None,
         "executionState": "failed",
@@ -142,7 +144,6 @@ def test_submit_job_can_send_status_email_override_and_fresh_run():
         "jobFileS3Key": "project/jobs/job.json",
         "sendSimulationStatusEmail": True,
         "forceRun": True,
-        "executionSiteId": "managed-slurm",
     }
 
 
@@ -173,7 +174,6 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
         "forceRun": False,
-        "executionSiteId": "managed-slurm",
         "projectName": "project",
         "projectDisplayName": "Project Alpha",
         "simulationName": "model",
@@ -188,14 +188,14 @@ def test_submit_job_sends_managed_site_contract():
     resources = {"nodes": 2, "mpiRanks": 8, "wallTimeSeconds": 1800}
     result = client.submit_job(
         "project/jobs/model/job/job.json",
-        execution_site_id="managed-slurm",
+        cluster_id="frequensol-shared-us-east-1",
         execution_resources=resources,
     )
     assert "executionSiteId: $executionSiteId" in client.last_query
     assert "providerJobId" in client.last_query
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
-        "executionSiteId": "managed-slurm",
+        "executionSiteId": "frequensol-shared-us-east-1",
         "executionResources": json.dumps(resources),
         "forceRun": False,
     }
@@ -329,3 +329,63 @@ def test_status_rejects_incompatible_schema_without_retry(options):
     with pytest.raises(RuntimeError, match="Cannot query field"):
         client.get_simulation_status_details("simulation-1")
     assert len(client.queries) == 1
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_compute_resolution_accepts_awsjson_and_preserves_selection(encoded):
+    import json
+
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    calls = []
+    value = {"executionSiteId": "research-cluster", "executionIdentity": "a" * 64}
+
+    def execute(query, variables):
+        calls.append(variables)
+        return {"resolveMyComputeCluster": json.dumps(value) if encoded else value}
+
+    client.execute = execute
+    assert client.resolve_compute_cluster(cluster_id="research-cluster") == value
+    assert calls == [{"executionSiteId": "research-cluster"}]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        {},
+        "invalid-json",
+        {"executionSiteId": "managed-batch", "executionIdentity": "a" * 64},
+        {"executionSiteId": "research", "executionIdentity": "not-a-fingerprint"},
+    ],
+)
+def test_compute_resolution_never_falls_back_on_invalid_response(value):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    calls = []
+
+    def execute(*args):
+        calls.append(args)
+        return {"resolveMyComputeCluster": value}
+
+    client.execute = execute
+    with pytest.raises(RuntimeError, match="compute cluster resolution"):
+        client.resolve_compute_cluster(cluster_id="research-cluster")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("value", ["", "Upper", "managed-batch", 1])
+def test_compute_resolution_rejects_invalid_cluster_before_network(value):
+    client = CapturingGraphQLClient()
+    with pytest.raises(ValueError, match="cluster_id"):
+        client.resolve_compute_cluster(cluster_id=value)
+    assert not client.last_query
+
+
+def test_submit_sends_cluster_and_resolved_identity():
+    client = CapturingGraphQLClient()
+    client.submit_job(
+        "project/job.json",
+        cluster_id="research",
+        expected_compute_identity="a" * 64,
+    )
+    assert client.last_variables["executionSiteId"] == "research"
+    assert client.last_variables["expectedComputeIdentity"] == "a" * 64

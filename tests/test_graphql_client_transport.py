@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -221,9 +222,15 @@ def test_wait_for_storage_ready_retries_transient_error_then_maps_success(
         ]
     )
     clock = iter([0, 31, 31, 31])
-    monkeypatch.setattr(graphql_client.time, "time", lambda: next(clock))
     sleeps = []
-    monkeypatch.setattr(graphql_client.time, "sleep", sleeps.append)
+    real_clock = time.time
+    monkeypatch.setattr(
+        graphql_client,
+        "time",
+        SimpleNamespace(time=lambda: next(clock), sleep=sleeps.append),
+    )
+    # Library background threads must keep the real process-wide clock.
+    assert time.time is real_clock
 
     assert client.wait_for_storage_ready(
         timeout=60,
@@ -241,7 +248,13 @@ def test_wait_for_storage_ready_retries_transient_error_then_maps_success(
 def test_wait_for_storage_ready_propagates_timeout_at_bound(monkeypatch):
     client = PollingGraphQLClient([])
     clock = iter([100, 105])
-    monkeypatch.setattr(graphql_client.time, "time", lambda: next(clock))
+    real_clock = time.time
+    monkeypatch.setattr(
+        graphql_client,
+        "time",
+        SimpleNamespace(time=lambda: next(clock)),
+    )
+    assert time.time is real_clock
 
     with pytest.raises(RuntimeError, match="timeout: 5s"):
         client.wait_for_storage_ready(timeout=5, poll_interval=0)

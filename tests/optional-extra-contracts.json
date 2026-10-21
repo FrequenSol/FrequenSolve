@@ -49,11 +49,14 @@
       "distribution": "wheel",
       "imports": [
         "boto3",
+        "dask.array",
         "requests"
       ],
       "selectors": [
         "tests/test_awssite_auth_retry.py",
-        "tests/test_cloud_cache_paths.py"
+        "tests/test_cloud_cache_paths.py",
+        "tests/test_cognito_login_challenges.py",
+        "tests/test_cloud_result_dependencies.py"
       ],
       "coverage_prefixes": [
         "frequensolve/orchestrator/sites/aws/"
@@ -69,7 +72,8 @@
       ],
       "selectors": [
         "tests/test_mcp_protocol.py::test_official_client_initializes_and_lists_the_finite_closed_surface",
-        "tests/test_mcp_protocol.py::test_cli_doctor_uses_the_official_in_memory_client"
+        "tests/test_mcp_protocol.py::test_cli_doctor_uses_the_official_in_memory_client",
+        "tests/test_workflow_protocol.py"
       ],
       "coverage_prefixes": [
         "frequensolve/mcp_server/"
@@ -212,6 +216,23 @@
           "branches": 10
         }
       }
+    },
+    {
+      "name": "notebook",
+      "distribution": "wheel",
+      "imports": [
+        "nbformat",
+        "nbclient",
+        "ipykernel"
+      ],
+      "selectors": [
+        "tests/test_workflow_artifacts.py::test_clean_notebook_and_failed_execution_evidence"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/workflow/notebooks.py"
+      ],
+      "coverage_floor": 65.0,
+      "coverage_branch_floor": 30
     }
   ],
   "approval_markers": {
