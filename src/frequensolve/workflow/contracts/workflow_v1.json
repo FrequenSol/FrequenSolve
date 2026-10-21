@@ -88,6 +88,19 @@
       "legacy": "older generation receipts are not invented; use registered notebook history",
       "attestation": "original local replay, not a current environment check or service attestation"
     },
+    "notebook_attempt_navigation": {
+      "version": "notebook-attempt-navigation.v1",
+      "tool": "workflow_workspace attempts or attempt",
+      "metadata_bytes_per_record": 65536,
+      "page_size": 25,
+      "directory_entry_limit": 1000,
+      "read_only": "no locks, journals, Cloud calls, transfers, kernels, resumption or replacement",
+      "selection": "returned attempt_key; original arguments stay model-managed",
+      "resume_request": "strict original schema, local project identity, context and path checks; no rewriting moved scope",
+      "inspection": "selected completed bundle uses registered byte checks; partial notebook checks only its authored file",
+      "uncertainty": "last-recorded pending state does not establish current process health or current-study evidence",
+      "pagination": "page-local metadata; retain earlier choices and uncertainty across concurrent additions"
+    },
     "saved_plans": {
       "tool": "workflow_saved_plans",
       "read_only": true,

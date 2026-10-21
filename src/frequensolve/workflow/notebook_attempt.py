@@ -88,7 +88,7 @@ def narrative(value: dict) -> str:
         "context": "binding the saved inputs",
         "directory_created": "preparing local files",
         "authored": "notebook authored",
-        "replaying": "running local analysis",
+        "replaying": "local analysis requested",
         "publishing": "saving outputs",
         "registered": "registering the saved notebook",
         "complete": "completed local replay",

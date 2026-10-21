@@ -225,6 +225,10 @@ def notebook_history(project: Path, after: str | None = None) -> dict:
 
 
 def narrative(value: dict) -> str:
+    if "notebook_attempts" in value or "notebook_attempt" in value:
+        from .notebook_navigation import narrative as attempt_narrative
+
+        return attempt_narrative(value)
     if "roots" in value:
         return (
             "Choose a scientific workspace: "
@@ -232,7 +236,7 @@ def narrative(value: dict) -> str:
             + "."
         )
     if "notebooks" in value:
-        lines = ["Your registered analysis notebooks", ""]
+        lines = ["Your registered analysis notebooks"]
         if value["notebooks"]:
             lines.append(
                 table(

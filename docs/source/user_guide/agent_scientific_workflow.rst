@@ -82,6 +82,20 @@ Older notebooks still use the registered-history recovery above. A recovered
 receipt describes the original local replay; it is not a fresh check of the
 current environment or a service attestation.
 
+After reconnecting without the earlier request, ask "Find my unfinished
+notebook for this study." The assistant can discover recorded attempts from
+the project name, show their last saved step and time, and inspect the selected
+copy. You do not need an old command or internal ID. This is a read-only view:
+browsing does not resume analysis, run a kernel or create a replacement.
+
+A pending checkpoint does not establish whether a process is currently running
+or stopped. Partial notebook links check the authored notebook file only;
+data and output completeness remain unconfirmed. The exact original request is
+available to the assistant only when the workspace context still matches.
+Moving files or changing root names does not silently rewrite that request.
+Current-study evidence still needs the reproduction chapter's owned result
+identity check.
+
 The notebook and static report explain their saved Credit observations in a
 table: quoted maximum, authorized maximum, captured charges, settlement and
 observation time. An incomplete history withholds the total; missing amounts
