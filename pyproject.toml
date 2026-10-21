@@ -265,3 +265,9 @@ module = [
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# Notebook execution remains an optional extra, including in the minimal CI lane.
+# When installed, its available types are checked normally.
+[[tool.mypy.overrides]]
+module = ["nbformat", "nbformat.*", "nbclient", "nbclient.*"]
+ignore_missing_imports = true

@@ -8,6 +8,46 @@ keep their current grants and behavior. Pilot availability requires a separately
 deployed Sandbox gateway and an eligible participant; installing this package
 does not establish live acceptance.
 
+The study unfolds in your MCP client
+------------------------------------
+
+Once connected, start with a scientific question, for example:
+
+    Show me the acoustic example, explain what we will learn at 2 and 20 Hz,
+    and walk me through the model, cost and results here.
+
+The assistant should show the specified source/receiver geometry, explain the
+assumptions and wavelength estimates, then present the resource proposal. You
+can ask questions or request a resource change in ordinary language. The
+assistant manages saved identities and recovery; you do not need to copy plan
+IDs, fingerprints or commands between sessions.
+
+For a connection with native paid approval enabled, each paid stage uses the
+client's approval form and a separate exact Credit-limit confirmation. With an
+ordinary connection, only paid approval requires the signed-in Cloud review.
+Follow progress, captured Credits, receiver plots and reference comparisons in
+the same conversation. Finish by asking for an editable analysis notebook.
+Cloud remains an optional place to inspect the saved study.
+
+``workflow_present`` supplies one focused chapter at a time: ``overview``,
+``model`` (including estimates), ``plan``, ``progress``, ``results`` or
+``reproduce``. It returns ordinary MCP text and PNG image blocks, plus structured
+provenance. Coordinate/numeric tables provide a text alternative. The client
+controls the final rendering: these are not embedded interactive widgets, and
+an image-capable desktop client and a text terminal need not look identical.
+Custom MCP Apps components require separate client support and acceptance.
+
+The presentation reads existing owned state and cannot authorize compute.
+Saved analysis must match the current input, plan revision and execution.
+Pressure magnitude and phase are recalculated from its recorded complex values;
+the view labels the local origin and does not claim that input/reference files
+were reverified or that a notebook has replayed successfully. Request verified
+result retrieval and notebook replay for that evidence. Interpretation remains
+separate from measured results and scientific qualification.
+
+Operator setup for the Sandbox pilot
+------------------------------------
+
 Install the candidate with the ``mcp`` and ``notebook`` optional extras in an
 explicit environment. Use the issuer and dedicated workflow client ID supplied
 by the Sandbox operator::
@@ -33,11 +73,12 @@ and Sandbox product origin. Its MCP configuration uses TOML::
             "--cloud-url", "http://127.0.0.1:5173"]
     required = true
     enabled_tools = ["workflow_discover", "workflow_create_project",
-                     "workflow_plan", "workflow_results"]
+                     "workflow_plan", "workflow_results", "workflow_study",
+                     "workflow_present"]
 
 The combined plan and result tools include preparation and local file writes,
 so Codex can request tool approval even for a read action. For unattended use of
-this restricted profile, explicitly approve only these four tools in the client
+this restricted profile, explicitly approve only the intended tools in the client
 configuration; leave other servers and tools excluded. For example::
 
     [mcp_servers.frequensolve-workflow.tools.workflow_discover]
@@ -47,6 +88,10 @@ configuration; leave other servers and tools excluded. For example::
     [mcp_servers.frequensolve-workflow.tools.workflow_plan]
     approval_mode = "approve"
     [mcp_servers.frequensolve-workflow.tools.workflow_results]
+    approval_mode = "approve"
+    [mcp_servers.frequensolve-workflow.tools.workflow_study]
+    approval_mode = "approve"
+    [mcp_servers.frequensolve-workflow.tools.workflow_present]
     approval_mode = "approve"
 
 These client settings allow the adapter's bounded operations. They do not grant
@@ -63,10 +108,13 @@ browser. Acceptance must exclude those alternative authorities.
 Workflow and recovery
 ---------------------
 
-Read ``frequensolve://workflow/capabilities`` for the versioned manifest. The four
+Read ``frequensolve://workflow/capabilities`` for the versioned manifest. The core
 tools are ``workflow_discover``, ``workflow_create_project``, ``workflow_plan``
-and ``workflow_results``. Tool arguments use a ``request`` object. Replies have
-``ok`` and a JSON ``payload`` string.
+and ``workflow_results``; ``workflow_study`` persists the scientific narrative
+and generates its notebook, and ``workflow_present`` presents it in the client.
+Tool arguments use a ``request`` object. Replies have ``ok`` and a JSON
+``payload`` string. Presentation replies also contain readable narrative and
+ordinary MCP image blocks; they do not duplicate image bytes in structured JSON.
 
 Discover the eligible cluster, then create a fresh local project. Names are
 metadata; each project receives a new immutable identity. Preparation serializes
@@ -94,13 +142,13 @@ pilot.
 Native review rehearsal
 -----------------------
 
-An optional fifth tool, ``workflow_review``, can display an authoritative
+An optional tool, ``workflow_review``, can display an authoritative
 proposal and request structured input directly through an MCP client's form.
 Start the server with ``--interactive-review`` and add ``workflow_review`` to
 the client's enabled tools. Use an interactive client with MCP elicitation
 enabled, a human approval reviewer and a tool timeout of at least 240 seconds.
 Keep other servers, shell, browser and app authorities excluded during acceptance.
-The default server still exposes only the original four tools.
+The default server excludes both approval tools.
 
 This tool is a **no-spend rehearsal**. Its response never authorizes planning,
 validation or execution. Ordinary workflow grants continue to reject paid
@@ -161,7 +209,7 @@ connection page. No stage is authorized by connecting. To expose
 with the usual allowed root and Cloud origin, and add only that tool to the
 client's enabled tool list. Keep MCP elicitation enabled with a human reviewer;
 exclude shell, browser and other authorities during acceptance. Ordinary
-``serve`` still exposes the unchanged four-tool profile.
+``serve`` excludes paid approval.
 
 Call ``workflow_approve`` with ``action="preview"``, ``root_id``,
 ``local_project``, ``plan_id`` and one ``stage``: ``planning``, ``validation`` or
@@ -169,9 +217,9 @@ Call ``workflow_approve`` with ``action="preview"``, ``root_id``,
 opaque ``proposal_fingerprint``. Call ``action="request_input"`` with that
 fingerprint as ``expected_fingerprint`` and a deliberate stable ``intent``.
 The client form contains the full proposal. To approve, the user chooses
-``approve_paid_stage``, then enters its exact ``maximum_credits`` in a separate
+``Approve this stage``, then enters its exact Credit maximum in a separate
 required prompt. Approval does not ask for an optional note. Choosing
-``request_changes`` instead opens a required change-description prompt. These decisions
+``Request changes`` instead opens a required change-description prompt. These decisions
 cannot be supplied as tool arguments. Cancellation, incomplete responses and
 change requests send no paid mutation. Changes are returned for review, never
 automatically applied. A rehearsal confirmation cannot be converted into paid

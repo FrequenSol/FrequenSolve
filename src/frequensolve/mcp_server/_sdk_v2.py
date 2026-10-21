@@ -7,6 +7,7 @@ depending on host-specific argument coercion or SDK-private manager hooks.
 
 from __future__ import annotations
 
+import base64
 import inspect
 import json
 import math
@@ -31,6 +32,7 @@ from mcp.types import (
     CallToolResult,
     GetPromptRequestParams,
     GetPromptResult,
+    ImageContent,
     ListPromptsResult,
     ListResourcesResult,
     ListToolsResult,
@@ -82,6 +84,9 @@ class _ToolRegistration:
     request_model: type[BaseModel]
     output_model: type[BaseModel]
     with_context: bool = False
+    content_renderer: Callable[[BaseModel], list[TextContent | ImageContent]] | None = (
+        None
+    )
 
 
 @dataclass(frozen=True)
@@ -152,6 +157,9 @@ class SafeMCPServer(Server[dict[str, Any]]):
         annotations: ToolAnnotations,
         structured_output: bool,
         with_context: bool = False,
+        content_renderer: (
+            Callable[[BaseModel], list[TextContent | ImageContent]] | None
+        ) = None,
     ) -> Callable[[_CallableT], _CallableT]:
         """Register one strict single-request-model structured tool."""
 
@@ -212,6 +220,7 @@ class SafeMCPServer(Server[dict[str, Any]]):
                 request_model=request_model,
                 output_model=output_model,
                 with_context=with_context,
+                content_renderer=content_renderer,
             )
             return function
 
@@ -427,7 +436,11 @@ class SafeMCPServer(Server[dict[str, Any]]):
                 allow_nan=False,
             )
             return CallToolResult(
-                content=[TextContent(type="text", text=text)],
+                content=(
+                    [*_bounded_content(registration.content_renderer(result))]
+                    if registration.content_renderer is not None
+                    else [TextContent(type="text", text=text)]
+                ),
                 structuredContent=structured,
             )
         except Exception:
@@ -648,6 +661,43 @@ def _request_schema(request_model: type[BaseModel]) -> dict[str, Any]:
         "required": ["request"],
         "type": "object",
     }
+
+
+def _bounded_content(
+    content: list[TextContent | ImageContent],
+) -> list[TextContent | ImageContent]:
+    """Opt-in, finite text/PNG output. Never embed executable HTML or remote URLs.
+
+    The renderer is application code, not a client-supplied rendering function.
+    PNG header checks bound the declared image size; they are not scientific
+    validation of the plotted data.
+    """
+    if not isinstance(content, list) or not 1 <= len(content) <= 3:
+        raise ValueError("Invalid presentation block count")
+    text_bytes = 0
+    image_bytes = 0
+    for item in content:
+        if isinstance(item, TextContent):
+            text_bytes += len(item.text.encode("utf-8"))
+            if text_bytes > 32_768:
+                raise ValueError("Presentation text exceeds its limit")
+        elif isinstance(item, ImageContent) and item.mime_type == "image/png":
+            if len(item.data) > 1_400_000:
+                raise ValueError("Presentation image exceeds its limit")
+            data = base64.b64decode(item.data, validate=True)
+            image_bytes += len(data)
+            if (
+                len(data) < 33
+                or not data.startswith(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+                or not 1 <= int.from_bytes(data[16:20], "big") <= 2048
+                or not 1 <= int.from_bytes(data[20:24], "big") <= 2048
+                or len(data) > 1_048_576
+                or image_bytes > 2_097_152
+            ):
+                raise ValueError("Invalid bounded PNG presentation")
+        else:
+            raise ValueError("Unsupported presentation content")
+    return content
 
 
 def _tool_error(message: str) -> CallToolResult:

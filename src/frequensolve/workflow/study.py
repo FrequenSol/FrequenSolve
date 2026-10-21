@@ -48,7 +48,7 @@ def read_context(path: str | Path, expected: str) -> dict:
 
 def model_summary(science: dict) -> dict:
     """Only derive wavelength when the homogeneous model and units are explicit."""
-    result = {
+    result: dict = {
         "physics": science.get("physics"),
         "dimension": science.get("dimension"),
         "precision": science.get("precision"),
@@ -392,7 +392,8 @@ def replay_study_notebook(path: Path, timeout: int = 120) -> dict:
             "Study code changed; use Jupyter for custom analysis. Original replay evidence no longer applies."
         )
     context = read_context(path.parent / "study.json", meta["context_sha256"])
-    snapshots, references = [], []
+    snapshots: list[dict] = []
+    references: list[dict | None] = []
     for item in meta["inputs"]:
         value = read_snapshot(path.parent / item["path"], item["sha256"])
         (snapshots if item["kind"] == "snapshot" else references).append(value)

@@ -7,7 +7,8 @@
     "workflow_create_project",
     "workflow_plan",
     "workflow_results",
-    "workflow_study"
+    "workflow_study",
+    "workflow_present"
   ],
   "oauth_scope_suffixes": [
     "read",
@@ -22,5 +23,14 @@
   "download_maximum_bytes": 16777216,
   "capacity_observations": "unavailable until a supported observation source exists",
   "notebook_execution": "analysis-only local replay; no service attestation",
-  "scientific_study": "scientific-study.v1: saved question, exact execution bindings, local analysis and portable notebook"
+  "scientific_study": "scientific-study.v1: saved question, exact execution bindings, local analysis and portable notebook",
+  "client_presentation": {
+    "version": "scientific-conversation.v1",
+    "tool": "workflow_present",
+    "chapters": ["overview", "model", "plan", "progress", "results", "reproduce"],
+    "content": ["text", "image/png"],
+    "fallback": "readable scientific text and bounded numeric tables",
+    "host_ui_required": false,
+    "paid_authority": false
+  }
 }
