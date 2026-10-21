@@ -16,6 +16,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .analysis import analyze_pressure, read_snapshot
@@ -204,6 +205,90 @@ def figure_svg(reports: list[dict], kind: str = "pressure") -> str:
     return output.getvalue()[output.getvalue().index("<svg") :]
 
 
+def credit_report_html(credits: dict) -> str:
+    """Describe saved financial observations without filling gaps or totaling rows."""
+    esc = lambda value: html.escape(str(value))
+
+    def amount(value: object) -> str:
+        if value is None or isinstance(value, bool):
+            return "Unavailable"
+        try:
+            raw = str(value)
+            if len(raw) > 128 or not Decimal(raw).is_finite():
+                return "Unavailable"
+        except (InvalidOperation, ValueError):
+            return "Unavailable"
+        return raw
+
+    def label(value: object, default: str = "Unknown") -> str:
+        return value if isinstance(value, str) and value.strip() else default
+
+    saved = credits.get("observations")
+    records_readable = isinstance(saved, list) and all(
+        isinstance(row, dict) for row in saved
+    )
+    observations = (
+        [row for row in saved if isinstance(row, dict)]
+        if isinstance(saved, list)
+        else []
+    )
+    rows = "".join(
+        "<tr>"
+        + "".join(
+            f"<td>{esc(cell)}</td>"
+            for cell in (
+                label(row.get("purpose")),
+                amount(row.get("quoted_maximum_credits")),
+                amount(row.get("authorized_maximum_credits")),
+                amount(row.get("captured_credits")),
+                label(row.get("reconciliation")),
+                label(row.get("observed_at"), "Not recorded"),
+            )
+        )
+        + "</tr>"
+        for row in observations
+    )
+    total = amount(credits.get("captured_credits"))
+    complete = credits.get("history_complete") if records_readable else None
+    if complete is True and total != "Unavailable":
+        summary = f"Captured charges across the complete saved history: <strong>{esc(total)} Credits</strong>. This is the amount captured in these saved observations."
+    elif complete is True:
+        summary = (
+            "The saved history is complete, but its captured total is unavailable."
+        )
+    elif complete is False:
+        summary = "The saved history is incomplete. The captured total is unavailable; the listed stages may cover only part of this workflow."
+    else:
+        summary = "Saved history completeness has not been confirmed. The captured total is unavailable."
+    if credits.get("settlement_pending") is True or any(
+        row.get("reconciliation") == "pending" for row in observations
+    ):
+        settlement = "Settlement or reconciliation is pending for one or more recorded stages. Further charges may remain."
+    elif (
+        credits.get("settlement_pending") is False
+        and observations
+        and all(row.get("reconciliation") == "settled" for row in observations)
+    ):
+        settlement = "No pending settlement is reported for the listed stages in this saved observation."
+        if complete is not True:
+            settlement += " Other operations may be missing."
+    else:
+        settlement = "The overall settlement state is unavailable in this saved record. Missing amounts or an empty stage list do not establish that the workflow was free or settled."
+    return (
+        "<p>These are saved financial observations, not a live account balance. Quoted and authorized maxima are spending limits; captured charges are the amounts recorded as charged. Planning, newly required paid validation and execution have separate approvals. This notebook and report cannot submit another run.</p>"
+        "<table><tr><th>Stage</th><th>Quoted maximum (Credits)</th><th>Authorized maximum (Credits)</th><th>Captured charges (Credits)</th><th>Settlement</th><th>Observed at</th></tr>"
+        + rows
+        + "</table>"
+        + (
+            "<p>No readable stage observations are included in this record.</p>"
+            if not observations
+            else ""
+        )
+        + f"<p>{summary}</p><p>{settlement}</p>"
+        + "<p>Captured amounts come from service settlement receipts; Chargebee remains authoritative. Internal reserved exposure is not a Chargebee hold, and an account-balance change is not this study's cost.</p>"
+    )
+
+
 def report_html(report: dict) -> str:
     esc = lambda value: html.escape(str(value))
     study, model = report["study"], report["model"]
@@ -217,10 +302,6 @@ def report_html(report: dict) -> str:
         for x in model["wavelengths"]
     )
     credits = report["credits"]
-    charges = "".join(
-        f"<tr><td>{esc(x.get('purpose'))}</td><td>{esc(x.get('quoted_maximum_credits', 'Unavailable'))}</td><td>{esc(x.get('captured_credits', 'Unsettled'))}</td><td>{esc(x.get('reconciliation', 'Unknown'))}</td></tr>"
-        for x in credits.get("observations", [])
-    )
     return f"""<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(study['title'])}</title>
 <style>body{{font:16px/1.65 system-ui;color:#20333c;max-width:1100px;margin:auto;padding:40px 28px;background:#fcfdfd}}h1{{font-size:36px;line-height:1.2}}h2{{margin-top:40px}}svg{{width:100%;height:auto}}table{{border-collapse:collapse;width:100%}}td,th{{padding:10px;border-bottom:1px solid #dce5e8;text-align:left}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f5;padding:16px}}.note{{border-left:4px solid #16756d;padding:12px 20px;background:#edf7f4}}</style>
 <h1>{esc(study['title'])}</h1><p>Scientific study · analysis reproduced locally</p>
@@ -228,7 +309,7 @@ def report_html(report: dict) -> str:
 <h2>2. Model and assumptions</h2><p>{esc(science.get('dimension', 'Unknown'))}D {esc(science.get('physics', 'unknown physics'))}, {esc(science.get('precision', 'unknown'))} precision. Scientific inputs and source scaling are retained below.</p>
 {figure_svg(report['reports'], 'geometry')}<details><summary>Inspect materials, boundaries, mesh, units and solver settings</summary><pre>{esc(json.dumps(science, indent=2))}</pre></details>
 <h2>3. Estimates before interpreting the result</h2><p>For an explicitly homogeneous velocity, wavelength = velocity / frequency.</p><ul>{wavelengths or '<li>No supported wavelength estimate is available from these inputs.</li>'}</ul><p>This scale estimate does not establish mesh or boundary accuracy. Frequencies remain independent.</p>
-<h2>4. Decisions, execution and Credits</h2><p>Planning, paid validation when necessary, and execution have separate approvals. This document records existing work and cannot submit another run.</p><table><tr><th>Stage</th><th>Quoted maximum (Credits)</th><th>Captured (Credits)</th><th>Settlement</th></tr>{charges}</table><p>History complete: {esc(credits.get('history_complete', False))}. Captured total: {esc(credits.get('captured_credits', 'Unavailable'))} Credits. Internal reservations are not Chargebee holds.</p><details><summary>Inspect exact resource choices and recorded revisions</summary><pre>{esc(json.dumps(report['plan'].get('plan', {}), indent=2))}</pre></details>
+<h2>4. Decisions, execution and Credits</h2>{credit_report_html(credits)}<details><summary>Inspect exact resource choices and recorded revisions</summary><pre>{esc(json.dumps(report['plan'].get('plan', {}), indent=2))}</pre></details>
 <h2>5. Receiver response and comparison</h2>{figure_svg(report['reports'])}<table><tr><th>Frequency</th><th>Finite / selected samples</th><th>Paired-reference coverage</th><th>Relative L2 difference</th></tr>{rows}</table><p>Phase is principal phase in radians and is undefined at zero magnitude. No interpolation, rescaling, unwrapping or time reconstruction is performed.</p>
 <h2>6. Conclusions and limits</h2><p>{sum(r['finite_count'] for r in report['reports'])} of {sum(r['sample_count'] for r in report['reports'])} selected values are finite. Comparisons above use only exactly compatible metadata. An absent reference is not a passed comparison.</p><div class="note">{esc(report['assurance']['scientific_claim'])} No engineering acceptance threshold is inferred. Measured distributed peak memory is not supplied by this analysis.</div>
 <h2>7. Reproduce and continue</h2><p>Open analysis.ipynb with the bundled inputs and the recorded Python environment. Run All performs local analysis only. Edit a copy to explore another interpretation; edits invalidate the original execution evidence. Preparing another simulation requires its own reviewed workflow.</p><details><summary>Input, execution and analysis provenance</summary><pre>{esc(json.dumps({'head': report['plan']['head'], 'assurance': report['assurance'], 'inputs': [r['assurance'] for r in report['reports']]}, indent=2))}</pre></details></html>"""
@@ -236,7 +317,7 @@ def report_html(report: dict) -> str:
 
 def notebook_cells(context_hash: str, entries: list[dict]) -> list[tuple[str, str]]:
     reads = [
-        "from frequensolve.workflow.study import read_context, study_report, figure_svg, report_html",
+        "from frequensolve.workflow.study import read_context, study_report, figure_svg, report_html, credit_report_html",
         "from frequensolve.workflow.analysis import read_snapshot",
         "from IPython.display import SVG, HTML, display",
         "import json",
@@ -283,7 +364,7 @@ def notebook_cells(context_hash: str, entries: list[dict]) -> list[tuple[str, st
         ),
         (
             "code",
-            "print(json.dumps(context['plan'].get('plan', {}), indent=2))\nprint(json.dumps(context['credits'], indent=2))",
+            "display(HTML(credit_report_html(context['credits'])))\nprint(json.dumps(context['plan'].get('plan', {}), indent=2))",
         ),
         (
             "markdown",

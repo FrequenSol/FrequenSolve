@@ -55,6 +55,13 @@ adapter process can recover the same bookmark without regenerating the notebook
 or running a kernel. The chapter reads current owned result metadata; it does
 not request transfer tickets or download contents.
 
+The notebook and static report explain their saved Credit observations in a
+table: quoted maximum, authorized maximum, captured charges, settlement and
+observation time. An incomplete history withholds the total; missing amounts
+remain unavailable rather than becoming zero. Pending or unknown settlement
+remains explicit. These are saved observations, and Chargebee remains
+authoritative for billing.
+
 A notebook for another run, question or frequency selection is identified as
 different. Older bookmarks without an exact binding remain recoverable through
 the workspace tool, but are not attached to the current study as verified
