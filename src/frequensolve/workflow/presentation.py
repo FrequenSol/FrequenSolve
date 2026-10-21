@@ -12,6 +12,7 @@ import math
 import threading
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import quote
 
 from mcp.types import ImageContent, TextContent
 
@@ -643,13 +644,70 @@ def present(
             "reproduce" if selected else "retrieve_and_analyze_current_outputs"
         )
     else:
+        book = view.get("notebook") or {}
+        match_status = (book.get("context_match") or {}).get("status")
         lines = [
             f"**{title} · reproduce and explore**",
-            "Ask to create the editable study notebook from the verified local result bundle and a compatible reference, when available. The notebook contains the question, assumptions, estimates, pressure analysis, figures and evidence.",
-            "Run All performs local analysis only. It does not upload, authorize or submit compute. Each successful fresh-kernel replay records the code, dependencies, inputs, parameters and outputs. This view does not assert that a notebook has already replayed successfully.",
-            "Edit a copy to explore another interpretation. Changed code, inputs or environment invalidate the original execution evidence. A changed scientific model requires its own preparation and paid-stage review.",
         ]
-        provenance["next_action"] = "create_or_verify_analysis_notebook"
+        if match_status == "match" and book.get("saved_bytes_unchanged"):
+            complete = book.get("recorded_replay_status") == "complete"
+            lines.append(
+                "Your saved notebook matches this exact study, plan revision, run, input/result fingerprints and frequency selection. Its saved files are unchanged."
+            )
+            lines.append(
+                "Recorded local replay: **complete**. The current environment has not been rechecked; this is not service attestation."
+                if complete
+                else "Recorded replay: **incomplete**. Open the editable notebook to inspect the failed attempt; it is not successful execution evidence."
+            )
+            labels = {
+                "analysis.ipynb": "Open editable notebook",
+                "executed.ipynb": "Open notebook with recorded outputs",
+                "report.html": "Open static report",
+            }
+            for artifact in book.get("artifacts", []):
+                path = artifact.get("path")
+                if (
+                    artifact.get("name") in labels
+                    and isinstance(path, str)
+                    and path.startswith("/")
+                    and not any(ord(c) < 32 for c in path)
+                ):
+                    lines.append(
+                        f"- [{labels[artifact['name']]}]({quote(path, safe='/')})"
+                    )
+            provenance["next_action"] = (
+                "open_saved_notebook" if complete else "inspect_incomplete_notebook"
+            )
+        elif book and book.get("recorded_replay_status") != "unavailable":
+            if book.get("saved_bytes_unchanged") is False:
+                lines.append(
+                    "The saved notebook files have changed or are missing. Earlier execution evidence cannot establish the current contents."
+                )
+            elif match_status == "mismatch":
+                lines.append(
+                    "The project's latest notebook belongs to a different study context or frequency selection. It has not been attached to this run. Its recorded context remains recoverable from the workspace."
+                )
+            elif match_status == "unbound":
+                lines.append(
+                    "The older notebook bookmark has no verified exact study/run binding. It remains recoverable from the workspace, but cannot be presented as this study's notebook."
+                )
+            else:
+                lines.append(
+                    "The current notebook/result identity could not be confirmed. Retry the same read; do not regenerate or submit replacement work to recover it."
+                )
+            provenance["next_action"] = "inspect_notebook_context"
+        else:
+            lines.append(
+                "Ask to create the editable study notebook from the verified local result bundle and a compatible reference, when available. The notebook contains the question, assumptions, estimates, pressure analysis, figures and evidence. No notebook replay is asserted by this view."
+            )
+            provenance["next_action"] = "create_or_verify_analysis_notebook"
+        lines.extend(
+            [
+                "Reopening does not run a kernel. Run All performs local analysis only: no upload, authorization or compute submission. A successful fresh-kernel replay records code, dependencies, inputs, parameters and outputs.",
+                "Edit a copy to explore another interpretation. Changed code, inputs or environment invalidate the original execution evidence. A changed scientific model requires its own preparation and paid-stage review.",
+            ]
+        )
+        provenance["notebook"] = book
     lines.append(
         "**Next:** "
         + {
@@ -661,6 +719,9 @@ def present(
             "reproduce": "Reproduce this analysis in an editable notebook.",
             "retrieve_and_analyze_current_outputs": "Retrieve and verify the current outputs before interpreting them.",
             "create_or_verify_analysis_notebook": "Create a notebook, or verify the existing replay evidence.",
+            "open_saved_notebook": "Open the saved notebook above; no regeneration is needed.",
+            "inspect_incomplete_notebook": "Inspect the incomplete notebook before deciding how to replay it.",
+            "inspect_notebook_context": "Inspect the existing notebook context or retry the same observation.",
         }[provenance["next_action"]]
     )
     return Presentation("\n\n".join(lines), provenance, tuple(images))

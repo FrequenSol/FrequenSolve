@@ -41,14 +41,28 @@ Folder browsing is explicit, does not follow symlinks and is limited to 1,000
 entries per folder, with 25 folders/projects per page. Contents can change
 between pages, so clients should deduplicate by identity and local path.
 
-After generating a notebook, ask "Open my notebook." The workspace tool returns
-clickable paths for the latest generated notebook, its recorded outputs and
-static report. A fresh adapter process can recover those bookmarks. Changed or
-missing saved files withhold the links and invalidate that byte-check evidence.
-Unchanged bytes do not establish that the current environment matches, and a
-local replay is not service attestation. Earlier, unbookmarked notebooks remain
-on disk. Editable cells inside the client require separate host support; an
-``ipynb`` link alone does not establish that capability.
+After generating a notebook, ask "Open my notebook." The ``reproduce`` chapter
+reopens its clickable paths when its saved files and exact study, project, plan
+revision, run, input/result fingerprints and selected frequencies match. A fresh
+adapter process can recover the same bookmark without regenerating the notebook
+or running a kernel. The chapter reads current owned result metadata; it does
+not request transfer tickets or download contents.
+
+A notebook for another run, question or frequency selection is identified as
+different. Older bookmarks without an exact binding remain recoverable through
+the workspace tool, but are not attached to the current study as verified
+notebooks. An incomplete replay offers the editable notebook for inspection,
+without presenting its outputs as successful evidence. Changed or missing files
+withhold the links. If current metadata cannot be confirmed, retry the same read;
+uncertainty does not call for regeneration or replacement solver work.
+
+The workspace tool can also recover the project's latest notebook independently
+of a selected study. That view checks saved bytes and reports its recorded
+context, without claiming it matches the current study. Unchanged bytes do not
+establish that the current environment matches, and a local replay is not service
+attestation. Earlier, unbookmarked notebooks remain on disk. Editable cells
+inside the client require separate host support; an ``ipynb`` link alone does not
+establish that capability.
 
 ``workflow_present`` supplies one focused chapter at a time: ``overview``,
 ``model`` (including estimates), ``plan``, ``progress``, ``results`` or

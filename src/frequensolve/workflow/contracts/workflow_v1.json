@@ -41,6 +41,14 @@
       "image/png"
     ],
     "fallback": "readable scientific text and bounded numeric tables",
+    "notebook_recovery": {
+      "binding_version": "study-notebook-binding.v1",
+      "matches": "study, project, plan revision, run, input/result fingerprints and exact frequency selection",
+      "current_result_metadata": "read-only; no ticket or download",
+      "reopening_executes_kernel": false,
+      "current_environment_reverified": false,
+      "unbound_or_different_context": "recoverable through workspace artifacts; not current-study evidence"
+    },
     "host_ui_required": false,
     "paid_authority": false
   },
@@ -51,6 +59,6 @@
     "maximum_folder_entries": 1000,
     "page_size": 25,
     "cloud_ownership": "confirmed by subsequent scoped plan reads",
-    "notebooks": "latest generated bundle; saved-byte checks do not verify the current environment"
+    "notebooks": "latest generated bundle and recorded context; use reproduce for exact selected-study matching; saved-byte checks do not verify the current environment"
   }
 }

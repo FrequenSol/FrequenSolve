@@ -83,9 +83,20 @@ def projects(root: Path, root_id: str, folder: str | None, after: str | None) ->
     }
 
 
-def remember_notebook(root: Path, project: Path, destination: str, status: str) -> None:
+def remember_notebook(
+    root: Path,
+    project: Path,
+    destination: str,
+    status: str,
+    *,
+    binding: dict | None = None,
+) -> None:
     """Bookmark the latest notebook without replacing any notebook content."""
     target = root / relative(destination)
+    if binding is not None:
+        from .notebook_binding import validate
+
+        validate(binding)
     files = []
     total = 0
     with directory(target) as fd, os.scandir(fd) as entries:
@@ -114,6 +125,7 @@ def remember_notebook(root: Path, project: Path, destination: str, status: str) 
                 "destination": destination,
                 "recorded_replay_status": status,
                 "files": files,
+                **({"binding": binding} if binding is not None else {}),
             }
         )
 
@@ -154,9 +166,18 @@ def notebook_artifacts(root: Path, project: Path) -> dict:
         if name in ("analysis.ipynb", "executed.ipynb", "report.html"):
             # Only verified, unchanged bookmarks receive clickable file links.
             links.append({"name": name, "path": str(root / destination / name)})
+    binding = saved.get("binding")
+    if binding is not None:
+        from .notebook_binding import validate
+
+        try:
+            validate(binding)
+        except (ValueError, TypeError):
+            binding = None
     return {
         "artifacts": links if unchanged else [],
         "recorded_replay_status": saved["recorded_replay_status"],
+        "binding": binding,
         "saved_bytes_unchanged": bool(unchanged),
         "current_environment_checked": False,
         "service_attestation": False,
@@ -202,6 +223,21 @@ def narrative(value: dict) -> str:
             + text(value["recorded_replay_status"])
             + ". Saved files are unchanged; the current environment has not been checked. Local evidence is not service attestation."
         )
+        if value.get("binding"):
+            binding = value["binding"]
+            lines.append(
+                "Recorded notebook context: plan "
+                + text(binding.get("plan_id"))
+                + ", revision "
+                + text(binding.get("plan_revision"))
+                + ", run "
+                + text(binding.get("execution_id"))
+                + ". This project-only view has not compared it with a current study."
+            )
+        else:
+            lines.append(
+                "This older bookmark has no exact study/run binding. It is recoverable, but is not verified as the current study notebook."
+            )
     elif value.get("recorded_replay_status") == "unavailable":
         lines.append(
             "No notebook bookmark is saved for this project yet. Create an analysis notebook from verified results."
