@@ -62,6 +62,13 @@ remain unavailable rather than becoming zero. Pending or unknown settlement
 remains explicit. These are saved observations, and Chargebee remains
 authoritative for billing.
 
+Notebook and report geometry figures retain native source and receiver IDs.
+Shared labels indicate exactly colocated positions; nearby coordinates remain
+distinct. Hollow receiver markers keep colocated source symbols visible. Dense
+selections omit point labels explicitly while retaining their native IDs and
+coordinates in the report data. The diagram shows selected acquisition points,
+not an inferred model boundary or a simulated wavefield.
+
 A notebook for another run, question or frequency selection is identified as
 different. Older bookmarks without an exact binding remain recoverable through
 the workspace tool, but are not attached to the current study as verified

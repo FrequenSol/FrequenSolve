@@ -134,6 +134,10 @@ def figure_svg(reports: list[dict], kind: str = "pressure") -> str:
             fig = plt.figure(figsize=(8, 4.5), layout="constrained")
             ax = fig.add_subplot(111, projection="3d")
             meta = reports[0]["metadata"]
+            show_labels = (
+                sum(len(meta[name + "_ids"]) for name in ("source", "receiver")) <= 12
+            )
+            point_labels: dict[tuple[float, ...], list[str]] = {}
             for name, marker, color in (
                 ("source", "*", "#b45309"),
                 ("receiver", "o", "#16756d"),
@@ -144,12 +148,33 @@ def figure_svg(reports: list[dict], kind: str = "pressure") -> str:
                 ax.scatter(
                     *xyz.T,
                     marker=marker,
-                    color=color,
-                    s=90 if name == "source" else 32,
+                    s=90 if name == "source" else 160,
                     label=name.title(),
+                    **(
+                        {"color": color}
+                        if name == "source"
+                        else {
+                            "facecolors": "none",
+                            "edgecolors": color,
+                            "linewidths": 1.8,
+                        }
+                    ),
                 )
-                for label, point in zip(meta[name + "_ids"], xyz):
-                    ax.text(*point, f" {name[0].upper()}{label}", fontsize=8)
+                if show_labels:
+                    for label, point in zip(meta[name + "_ids"], xyz):
+                        point_labels.setdefault(tuple(point), []).append(
+                            f"{name[0].upper()}{label}"
+                        )
+            for point, labels in point_labels.items():
+                ax.text(*point, "  " + " / ".join(labels), fontsize=8)
+            if not show_labels:
+                ax.text2D(
+                    0.02,
+                    0.02,
+                    "Point labels omitted for dense geometry; native IDs and coordinates remain in the structured report.",
+                    transform=ax.transAxes,
+                    fontsize=8,
+                )
             for axis in "xyz":
                 getattr(ax, f"set_{axis}label")(
                     f"{axis.upper()} ({meta['coordinate_units']})"
