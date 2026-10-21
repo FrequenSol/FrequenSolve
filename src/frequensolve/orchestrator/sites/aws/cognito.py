@@ -66,6 +66,41 @@ _IDENTITY_BUSY_MESSAGE = (
 )
 
 
+def _authentication_result(
+    response: Dict[str, Any], *, refreshing: bool = False
+) -> Dict[str, Any]:
+    """Require completed authentication without exposing challenge contents."""
+    challenge = response.get("ChallengeName")
+    if challenge == "NEW_PASSWORD_REQUIRED":
+        raise ValueError(
+            "Your first FrequenSolve Cloud sign-in is not complete. Open your "
+            "FrequenSolve web app and follow the welcome email to set your "
+            "password and complete account setup. Then retry Python sign-in; "
+            "restart the local MCP server after sign-in succeeds."
+        )
+    if challenge:
+        raise ValueError(
+            "Your account requires additional sign-in verification that this "
+            "Python client cannot complete. Sign in through your FrequenSolve "
+            "web app to review the required steps. For hosted MCP, use its "
+            "browser sign-in; for Python or local MCP access, contact support "
+            "about the supported sign-in method for your account."
+        )
+    result = response.get("AuthenticationResult")
+    required: tuple[str, ...] = ("IdToken", "AccessToken")
+    if not refreshing:
+        required += ("RefreshToken",)
+    if not isinstance(result, dict) or any(
+        not isinstance(result.get(field), str) or not result[field]
+        for field in required
+    ):
+        raise RuntimeError(
+            "FrequenSolve Cloud sign-in did not return complete credentials. "
+            "Retry sign-in. If this continues, contact support with this message."
+        )
+    return result
+
+
 def _call_identity_with_retry(
     operation_name: str,
     operation: Callable[[], Dict[str, Any]],
@@ -206,6 +241,8 @@ class CognitoAuth:
 
         Raises:
             ClientError: If authentication fails
+            ValueError: If web account setup or unsupported verification is required
+            RuntimeError: If the provider does not return complete credentials
         """
         logger.debug(f"Authenticating with Cognito as {email}...")
         try:
@@ -215,7 +252,7 @@ class CognitoAuth:
                 AuthParameters={"USERNAME": email, "PASSWORD": password},
             )
 
-            auth_result = response["AuthenticationResult"]
+            auth_result = _authentication_result(response)
 
             # Calculate expiration time (tokens typically expire in 1 hour)
             expires_at = datetime.now() + timedelta(
@@ -243,6 +280,18 @@ class CognitoAuth:
                 raise ValueError("Invalid email or password") from e
             elif error_code == "UserNotFoundException":
                 raise ValueError("User not found") from e
+            elif error_code == "PasswordResetRequiredException":
+                raise ValueError(
+                    "Your Cloud password must be reset. Open your FrequenSolve "
+                    "web app and use password recovery, then retry Python sign-in."
+                ) from None
+            elif error_code == "UserNotConfirmedException":
+                raise ValueError(
+                    "Your Cloud account is not confirmed. Follow the welcome "
+                    "email and complete first sign-in in your FrequenSolve web "
+                    "app, then retry Python sign-in. Contact support if the "
+                    "welcome email is unavailable."
+                ) from None
             else:
                 raise
 
@@ -268,7 +317,7 @@ class CognitoAuth:
                 AuthParameters={"REFRESH_TOKEN": cached["refresh_token"]},
             )
 
-            auth_result = response["AuthenticationResult"]
+            auth_result = _authentication_result(response, refreshing=True)
 
             # Calculate new expiration time
             expires_at = datetime.now() + timedelta(

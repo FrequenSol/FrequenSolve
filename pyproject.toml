@@ -49,6 +49,7 @@ dependencies = [
 [project.scripts]
 frequensolve = "frequensolve.commands.cli:main"
 frequensolve-mcp = "frequensolve.mcp_server.cli:main"
+frequensolve-workflow = "frequensolve.workflow.cli:main"
 frequensolve-adaptive-scheduler = "frequensolve.adaptive:main"
 
 [project.urls]
@@ -57,11 +58,19 @@ Documentation = "https://docs.frequensol.com"
 Support = "https://frequensol.com/support"
 
 [project.optional-dependencies]
+notebook = [
+    "matplotlib>=3.7,<4.0",
+    "nbformat>=5.10,<6",
+    "nbclient>=0.10,<0.11",
+    "ipykernel>=6.29.5,<7",
+]
+
 fast-fft = [
     "pyfftw>=0.14,<0.16",
 ]
 cloud = [
     "boto3>=1.36.23,<2.0.0",
+    "dask>=2025.1.0,<2026.0.0",
     "requests>=2.31.0,<3.0.0",
 ]
 mcp = [
@@ -142,6 +151,7 @@ include = ["frequensolve*"]
 "frequensolve" = ["solver_compatibility.json"]
 "frequensolve.knowledge" = ["*.json"]
 "frequensolve.mcp_server" = ["contracts/*.json"]
+"frequensolve.workflow" = ["templates/*.json", "contracts/*.json"]
 "frequensolve.orchestrator.sites" = ["site_presets.toml"]
 "frequensolve.orchestrator.sites.hpc" = ["templates/**/*.sh", "templates/**/*.py"]
 
@@ -161,6 +171,8 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 timeout = 300
+# Preserve record_property timing evidence in JUnit without warning-as-error.
+junit_family = "xunit1"
 filterwarnings = [
     "error",
 ]
@@ -253,3 +265,9 @@ module = [
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# Notebook execution remains an optional extra, including in the minimal CI lane.
+# When installed, its available types are checked normally.
+[[tool.mypy.overrides]]
+module = ["nbformat", "nbformat.*", "nbclient", "nbclient.*"]
+ignore_missing_imports = true

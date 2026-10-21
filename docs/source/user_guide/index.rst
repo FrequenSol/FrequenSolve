@@ -29,3 +29,8 @@ unfamiliar, check the :doc:`../glossary`.
    traces_paraview_outputs
    eikonal
    boreholes
+
+.. toctree::
+   :maxdepth: 1
+
+   agent_scientific_workflow

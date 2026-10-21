@@ -196,9 +196,22 @@ jobs:
       env:
         CONTRACT: ${{ matrix.contract }}
       run: |
-        python scripts/check_optional_extra_contracts.py \
-          --run "$CONTRACT" \
-          --coverage-output "tests/output/optional-${CONTRACT}-coverage.json"
+        set -euo pipefail
+        command=(python scripts/check_optional_extra_contracts.py
+          --run "$CONTRACT"
+          --coverage-output "tests/output/optional-${CONTRACT}-coverage.json")
+        if [ "$CONTRACT" = visual ]; then
+          sudo apt-get update
+          sudo apt-get install --yes xvfb libgl1-mesa-dri libglx-mesa0
+          # Keep real screenshot assertions on a software-rendered X context.
+          # The runner's default EGL context can crash in VTK screenshot().
+          export PYVISTA_OFF_SCREEN=true
+          export VTK_DEFAULT_OPENGL_WINDOW=vtkXOpenGLRenderWindow
+          export LIBGL_ALWAYS_SOFTWARE=1
+          xvfb-run --auto-servernum "${command[@]}"
+        else
+          "${command[@]}"
+        fi
 
     - name: Upload optional contract coverage
       if: always()

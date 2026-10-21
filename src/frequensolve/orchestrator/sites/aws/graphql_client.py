@@ -7,6 +7,7 @@ the FrequenSol AppSync API using Cognito authentication.
 
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -305,6 +306,72 @@ class GraphQLClient:
             "status": storage_stack.get("status", ""),
         }
 
+    def resolve_compute_cluster(
+        self,
+        *,
+        cluster_id: Optional[str] = None,
+        execution_resources: Optional[Dict[str, Any]] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Resolve current access and immutable identity before local reuse."""
+        from .execution_profile import validate_cluster_id
+
+        if cluster_id is not None:
+            validate_cluster_id(cluster_id)
+        result = self.execute(
+            """query ResolveMyComputeCluster($executionSiteId: String, $partition: String, $allowUnverifiedCompute: Boolean, $executionResources: AWSJSON) {
+                resolveMyComputeCluster(executionSiteId: $executionSiteId, partition: $partition, allowUnverifiedCompute: $allowUnverifiedCompute, executionResources: $executionResources)
+            }""",
+            {
+                key: value
+                for key, value in {
+                    "executionSiteId": cluster_id,
+                    "partition": partition,
+                    "allowUnverifiedCompute": allow_unverified_compute,
+                    "executionResources": (
+                        json.dumps(execution_resources)
+                        if execution_resources is not None
+                        else None
+                    ),
+                }.items()
+                if value is not None
+            },
+        )
+        resolved = result.get("resolveMyComputeCluster")
+        if isinstance(resolved, str):
+            try:
+                resolved = json.loads(resolved)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "Cloud returned malformed compute cluster resolution"
+                ) from exc
+        if (
+            not isinstance(resolved, dict)
+            or not isinstance(resolved.get("executionSiteId"), str)
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", resolved["executionSiteId"])
+            or resolved["executionSiteId"] == "managed-batch"
+            or (cluster_id is not None and resolved["executionSiteId"] != cluster_id)
+            or not isinstance(resolved.get("executionIdentity"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", resolved["executionIdentity"])
+        ):
+            raise RuntimeError(
+                "Cloud returned an invalid compute cluster resolution; update the Cloud backend and retry"
+            )
+        return resolved
+
+    def request_project_identity(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.execute(
+            "mutation ProjectIdentity($input: AWSJSON!) { requestMyProjectIdentity(input: $input) }",
+            {"input": json.dumps(payload)},
+        )
+        value = result.get("requestMyProjectIdentity")
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            raise RuntimeError("Cloud project identity is unavailable")
+        return value
+
     def submit_job(
         self,
         job_file_s3_key: str,
@@ -313,21 +380,33 @@ class GraphQLClient:
         send_simulation_status_email: Optional[bool] = None,
         fresh: bool = False,
         retry: bool = False,
+        project_id: Optional[str] = None,
         project_name: Optional[str] = None,
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
-        execution_site_id: str = "managed-slurm",
+        cluster_id: Optional[str] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
+        expected_compute_identity: Optional[str] = None,
         execution_resources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Submit through the current managed execution-site contract."""
-        if execution_site_id != "managed-slurm":
-            raise ValueError("execution_site_id must be managed-slurm")
+        from .execution_profile import validate_cluster_id
+
+        if cluster_id is not None:
+            validate_cluster_id(cluster_id)
+        if expected_compute_identity is not None and (
+            not isinstance(expected_compute_identity, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", expected_compute_identity)
+        ):
+            raise ValueError("Invalid expected compute identity")
         mutation = """
             mutation SubmitJob(
                 $jobFileS3Key: String!, $jobName: String, $sendSimulationStatusEmail: Boolean,
                 $projectName: String, $projectDisplayName: String, $simulationName: String,
                 $simulationJobName: String, $executionSiteId: String, $executionResources: AWSJSON,
+                $expectedComputeIdentity: String, $partition: String, $allowUnverifiedCompute: Boolean,
                 $forceRun: Boolean
             ) {
                 submitJob(jobFileS3Key: $jobFileS3Key, jobName: $jobName,
@@ -335,11 +414,21 @@ class GraphQLClient:
                     projectName: $projectName, projectDisplayName: $projectDisplayName,
                     simulationName: $simulationName, simulationJobName: $simulationJobName,
                     executionSiteId: $executionSiteId, executionResources: $executionResources,
+                    expectedComputeIdentity: $expectedComputeIdentity, partition: $partition, allowUnverifiedCompute: $allowUnverifiedCompute,
                     forceRun: $forceRun) {
-                    simulationId status executionSiteId logicalAttemptId providerJobId executionState
+                    simulationId status executionSiteId executionRegistrationFingerprint logicalAttemptId providerJobId executionState computePlacement
                 }
             }
         """
+        if project_id is not None:
+            from frequensolve.project_identity import ProjectIdentity
+
+            ProjectIdentity(project_id)
+            mutation = mutation.replace(
+                "$forceRun: Boolean", "$projectId: String, $forceRun: Boolean"
+            ).replace(
+                "forceRun: $forceRun)", "projectId: $projectId, forceRun: $forceRun)"
+            )
         if retry:
             # Ordinary submissions remain compatible with backends predating retries.
             mutation = mutation.replace(
@@ -349,6 +438,7 @@ class GraphQLClient:
                 "forceRun: $forceRun, retry: $retry)",
             )
         variables = {
+            **({"projectId": project_id} if project_id is not None else {}),
             "jobFileS3Key": job_file_s3_key,
             "jobName": job_name,
             "sendSimulationStatusEmail": send_simulation_status_email,
@@ -356,7 +446,10 @@ class GraphQLClient:
             "projectDisplayName": project_display_name,
             "simulationName": simulation_name,
             "simulationJobName": simulation_job_name,
-            "executionSiteId": execution_site_id,
+            "executionSiteId": cluster_id,
+            "partition": partition,
+            "allowUnverifiedCompute": allow_unverified_compute,
+            "expectedComputeIdentity": expected_compute_identity,
             "executionResources": (
                 json.dumps(execution_resources)
                 if execution_resources is not None
@@ -371,7 +464,10 @@ class GraphQLClient:
         )
         if not result.get("submitJob"):
             raise RuntimeError("Job submission failed: No response from API")
-        return result["submitJob"]
+        submission = result["submitJob"]
+        if isinstance(submission.get("computePlacement"), str):
+            submission["computePlacement"] = json.loads(submission["computePlacement"])
+        return submission
 
     def cancel_simulation(self, simulation_id: str) -> None:
         """Request cancellation; terminal state remains authoritative in Cloud."""
@@ -437,6 +533,8 @@ class GraphQLClient:
                     requestedResources
                     allocatedResources
                     executionSiteId
+                    computePlacement
+                    executionRegistrationFingerprint
                     logicalAttemptId
                     providerJobId
                     executionState
@@ -481,6 +579,14 @@ class GraphQLClient:
             "requestedResources": resources("requestedResources"),
             "allocatedResources": resources("allocatedResources"),
             "executionSiteId": details.get("executionSiteId"),
+            "computePlacement": (
+                json.loads(details["computePlacement"])
+                if isinstance(details.get("computePlacement"), str)
+                else details.get("computePlacement")
+            ),
+            "executionRegistrationFingerprint": details.get(
+                "executionRegistrationFingerprint"
+            ),
             "logicalAttemptId": details.get("logicalAttemptId"),
             "providerJobId": details.get("providerJobId"),
             "executionState": normalize_execution_state(

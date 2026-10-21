@@ -74,6 +74,42 @@ if unexpected:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def test_native_draft_validation_does_not_import_sites_or_waveform_processors():
+    code = """
+import sys
+from tempfile import TemporaryDirectory
+from frequensolve.mcp_server.core import create_simulation_draft, validate_simulation_draft
+
+with TemporaryDirectory() as directory:
+    draft = create_simulation_draft(
+        project_name='import-boundary', simulation_name='acoustic_starter',
+        frequency_hz=10.0, receiver_count=101,
+    )
+    report = validate_simulation_draft(draft, directory)
+    assert report['valid'], report
+    assert report['error_count'] == 0, report
+for prefix in ('frequensolve.orchestrator', 'scipy.signal', 'scipy.stats', 'scipy.interpolate'):
+    loaded = sorted(name for name in sys.modules if name == prefix or name.startswith(prefix + '.'))
+    assert not loaded, loaded
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_project_site_annotations_still_resolve_to_public_base_site():
+    from typing import get_type_hints
+
+    from frequensolve.orchestrator.sites.base import BaseSite
+    from frequensolve.project.project import Project
+
+    for method in (
+        Project._transfer,
+        Project._transfer_host_tmp_dir,
+        Project._site_is_local,
+        Project._remote_project_root,
+    ):
+        assert get_type_hints(method)["site"] is BaseSite
+
+
 def test_named_and_star_root_imports_remain_compatible():
     code = """
 from frequensolve import Project

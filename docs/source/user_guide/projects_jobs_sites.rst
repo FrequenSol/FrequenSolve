@@ -316,3 +316,87 @@ disabled too.
 Only sites with access to the :term:`fast solver` can execute jobs. The Python
 package can author, save, inspect, and load projects without a solver
 installation.
+
+Reviewing Saved Frequency Plans (restricted SDK pilot)
+------------------------------------------------------
+
+The participant-restricted Cloud SDK candidate supports offline plan review.
+This is not a general release or support for automatic sizing inside a
+single-allocation job. A summary reads the handle's last observed response;
+it never polls Cloud, validates allocations, accepts a quote or starts work.
+
+.. code-block:: python
+
+   plan = site.open_plan(plan_id, project_key=project_key)
+   print(plan.summary())
+   print(plan.summary(details=True))
+   before = plan.snapshot()
+
+The table includes frequency index/value, nodes, total MPI ranks, CPUs per rank,
+total CPUs, memory per node, aggregate memory, time limit and the server's last
+validation status. Memory uses exact MiB and GiB units. Aggregate memory is
+spread across nodes; it is not memory available to every process or node.
+Expanded details include hardware, selection reasons, automatic requests that
+differ from edited requests, overrides and recorded validated memory minimums.
+Concurrency ceilings are separate from job totals. Runtime predictions and
+measured distributed peak memory remain unavailable; neither is guessed.
+
+Recorded quotes retain their purpose: planning, validation, execution, or the
+bounded automatic workflow. Automatic quote components are shown separately.
+A recorded quote is neither a charge nor a fresh authorization. Latest reported
+settled captures are shown separately for sizing and execution, without claiming
+a complete lifetime total. Missing amounts remain unavailable rather than zero.
+
+``snapshot()`` returns a detached copy of the public response. Keep it *before*
+an edit because the handle adopts each accepted server revision. Changing the
+snapshot dictionary does not change or validate a saved plan.
+
+After an intentional ``plan.edit(...)``, compare the result:
+
+.. code-block:: python
+
+   print(plan.diff(before))
+   plan.validate()  # explicit server validation; no Credit maximum supplied
+   print(plan.summary(details=True))
+
+A layout change may need matching evidence or paid sizing. A reservation-only
+change still needs server checks and can be rejected, for example when memory
+is below a validated minimum or exceeds hardware capacity. The comparison does
+not decide validity or promise free validation. Only the server can return the
+paid-validation requirement/quote; paying requires explicit bounded authorization.
+Input, generated-artifact, solver or runtime changes require replanning.
+
+Comparisons reject another plan, different owner/binding, changed frequency
+identity or a snapshot newer than the current handle. Row order is not identity.
+To compare saved revisions, open each explicitly with ``site.open_plan(...,
+revision=...)`` and compare its snapshot with the current handle. Historical
+revisions remain read-only. Existing ``plan.export(path)`` files retain their
+wire format and can be loaded as local snapshots for inspection; edited exports
+are never trusted validation evidence.
+
+Safe Reopening and Recovery
+---------------------------
+
+.. code-block:: python
+
+   print(plan.recovery())
+
+This prints the exact ``site.open_plan(...)`` call for the retained plan and
+explains recovery without issuing it. A fresh ``open_plan`` reads only. An old
+handle's ``refresh`` or ``wait`` can honor a planning Credit maximum previously
+supplied to that handle; use a fresh open for read-only recovery instead.
+
+For a stale revision, reopen the current plan, compare it with your earlier
+snapshot, and reapply only the intended edit. After a lost mutation response or
+timeout, preserve the original handle, exact request and idempotency key.
+Inspect the retained plan/execution before retrying; a timeout does not prove
+that work was never accepted. Do not invent a new key or submit a second run
+to recover the first. No failed solver work is retried automatically.
+
+Project copies retain ``.fs-copy.lock`` while active or after failure. Uploads
+and ``Project.copy(..., load_if_exists=True)`` refuse such a destination.
+Wait for an active writer. If the copy failed, preserve the partial folder for
+inspection and retry from the intact source into a different new, empty folder.
+Do not delete a claim, replace a project ID, or adopt a partial destination as a
+completed copy. A moved project is reopened with ``Project.load(new_path)``;
+use its ``load_job(...)`` so jobs receive the relocated project context.

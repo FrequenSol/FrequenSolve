@@ -57,7 +57,7 @@ __all__ = [
 CONTRACT_ID = CLOUD_READ_CONTRACT_ID
 CONTRACT_VERSION = CLOUD_READ_CONTRACT_VERSION
 CLOUD_READ_CATALOG_SHA256 = (
-    "73eb98fae807f827d50a8da4ee34e9a75e2bde6144a2f2cdb20f3cfd67fe7d5b"
+    "3a92a97a42f301156f7399f74323e97e9cf9b89906f45b73c26875293fbeb749"
 )
 CLOUD_READ_OPERATIONS = (
     "getCloudReadiness",
@@ -458,7 +458,7 @@ def validate_cloud_operation_output(
 def _load_contract() -> dict[str, Any]:
     try:
         resource = files("frequensolve.mcp_server").joinpath(
-            "contracts/customer_cloud_read_v2.json"
+            "contracts/customer_cloud_read_v3.json"
         )
         raw = resource.read_bytes()
         if hashlib.sha256(raw).hexdigest() != CLOUD_READ_CATALOG_SHA256:
@@ -572,6 +572,22 @@ def _prune_optional_nulls(
 
 
 def _validate_value(value: Any, schema: Mapping[str, Any], *, path: str) -> Any:
+    if "const" in schema and (
+        type(value) is not type(schema["const"]) or value != schema["const"]
+    ):
+        raise CloudReadError("INVALID_INPUT", "input-invalid")
+    alternatives = schema.get("oneOf")
+    if isinstance(alternatives, list):
+        matches = []
+        for alternative in alternatives:
+            try:
+                matches.append(_validate_value(value, alternative, path=path))
+            except CloudReadError as error:
+                if error.code != "INVALID_INPUT":
+                    raise
+        if len(matches) != 1:
+            raise CloudReadError("INVALID_INPUT", "input-invalid")
+        return matches[0]
     expected = schema.get("type")
     if expected == "object":
         if not isinstance(value, dict):
@@ -582,6 +598,9 @@ def _validate_value(value: Any, schema: Mapping[str, Any], *, path: str) -> Any:
             raise CloudReadError("UPSTREAM_UNAVAILABLE", "upstream-unavailable")
         if any(key not in value for key in required):
             raise CloudReadError("INVALID_INPUT", "input-invalid")
+        for key, dependencies in schema.get("dependentRequired", {}).items():
+            if key in value and any(name not in value for name in dependencies):
+                raise CloudReadError("INVALID_INPUT", "input-invalid")
         if schema.get("additionalProperties") is False:
             if any(key not in properties for key in value):
                 raise CloudReadError("INVALID_INPUT", "input-invalid")

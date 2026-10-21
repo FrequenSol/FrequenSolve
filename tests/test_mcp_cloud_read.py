@@ -29,7 +29,7 @@ def _resource_bytes(name: str) -> bytes:
 
 def _fixtures() -> list[dict[str, Any]]:
     return json.loads(
-        _resource_bytes("customer_cloud_read_v2_fixtures.json").decode("utf-8")
+        _resource_bytes("customer_cloud_read_v3_fixtures.json").decode("utf-8")
     )
 
 
@@ -306,7 +306,7 @@ def test_contract_contains_only_fixed_bounded_queries():
 
 
 @pytest.mark.parametrize("fixture", _fixtures(), ids=lambda item: item["operation"])
-def test_all_five_public_methods_project_exact_v2_fixture_outputs(fixture):
+def test_all_five_public_methods_project_exact_v3_fixture_outputs(fixture):
     operation = cloud._load_contract()["operationsByName"][fixture["operation"]]
     calls: list[dict[str, Any]] = []
     client = cloud.CloudReadClient(
@@ -1468,7 +1468,7 @@ if server is None:
 
 fixtures = json.loads(
     files('frequensolve.mcp_server')
-    .joinpath('contracts/customer_cloud_read_v2_fixtures.json')
+    .joinpath('contracts/customer_cloud_read_v3_fixtures.json')
     .read_text(encoding='utf-8')
 )
 fixture = next(
@@ -1503,7 +1503,7 @@ print(cloud.CLOUD_READ_CONTRACT_VERSION)
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "2.0.0"
+    assert result.stdout.strip() == "3.0.0"
 
 
 @pytest.mark.parametrize(
@@ -1523,7 +1523,9 @@ def test_slurm_read_rejects_retired_batch_output(retired_field):
         client.get_simulation(simulation_id="sim-example-001")
 
 
-@pytest.mark.parametrize("state", ["READY", "UNAVAILABLE"])
+@pytest.mark.parametrize(
+    "state", ["READY", "UNAVAILABLE", "MISSING", "IN_PROGRESS", "FAILED", "UNKNOWN"]
+)
 def test_managed_slurm_readiness_is_preserved_through_fixed_cloud_read(state):
     fixture = next(
         item for item in _fixtures() if item["operation"] == "getCloudReadiness"
@@ -1536,8 +1538,8 @@ def test_managed_slurm_readiness_is_preserved_through_fixed_cloud_read(state):
     assert client.check_readiness()["infrastructure"]["compute"] == state
 
 
-@pytest.mark.parametrize("state", ["MISSING", "IN_PROGRESS", "FAILED", "UNKNOWN"])
-def test_retired_batch_compute_readiness_states_are_rejected(state):
+@pytest.mark.parametrize("state", ["INTERNAL_ONLY", "BATCH_READY"])
+def test_unrecognized_compute_readiness_states_are_rejected(state):
     fixture = next(
         item for item in _fixtures() if item["operation"] == "getCloudReadiness"
     )
@@ -1549,3 +1551,98 @@ def test_retired_batch_compute_readiness_states_are_rejected(state):
     with pytest.raises(cloud.CloudReadError) as exc_info:
         client.check_readiness()
     assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("status", ["AVAILABLE", "REVIEW_REQUIRED"])
+def test_readiness_retains_exact_credits_without_requiring_a_seat(status):
+    output = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )["output"]
+    output["membership"]["hasSeat"] = False
+    output["credits"]["status"] = status
+    output["credits"]["nextExpiryAt"] = "2026-08-01T00:00:00Z"
+    output["credits"]["nextExpiryCredits"] = "0.000000000000000001"
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    assert client.check_readiness() == output
+    assert (
+        cloud.validate_cloud_operation_output("getCloudReadiness", {}, output) == output
+    )
+    assert (
+        output["credits"]["availableCredits"] == "9007199254740993.123456789012345678"
+    )
+
+
+@pytest.mark.parametrize("status", ["NOT_AVAILABLE", "INACTIVE"])
+def test_unavailable_credits_remain_unknown_instead_of_zero(status):
+    output = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )["output"]
+    output["credits"] = {
+        "available": False,
+        "status": status,
+        "refreshedAt": "2026-07-24T12:00:00Z",
+        "availableCredits": None,
+        "heldCredits": None,
+        "totalCredits": None,
+        "nextExpiryAt": None,
+        "nextExpiryCredits": None,
+        "providerModifiedAt": None,
+    }
+    expected = {
+        key: value for key, value in output["credits"].items() if value is not None
+    }
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    assert client.check_readiness()["credits"] == expected
+    assert (
+        cloud.validate_cloud_operation_output("getCloudReadiness", {}, output)[
+            "credits"
+        ]
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"availableCredits": 1.5},
+        {"availableCredits": "-1"},
+        {"availableCredits": "NaN"},
+        {"availableCredits": "1e3"},
+        {"availableCredits": "1" * 65},
+        {"availableCredits": None},
+        {"available": False},
+        {"status": "INACTIVE"},
+        {"nextExpiryAt": "2026-08-01T00:00:00Z"},
+        {"nextExpiryCredits": "1"},
+        {"refreshedAt": "yesterday"},
+        {"creditUnitId": "private-provider-key"},
+    ],
+)
+def test_invalid_or_private_credit_projection_fails_closed_in_both_paths(change):
+    output = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )["output"]
+    output["credits"].update(change)
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    for operation in (
+        client.check_readiness,
+        lambda: cloud.validate_cloud_operation_output("getCloudReadiness", {}, output),
+    ):
+        with pytest.raises(cloud.CloudReadError) as exc_info:
+            operation()
+        assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
+
+
+def test_unavailable_credits_cannot_carry_stale_balances():
+    output = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )["output"]
+    output["credits"].update(available=False, status="NOT_AVAILABLE")
+    with pytest.raises(cloud.CloudReadError):
+        cloud.validate_cloud_operation_output("getCloudReadiness", {}, output)

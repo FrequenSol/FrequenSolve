@@ -841,6 +841,31 @@ def test_vtu_base_field_alias_accepts_unique_source_indexed_pressure(tmp_path):
     plotter.close()
 
 
+@pytest.mark.parametrize("unit_suffix", ["[Pa]", "(Pa)"])
+def test_native_vtu_display_name_and_units_produce_one_scalar_bar_unit(
+    tmp_path, unit_suffix
+):
+    path = _write_source_indexed_pressure_vtu(tmp_path)
+    path.write_text(
+        path.read_text().replace(
+            'Name="pressure_1_abs"',
+            f'Name="pressure_1_abs" fs_display_name="Pressure (Magnitude) {unit_suffix}" fs_units="Pa"',
+        )
+    )
+    plotter, mesh = plot_vtu(
+        path, field="pressure", source=1, part="abs", show=False, return_mesh=True
+    )
+    try:
+        assert "Pressure (Magnitude) [Pa]" in mesh.point_data
+        np.testing.assert_allclose(
+            mesh.point_data["Pressure (Magnitude) [Pa]"],
+            mesh.point_data["pressure_1_abs"],
+        )
+        assert list(plotter.scalar_bars.keys()) == ["Pressure (Magnitude) [Pa]"]
+    finally:
+        plotter.close()
+
+
 def test_vtu_plot_accepts_source_number_for_source_indexed_fields(tmp_path):
     path = _write_multi_source_strain_vtu(tmp_path)
 
@@ -1097,3 +1122,52 @@ def test_vtu_plot_supports_solver_tensor_component_fallbacks(tmp_path):
         plotted_mesh.point_data["velocity"][:, 2],
     )
     plotter.close()
+
+
+@pytest.mark.parametrize("cell_type", ["LINE", "QUADRATIC_EDGE", "QUAD"])
+def test_vtu_edge_overlay_handles_interface_and_surface_cells(cell_type):
+    pv = pytest.importorskip("pyvista")
+    points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    if cell_type == "LINE":
+        points = points[:2]
+    elif cell_type == "QUAD":
+        points = np.array(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+        )
+    mesh = pv.UnstructuredGrid(
+        np.r_[len(points), np.arange(len(points))],
+        np.array([getattr(pv.CellType, cell_type)], dtype=np.uint8),
+        points,
+    )
+    values = np.arange(mesh.n_points, dtype=float) + 1.0
+    mesh.point_data["vp"] = values
+    plotter = pv.Plotter(off_screen=True, window_size=(240, 180))
+    try:
+        _, plotted = plot_vtu(
+            mesh,
+            "vp",
+            show_edges=True,
+            scalar_bar=False,
+            plotter=plotter,
+            show=False,
+            return_mesh=True,
+        )
+        np.testing.assert_allclose(plotted.point_data["vp"], values)
+        assert plotted.n_cells == 1
+        assert len(plotter.renderer.actors) == (2 if cell_type == "QUAD" else 1)
+        pixels = plotter.screenshot(return_img=True)
+        assert pixels.shape[:2] == (180, 240)
+        assert np.ptp(pixels) > 0
+    finally:
+        plotter.close()
+
+
+def test_vtu_edge_overlay_does_not_allow_empty_input():
+    pv = pytest.importorskip("pyvista")
+    mesh = pv.UnstructuredGrid()
+    plotter = pv.Plotter(off_screen=True)
+    try:
+        with pytest.raises(ValueError):
+            plot_vtu(mesh, show_edges=True, plotter=plotter, show=False)
+    finally:
+        plotter.close()

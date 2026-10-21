@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 MANAGED_EXECUTION_PROFILE_FIELDS = frozenset(
-    {"execution_site_id", "execution_resources"}
+    {"cluster_id", "execution_resources", "partition", "allow_unverified_compute"}
 )
 
 
@@ -18,7 +19,7 @@ class ManagedExecutionProfileError(ValueError):
 class ManagedExecutionProfile:
     """Execution settings sourced from one named site profile."""
 
-    execution_site_id: str = "managed-slurm"
+    cluster_id: str | None = None
     execution_resources: dict[str, Any] = field(
         default_factory=lambda: {
             "nodes": 1,
@@ -27,18 +28,27 @@ class ManagedExecutionProfile:
         }
     )
 
+    partition: str | None = None
+    allow_unverified_compute: bool | None = None
+
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "ManagedExecutionProfile":
         if not isinstance(values, Mapping):
             raise ManagedExecutionProfileError("Execution profile must be a mapping")
         if values.keys() - MANAGED_EXECUTION_PROFILE_FIELDS:
             raise ManagedExecutionProfileError(
-                "Use execution_site_id and execution_resources for managed execution"
+                "Use cluster_id and execution_resources for managed execution"
             )
-        site_id = values.get("execution_site_id", "managed-slurm")
-        if site_id != "managed-slurm":
+        site_id = values.get("cluster_id")
+        if site_id is not None:
+            validate_cluster_id(site_id)
+        partition = values.get("partition")
+        if partition is not None:
+            validate_partition(partition)
+        allow = values.get("allow_unverified_compute")
+        if allow is not None and type(allow) is not bool:
             raise ManagedExecutionProfileError(
-                "execution_site_id must be managed-slurm"
+                "allow_unverified_compute must be a boolean"
             )
         resources = values.get("execution_resources")
         if resources is None:
@@ -90,11 +100,15 @@ class ManagedExecutionProfile:
                 != 0
                 or pool.memory_mib_per_node % (pool.ranks_per_node * 256) != 0
                 or pool.memory_mib_per_node > 124518
-                or pool.partition not in {"cpu-single", "cpu-efa"}
-                or (nodes > 1 and pool.partition != "cpu-efa")
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", pool.partition)
             ):
                 raise ManagedExecutionProfileError("Unsupported managed adaptive pool")
-            return cls(site_id, {**resources, "pool": dict(resources["pool"])})
+            return cls(
+                site_id,
+                {**resources, "pool": dict(resources["pool"])},
+                partition,
+                allow,
+            )
         if (
             resources.get("mode", "independent-frequency.v1")
             != "independent-frequency.v1"
@@ -123,7 +137,12 @@ class ManagedExecutionProfile:
             raise ManagedExecutionProfileError(
                 "Unsupported node/MPI-rank combination at managed-slurm"
             )
-        return cls(execution_site_id=site_id, execution_resources=validated)
+        return cls(
+            cluster_id=site_id,
+            execution_resources=validated,
+            partition=partition,
+            allow_unverified_compute=allow,
+        )
 
     def graphql_arguments(self) -> dict[str, Any]:
         """Return the hosted submitJob arguments for this profile."""
@@ -134,7 +153,13 @@ class ManagedExecutionProfile:
             "planner_memory_mib": "plannerMemoryMiB",
         }
         return {
-            "execution_site_id": self.execution_site_id,
+            **({"partition": self.partition} if self.partition is not None else {}),
+            **(
+                {"allow_unverified_compute": self.allow_unverified_compute}
+                if self.allow_unverified_compute is not None
+                else {}
+            ),
+            **({"cluster_id": self.cluster_id} if self.cluster_id is not None else {}),
             "execution_resources": {
                 names.get(k, k): (
                     {
@@ -160,3 +185,44 @@ def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
             f"unsupported Slurm resource shape: {name} must be from {minimum} through {maximum}"
         )
     return value
+
+
+def validate_cluster_id(value: Any) -> str:
+    """Validate an explicit cluster without normalizing its identity."""
+    if (
+        not isinstance(value, str)
+        or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", value)
+        or value == "managed-batch"
+    ):
+        raise ManagedExecutionProfileError("Invalid cluster_id")
+    return value
+
+
+def validate_partition(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value
+    ):
+        raise ManagedExecutionProfileError("Invalid partition identifier")
+    return value
+
+
+def resolve_compute_options(
+    config: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Merge selectors independently; explicit False overrides configured True."""
+    result = {**config}
+    for key in ("cluster_id", "partition", "allow_unverified_compute"):
+        if key in overrides:
+            result[key] = overrides[key]
+    if "cluster_id" in result:
+        validate_cluster_id(result["cluster_id"])
+    if "partition" in result:
+        validate_partition(result["partition"])
+    allow = result.get("allow_unverified_compute", False)
+    if type(allow) is not bool:
+        raise ManagedExecutionProfileError("allow_unverified_compute must be a boolean")
+    if allow and "partition" not in result:
+        raise ManagedExecutionProfileError(
+            "Unverified compute requires an explicit partition"
+        )
+    return result
