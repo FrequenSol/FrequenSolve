@@ -38,6 +38,9 @@ workspace, then uses read-only ``workflow_saved_plans`` to list their owned save
 plans. Reopening needs no permission to use a plan-editing tool. If names are ambiguous, it asks
 which one you mean. It does not create another project or run to recover old
 work. Local metadata is a navigation hint; Cloud still checks access on reads.
+For saved local notebooks or unfinished notebook attempts, the assistant stays
+in the workspace view. Fresh Cloud login and plan lookups are unnecessary unless you
+ask for fresh Cloud status or verification against the current study.
 Folder browsing is explicit, does not follow symlinks and is limited to 1,000
 entries per folder, with 25 folders/projects per page. Contents can change
 between pages, so clients should deduplicate by identity and local path.
