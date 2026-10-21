@@ -8,6 +8,61 @@ from mcp import Client
 from frequensolve.workflow.server import RESOURCE, TOOLS, build_server
 
 
+def test_study_save_recovers_exact_intent_across_fresh_clients(tmp_path):
+    from frequensolve.workflow.client import create_project
+    from frequensolve.workflow.journal import IntentJournal
+    from frequensolve.workflow.storage import PrivateStore
+
+    root = tmp_path.resolve()
+    create_project(root, "study", "A customer study")
+    journal = IntentJournal(PrivateStore(root / "journal"), {"project": "fake-project"})
+    calls = []
+
+    class ClientTransport:
+        def journal(self, _path):
+            return journal
+
+        def call(self, operation, payload):
+            calls.append((operation, payload))
+            if operation == "study_get":
+                return {"study": None}
+            assert operation == "study_save"
+            if len([x for x in calls if x[0] == "study_save"]) == 1:
+                raise RuntimeError("Response lost after server committed")
+            return {"study": {"revision": 1, **payload["content"]}}
+
+    async def attempt():
+        server = build_server(
+            ClientTransport(), {"workspace": root}, "https://example.test"
+        )
+        async with Client(server, cache=None) as session:
+            result = await session.call_tool(
+                "workflow_study",
+                {
+                    "request": {
+                        "action": "save",
+                        "root_id": "workspace",
+                        "local_project": "study",
+                        "plan_id": "fake-plan",
+                        "title": "My study",
+                        "question": "How does pressure vary?",
+                        "success_criterion": "Inspect finite receivers.",
+                    }
+                },
+            )
+            return result.structured_content
+
+    assert not anyio.run(attempt)["ok"]
+    recovered = anyio.run(attempt)
+    assert (
+        recovered["ok"]
+        and json.loads(recovered["payload"])["paid_request_sent"] is False
+    )
+    mutations = [payload for op, payload in calls if op == "study_save"]
+    assert mutations[0] == mutations[1] and mutations[0]["idempotency_key"]
+    assert [op for op, _ in calls] == ["study_get", "study_save", "study_save"]
+
+
 def test_workflow_profile_protocol_and_local_authoring(tmp_path):
     calls = []
 

@@ -24,7 +24,7 @@ FORM: dict[str, Any] = {
             "type": "string",
             "title": "Paid-stage decision",
             "description": "Choose one action for this paid stage.",
-            "enum": ["cancel", "request_changes", "approve_paid_stage"],
+            "enum": ["Cancel", "Request changes", "Approve this stage"],
         },
     },
     "required": ["choice"],
@@ -263,8 +263,8 @@ async def confirm_paid(
             maximum = snapshot["quote"]["maximum_credits"]
             message = (
                 f"PAID {snapshot['stage'].upper()} APPROVAL. This can start paid compute.\n"
-                "Review the complete authoritative proposal below. To approve only this stage, choose approve_paid_stage and enter "
-                f"exactly {snapshot['quote']['maximum_credits']} in maximum_credits. Cancellation does not imply immediate termination or refund. "
+                "Review the complete authoritative proposal below. To approve only this stage, choose Approve this stage. A second prompt asks for "
+                f"exactly {maximum} Credits (enter only the number). Cancellation does not imply immediate termination or refund. "
                 "Allocated failed/canceled work may be charged; execution minimum/failure policy is in quote.pricing. "
                 "The client reports your response; this is not independent proof that a human answered.\n"
                 + json.dumps(
@@ -276,7 +276,17 @@ async def confirm_paid(
             state, choice = form_answer(await elicit(message, deepcopy(FORM)), "choice")
             failure_code = "invalid_form_response"
             if state == "accepted":
-                if choice not in FORM["properties"]["choice"]["enum"]:
+                # Older saved clients can still return the original protocol labels.
+                choice = (
+                    {
+                        "Cancel": "cancel",
+                        "Request changes": "request_changes",
+                        "Approve this stage": "approve_paid_stage",
+                    }.get(choice, choice)
+                    if isinstance(choice, str)
+                    else None
+                )
+                if choice not in ("cancel", "request_changes", "approve_paid_stage"):
                     raise PaidApprovalInputError(
                         "The paid-stage decision was invalid. No paid request was sent."
                     )
@@ -314,7 +324,13 @@ async def confirm_paid(
                         else "missing_change_note"
                     )
                     state, value = form_answer(
-                        await elicit(message + "\n" + description, detail_form), field
+                        await elicit(
+                            f"PAID {snapshot['stage'].upper()} · Confirm the Credit limit\n"
+                            f"{description}\nThe exact proposal you just reviewed remains bound to revision {snapshot['revision']}. "
+                            f"Proposal fingerprint: {current['proposal_fingerprint']}. No other stage is approved.",
+                            detail_form,
+                        ),
+                        field,
                     )
                     if state == "accepted":
                         if field == "maximum_credits":

@@ -19,6 +19,7 @@ READS = (
     "plan_results",
     "plan_files",
     "credit_history",
+    "study_get",
 )
 
 

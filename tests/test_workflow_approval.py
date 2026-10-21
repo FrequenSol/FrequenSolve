@@ -137,16 +137,25 @@ def test_confirmed_exact_stage_uses_one_saved_request_then_recovers_without_form
                 "do not repeat approve_paid_stage"
                 in schema["properties"]["maximum_credits"]["description"]
             )
-        # Preserve the full proposal while keeping fields visible in short TUIs.
-        assert (
-            json.dumps(current["proposal"], sort_keys=True, separators=(",", ":"))
-            in message
-        )
+        # Present the complete proposal once, then a short bound limit prompt.
+        if "choice" in schema["properties"]:
+            assert schema["properties"]["choice"]["enum"] == [
+                "Cancel",
+                "Request changes",
+                "Approve this stage",
+            ]
+            assert (
+                json.dumps(current["proposal"], sort_keys=True, separators=(",", ":"))
+                in message
+            )
+        else:
+            assert current["proposal_fingerprint"] in message
+            assert len(message) < 1000
         return client_response(
             {
                 "action": "accept",
                 "content": {
-                    "choice": "approve_paid_stage",
+                    "choice": "Approve this stage",
                     "maximum_credits": "10.25",
                     "note": "No note",
                 },

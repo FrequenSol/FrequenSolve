@@ -36,6 +36,7 @@ TOOLS = (
     "workflow_create_project",
     "workflow_plan",
     "workflow_results",
+    "workflow_study",
 )
 RESOURCE = "frequensolve://workflow/capabilities"
 PROMPT = "curated_3d_workflow"
@@ -156,6 +157,22 @@ class ResultRequest(Closed):
     frequency_index: int = Field(default=0, ge=0, le=1)
 
 
+class StudyRequest(Closed):
+    action: Literal["get", "save", "publish_analysis", "notebook"]
+    root_id: str
+    local_project: str
+    plan_id: str
+    title: str | None = Field(default=None, min_length=1, max_length=128)
+    question: str | None = Field(default=None, min_length=1, max_length=2048)
+    success_criterion: str | None = Field(default=None, min_length=1, max_length=2048)
+    bundle: str | None = None
+    reference_bundle: str | None = None
+    frequency_indices: list[int] = Field(
+        default_factory=lambda: [0, 1], min_length=1, max_length=2
+    )
+    destination: str | None = None
+
+
 class Reply(Closed):
     version: str = CONTRACT
     ok: bool
@@ -265,12 +282,13 @@ def build_server(
     )
     async def workflow_prompt() -> str:
         return (
-            "Discover the accessible Sandbox CPU cluster and report unknown capacity. Create a fresh curated 3D acoustic 2/20 Hz project. "
-            "Prepare a plan with a stable intent, open its Cloud review link for human planning approval, and read saved progress. "
-            "Inspect and revise resources using an exact revision and a new intent. Validate and obtain separate human approval if compute is required. "
-            "Quote execution and open Cloud review for the human to run the exact plan. Never authorize with another credential or retry failed solver work. "
+            "Use plain customer language. Manage technical identifiers yourself; never ask the customer to copy plan IDs, fingerprints or recovery commands. Explain one next step at a time. "
+            "Start by agreeing a scientific question and success criterion for the supported 3D acoustic 2/20 Hz study. Discover the accessible CPU cluster and report unknown capacity. Create a fresh curated project. "
+            "Prepare a plan with a stable intent and read saved progress. For each paid stage, use the native approval tool if this profile exposes it; otherwise provide the signed-in Cloud review. Do not describe an approval rehearsal as paid authority. "
+            "Save the question with workflow_study and explain model assumptions, geometry and units. Inspect recommended resources; edits are optional. Validate any changed resources and obtain separate approval if compute is required. "
+            "Quote execution and obtain the exact paid-stage approval to run the plan. Never authorize with another credential or retry failed solver work. "
             "Read progress and complete Credit history, retrieve selected immutable native outputs, compare compatible pressure data, and cleanly replay an analysis-only notebook. "
-            "Retain saved IDs on uncertainty and describe local execution evidence separately from scientific correctness."
+            "Publish the tested analysis to the saved study and generate the complete study notebook with workflow_study. Retain saved IDs on uncertainty and describe local execution evidence separately from scientific correctness."
         )
 
     def root(root_id: str) -> Path:
@@ -313,10 +331,13 @@ def build_server(
         )
 
     async def bounded(
-        function: Callable[..., Any], *args: Any, read_operation: str | None = None
+        function: Callable[..., Any],
+        *args: Any,
+        read_operation: str | None = None,
+        timeout: float = 60,
     ) -> Reply:
         try:
-            with anyio.fail_after(60):
+            with anyio.fail_after(timeout):
                 value = await anyio.to_thread.run_sync(
                     function, *args, limiter=limiter, abandon_on_cancel=True
                 )
@@ -617,6 +638,223 @@ def build_server(
             result_operation,
             request,
             read_operation="plan_results" if request.action == "list" else None,
+        )
+
+    def study_operation(request: StudyRequest) -> dict:
+        import tempfile
+        from uuid import uuid4
+
+        from frequensolve.project_identity import ProjectIdentity
+
+        from .study import create_study_notebook, replay_study_notebook
+
+        allowed = root(request.root_id)
+        project_path = allowed / relative(request.local_project)
+        identity = ProjectIdentity.from_dict(
+            json.loads(read_local(project_path, ".frequensolve/project-identity.json"))
+        )
+        ids = {
+            "project_key": identity.storage_prefix,
+            "project_id": identity.project_id,
+            "plan_id": request.plan_id,
+        }
+        url = (
+            cloud_url
+            + "/study?"
+            + urlencode(
+                {"project_key": identity.storage_prefix, "plan_id": request.plan_id}
+            )
+        )
+        # Preserve the original exact mutation before interpreting current remote state.
+        coordinator = PrivateStore(project_path / ".frequensolve" / "workflow")
+        selector = "study-" + hashlib.sha256(canonical(ids)).hexdigest()
+        if any(i not in (0, 1) for i in request.frequency_indices) or len(
+            set(request.frequency_indices)
+        ) != len(request.frequency_indices):
+            raise ValueError("Select distinct supported frequencies")
+        desired = request.model_dump(exclude_none=True)
+        if request.action in ("save", "publish_analysis"):
+            with coordinator.locked(selector) as pending:
+                saved = pending.read()
+                journal = client.journal(project_path)
+                if saved and saved.get("status") == "pending":
+                    if saved["desired"] != desired:
+                        raise ValueError(
+                            "Recover the existing study save before requesting another change"
+                        )
+                    response = journal.perform(
+                        saved["intent"], "study_save", saved["arguments"], client.call
+                    )
+                    pending.write({**saved, "status": "complete"})
+                    return {**response, "study_url": url, "paid_request_sent": False}
+                study = client.call("study_get", ids).get("study")
+                if request.action == "save":
+                    if not all(
+                        (request.title, request.question, request.success_criterion)
+                    ):
+                        raise ValueError(
+                            "Provide the study title, scientific question and success criterion"
+                        )
+                    content = {
+                        "title": request.title,
+                        "question": request.question,
+                        "success_criterion": request.success_criterion,
+                    }
+                else:
+                    if not study or not request.bundle:
+                        raise ValueError(
+                            "Save the scientific question first and select a verified result bundle"
+                        )
+                    if len(set(request.frequency_indices)) != len(
+                        request.frequency_indices
+                    ):
+                        raise ValueError("Select distinct frequencies")
+                    view = client.call("plan_get", ids)
+                    reports = []
+                    for index in request.frequency_indices:
+                        value = snapshot_from_bundle(allowed, request.bundle, index)
+                        reference = (
+                            snapshot_from_bundle(
+                                allowed, request.reference_bundle, index
+                            )
+                            if request.reference_bundle
+                            else None
+                        )
+                        reports.append(analyze_pressure(value, reference))
+                    result_digests = {
+                        r["assurance"]["input"]["result_digest"] for r in reports
+                    }
+                    if len(result_digests) != 1:
+                        raise ValueError(
+                            "Selected data must belong to one exact execution"
+                        )
+                    content = {
+                        k: study[k] for k in ("title", "question", "success_criterion")
+                    }
+                    content["analysis"] = {
+                        "execution_id": view["head"]["execution_id"],
+                        "plan_revision": view["head"]["revision"],
+                        "input_digest": view["input_digest"],
+                        "plan_digest": view["plan"]["digest"],
+                        "result_digest": next(iter(result_digests)),
+                        "reports": reports,
+                    }
+                arguments = {
+                    **ids,
+                    "expected_study_revision": study["revision"] if study else 0,
+                    "content": content,
+                }
+                saved = {
+                    "status": "pending",
+                    "desired": desired,
+                    "intent": "study-" + uuid4().hex,
+                    "arguments": arguments,
+                }
+                pending.write(saved)
+                response = journal.perform(
+                    saved["intent"], "study_save", arguments, client.call
+                )
+                pending.write({**saved, "status": "complete"})
+                return {**response, "study_url": url, "paid_request_sent": False}
+        view = client.call("plan_get", ids)
+        study = client.call("study_get", ids).get("study")
+        credits = credit_scan(client, project_path, ids)
+        if request.action == "get":
+            return {
+                "study": study,
+                "plan": view,
+                "credits": credits,
+                "study_url": url,
+                "paid_request_sent": False,
+            }
+        if not study or not request.bundle or not request.destination:
+            raise ValueError(
+                "Save a question and choose verified local results and a new notebook directory"
+            )
+        snapshots = [
+            snapshot_from_bundle(allowed, request.bundle, i)
+            for i in request.frequency_indices
+        ]
+        references = [
+            (
+                snapshot_from_bundle(allowed, request.reference_bundle, i)
+                if request.reference_bundle
+                else None
+            )
+            for i in request.frequency_indices
+        ]
+        context = {
+            "study": {k: study[k] for k in ("title", "question", "success_criterion")},
+            "plan": view,
+            "credits": credits,
+        }
+        destination = relative(request.destination)
+        with directory(allowed / Path(destination).parent) as fd:
+            os.mkdir(Path(destination).name, mode=0o700, dir_fd=fd)
+        with tempfile.TemporaryDirectory(prefix="fs-study-replay-") as temp:
+            notebook = create_study_notebook(
+                Path(temp) / "study", context, snapshots, references
+            )
+            for file in notebook.parent.iterdir():
+                write_local(allowed, destination + "/" + file.name, file.read_bytes())
+            write_local(
+                allowed,
+                destination + "/attempt.json",
+                canonical({"status": "incomplete", "origin": "local"}),
+            )
+            failed = False
+            try:
+                receipt = replay_study_notebook(notebook)
+            except Exception:
+                failed = True
+                receipt = {"status": "incomplete", "origin": "local"}
+            for name in (
+                "executed.ipynb",
+                "report.json",
+                "report.html",
+                "geometry.svg",
+                "pressure.svg",
+                "replay.json",
+            ):
+                if (notebook.parent / name).is_file():
+                    write_local(
+                        allowed,
+                        destination + "/" + name,
+                        (notebook.parent / name).read_bytes(),
+                    )
+            if failed:
+                raise _IncompleteNotebookReplay(
+                    {
+                        "relative_path": destination + "/analysis.ipynb",
+                        "replay_status": "incomplete",
+                    }
+                )
+        return {
+            "relative_path": destination + "/analysis.ipynb",
+            "report_path": destination + "/report.html",
+            "replay_status": receipt["status"],
+            "study_url": url,
+            "assurance": "locally rerun; no service attestation",
+            "paid_request_sent": False,
+        }
+
+    @server.tool(
+        name="workflow_study",
+        description="Open a scientific study, save its title/question/success criterion, publish locally tested pressure analysis from a verified result bundle, or generate a complete editable study notebook and static report. Mutations retain their own recovery identity automatically. Never authorizes or starts compute; notebook replay uses local data only.",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    async def scientific_study(request: StudyRequest) -> Reply:
+        return await bounded(
+            study_operation,
+            request,
+            read_operation="study_get" if request.action == "get" else None,
+            timeout=240 if request.action == "notebook" else 60,
         )
 
     @server.tool(

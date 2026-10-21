@@ -21,6 +21,7 @@ from .storage import PrivateStore, canonical, directory
 
 MUTATIONS = frozenset(
     {
+        "study_save",
         "bind_project",
         "upload_begin",
         "plan_create",
@@ -30,6 +31,7 @@ MUTATIONS = frozenset(
     }
 )
 OPERATIONS = MUTATIONS | {
+    "study_get",
     "discover",
     "upload_ticket",
     "upload_finalize",
@@ -46,6 +48,7 @@ OPERATIONS = MUTATIONS | {
 
 READ_OPERATIONS = frozenset(
     {
+        "study_get",
         "discover",
         "plan_get",
         "plan_list",
