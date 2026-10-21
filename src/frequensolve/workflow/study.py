@@ -314,6 +314,155 @@ def credit_report_html(credits: dict) -> str:
     )
 
 
+def resource_report_html(view: dict) -> str:
+    """Explain a saved resource choice without inferring live capacity or usage."""
+    esc = lambda value: html.escape(str(value))
+
+    def mapping(value: object) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    def label(value: object) -> str:
+        return (
+            value
+            if isinstance(value, str) and 0 < len(value.strip()) <= 128
+            else "Unavailable"
+        )
+
+    def number(value: object, *, whole: bool = True, zero: bool = False) -> str:
+        if value is None or isinstance(value, bool):
+            return "Unavailable"
+        try:
+            raw = str(value)
+            if len(raw) > 128:
+                return "Unavailable"
+            parsed = Decimal(raw)
+            if (
+                not parsed.is_finite()
+                or parsed < 0
+                or (not zero and parsed == 0)
+                or parsed > 10**12
+                or (whole and parsed != parsed.to_integral_value())
+            ):
+                return "Unavailable"
+        except (InvalidOperation, ValueError):
+            return "Unavailable"
+        if whole or parsed == parsed.to_integral_value():
+            return str(int(parsed))
+        return (
+            format(parsed, "f").rstrip("0").rstrip(".")
+            if parsed.adjusted() >= -6
+            else str(parsed)
+        )
+
+    plan = mapping(view.get("plan"))
+    detail = f"<details><summary>Inspect the exact saved resource plan and revision</summary><pre>{esc(json.dumps(plan, indent=2))}</pre></details>"
+    explanation = (
+        "<p>These are saved requested resources. Memory per node is a request, not measured peak memory. "
+        "Wall time is a limit, not a runtime estimate. Validation states are recorded observations; "
+        "this analysis performs no new validation or authorization.</p>"
+    )
+    saved = plan.get("rows")
+    if (
+        plan.get("version") != "frequency-execution-plan.v1"
+        or not isinstance(saved, list)
+        or not 1 <= len(saved) <= 2
+        or any(not isinstance(row, dict) for row in saved)
+    ):
+        return (
+            explanation
+            + "<p>A supported saved resource table is unavailable. No resource choices or validation outcomes are inferred.</p>"
+            + detail
+        )
+
+    fields = [
+        ("Nodes", "nodes", "layout", "count", ""),
+        ("Node type", "node_type", "layout", "label", ""),
+        ("Partition", "partition", "layout", "label", ""),
+        ("Ranks per node", "ranks_per_node", "layout", "count", ""),
+        ("CPUs per rank", "cpus_per_rank", "layout", "count", ""),
+        ("Memory per node", "memory_mib_per_node", "", "count", " MiB"),
+        ("Wall-time limit", "wall_time_seconds", "", "count", " s"),
+    ]
+
+    def choices(value: object) -> list[str]:
+        config = mapping(value)
+        result = []
+        for _, key, nested, kind, _ in fields:
+            value = (mapping(config.get(nested)) if nested else config).get(key)
+            result.append(label(value) if kind == "label" else number(value))
+        return result
+
+    rows, changes = [], []
+    for row in saved:
+        frequency = number(row.get("frequency"), whole=False, zero=True)
+        frequency = frequency + " Hz" if frequency != "Unavailable" else frequency
+        requested, automatic = choices(row.get("requested")), choices(
+            row.get("automatic")
+        )
+        runtime = number(row.get("estimated_runtime_seconds"), whole=False, zero=True)
+        runtime = runtime + " s" if runtime != "Unavailable" else runtime
+        validation = label(mapping(row.get("validation")).get("status"))
+        if validation != "Unavailable":
+            validation += " (recorded)"
+        cells = [frequency, *requested, runtime, validation]
+        rows.append(
+            "<tr>" + "".join(f"<td>{esc(cell)}</td>" for cell in cells) + "</tr>"
+        )
+        differences = [
+            f"{field[0]}: {before} → {after}{field[4]}"
+            for field, before, after in zip(fields, automatic, requested)
+            if "Unavailable" not in (before, after) and before != after
+        ]
+        incomplete = "Unavailable" in requested or "Unavailable" in automatic
+        change = (
+            "; ".join(differences)
+            if differences
+            else (
+                "Requested resources match the saved automatic suggestion."
+                if not incomplete
+                else "The automatic comparison is unavailable."
+            )
+        )
+        if incomplete and differences:
+            change += ". Other fields could not be compared."
+        reason = label(row.get("reason"))
+        if reason != "Unavailable":
+            change += " Recorded sizing reason: " + reason
+        changes.append(f"<li><strong>{esc(frequency)}:</strong> {esc(change)}</li>")
+    headers = [
+        "Frequency",
+        *(
+            field[0] + (f" ({field[4].strip()})" if field[4] else "")
+            for field in fields
+        ),
+        "Estimated runtime (s)",
+        "Validation",
+    ]
+    limits = mapping(plan.get("limits"))
+    limits_text = "; ".join(
+        label + ": " + number(limits.get(key))
+        for label, key in (
+            ("concurrent frequencies", "max_concurrent_frequencies"),
+            ("nodes per frequency", "max_nodes_per_frequency"),
+            ("running CPUs", "max_running_cpus"),
+        )
+    )
+    return (
+        explanation
+        + f"<p>Saved plan revision: {esc(number(plan.get('revision'), zero=True))}.</p>"
+        + '<div style="overflow-x:auto"><table><tr>'
+        + "".join(f"<th>{esc(header)}</th>" for header in headers)
+        + "</tr>"
+        + "".join(rows)
+        + "</table></div>"
+        + "<p>Changes from automatic sizing:</p><ul>"
+        + "".join(changes)
+        + "</ul>"
+        + f"<p>Configured plan limits: {esc(limits_text)}. These limits do not report available cluster capacity or observed resource usage.</p>"
+        + detail
+    )
+
+
 def report_html(report: dict) -> str:
     esc = lambda value: html.escape(str(value))
     study, model = report["study"], report["model"]
@@ -334,7 +483,7 @@ def report_html(report: dict) -> str:
 <h2>2. Model and assumptions</h2><p>{esc(science.get('dimension', 'Unknown'))}D {esc(science.get('physics', 'unknown physics'))}, {esc(science.get('precision', 'unknown'))} precision. Scientific inputs and source scaling are retained below.</p>
 {figure_svg(report['reports'], 'geometry')}<details><summary>Inspect materials, boundaries, mesh, units and solver settings</summary><pre>{esc(json.dumps(science, indent=2))}</pre></details>
 <h2>3. Estimates before interpreting the result</h2><p>For an explicitly homogeneous velocity, wavelength = velocity / frequency.</p><ul>{wavelengths or '<li>No supported wavelength estimate is available from these inputs.</li>'}</ul><p>This scale estimate does not establish mesh or boundary accuracy. Frequencies remain independent.</p>
-<h2>4. Decisions, execution and Credits</h2>{credit_report_html(credits)}<details><summary>Inspect exact resource choices and recorded revisions</summary><pre>{esc(json.dumps(report['plan'].get('plan', {}), indent=2))}</pre></details>
+<h2>4. Decisions, execution and Credits</h2>{resource_report_html(report['plan'])}{credit_report_html(credits)}
 <h2>5. Receiver response and comparison</h2>{figure_svg(report['reports'])}<table><tr><th>Frequency</th><th>Finite / selected samples</th><th>Paired-reference coverage</th><th>Relative L2 difference</th></tr>{rows}</table><p>Phase is principal phase in radians and is undefined at zero magnitude. No interpolation, rescaling, unwrapping or time reconstruction is performed.</p>
 <h2>6. Conclusions and limits</h2><p>{sum(r['finite_count'] for r in report['reports'])} of {sum(r['sample_count'] for r in report['reports'])} selected values are finite. Comparisons above use only exactly compatible metadata. An absent reference is not a passed comparison.</p><div class="note">{esc(report['assurance']['scientific_claim'])} No engineering acceptance threshold is inferred. Measured distributed peak memory is not supplied by this analysis.</div>
 <h2>7. Reproduce and continue</h2><p>Open analysis.ipynb with the bundled inputs and the recorded Python environment. Run All performs local analysis only. Edit a copy to explore another interpretation; edits invalidate the original execution evidence. Preparing another simulation requires its own reviewed workflow.</p><details><summary>Input, execution and analysis provenance</summary><pre>{esc(json.dumps({'head': report['plan']['head'], 'assurance': report['assurance'], 'inputs': [r['assurance'] for r in report['reports']]}, indent=2))}</pre></details></html>"""
@@ -342,7 +491,7 @@ def report_html(report: dict) -> str:
 
 def notebook_cells(context_hash: str, entries: list[dict]) -> list[tuple[str, str]]:
     reads = [
-        "from frequensolve.workflow.study import read_context, study_report, figure_svg, report_html, credit_report_html",
+        "from frequensolve.workflow.study import read_context, study_report, figure_svg, report_html, credit_report_html, resource_report_html",
         "from frequensolve.workflow.analysis import read_snapshot",
         "from IPython.display import SVG, HTML, display",
         "import json",
@@ -389,7 +538,7 @@ def notebook_cells(context_hash: str, entries: list[dict]) -> list[tuple[str, st
         ),
         (
             "code",
-            "display(HTML(credit_report_html(context['credits'])))\nprint(json.dumps(context['plan'].get('plan', {}), indent=2))",
+            "display(HTML(resource_report_html(context['plan'])))\ndisplay(HTML(credit_report_html(context['credits'])))",
         ),
         (
             "markdown",

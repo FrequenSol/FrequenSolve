@@ -106,6 +106,14 @@ remain unavailable rather than becoming zero. Pending or unknown settlement
 remains explicit. These are saved observations, and Chargebee remains
 authoritative for billing.
 
+The saved resource plan is also shown as a readable per-frequency table, with
+requested nodes, hardware, partition, ranks, CPUs, memory and wall-time limits.
+Recorded runtime estimates and validation states stay separate. Changes from
+the automatic suggestion are explained only where both saved values are
+available. Requested memory is not measured peak memory; configured limits are
+not available cluster capacity. Missing or unsupported fields remain unavailable.
+The exact saved plan and revision remain in an expandable detail section.
+
 Notebook and report geometry figures retain native source and receiver IDs.
 Shared labels indicate exactly colocated positions; nearby coordinates remain
 distinct. Hollow receiver markers keep colocated source symbols visible. Dense
