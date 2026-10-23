@@ -123,6 +123,7 @@ class ManagedExecutionProfile:
             "cpu": (1, 128),
             "memory_mib": (1, 262144),
             "planner_memory_mib": (1, 124518),
+            "gpus_per_node": (0, 1),
         }
         if not required <= resources.keys() or resources.keys() - limits.keys():
             raise ManagedExecutionProfileError(
@@ -133,6 +134,16 @@ class ManagedExecutionProfile:
             for key, value in resources.items()
         }
         nodes, ranks = validated["nodes"], validated["mpi_ranks"]
+        if validated.get("gpus_per_node", 0) and (nodes != 1 or ranks != 1):
+            raise ManagedExecutionProfileError(
+                "GPU execution requires one node and one MPI rank"
+            )
+        if validated.get("gpus_per_node", 0) and validated.get("cpu", 32) != 32:
+            raise ManagedExecutionProfileError(
+                "Exclusive GPU execution reserves all 32 worker CPUs"
+            )
+        if validated.get("gpus_per_node", 0) and validated.get("memory_mib", 0) > 62259:
+            raise ManagedExecutionProfileError("GPU worker memory exceeds 62,259 MiB")
         if ranks % nodes or ranks // nodes > 4 or (nodes == 1 and ranks != 1):
             raise ManagedExecutionProfileError(
                 "Unsupported node/MPI-rank combination at managed-slurm"
@@ -151,6 +162,7 @@ class ManagedExecutionProfile:
             "wall_time_seconds": "wallTimeSeconds",
             "memory_mib": "memoryMiB",
             "planner_memory_mib": "plannerMemoryMiB",
+            "gpus_per_node": "gpusPerNode",
         }
         return {
             **({"partition": self.partition} if self.partition is not None else {}),
