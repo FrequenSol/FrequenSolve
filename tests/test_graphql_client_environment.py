@@ -82,6 +82,7 @@ def test_simulation_status_details_include_customer_safe_failure_message():
     assert client.get_simulation_status_details("simulation-1") == {
         "id": "simulation-1",
         "outputIdentity": None,
+        "strictRetryFingerprint": None,
         "status": "FAILED",
         "failureCode": "SCU_BALANCE_INSUFFICIENT",
         "failureMessage": "This simulation needs more SCUs.",

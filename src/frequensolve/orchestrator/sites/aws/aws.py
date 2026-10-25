@@ -1399,6 +1399,9 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         if payload is not None and not getattr(
             result, "_cloud_saved_plan_inputs", False
         ):
+            result._cloud_authored_job_digest = result._frozen_staged_provenance[
+                "AWSSite"
+            ]["job"]["digest"]
             # Managed Slurm verifies the uploaded descriptor, then privately
             # scopes its output paths to the accepted run before invoking the
             # solver. Match those exact bytes, never a fingerprint supplied by
@@ -1482,6 +1485,26 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
             or details.get("outputIdentity") != expected
         ):
             raise RuntimeError("Cloud result location does not match the requested run")
+        strict_retry = details.get("strictRetryFingerprint")
+        if strict_retry is not None:
+            if not isinstance(strict_retry, str) or not re.fullmatch(
+                r"[a-f0-9]{64}", strict_retry
+            ):
+                raise RuntimeError("Cloud returned an invalid strict-retry identity")
+            authored_digest = getattr(result, "_cloud_authored_job_digest", None)
+            if authored_digest is not None:
+                # Strict-retry sites preserve the uploaded producer descriptor
+                # even on a fresh run. Transport alone scopes its outputs. Use
+                # our frozen staged digest, never a hash from remote artifacts.
+                result._frozen_staged_provenance["AWSSite"]["job"] = {
+                    "digest": authored_digest
+                }
+                result._frozen_artifact_fingerprints = (
+                    result.staged_artifact_fingerprints("AWSSite")
+                )
+                result._frozen_task_fingerprints = result.staged_task_fingerprints(
+                    "AWSSite"
+                )
         result._cloud_output_identity = expected
         return result
 

@@ -1716,3 +1716,99 @@ def test_unbound_jobs_and_stale_cloud_bindings_do_not_select_a_run_directory(tmp
     assert job.trace_path == expected
     job._cloud_result_binding = ("other-run", tmp_path / "unrelated")
     assert job.trace_path == expected
+
+
+@pytest.mark.parametrize("image", [False, True])
+@pytest.mark.parametrize("strict", [False, True])
+def test_attached_cloud_run_uses_owned_producer_mode(tmp_path, image, strict):
+    from frequensolve.simulation.artifact_contract import (
+        ArtifactCatalog,
+        OperationResult,
+        TaskPartition,
+        TaskResult,
+    )
+
+    job, payload, staged = staged_cloud_job(tmp_path, image=image)
+    authored_digest = "sha256:" + hashlib.sha256(staged.read_bytes()).hexdigest()
+    site = make_site(FakeS3Client({}))
+    calls = []
+
+    def details(run_id):
+        calls.append(run_id)
+        return {
+            "id": run_id,
+            "outputIdentity": (
+                "s3://bucket/project-a/jobs/simulation-a/job-a/results/runs/owned-run/"
+            ),
+            "strictRetryFingerprint": "a" * 64 if strict else None,
+        }
+
+    site.graphql_client = SimpleNamespace(get_simulation_status_details=details)
+    run = site.handle(job, job_id="owned-run")
+    frozen = site._result_job(run.job)
+    expected = frozen.staged_artifact_fingerprints("AWSSite")
+    if strict:
+        assert expected["job"] == authored_digest
+    else:
+        payload["result_path"] = "jobs/simulation-a/job-a/results/runs/owned-run"
+        if image:
+            payload["Image"]["save_path"] = payload["result_path"] + "/image.h5"
+        assert (
+            expected["job"]
+            == "sha256:"
+            + hashlib.sha256(
+                (json.dumps(payload, sort_keys=True) + "\n").encode()
+            ).hexdigest()
+        )
+    assert frozen._artifact_contract_fingerprints() == expected
+    assert frozen._task_reuse_fingerprints() == expected
+    assert job.staged_artifact_fingerprints("AWSSite")["job"] == authored_digest
+    assert frozen._result_path == job._result_path / "runs/owned-run"
+    assert site._result_job(frozen) is frozen
+    assert calls == ["owned-run"]
+    result = TaskResult(
+        path=Path("result.json"),
+        result_path=tmp_path,
+        partition=TaskPartition(task=1, task_count=1, frequency=complex(10)),
+        fingerprints=dict(expected),
+        state="success",
+        code=0,
+        artifacts=(),
+    )
+    catalog = ArtifactCatalog(result_path=tmp_path, results={1: result})
+    site._validate_remote_catalog(frozen, catalog, (1,))
+    operation = OperationResult(
+        path=Path("pack.json"),
+        result_path=tmp_path,
+        name="pack",
+        generation="owned-generation",
+        fingerprints=dict(expected),
+        state="success",
+        code=0,
+        artifacts=(),
+    )
+    site._validate_remote_operation(frozen, operation)
+    for key in expected:
+        result.fingerprints[key] = "sha256:" + "d" * 64
+        with pytest.raises(RuntimeError, match="does not match"):
+            site._validate_remote_catalog(frozen, catalog, (1,))
+        result.fingerprints[key] = expected[key]
+        operation.fingerprints[key] = "sha256:" + "d" * 64
+        with pytest.raises(RuntimeError, match="does not match"):
+            site._validate_remote_operation(frozen, operation)
+        operation.fingerprints[key] = expected[key]
+
+
+@pytest.mark.parametrize("identity", ["bad", "", True, "g" * 64])
+def test_cloud_rejects_invalid_owned_strict_retry_identity(tmp_path, identity):
+    job, _, _ = staged_cloud_job(tmp_path)
+    site = make_site(FakeS3Client({}))
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status_details=lambda run_id: {
+            "id": run_id,
+            "outputIdentity": "s3://bucket/project-a/jobs/simulation-a/job-a/results/runs/run/",
+            "strictRetryFingerprint": identity,
+        }
+    )
+    with pytest.raises(RuntimeError, match="invalid strict-retry identity"):
+        site._result_job(site.handle(job, job_id="run").job)
