@@ -524,6 +524,7 @@ class GraphQLClient:
                     id
                     status
                     outputIdentity
+                    strictRetryFingerprint
                     failureCode
                     failureMessage
                     creditSettlementMode
@@ -599,6 +600,7 @@ class GraphQLClient:
             "id": details.get("id"),
             "status": status,
             "outputIdentity": details.get("outputIdentity"),
+            "strictRetryFingerprint": details.get("strictRetryFingerprint"),
             "failureCode": details.get("failureCode"),
             "failureMessage": details.get("failureMessage"),
             **{
