@@ -188,7 +188,11 @@ def _run_mypy(root: Path) -> Counter[Diagnostic]:
     if result.returncode not in {0, 1}:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"mypy failed to produce diagnostics: {detail}")
-    return parse_diagnostics(result.stdout, root)
+    diagnostics = parse_diagnostics(result.stdout, root)
+    if result.returncode == 1 and not diagnostics:
+        detail = result.stderr.strip() or "exit status 1 without error diagnostics"
+        raise RuntimeError(f"mypy failed to produce diagnostics: {detail}")
+    return diagnostics
 
 
 def _load_baseline(
