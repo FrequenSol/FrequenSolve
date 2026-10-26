@@ -1324,7 +1324,7 @@ class Preprocess:
         cls,
         *,
         norm: str = "inherit",
-        max_iterations: int = 20,
+        max_iterations: int = 100,
         relative_tolerance: float = 1.0e-8,
         delta: Optional[float] = None,
         c2: Optional[float] = None,

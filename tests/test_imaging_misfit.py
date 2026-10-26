@@ -400,7 +400,7 @@ def test_receiver_projection_rejects_invalid_configuration(factory):
             "trace_pair",
             {
                 "norm": "huber",
-                "max_iterations": 20,
+                "max_iterations": 100,
                 "relative_tolerance": 1e-8,
                 "delta": 1.2,
             },
