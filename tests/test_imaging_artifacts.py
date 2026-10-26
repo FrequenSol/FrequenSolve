@@ -540,6 +540,54 @@ def test_objective_report_reads_pinned_example():
         report.term("missing")
 
 
+def test_objective_report_exposes_projected_source_values():
+    term = {
+        "raw_sum": 1.0,
+        "effective_weight_mass": 1.0,
+        "normalized_value": 1.0,
+        "weight": 1.0,
+        "weighted_value": 1.0,
+        "active_samples": 4,
+        "scale": [1.0],
+    }
+    report = ObjectiveReport.from_dict(
+        {
+            "schema": "fs-objective-report-1",
+            "total": 2.0,
+            "terms": [
+                dict(
+                    term,
+                    id="phase",
+                    source_projection={
+                        "kind": "delay",
+                        "delay_s": [0.01, -0.02],
+                        "iterations": 3,
+                        "converged": True,
+                    },
+                ),
+                dict(
+                    term,
+                    id="waveform",
+                    source_projection={
+                        "kind": "scalar",
+                        "real": [1.0, 0.5],
+                        "imag": [0.0, -0.25],
+                        "iterations": 1,
+                        "converged": True,
+                    },
+                ),
+                dict(term, id="plain"),
+            ],
+        }
+    )
+    assert report.term("phase").source_delay == (0.01, -0.02)
+    assert report.term("phase").source_scalar is None
+    assert report.term("waveform").source_scalar == (1.0 + 0.0j, 0.5 - 0.25j)
+    assert report.term("waveform").source_delay is None
+    assert report.term("plain").source_projection == {}
+    assert report.term("plain").source_delay is None
+
+
 def test_objective_report_rejects_wrong_schema_and_duplicate_terms(tmp_path):
     with pytest.raises(ValueError, match="schema"):
         ObjectiveReport.from_dict(

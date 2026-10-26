@@ -140,6 +140,49 @@ def test_comparison_waveform_and_phase_derivative_round_trip():
         Comparison.from_fs({"kind": "phase_derivative", "derivative_axis": "laplace"})
 
 
+def test_comparison_source_delay_fit_serializes_and_round_trips():
+    plain = Comparison.phase_derivative(source_derivative="total")
+    fitted = Comparison.phase_derivative(source_derivative="total", source_delay="FIT")
+
+    assert "source_delay" not in plain.to_fs()
+    assert fitted.source_delay == "fit"
+    assert fitted.to_fs() == {
+        "kind": "phase_derivative",
+        "derivative_axis": "frequency",
+        "source_derivative": "total",
+        "relative_amplitude_floor": 0.01,
+        "source_delay": "fit",
+    }
+    assert Comparison.from_fs(fitted.to_fs()) == fitted
+    assert Comparison.from_value(fitted.to_fs()) == fitted
+    term = ObjectiveTerm("das", comparison=fitted, id="das.phase")
+    assert term.to_fs()["comparison"]["source_delay"] == "fit"
+    assert ObjectiveTerm.from_fs(term.to_fs()) == term
+    for kind in ("waveform", "spectral_derivative"):
+        with pytest.raises(ValueError, match="requires phase_derivative"):
+            Comparison(kind=kind, source_delay="fit")
+    with pytest.raises(ValueError, match="source_delay"):
+        Comparison.phase_derivative(source_delay="mean")
+    with pytest.raises(ValueError, match="source delay"):
+        Comparison.phase_derivative(source_delay="fit").bind(None)
+
+
+def test_source_scalar_fit_variants_serialize():
+    default = Preprocess.source_scalar_fit()
+    phase_only = Preprocess.source_scalar_fit(variant="Phase_Only", norm="studentst")
+
+    assert "variant" not in default.params
+    assert phase_only.params["variant"] == "phase_only"
+    assert phase_only.stage == "trace_pair"
+    assert Preprocess.from_fs(phase_only.to_fs()).to_fs() == phase_only.to_fs()
+    assert (
+        Preprocess.source_scalar_fit(variant="amplitude_only").params["variant"]
+        == "amplitude_only"
+    )
+    with pytest.raises(ValueError, match="variant"):
+        Preprocess.source_scalar_fit(variant="real")
+
+
 def test_normalization_variants_serialize_units_and_round_trip():
     explicit = Normalization.explicit(2.5 * u.Pa)
     components = Normalization.explicit(

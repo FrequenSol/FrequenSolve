@@ -321,6 +321,12 @@ class Comparison:
     ``df = -2*pi*i*X_1`` (first time moment; ``source_derivative="total"``).
     ``spectral_derivative`` compares the full complex frequency derivative,
     retaining amplitude as well as phase information.
+
+    ``source_delay="fit"`` (``phase_derivative`` only) projects one source
+    delay per frequency task and encoded RHS out of the traveltime residual
+    inside Sauce: the objective is the minimum over the delays, its gradient
+    is the fixed-delay gradient, and the fitted delays are reported per task
+    (``ObjectiveTermReport.source_delay``).
     """
 
     kind: Literal["waveform", "phase_derivative", "spectral_derivative"] = "waveform"
@@ -329,6 +335,7 @@ class Comparison:
     array: Any = None
     reliability: Optional[str] = None
     confidence_floor: float = 0.0
+    source_delay: Literal["none", "fit"] = "none"
 
     def __post_init__(self) -> None:
         kind = str(self.kind).strip().lower()
@@ -352,6 +359,12 @@ class Comparison:
         )
         if self.confidence_floor and kind != "phase_derivative":
             raise ValueError("confidence_floor requires phase_derivative")
+        source_delay = str(self.source_delay).strip().lower()
+        if source_delay not in {"none", "fit"}:
+            raise ValueError("source_delay must be 'none' or 'fit'")
+        if source_delay == "fit" and kind != "phase_derivative":
+            raise ValueError("source_delay='fit' requires phase_derivative")
+        object.__setattr__(self, "source_delay", source_delay)
         from .synthetic_array import SyntheticArray
 
         if self.array is not None and not isinstance(self.array, SyntheticArray):
@@ -383,8 +396,13 @@ class Comparison:
         array: Any = None,
         reliability: Optional[str] = None,
         confidence_floor: float = 0.0,
+        source_delay: Literal["none", "fit"] = "none",
     ) -> "Comparison":
-        """Return the instantaneous travel-time (phase-slope) comparison."""
+        """Return the instantaneous travel-time (phase-slope) comparison.
+
+        ``source_delay="fit"`` projects a per-task, per-RHS source delay out of
+        the residual inside the native objective.
+        """
 
         return cls(
             kind="phase_derivative",
@@ -393,6 +411,7 @@ class Comparison:
             array=array,
             reliability=reliability,
             confidence_floor=confidence_floor,
+            source_delay=source_delay,
         )
 
     @property
@@ -413,6 +432,8 @@ class Comparison:
             raise ValueError(
                 "spectral binding currently requires frozen-source phase_derivative"
             )
+        if self.source_delay != "none":
+            raise ValueError("spectral binding does not project a source delay")
         if definition is None:
             definition = SpectralAttribute(
                 "phase_slope",
@@ -495,6 +516,11 @@ class Comparison:
                 else {}
             ),
             **({"reliability": self.reliability} if self.reliability else {}),
+            **(
+                {"source_delay": self.source_delay}
+                if self.source_delay != "none"
+                else {}
+            ),
         }
 
     @classmethod
@@ -509,6 +535,7 @@ class Comparison:
             "array",
             "confidence_floor",
             "reliability",
+            "source_delay",
         }
         unknown = sorted(set(data).difference(allowed))
         if unknown:
@@ -527,6 +554,7 @@ class Comparison:
             kind=data.get("kind", "waveform"),
             source_derivative=data.get("source_derivative", "frozen"),
             relative_amplitude_floor=data.get("relative_amplitude_floor", 0.01),
+            source_delay=data.get("source_delay", "none"),
         )
 
 
@@ -1301,17 +1329,29 @@ class Preprocess:
         delta: Optional[float] = None,
         c2: Optional[float] = None,
         nu: Optional[float] = None,
+        variant: str = "complex",
         name: Optional[str] = None,
     ) -> "Preprocess":
         """Variable-projection complex source scalar per RHS (``trace_pair``).
 
         ``norm="inherit"`` reuses the enclosing objective's loss; an explicit
-        norm must be equivalent to it.
+        norm must be equivalent to it. ``variant`` fits a ``"complex"`` factor
+        (default), a real nonnegative ``"amplitude_only"`` factor, or a
+        unit-modulus ``"phase_only"`` factor. With a waveform comparison an
+        ``ImagingProblem`` (``fwi_operator``) projects the factor out of its
+        objective: the gradient is the fixed-factor gradient, JVP/normal use
+        the frozen factor, and the fitted factors are reported per task
+        (``ObjectiveTermReport.source_scalar``).
         """
 
         norm_text = str(norm).strip().lower()
         if norm_text != "inherit":
             norm_text = Loss(kind=norm_text).kind
+        variant_text = str(variant).strip().lower()
+        if variant_text not in {"complex", "amplitude_only", "phase_only"}:
+            raise ValueError(
+                "source_scalar_fit variant must be 'complex', 'amplitude_only', or 'phase_only'"
+            )
         params: Dict[str, Any] = {
             "norm": norm_text,
             "max_iterations": _positive_int(max_iterations, "max_iterations"),
@@ -1319,6 +1359,8 @@ class Preprocess:
                 relative_tolerance, "relative_tolerance"
             ),
         }
+        if variant_text != "complex":
+            params["variant"] = variant_text
         for key, value in (("delta", delta), ("c2", c2), ("nu", nu)):
             if value is not None:
                 params[key] = _positive_float(value, key)

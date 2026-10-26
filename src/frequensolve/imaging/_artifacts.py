@@ -1239,7 +1239,12 @@ def _require_schema(data: Mapping[str, Any], expected: str) -> None:
 
 @dataclass(frozen=True)
 class ObjectiveTermReport:
-    """One objective term of an ``fs-objective-report-1`` report."""
+    """One objective term of an ``fs-objective-report-1`` report.
+
+    ``source_projection`` holds the per-RHS source unknowns Sauce projected out
+    of the term at the saved baseline (``kind`` ``"delay"`` or ``"scalar"``);
+    it is empty when the term projects no source.
+    """
 
     id: str
     raw_sum: float
@@ -1250,6 +1255,30 @@ class ObjectiveTermReport:
     active_samples: int
     scale: Tuple[float, ...]
     robust: Dict[str, Any] = field(default_factory=dict)
+    source_projection: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def source_delay(self) -> Optional[Tuple[float, ...]]:
+        """Fitted per-RHS source delays in seconds, or ``None``."""
+
+        if self.source_projection.get("kind") != "delay":
+            return None
+        return tuple(float(v) for v in self.source_projection["delay_s"])
+
+    @property
+    def source_scalar(self) -> Optional[Tuple[complex, ...]]:
+        """Fitted per-RHS complex source factors, or ``None``."""
+
+        if self.source_projection.get("kind") != "scalar":
+            return None
+        return tuple(
+            complex(float(re), float(im))
+            for re, im in zip(
+                self.source_projection["real"],
+                self.source_projection["imag"],
+                strict=True,
+            )
+        )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ObjectiveTermReport":
@@ -1265,6 +1294,7 @@ class ObjectiveTermReport:
             active_samples=int(data["active_samples"]),
             scale=tuple(float(v) for v in data["scale"]),
             robust=dict(data.get("robust") or {}),
+            source_projection=dict(data.get("source_projection") or {}),
         )
 
 
