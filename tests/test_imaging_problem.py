@@ -1392,3 +1392,26 @@ def test_volume_injection_mechanism_keeps_volumetric_units(tmp_path, fake):
     points = installed.acquisition.source_geometry.sources
     assert points[0].amplitude == {"value": 1.0, "units": "m^3/s"}
     assert points[1].amplitude == {"value": 2.0, "units": "m^3/s"}
+
+
+def test_identity_sees_large_trace_weights_and_source_delay(tmp_path, fake):
+    from frequensolve.imaging.misfit import Preprocess
+
+    _, problem = _problem(tmp_path, fake)
+    many = 300  # above the 256-entry inline limit of Preprocess.trace_weight
+    base = Misfit.l2(preprocess=[Preprocess.trace_weight(np.ones(many))])
+    other = Misfit.l2(
+        preprocess=[Preprocess.trace_weight(np.r_[np.ones(many - 1), 0.5])]
+    )
+    a = problem.restrict(misfit=base)
+    b = problem.restrict(misfit=other)
+    # Identical weights hash alike; the fingerprint carries a digest, not a repr.
+    assert a._fingerprint(None) == problem.restrict(misfit=base)._fingerprint(None)
+    assert a._fingerprint(None) != b._fingerprint(None)
+    assert "weights" in json.dumps(a.identity())
+
+    # The same holds for the shared problem's own identity.
+    _, big = _problem(tmp_path, fake, misfit=base)
+    _, big_other = _problem(tmp_path, fake, misfit=other)
+    assert big.identity()["misfit"] != big_other.identity()["misfit"]
+    assert not isinstance(big.identity()["misfit"], str)

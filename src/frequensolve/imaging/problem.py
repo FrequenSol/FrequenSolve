@@ -165,6 +165,45 @@ def _digest(values: Any) -> str:
     return hashlib.sha256(array.tobytes()).hexdigest()
 
 
+class _FingerprintStore:
+    """Stand-in HDF5 store that fingerprints large arrays instead of writing them.
+
+    ``Preprocess.to_fs`` refuses to inline more than 256 trace weights without
+    a store. Identity fingerprints must still see those weights (and every
+    other misfit field), so this store answers ``put_dataarray`` with a digest
+    reference of the array's values, shape and dtype.
+    """
+
+    class _Ref:
+        def __init__(self, payload: Dict[str, Any]) -> None:
+            self._payload = payload
+
+        def to_fs(self, **_: Any) -> Dict[str, Any]:
+            return dict(self._payload)
+
+    def put_dataarray(
+        self, dataset: str, array: Any, **_: Any
+    ) -> "_FingerprintStore._Ref":
+        values = np.asarray(getattr(array, "values", array))
+        return self._Ref(
+            {
+                "dataset": str(dataset),
+                "digest": _digest(values),
+                "shape": list(values.shape),
+                "dtype": str(values.dtype),
+            }
+        )
+
+
+class _FingerprintContext:
+    """Export context whose only purpose is a complete misfit fingerprint."""
+
+    def __init__(self) -> None:
+        self.store = _FingerprintStore()
+        self.project_path = None
+        self.rel_path = None
+
+
 def _mechanism_blocks(space: ControlSpace) -> List[str]:
     """Return the qualified ``source.<i>.mechanism`` blocks of ``space``."""
 
@@ -453,10 +492,9 @@ class _Shared:
                 simulation: Any = self.simulation.to_fs()
             except Exception:  # pragma: no cover - defensive fallback
                 simulation = repr(self.simulation)
-            try:
-                misfit: Any = self.misfit_payload.to_fs()
-            except ValueError:  # large trace weights need an export context
-                misfit = repr(self.misfit)
+            # A fingerprint context digests large trace weights instead of
+            # inlining them; repr(misfit) would drop weights and source_delay.
+            misfit: Any = self.misfit_payload.to_fs(_FingerprintContext())
             self._identity = {
                 "problem": self.name,
                 "simulation": simulation,
@@ -864,10 +902,7 @@ class ImagingProblem:
 
         parts: Dict[str, Any] = {}
         if "misfit" in self._overrides:
-            try:
-                misfit: dict[str, Any] | str = self._misfit_payload.to_fs()
-            except ValueError:  # large trace weights need an export context
-                misfit = repr(self.misfit)
+            misfit: dict[str, Any] = self._misfit_payload.to_fs(_FingerprintContext())
             # Explicitly restating the shared misfit does not change the
             # receiver state. Keep equivalent views on the same cache entry.
             if fingerprint(misfit=misfit) != fingerprint(
@@ -1125,19 +1160,20 @@ class ImagingProblem:
     def freeze_reliability(
         self, v: Any = None, *, relative_floor=None, window=None
     ) -> "ImagingProblem":
-        """Return a native point-receiver view with predicted confidence frozen.
+        """Return a native receiver view with predicted confidence frozen.
 
         Prepare one multifrequency forward reference, then store immutable
         confidence weights for all trial models. The returned view supports
         ordinary FWI, Huber/Student-t, normal actions and regularization.
         Call again on the original problem at an accepted model to begin a
         new stage with refreshed confidence; never refresh within a line search.
-        Arrays and patch problems are not supported by this native snapshot.
+        Synthetic arrays use pooled predicted power; patch problems are unsupported.
         ``relative_floor`` sets confidence independently of attribute stabilization.
         With ``window=im.SyntheticArray.gaussian(sigma=...)``, confidence uses a
         local predicted-power reference (default floor 0.1), instead of the
-        shot-wide observed RMS. Only confidence is smoothed; each traveltime
-        remains a point attribute. Author separate receiver groups for lines
+        shot-wide observed RMS. The window smooths only the confidence reference;
+        the comparison's array, if supplied, separately pools the attributes.
+        Author separate receiver groups for lines
         that must not share a confidence neighborhood.
         """
         from ._reliability import freeze
@@ -2746,10 +2782,14 @@ def _install_source_mechanism(
     dimension = int(simulation.dimension)
     real, phase = _real_components(values, block.name)
     physical = real * float(scale)
-    if kind in {"scalar", "monopole", "volume_injection"}:
+    if kind in {"scalar", "monopole", "volume_injection", "pressure_monopole", "isotropic_moment"}:
         if physical.size != 1:
             raise ValueError(f"{block.name!r} must have one component for {kind}")
-        default_units = "m^3/s" if kind == "volume_injection" else "N*m"
+        default_units = {"volume_injection": "m^3/s", "pressure_monopole": "m^3/s^2"}.get(kind, "N*m")
+        if kind == "scalar" and str(simulation.physics).lower() in {
+            "acoustic", "acoustic_axisym", "coupled", "coupled_axisym", "coupled2", "coupled_aep"
+        }:
+            default_units = "m^3/s^2"
         point.amplitude = {"value": float(physical[0]), "units": units or default_units}
         return phase
     if kind in {"vector", "dipole"}:
