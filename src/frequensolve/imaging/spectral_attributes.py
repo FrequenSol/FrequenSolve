@@ -188,7 +188,9 @@ class SpectralAttribute:
                 or not np.isfinite(scales).all()
                 or np.any(scales <= 0)
             ):
-                raise ValueError("order_scales requires positive fixed waveform_jet scales")
+                raise ValueError(
+                    "order_scales requires positive fixed waveform_jet scales"
+                )
             scales.flags.writeable = False
             object.__setattr__(self, "order_scales", scales)
 
@@ -299,7 +301,9 @@ class SpectralAttribute:
             weights = np.ones(len(u))
         if self.kind == "waveform_jet":
             if self.order_scales is None or len(self.order_scales) != u.shape[1]:
-                raise ValueError("waveform_jet requires one fixed scale per input moment")
+                raise ValueError(
+                    "waveform_jet requires one fixed scale per input moment"
+                )
 
         def forward(x: np.ndarray, dx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             kind, tau = self.kind, self.time_scale
@@ -752,8 +756,12 @@ class SpectralJetLinearization:
 
         Receiver transforms, non-waveform comparisons and nonunit frequency
         weights are rejected. Observations must supply every requested raw order
-        with the same frozen source-spectrum convention. Use individual shots
-        when attributes are intended to describe physical arrival times.
+        with the same frozen source-spectrum convention. A time-domain trace
+        store supplies every order natively as ``(-2*pi*i)**k`` times its
+        ``k``-th time moment; such recorded data carry the source spectrum, so
+        they match these frozen planes only for frequency-independent sources.
+        Use individual shots when attributes are intended to describe physical
+        arrival times.
         """
         if (
             isinstance(order, bool)
@@ -930,8 +938,9 @@ class SpectralJetLinearization:
 
     def synthetic_array(self, array, coordinates, *, sample_weights=None):
         """Bind a SyntheticArray to output-channel coordinates in canonical order."""
-        from .synthetic_array import SyntheticArray
         from frequensolve import Q_
+
+        from .synthetic_array import SyntheticArray
 
         if not isinstance(array, SyntheticArray):
             raise TypeError("array must be a SyntheticArray")

@@ -536,12 +536,21 @@ class AWIProblem:
             g.survey is not None for g in problem.simulation.acquisition.receiver_groups
         ):
             raise ValueError("initial AWI validation requires dense receiver groups")
+        derived = config.filter_lags is None and any(
+            g.df is None and g.time_moments for g in problem.observed_groups
+        )
         if not problem.observed_groups or any(
-            g.observed is None or (config.filter_lags is None and g.df is None)
+            g.observed is None
+            or (config.filter_lags is None and g.df is None and not g.time_moments)
             for g in problem.observed_groups
         ):
             raise ValueError(
                 "AWI requires fixed observed data (including df for spectral_moment)"
+            )
+        if derived and config.source_derivative != "total":
+            raise ValueError(
+                "AWI df derived from a time-domain observed store requires "
+                "source_derivative='total'"
             )
         if tuple(map(complex, problem.frequencies)) != config.frequencies:
             raise ValueError("AWI band must exactly match the problem frequencies")
@@ -642,9 +651,9 @@ class AWIProblem:
             **self._problem.identity(),
             "awi": self.config.to_dict(),
             "awi_trace_weights": self.trace_weights,
-            "awi_array": None
-            if self.synthetic_array is None
-            else self.synthetic_array.to_dict(),
+            "awi_array": (
+                None if self.synthetic_array is None else self.synthetic_array.to_dict()
+            ),
             "awi_coordinates": self.coordinates,
             "observed": [_observed_descriptor(g) for g in self.observed_groups],
         }

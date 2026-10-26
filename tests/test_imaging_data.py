@@ -151,6 +151,33 @@ def test_observed_group_serializes_stems_and_stores():
         ObservedGroup("surface", derivatives={"ds": "x"})
 
 
+def test_time_domain_trace_store_supplies_observed_derivatives(tmp_path):
+    from frequensolve.seismic.trace_conversion import convert_traces
+
+    time_store = TraceStoreRef(
+        convert_traces(np.ones((2, 4)), tmp_path / "time.h5", dt=0.1, component="p")
+    )
+    spectra = tmp_path / "spectra.h5"
+    with h5py.File(spectra, "w") as h5:
+        h5["data/frequency/value"] = np.zeros((2, 1, 2), dtype=np.float32)
+    corrupt = tmp_path / "corrupt.h5"
+    corrupt.write_text("not hdf5")
+
+    assert time_store.has_time_samples
+    for ref in (
+        TraceStoreRef(spectra),
+        TraceStoreRef(corrupt),
+        TraceStoreRef(tmp_path / "absent.h5"),
+    ):
+        assert not ref.has_time_samples
+    group = ObservedGroup("surface", observed=time_store)
+    assert group.time_moments and group.df is None
+    assert "observed_derivatives" not in group.to_fs()
+    assert not ObservedGroup("surface", observed=time_store.file).time_moments
+    assert not ObservedGroup("surface", observed=TraceStoreRef(spectra)).time_moments
+    assert not ObservedGroup("zero").time_moments
+
+
 def test_observed_data_infers_frequencies_and_groups_from_forward_job(
     tmp_path, simulation
 ):

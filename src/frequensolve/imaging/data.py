@@ -239,6 +239,27 @@ class TraceStoreRef:
             source_basis=source_basis,
         )
 
+    @property
+    def has_time_samples(self) -> bool:
+        """Whether ``file`` is a readable trace store holding time-domain samples.
+
+        Without an explicit derivative dataset, Sauce derives the observed
+        order-``p`` physical-frequency derivative from such a store as
+        ``(-2*pi*i)**p`` times its ``p``-th time moment at the task's Laplace
+        damping. Recorded data carry the source spectrum, so that derivative
+        has the ``total`` source-derivative policy.
+        """
+
+        if not self.file.is_file():
+            return False
+        import h5py
+
+        try:
+            with h5py.File(self.file, "r") as h5:
+                return isinstance(h5.get("data/time/value"), h5py.Dataset)
+        except OSError:
+            return False
+
     def replace(self, **changes: Any) -> "TraceStoreRef":
         """Return a copy with the given fields replaced."""
 
@@ -317,7 +338,9 @@ class ObservedGroup:
             Sauce for zero observed data (sensitivity kernels).
         derivatives: Mapping from derivative name (``"df"``) to a path stem
             or :class:`TraceStoreRef` holding the matching observed
-            derivative traces.
+            derivative traces. Explicit derivatives take precedence; a
+            time-domain ``observed`` store supplies omitted ones natively
+            (see :attr:`time_moments`).
         source_basis: Observed source basis for a path-stem ``observed``
             (``observed_source_basis`` in the contract).
     """
@@ -354,6 +377,19 @@ class ObservedGroup:
         """Return the first frequency-derivative reference when present."""
 
         return self.derivatives.get("df")
+
+    @property
+    def time_moments(self) -> bool:
+        """Whether Sauce derives omitted observed derivatives from time moments.
+
+        True when ``observed`` is a :class:`TraceStoreRef` to a locally
+        readable time-domain store (for example from ``convert_traces``).
+        No ``observed_derivatives`` entry is emitted for derived axes.
+        """
+
+        return (
+            isinstance(self.observed, TraceStoreRef) and self.observed.has_time_samples
+        )
 
     def to_fs(self) -> Dict[str, Any]:
         """Serialize the observed part of one misfit receiver-group entry."""
@@ -580,7 +616,9 @@ class ObservedData:
         source: Observed data in one of the forms above.
         derivatives: Mapping from derivative axis (``"df"``) to a source in
             the same forms. A forward job or path stem is read as a packed
-            trace root and the ``<group>_df`` dataset is referenced.
+            trace root and the ``<group>_df`` dataset is referenced. Omit it
+            for a time-domain :class:`TraceStoreRef`: Sauce then derives the
+            derivatives from the store's time moments (``total`` source policy).
         source_basis: Observed source basis applied to every group.
         missing: Missing-data policy applied to trace-store references.
         frequencies: Explicit frequencies when they cannot be inferred.

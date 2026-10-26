@@ -316,7 +316,9 @@ class Comparison:
 
     ``phase_derivative`` compares the stabilized phase slope with respect to
     physical frequency (instantaneous travel time) and requires observed
-    ``df`` derivative traces for every receiver group.
+    ``df`` derivative traces for every receiver group: an explicit dataset,
+    or a time-domain observed trace store from which Sauce derives
+    ``df = -2*pi*i*X_1`` (first time moment; ``source_derivative="total"``).
     ``spectral_derivative`` compares the full complex frequency derivative,
     retaining amplitude as well as phase information.
     """
@@ -343,7 +345,11 @@ class Comparison:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "source_derivative", source_derivative)
         object.__setattr__(self, "relative_amplitude_floor", floor)
-        object.__setattr__(self, "confidence_floor", _nonnegative_float(self.confidence_floor, "confidence_floor"))
+        object.__setattr__(
+            self,
+            "confidence_floor",
+            _nonnegative_float(self.confidence_floor, "confidence_floor"),
+        )
         if self.confidence_floor and kind != "phase_derivative":
             raise ValueError("confidence_floor requires phase_derivative")
         from .synthetic_array import SyntheticArray
@@ -354,9 +360,13 @@ class Comparison:
             raise ValueError("reliability must be None or 'predicted'")
         if self.array is not None or self.reliability is not None:
             if kind != "phase_derivative":
-                raise ValueError("synthetic arrays and reliability require phase_derivative")
+                raise ValueError(
+                    "synthetic arrays and reliability require phase_derivative"
+                )
             if self.reliability is not None and source_derivative != "frozen":
-                raise ValueError("predicted reliability requires frozen-source phase_derivative")
+                raise ValueError(
+                    "predicted reliability requires frozen-source phase_derivative"
+                )
 
     @classmethod
     def waveform(cls) -> "Comparison":
@@ -405,8 +415,9 @@ class Comparison:
             )
         if definition is None:
             definition = SpectralAttribute(
-                "phase_slope", relative_floor=self.relative_amplitude_floor,
-                confidence_floor=self.confidence_floor or None
+                "phase_slope",
+                relative_floor=self.relative_amplitude_floor,
+                confidence_floor=self.confidence_floor or None,
             )
         if (
             definition.kind != "phase_slope"
@@ -478,7 +489,11 @@ class Comparison:
             "source_derivative": self.source_derivative,
             "relative_amplitude_floor": self.relative_amplitude_floor,
             **({"array": self.array.to_dict()} if self.array is not None else {}),
-            **({"confidence_floor": self.confidence_floor} if self.confidence_floor else {}),
+            **(
+                {"confidence_floor": self.confidence_floor}
+                if self.confidence_floor
+                else {}
+            ),
             **({"reliability": self.reliability} if self.reliability else {}),
         }
 
@@ -1853,7 +1868,9 @@ class Misfit:
             ctx: Optional export context for HDF5-materialized trace weights.
 
         Raises:
-            ValueError: If a phase-derivative term lacks observed ``df`` data,
+            ValueError: If a phase-derivative term lacks observed ``df`` data
+                (neither explicit nor derivable from a time-domain store), a
+                derived ``df`` is paired with ``source_derivative="frozen"``,
                 or explicit terms name receiver groups that are absent.
         """
 
@@ -1880,11 +1897,19 @@ class Misfit:
         for term in terms:
             group = by_name[term.receiver_group]
             for axis in term.comparison.requires_derivatives:
-                if axis not in group.derivatives:
+                if axis in group.derivatives:
+                    continue
+                if not group.time_moments:
                     raise ValueError(
                         f"objective term {term.id!r} uses a {term.comparison.kind} "
                         f"comparison but receiver group {group.name!r} has no "
-                        f"observed {axis!r} derivatives"
+                        f"observed {axis!r} derivatives and no time-domain trace store"
+                    )
+                if term.comparison.source_derivative != "total":
+                    raise ValueError(
+                        f"objective term {term.id!r} derives observed {axis!r} from the "
+                        f"time-domain store of receiver group {group.name!r}; recorded "
+                        "data carry the source spectrum, so use source_derivative='total'"
                     )
         unknown = sorted(set(self.group_preprocess).difference(names))
         if unknown:

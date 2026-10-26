@@ -672,6 +672,70 @@ def test_spectral_waveform_terms_require_df_and_keep_independent_normalization(
         Misfit.l2(comparison=derivative).to_fs({"das": GROUPS["das"]})
 
 
+def _time_store(path: Path) -> Path:
+    with h5py.File(path, "w") as h5:
+        h5["data/time/value"] = np.zeros((2, 8), dtype=np.float32)
+        h5["data/time/dt"] = 0.004
+        h5["data/time/t0"] = 0.0
+    return path
+
+
+@pytest.mark.parametrize(
+    "comparison",
+    [
+        Comparison.phase_derivative(source_derivative="total"),
+        Comparison.spectral_derivative(source_derivative="total"),
+    ],
+)
+def test_derivative_comparisons_derive_df_from_time_domain_store(
+    tmp_path, imaging_validator, comparison
+):
+    store = _time_store(tmp_path / "observed_store.h5")
+    group = ObservedGroup("hydrophone", observed=TraceStoreRef(store))
+
+    payload = Misfit.l2(comparison=comparison).to_fs({"hydrophone": group})
+
+    _validate(imaging_validator, payload)
+    assert payload["receiver_groups"][0]["observed"] == {
+        "_type": "HDF5TraceStore",
+        "file": str(store),
+    }
+    assert "observed_derivatives" not in payload["receiver_groups"][0]
+    assert payload["objective_terms"][0]["comparison"]["source_derivative"] == "total"
+    frozen = Comparison(kind=comparison.kind, source_derivative="frozen")
+    with pytest.raises(ValueError, match="source_derivative='total'"):
+        Misfit.l2(comparison=frozen).to_fs({"hydrophone": group})
+
+
+def test_explicit_observed_df_takes_precedence_over_time_store(tmp_path):
+    store = _time_store(tmp_path / "observed_store.h5")
+    df = TraceStoreRef(tmp_path / "observed_df.h5", dataset="hydrophone")
+    group = ObservedGroup(
+        "hydrophone", observed=TraceStoreRef(store), derivatives={"df": df}
+    )
+
+    payload = Misfit.l2(comparison="phase_derivative").to_fs({"hydrophone": group})
+
+    assert payload["receiver_groups"][0]["observed_derivatives"] == {"df": df.to_fs()}
+    assert payload["objective_terms"][0]["comparison"]["source_derivative"] == "frozen"
+
+
+def test_derivative_comparisons_without_time_samples_still_require_df(tmp_path):
+    spectra = tmp_path / "spectra.h5"
+    with h5py.File(spectra, "w") as h5:
+        h5["data/frequency/value"] = np.zeros((2, 1, 2), dtype=np.float32)
+    total = Comparison.phase_derivative(source_derivative="total")
+    for observed in (
+        TraceStoreRef(spectra),
+        spectra,
+        TraceStoreRef(tmp_path / "absent.h5"),
+        None,
+    ):
+        group = ObservedGroup("hydrophone", observed=observed)
+        with pytest.raises(ValueError, match="observed 'df' derivatives"):
+            Misfit.l2(comparison=total).to_fs({"hydrophone": group})
+
+
 def test_misfit_rejects_inconsistent_construction():
     with pytest.raises(ValueError):
         Misfit(loss="l2", terms=[ObjectiveTerm("das")])
