@@ -437,31 +437,17 @@ def test_fetch_run_metadata_downloads_job_run_directory(tmp_path):
     assert calls == [job]
 
 
-@pytest.mark.parametrize("explicit_run_id", [None, "older-simulation"])
-def test_fetch_logs_falls_back_to_authenticated_cloudwatch_events(
-    tmp_path, explicit_run_id
-):
-    expected_run_id = explicit_run_id or "simulation-1"
-
+def cloud_log_site(tmp_path, pages):
     class CloudLogs:
         def __init__(self):
-            self.requested = []
+            self.calls = []
 
-        def list_simulation_frequency_jobs(self, simulation_id):
-            assert simulation_id == expected_run_id
-            return [
-                {"frequencyIndex": 0, "batchJobId": "batch-1"},
-                {"frequencyIndex": 1, "batchJobId": "batch-2"},
-            ]
-
-        def get_job_logs(self, batch_job_id):
-            self.requested.append(batch_job_id)
-            return [
-                {
-                    "timestamp": "2026-09-06T14:00:00.000Z",
-                    "message": f"{batch_job_id} complete\n",
-                }
-            ]
+        def get_simulation_logs(self, simulation_id, **options):
+            self.calls.append((simulation_id, options))
+            value = pages[len(self.calls) - 1]
+            if isinstance(value, Exception):
+                raise value
+            return value
 
     site = AWSSite.__new__(AWSSite)
     site.config = SimpleNamespace(s3_bucket="bucket")
@@ -475,93 +461,117 @@ def test_fetch_logs_falls_back_to_authenticated_cloudwatch_events(
         name="job-a",
         simulation=SimpleNamespace(name="simulation-a"),
     )
-    (job._stdout_path / expected_run_id).mkdir(parents=True)
-    (job._stdout_path / expected_run_id / "task_99.log").write_text("stale\n")
+    return site, job
 
+
+def log_page(text="Planner failed before any task started\n", **updates):
+    return {
+        "available": True,
+        "logs": [{"timestamp": "2026-10-01T00:00:00.000Z", "message": text}],
+        "truncated": False,
+        "nextToken": None,
+        **updates,
+    }
+
+
+@pytest.mark.parametrize("explicit_run_id", [None, "older-simulation"])
+def test_fetch_logs_recovers_failed_planner_diagnostic(
+    tmp_path, explicit_run_id, capsys
+):
+    site, job = cloud_log_site(tmp_path, [log_page()])
+    run_id = explicit_run_id or "simulation-1"
+    cache = job._stdout_path / run_id
+    cache.mkdir(parents=True)
+    (cache / "task_99.log").write_text("stale")
+    assert site.fetch_logs(job, simulation_id=explicit_run_id, show=True) == cache
+    assert site.graphql_client.calls == [
+        (run_id, {"frequency_index": None, "before_byte": None})
+    ]
     assert (
-        site.fetch_logs(job, simulation_id=explicit_run_id)
-        == job._stdout_path / expected_run_id
-    )
-    assert site.graphql_client.requested == ["batch-1", "batch-2"]
-    assert not (job._stdout_path / expected_run_id / "task_99.log").exists()
-    assert (
-        job._stdout_path / expected_run_id / "task_1.log"
-    ).read_text() == "batch-1 complete\n"
-    assert (
-        job._stdout_path / expected_run_id / "task_2.log"
-    ).read_text() == "batch-2 complete\n"
+        cache / "planner.log"
+    ).read_text() == "Planner failed before any task started\n"
+    assert not (cache / "task_99.log").exists()
+    assert "Planner failed" in capsys.readouterr().out
 
 
-def test_fetch_logs_cloudwatch_fallback_honors_frequency_selector(tmp_path):
-    class CloudLogs:
-        def list_simulation_frequency_jobs(self, simulation_id):
-            return [
-                {"frequencyIndex": 0, "batchJobId": "batch-1"},
-                {"frequencyIndex": 1, "batchJobId": "batch-2"},
-            ]
-
-        def get_job_logs(self, batch_job_id):
-            assert batch_job_id == "batch-2"
-            return [{"timestamp": "now", "message": "selected"}]
-
-    site = AWSSite.__new__(AWSSite)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    site.graphql_client = CloudLogs()
-    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
-    job = SimpleNamespace(
-        project_path=tmp_path / "project-a",
-        _stdout_path=tmp_path / "project-a/logs",
-        _job_id="simulation-1",
-        f_list=[10.0, 20.0],
-        name="job-a",
-        simulation=SimpleNamespace(name="simulation-a"),
-    )
-
-    selected = site.fetch_logs(job, frequency=20.0)
-
+@pytest.mark.parametrize("selector", [{"task": 2}, {"frequency": 20.0}])
+def test_fetch_logs_api_fallback_honors_task_selector(tmp_path, selector):
+    site, job = cloud_log_site(tmp_path, [log_page("selected\n")])
+    selected = site.fetch_logs(job, **selector)
     assert selected == job._stdout_path / "simulation-1" / "task_2.log"
     assert selected.read_text() == "selected\n"
-    assert not (job._stdout_path / "simulation-1" / "task_1.log").exists()
+    assert site.graphql_client.calls == [
+        ("simulation-1", {"frequency_index": 1, "before_byte": None})
+    ]
+    assert not (selected.parent / "planner.log").exists()
 
 
-def test_fetch_logs_cloudwatch_failure_preserves_existing_cache(tmp_path):
-    class CloudLogs:
-        def list_simulation_frequency_jobs(self, simulation_id):
-            return [
-                {"frequencyIndex": 0, "batchJobId": "batch-1"},
-                {"frequencyIndex": 1, "batchJobId": "batch-2"},
-            ]
-
-        def get_job_logs(self, batch_job_id):
-            if batch_job_id == "batch-2":
-                raise RuntimeError("CloudWatch unavailable")
-            return [{"timestamp": "now", "message": "replacement"}]
-
-    site = AWSSite.__new__(AWSSite)
-    site.config = SimpleNamespace(s3_bucket="bucket")
-    site.graphql_client = CloudLogs()
-    site.get = lambda remote, local: (_ for _ in ()).throw(FileNotFoundError())
-    job = SimpleNamespace(
-        project_path=tmp_path / "project-a",
-        _stdout_path=tmp_path / "project-a/logs",
-        _job_id="simulation-1",
-        f_list=[10.0, 20.0],
-        name="job-a",
-        simulation=SimpleNamespace(name="simulation-a"),
+def test_fetch_logs_concatenates_backward_pages_without_changing_utf8(tmp_path):
+    site, job = cloud_log_site(
+        tmp_path,
+        [log_page("tail\n", truncated=True, nextToken="8"), log_page("start €\n")],
     )
-    (job._stdout_path / "simulation-1").mkdir(parents=True)
-    (job._stdout_path / "simulation-1" / "task_1.log").write_text("cached one\n")
-    (job._stdout_path / "simulation-1" / "task_2.log").write_text("cached two\n")
+    cache = site.fetch_logs(job)
+    assert (cache / "planner.log").read_text() == "start €\ntail\n"
+    assert site.graphql_client.calls[1][1]["before_byte"] == "8"
 
-    with pytest.raises(RuntimeError, match="CloudWatch unavailable"):
+
+@pytest.mark.parametrize(
+    "pages,error,match",
+    [
+        ([log_page("", logs=[], available=False)], FileNotFoundError, "No retained"),
+        ([log_page("", logs=[])], FileNotFoundError, "currently empty"),
+        (
+            [RuntimeError("NOT_FOUND_OR_ACCESS_DENIED")],
+            RuntimeError,
+            "NOT_FOUND_OR_ACCESS_DENIED",
+        ),
+        (
+            [log_page(truncated=True, nextToken="8"), RuntimeError("API unavailable")],
+            RuntimeError,
+            "API unavailable",
+        ),
+        (
+            [
+                log_page(truncated=True, nextToken="8"),
+                log_page(truncated=True, nextToken="8"),
+            ],
+            RuntimeError,
+            "cursor",
+        ),
+        (
+            [
+                log_page(truncated=True, nextToken="8"),
+                log_page("", logs=[], available=False),
+            ],
+            RuntimeError,
+            "changed",
+        ),
+        ([log_page(truncated=True, nextToken="bad")], RuntimeError, "cursor"),
+        ([log_page(nextToken="8")], RuntimeError, "cursor"),
+        ([log_page(available="true")], RuntimeError, "invalid"),
+        ([log_page(logs=[{"message": 3, "timestamp": "now"}])], RuntimeError, "events"),
+        ([log_page("x" * (1024 * 1024 + 1))], RuntimeError, "retrieval limit"),
+        (
+            [
+                log_page(truncated=True, nextToken=str(100 - index))
+                for index in range(16)
+            ],
+            RuntimeError,
+            "page limit",
+        ),
+    ],
+)
+def test_fetch_logs_api_failure_preserves_cache(tmp_path, pages, error, match):
+    site, job = cloud_log_site(tmp_path, pages)
+    cache = job._stdout_path / "simulation-1"
+    cache.mkdir(parents=True)
+    (cache / "planner.log").write_text("original planner")
+    (cache / "task_1.log").write_text("original task")
+    with pytest.raises(error, match=match):
         site.fetch_logs(job)
-
-    assert (
-        job._stdout_path / "simulation-1" / "task_1.log"
-    ).read_text() == "cached one\n"
-    assert (
-        job._stdout_path / "simulation-1" / "task_2.log"
-    ).read_text() == "cached two\n"
+    assert (cache / "planner.log").read_text() == "original planner"
+    assert (cache / "task_1.log").read_text() == "original task"
 
 
 def test_fetch_outputs_downloads_complete_configured_artifact_set():
@@ -1812,3 +1822,14 @@ def test_cloud_rejects_invalid_owned_strict_retry_identity(tmp_path, identity):
     )
     with pytest.raises(RuntimeError, match="invalid strict-retry identity"):
         site._result_job(site.handle(job, job_id="run").job)
+
+
+def test_attached_run_logs_keep_the_requested_simulation(tmp_path):
+    site, job = cloud_log_site(tmp_path, [log_page("saved failure\n")])
+    site._snapshot_run_job = lambda item, run_id: item
+    run = site.handle(job, job_id="retained-failed-simulation")
+    selected = run.logs(local_dir=tmp_path / "requested-logs", show=False)
+    assert selected == tmp_path / "requested-logs"
+    assert (selected / "planner.log").read_text() == "saved failure\n"
+    assert site.graphql_client.calls[0][0] == "retained-failed-simulation"
+    assert job._job_id == "simulation-1"
