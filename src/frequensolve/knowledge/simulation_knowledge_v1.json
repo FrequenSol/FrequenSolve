@@ -1293,6 +1293,13 @@
       "remediation": "Use a discretization supported by the physics; Galerkin currently supports acoustic, acoustic_axisym, and elastic."
     },
     {
+      "code": "model.attenuation.gsls.unsupported",
+      "severity": "error",
+      "path": "model.attenuation.model",
+      "explanation": "GSLS multi-mechanism attenuation is a time-domain constitutive law; frequency-domain, imaging and FWI workflows cannot use it.",
+      "remediation": "Use attenuation model 'kjartansson' (or 'none') for frequency-domain workflows; 'gsls' is for TransientJob only."
+    },
+    {
       "code": "model.missing",
       "severity": "warning",
       "path": "model",

@@ -132,6 +132,31 @@ def _validate_model(model: Any, ctx: _ValidationContext) -> None:
             path="model.dimension",
         )
 
+    for index, surface in enumerate(getattr(model, "surfaces", []) or []):
+        if not getattr(surface, "is_reduced", False):
+            continue
+        path = f"model.surfaces[{index}].fracture_model"
+        if ctx.workflow not in {None, "mesh", "transient"}:
+            ctx.report.error(
+                "model.fracture.solve.unsupported",
+                "Reduced fracture seismic solves require the transient workflow.",
+                path=path,
+            )
+
+    attenuation = getattr(model, "attenuation_model", None)
+    if (
+        isinstance(attenuation, str)
+        and attenuation.strip().casefold() == "gsls"
+        and ctx.workflow not in {None, "mesh", "transient"}
+    ):
+        ctx.report.error(
+            "model.attenuation.gsls.unsupported",
+            "gsls attenuation is transient-only; use kjartansson for "
+            "frequency-domain workflows.",
+            path="model.attenuation_model",
+            hint="Use TransientJob for gsls, or set attenuation_model='kjartansson'.",
+        )
+
     seen_ids: set[int] = set()
     for index, subdomain in enumerate(getattr(model, "subdomains", []) or []):
         sub_path = f"model.subdomains[{index}]"

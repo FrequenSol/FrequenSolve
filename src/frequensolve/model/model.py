@@ -458,7 +458,7 @@ class ModelBase(ExtraFieldsMixin):
                 ),
             )
             if attenuation is not None:
-                model._attenuation_extra = attenuation.extra
+                model._attenuation_extra = attenuation.fs_extra()
             model.extra = data
             return model
         if class_name in class_registry:

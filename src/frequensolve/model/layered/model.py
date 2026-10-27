@@ -495,7 +495,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             property_spaces=property_spaces,
         )
         if attenuation is not None:
-            model._attenuation_extra = attenuation.extra
+            model._attenuation_extra = attenuation.fs_extra()
         model.extra = data
 
         def add_model_surface(surface_payload: Mapping[str, Any]) -> None:
