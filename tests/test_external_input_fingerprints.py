@@ -8,6 +8,7 @@ import pytest
 
 from frequensolve.imaging.jobs import ControlGradientJob
 from frequensolve.orchestrator.sites.base import BaseSite
+from frequensolve.orchestrator.sites.hpc.project_guard import claim_project
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
 from frequensolve.simulation.artifact_contract import (
     ArtifactCatalog,
@@ -376,6 +377,9 @@ def test_direct_remote_submission_stages_nested_and_absolute_vector_payloads(
             SlurmSite._transfer_remote_simulation_inputs
         )
 
+        def _claim_remote_project(self, path):
+            claim_project(self.work_dir, str(Path(path).resolve()))
+
         def put(self, local, target):
             target = Path(target)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -570,6 +574,9 @@ def test_slurm_sites_upload_operator_inputs_once(tmp_path):
         _transfer_remote_simulation_inputs = (
             SlurmSite._transfer_remote_simulation_inputs
         )
+
+        def _claim_remote_project(self, path):
+            claim_project(self.work_dir, str(Path(path).resolve()))
 
         def put(self, local, target):
             uploads.append((Path(local), Path(target)))

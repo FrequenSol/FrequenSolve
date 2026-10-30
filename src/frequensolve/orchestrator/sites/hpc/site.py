@@ -3392,6 +3392,27 @@ class SlurmSite(BaseSite):
         """Sync the project to the site."""
         project._transfer(self)
 
+    def _claim_remote_project(self, project_path):
+        """Reject cross-project uploads before changing persistent remote inputs."""
+        source = str(Path(project_path).expanduser().resolve())
+        script = Path(__file__).with_name("project_guard.py").read_text()
+        command = "python3 -c " + shlex.quote(script)
+        command += " " + shlex.quote(str(self.work_dir)) + " " + shlex.quote(source)
+        response = self.run_login(command, timeout=30)
+        try:
+            result = json.loads(response)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Could not verify remote project ownership; no project files were uploaded"
+            ) from exc
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            detail = (
+                result.get("error", "invalid response")
+                if isinstance(result, dict)
+                else "invalid response"
+            )
+            raise RuntimeError(f"Remote project ownership check failed: {detail}")
+
     def _sync_result(self, result):
         """Sync a result with the site."""
         raise NotImplementedError(
@@ -3767,6 +3788,7 @@ class SlurmSite(BaseSite):
             Path(remote_job).parent / "logs" / "batch" / f"sweep-{uuid4().hex}.slurm"
         )
         remote_runner = self._adaptive_scheduler_remote_path()
+        self._transfer_remote_simulation_inputs(job)
         with _temporary_text_file(
             script,
             suffix=".slurm",
@@ -3778,7 +3800,6 @@ class SlurmSite(BaseSite):
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)
 
-        self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
         runner_resource = (
@@ -3826,6 +3847,7 @@ class SlurmSite(BaseSite):
     def _transfer_remote_simulation_inputs(self, job: BaseJob) -> None:
         """Transfer the simulation JSON and direct file inputs for a staged job."""
 
+        self._claim_remote_project(job.project_path)
         local_sim, remote_sim = job.save_simulation_for_remote(
             self.__class__.__name__, self.work_dir
         )

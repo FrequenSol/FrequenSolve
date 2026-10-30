@@ -564,6 +564,9 @@ class Project:
             return
 
         remote = self._remote_project_root(site)
+        claim = getattr(site, "_claim_remote_project", None)
+        if callable(claim):
+            claim(self.path)
         project_file = self.path / f"{self.name}.json"
         if project_file.exists():
             site.put(project_file, remote / f"{self.name}.json")

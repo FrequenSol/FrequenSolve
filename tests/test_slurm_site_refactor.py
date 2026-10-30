@@ -876,8 +876,10 @@ def test_slurm_job_transfer_overwrites_remote_simulation_and_mesh(
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0])
     puts = []
     captured = {}
+    claimed = []
 
     def fake_put(local, remote):
+        assert claimed == [project.path]
         local = Path(local)
         remote = Path(remote)
         puts.append((local, remote))
@@ -886,6 +888,7 @@ def test_slurm_job_transfer_overwrites_remote_simulation_and_mesh(
 
     monkeypatch.setattr(site, "put", fake_put)
     monkeypatch.setattr(site, "run_login", lambda cmd: "")
+    monkeypatch.setattr(site, "_claim_remote_project", claimed.append)
 
     site._transfer_SLURM_job("script", job)
 

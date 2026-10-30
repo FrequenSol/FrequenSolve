@@ -72,6 +72,14 @@ republication with the same id and payload does not execute the request twice.
 An id cannot be reused for different work. Durable session records remain under
 ``<work_dir>/.fs_sessions/<session_id>`` after the allocation ends.
 
+The SLURM ``work_dir`` is a persistent project directory. Before uploading inputs,
+FrequenSolve records its originating local project directory and rejects uploads
+from a different project. Repeated runs and updated inputs from the same project
+continue to use the existing layout; no new project directories are created.
+Use a separate ``work_dir`` for each local project. Older remote directories are
+adopted only when their saved project metadata identifies the same origin;
+ambiguous ownership or a moved local project produces an error before upload.
+
 Creating the session directory and publishing each lease renewal, request and
 command are login-node filesystem commands (``mkdir``, ``mv`` and ``ln``).
 Each may take up to ``session_command_timeout`` seconds (default 120), set in
