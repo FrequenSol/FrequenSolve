@@ -44,7 +44,7 @@ def test_surface_and_width_units():
         {"sigma": math.nan * ureg.m},
         {"sigma": [1, 2] * ureg.m},
         {"sigma": 1 * ureg.s},
-        {"sigma": 1 * ureg.m, "cutoff": 1},
+        {"sigma": 1 * ureg.m, "cutoff": 4},
         {"sigma": 1 * ureg.m, "cutoff": math.inf},
         {"sigma": 1 * ureg.m, "boundary": "drop"},
         {"sigma": 1 * ureg.m, "surface": ""},
@@ -128,3 +128,10 @@ def test_sampled_auto_bandwidth_preserves_samples(tmp_path):
     frequency = job._time_payload()["point_source"]["f_max"]
     assert 30 < frequency < 40
     np.testing.assert_array_equal(job.source.wavelet.samples, samples)
+
+
+def test_one_sigma_default_preserves_normalized_support_contract():
+    support = GaussianSupport(2 * ureg.m)
+    assert support.cutoff == 1
+    assert support.to_fs()["cutoff"] == 1
+    assert support.boundary == "truncate_renormalize"

@@ -536,14 +536,14 @@ def _acoustic_reciprocal_receiver(
 class GaussianSupport:
     """Compact isotropic Gaussian support, integrated and normalized by Sauce.
 
-    ``sigma`` is a physical length. The radial Gaussian tapers smoothly from
-    ``(cutoff - 1) * sigma`` to zero at ``cutoff * sigma``. ``surface`` selects
+    ``sigma`` is a physical length. The radial Gaussian tapers smoothly to zero
+    at one sigma; ``cutoff`` is fixed at 1. ``surface`` selects
     a named exterior mesh surface; otherwise this is a volume source. The
     authored amplitude is the total integrated strength, including when clipped.
     """
 
     sigma: Any
-    cutoff: float = 4.0
+    cutoff: float = 1.0
     boundary: str = "truncate_renormalize"
     surface: Optional[str] = None
     tolerance: float = 1e-4
@@ -559,8 +559,8 @@ class GaussianSupport:
             raise ValueError(
                 "GaussianSupport.sigma must be a finite positive scalar length"
             )
-        if not np.isfinite(self.cutoff) or self.cutoff < 2 or self.cutoff > 8:
-            raise ValueError("GaussianSupport.cutoff must be between 2 and 8")
+        if not np.isfinite(self.cutoff) or self.cutoff != 1:
+            raise ValueError("GaussianSupport.cutoff must be 1 (one-sigma support)")
         if self.boundary not in {"truncate_renormalize", "reject"}:
             raise ValueError(
                 "GaussianSupport.boundary must be truncate_renormalize or reject"
