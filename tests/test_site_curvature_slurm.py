@@ -74,6 +74,30 @@ def _streams(stdout, stderr, status):
     return None, _Stream(stdout, status), _Stream(stderr, status)
 
 
+def slurm_allocation_environment(
+    bin_dir, *, nodes=1, ranks_per_node=4, cores_per_node=8, job_id="4242"
+):
+    """Return the allocation variables sbatch gives a job, with a fake scontrol.
+
+    Batch scripts run inside an allocation, so srun sweeps can map rank slots
+    onto ``SLURM_JOB_NODELIST`` hosts and ``SLURM_TASKS_PER_NODE`` counts.
+    """
+
+    scontrol = Path(bin_dir) / "scontrol"
+    scontrol.write_text(
+        "#!/bin/bash\n"
+        '[ "${1:-} ${2:-}" = "show hostnames" ] || exit 1\n'
+        "printf '%s\\n' ${3//,/ }\n"
+    )
+    scontrol.chmod(0o755)
+    return {
+        "SLURM_JOB_ID": str(job_id),
+        "SLURM_JOB_NODELIST": ",".join(f"node{index:02d}" for index in range(nodes)),
+        "SLURM_TASKS_PER_NODE": f"{ranks_per_node}(x{nodes})",
+        "SLURM_JOB_CPUS_PER_NODE": f"{cores_per_node}(x{nodes})",
+    }
+
+
 class FakeCluster:
     """Login node, scheduler and compute nodes backed by local directories."""
 
@@ -84,7 +108,7 @@ class FakeCluster:
         self.calls = tmp_path / "sauce-calls.jsonl"
         self.launches = tmp_path / "launches.txt"
         self.oracle = oracle
-        self.login, self.compute, self.puts, self.gets = [], [], [], []
+        self.login, self.puts, self.gets = [], [], []
         self.jobs, self.directives, self.allocations = {}, {}, set()
         self.sauce_status = 0
         self.sauce_message = "ERROR: covariance factors are invalid"
@@ -200,10 +224,6 @@ class FakeCluster:
                 self.oracle(Path(record["path"]))
         self.processed = len(records)
 
-    def run_compute_cmd(self, command):
-        self.compute.append(command)
-        return _streams(*self._shell(command, FAKE_SAUCE_WRITE="1"))
-
     # -- transfers -----------------------------------------------------------
 
     def put(self, local, remote, *, compress=True):
@@ -265,7 +285,7 @@ def cluster(tmp_path, monkeypatch):
             run_config=SlurmRunConfig(poll_interval=0),
             **options,
         )
-        for name in ("run_login_cmd", "run_compute_cmd", "put", "get"):
+        for name in ("run_login_cmd", "put", "get"):
             setattr(site, name, getattr(fake, name))
         return site, fake
 
@@ -585,36 +605,6 @@ def test_dispatcher_without_curvature_routing_gets_a_hint(cluster, tmp_path):
     assert fake.jobs == {"100": 1}
 
 
-def test_attached_allocation_runs_on_its_batch_host(cluster, tmp_path):
-    site, fake = cluster()
-    distributed = _manual_request(tmp_path, "rickett")
-    single = _manual_request(tmp_path, "mesh_sample")
-    with pytest.raises(RuntimeError, match="No active compute allocation"):
-        site.run_curvature(distributed, mode="attached")
-    site.pool.id = "77"
-    fake.allocations.add("77")
-
-    def attach():
-        site._compute_client = DummySSHClientClass(DummyRawClient())
-        site.pool.nhost, site.pool.nproc, site.pool.ncore = 2, 4, 16
-
-    site._attach_compute_client = attach
-
-    site.run_curvature(distributed)
-    site.run_curvature(single)
-
-    assert fake.jobs == {}
-    assert all("nohup bash" in command for command in fake.compute)
-    assert [record["argv"][1] for record in fake.sauce_calls()] == ["4", "8"]
-    assert [line[:5] for line in fake.launch_lines()] == [
-        ["srun", "--ntasks", "4", "--cpus-per-task", "4"],
-        ["srun", "--ntasks", "1", "--cpus-per-task", "8"],
-    ]
-    assert (distributed.parent / "pending.h5").read_text() == "output"
-    with pytest.raises(ValueError, match="pass mode='batch'"):
-        site.run_curvature(distributed, nodes=2)
-
-
 @pytest.mark.integration
 def test_real_sauce_and_mpirun_behind_the_fake_cluster(cluster, tmp_path, monkeypatch):
     """The generated batch script runs real Sauce ranks on mirrored remote files."""
@@ -654,3 +644,34 @@ def test_real_sauce_and_mpirun_behind_the_fake_cluster(cluster, tmp_path, monkey
         local.covariance(expected, projection=projection).read("variance"),
         rtol=1e-12,
     )
+
+
+def test_provisioned_allocation_runs_curvature_in_its_session(cluster, tmp_path):
+    site, fake = cluster()
+    request = _manual_request(tmp_path, "rickett")
+    with pytest.raises(RuntimeError, match="No persistent allocation is active"):
+        site.run_curvature(request, mode="attached")
+
+    class Session:
+        _closed, owned, allocation_id = False, True, "77"
+        _config = {"nodes": 2, "total_ranks": 4}
+
+        def __init__(self):
+            self.requests = []
+
+        def wait_ready(self, timeout=None):
+            return self
+
+        def run_curvature(self, path, **options):
+            self.requests.append(Path(path))
+
+    session = Session()
+    site._adopt_session(session)
+
+    site.run_curvature(request)
+
+    # The session stages, runs and fetches the request; no batch job is spent.
+    assert session.requests == [request.absolute()]
+    assert fake.jobs == {}
+    with pytest.raises(ValueError, match="pass mode='batch'"):
+        site.run_curvature(request, nodes=2)

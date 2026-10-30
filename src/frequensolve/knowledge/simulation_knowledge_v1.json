@@ -1286,11 +1286,18 @@
       "remediation": "Use 2, 2.5, or 3 and follow any formulation-specific dimension constraints."
     },
     {
+      "code": "helmholtz.axisymmetric.s_projection.unsupported",
+      "severity": "error",
+      "path": "helmholtz_projection.s_projection",
+      "explanation": "The direct solenoidal projection uses Cartesian operators and is unavailable for axisymmetric fields.",
+      "remediation": "Use s_projection=complement for axisymmetric P/S velocity decomposition."
+    },
+    {
       "code": "discretization.method.incompatible",
       "severity": "error",
       "path": "discretization.method",
       "explanation": "The selected finite-element discretization is unavailable for the simulation physics.",
-      "remediation": "Use a discretization supported by the physics; Galerkin currently supports acoustic, acoustic_axisym, and elastic."
+      "remediation": "Use a discretization supported by the physics; Galerkin supports acoustic, elastic, their axisymmetric variants, and coupled_axisym; transient coupled is also supported."
     },
     {
       "code": "model.attenuation.gsls.unsupported",
@@ -1942,6 +1949,13 @@
       "path": "model.dimension",
       "explanation": "The material model dimension does not match the simulation model dimension.",
       "remediation": "Rebuild the model with the spatial dimension required by the simulation."
+    },
+    {
+      "code": "model.fracture.solve.unsupported",
+      "severity": "error",
+      "path": "model.surfaces[*].fracture_model",
+      "explanation": "Reduced fracture seismic solves require native transient Galerkin coupling.",
+      "remediation": "Use a 2D Cartesian elastic or coupled TransientJob with one internal straight fracture and the monolithic CPU solver. Frequency-domain reduced-fracture solves are not supported."
     },
     {
       "code": "model.property.coordinate_units.invalid",

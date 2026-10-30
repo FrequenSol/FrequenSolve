@@ -1,4 +1,3 @@
-import asyncio
 import os
 import shutil
 import socket
@@ -10,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
+from frequensolve.orchestrator.sites.base import JobStatus
 from frequensolve.orchestrator.sites.hpc import auth
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
@@ -1167,8 +1166,9 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
         ('File "/remote/optional.json" not found.\n', FileNotFoundError),
         ("stat remote: No such file or directory\n", FileNotFoundError),
         ("remote open: Permission denied\n", OSError),
-        ("Connection closed\n", OSError),
-        ("Control socket connect: No such file or directory\n", OSError),
+        # Connection failures stay OSErrors but are retryable ConnectionErrors.
+        ("Connection closed\n", ConnectionError),
+        ("Control socket connect: No such file or directory\n", ConnectionError),
     ],
 )
 def test_ssh_proxy_sftp_preserves_transfer_errors(monkeypatch, tmp_path, stderr, error):
@@ -1197,21 +1197,4 @@ def test_slurm_wait_timeout_preserves_non_cancelling_behavior():
     result = run.wait(timeout=0, poll_interval=0, check=False)
 
     assert result.status.state == "timeout"
-    assert cancelled == []
-
-
-def test_attached_slurm_timeout_propagates_without_cancellation():
-    site = object.__new__(SlurmSite)
-    cancelled = []
-    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
-
-    async def wait_for_timeout():
-        future = asyncio.get_running_loop().create_future()
-        run = RunHandle(site=site, job=SimpleNamespace(), id="128", mode="attached")
-        run.backend["future"] = future
-        with pytest.raises(asyncio.TimeoutError):
-            await site._wait_attached_run_async(run, timeout=0)
-
-    asyncio.run(wait_for_timeout())
-
     assert cancelled == []

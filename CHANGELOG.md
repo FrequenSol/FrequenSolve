@@ -5,6 +5,29 @@ prepared.
 
 ## Unreleased
 
+- Persistent sessions can be reused across scripts.
+  `site.session(reuse=project, linger="30m")` adopts a compatible session
+  that the same user started with the same reuse scope and that no client is
+  attached to, instead of queueing a new allocation; `share=True` also joins
+  one in use. Only the user's own `FS_session` jobs recorded under the site's
+  work directory qualify. `linger` (default 0) keeps the allocation that long
+  once nothing is attached or running, so the context only detaches on exit;
+  `session.release()` and `site.release_sessions(...)` end it and
+  `site.sessions(...)` lists sessions. `site.attach_session(reuse=...)` adopts
+  without queueing, and `PersistentAllocation` takes the same options.
+- `SlurmSite.provision()` and `attach_allocation()` are deprecated in favor of
+  `site.session(...)`. `provision()` now starts a persistent session (`tasks`
+  ranks spread evenly over `nodes`) that `site.run`/`site.submit` in `"auto"`
+  or `"attached"` mode and attached curvature use until `deprovision()` or
+  `close()`; `attach_allocation(job_id)` reconnects only to a FrequenSolve
+  session's allocation. The SSH-launched attached sweep is removed: on
+  Stampede3 an SSH shell on a held node lacks the job's Slurm and module
+  environment, so `ibrun` could not launch there. `compute_client`,
+  `compute_host` and `run_compute`/`run_compute_cmd` are removed with it.
+- Persistent sessions on GPU partitions export the partition environment, size
+  workers by device memory and give each `ibrun` step's ranks the device under
+  their slot. GPU placement runs through an `fs-gpu-place` wrapper file
+  because TACC's `ibrun` re-splits launch arguments.
 - Background checkpoints follow Sauce's `fs-background-state-2`: one HDF5 file
   per MPI rank (`"rank"`) or one file per task written by every rank
   (`"shared"`). The new site option and `site.toml` key `background_layout`
@@ -58,6 +81,57 @@ prepared.
   (preserving its mtime, so rsync skips it) and scans input references
   without the coefficients. Job, task and compatibility fingerprints hash a
   saved JSON document once per file state.
+- Added persistent SLURM allocation sessions with an allocation-resident
+  scheduler, adaptive frequency workers, per-run cancellation and reconnectable
+  run handles. Initialization, smoothing, packing and curvature share the same
+  resource pool. `FWI.run(execution=PersistentAllocation(...))` owns a session
+  through the complete inversion and releases it on exit; an open session may
+  also be borrowed. Controller liveness is judged by an advancing heartbeat
+  sequence on the client's monotonic clock (`heartbeat_timeout`, default the
+  site's `scheduler_heartbeat_timeout`), never by comparing hosts' clocks;
+  leases renew during uploads and tolerate clock skew. Owned sessions drain
+  without `scancel` while the controller is alive (`cleanup_timeout=None` by
+  default), and cleanup failures after successful work warn instead of
+  discarding results. `FWI.run` saves the final result before releasing its
+  allocation.
+- `scheduler_heartbeat_timeout` now defaults to 300 seconds (was 60) for
+  adaptive-scheduler batch runs and persistent sessions, and the starter site
+  configuration writes 300: shared scratch filesystems can stall heartbeat
+  writes for minutes. Explicitly configured values are honoured; a session
+  whose window is below 120 seconds logs a warning when it starts.
+- Persistent-session filesystem commands on the login node (session directory
+  creation and the `mv`/`ln` that publish lease renewals, requests and
+  commands) are bounded by the new `run_config.session_command_timeout`
+  (default 120 s; also `site.session(session_command_timeout=...)` and
+  `PersistentAllocation(session_command_timeout=...)`) instead of the 15 s
+  solver identity-query bound, which failed sessions on slow work
+  filesystems. A timeout or failure names the command and remote path instead
+  of reporting "Enterprise HPC preflight could not verify operate allocation
+  session".
+- SLURM uploads and downloads retry stalls and SSH connection failures:
+  `transfer_attempts` (site profile, default 3) attempts with a short backoff,
+  after checking that the login connection still answers and switching to
+  another live `~/.ssh/control` socket if it does not (the user's control
+  master is never closed). `transfer_stall_timeout` (default 120 s) sets how
+  long a transfer may make no progress; rsync now also passes it as
+  `--timeout`, and rsync retries resume partial files. OpenSSH SFTP
+  connection failures raise `ConnectionError` and control-socket status 255
+  raises `SSHTransportError` (both subclasses of the previous `OSError` and
+  `RuntimeError`).
+- SLURM profiles can run on the scratch filesystem: `storage = "scratch"`
+  (site profile or `SlurmSite(storage=...)`) moves the default `work_dir` from
+  `$WORK/frequensolve` to `$SCRATCH/frequensolve`, and with it persistent
+  session directories, heartbeat/status files and curvature mirrors. The
+  default stays `"work"`. `work_dir`, `scratch_dir` and `tmp_dir` may start
+  with a remote variable such as `$SCRATCH` or `${WORK}`, resolved once in the
+  login shell, cached and logged; a `$` elsewhere in these paths is rejected.
+- A dying session controller leaves a trace: it enables `faulthandler`, so
+  fatal signals dump every thread's traceback to `controller.log`, and it logs
+  an unhandled error's traceback before cleanup, so a failing final status
+  write no longer hides the cause. Client statuses for a lost heartbeat, a
+  failed controller or an ended Slurm job include the remote `controller.log`
+  path (`session.controller_log`).
+
 - Optimizer iteration records (`InexactNewtonIteration`) share the accepted
   model, gradients and steps as read-only views instead of copying five
   vectors per iteration; callbacks must copy a vector before modifying it.

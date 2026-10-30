@@ -8,6 +8,53 @@ space, observed data, a misfit, the frequencies and a site; gradients,
 Jacobians, normal operators, the :term:`FWI`, :term:`LSRTM` and :term:`RTM`
 workflows and the coherent focusing objectives all derive from it.
 
+FWI in one persistent allocation
+--------------------------------
+
+On Stampede3 or another SLURM site, use an inversion-owned execution policy to
+avoid a new batch submission for every objective, gradient and normal action::
+
+   from frequensolve.orchestrator.sites import (
+       AdaptiveWorkers,
+       PersistentAllocation,
+   )
+
+   result = fwi.run(
+       execution=PersistentAllocation(
+           nodes=1,
+           ranks_per_node=8,
+           duration="02:00:00",
+           workers=AdaptiveWorkers(max_ranks_per_task=2),
+       )
+   )
+
+``fwi`` is an existing ``FWI`` object whose problem uses a SLURM site. These
+resource values are examples; choose a walltime and worker limit appropriate
+for the problem. ``FWI.run`` owns the allocation through preparation, all
+stages, backtracking, normal actions, smoothing, curvature and final output
+writing. It releases the allocation on completion, error or interruption.
+The caller's site and problem views return to their original executor when the
+run exits.
+
+Before releasing an owned allocation, ``FWI.run`` saves the final result
+(``FWIResult.save``) under ``<workdir>/fwi_results/session_<session_id>``,
+even without a ``checkpoint``; ``fwi.result_path`` names the directory and
+``FWIResult.load(fwi.result_path, problem)`` reads it back. If releasing the
+allocation fails after a successful inversion, the result is still returned
+and a ``RuntimeWarning`` names the session and Slurm allocation. A drain that
+outlasts ``cleanup_timeout`` or loses the controller heartbeat also warns and
+leaves the allocation to its lease and walltime instead of cancelling work
+mid-write. ``PersistentAllocation(heartbeat_timeout=..., cleanup_timeout=...)``
+tunes both, and ``session_command_timeout`` bounds each session filesystem
+command on the login node; see :ref:`site-configuration`.
+
+To reuse a session across workflows, enter ``problem.site.session(...)`` and
+pass that open session as ``fwi.run(execution=session)``. FWI borrows it and
+leaves teardown to the outer context. Alternatively, construct an
+``ImagingProblem(..., site=session)`` inside the context and use its operators
+and workflows normally. See :ref:`site-configuration` for cancellation,
+reconnection, leases and finite-walltime behavior.
+
 Mesh-gradient field outputs
 ---------------------------
 
@@ -2763,8 +2810,8 @@ contiguous coefficient rows; mesh transfer and sampling always run on one rank
 with the whole thread budget. ``LocalSite`` launches ``curvature_ranks`` MPI
 ranks (default one) that share its worker thread budget, disables Open MPI's
 default one-core rank binding and honors explicit thread environment overrides.
-SLURM sites run each operation on compute nodes: inside an attached running
-allocation, or as a batch job sized by ``curvature_run_config`` (default
+SLURM sites run each operation on compute nodes: inside a persistent session
+(``site.session(...)``), or as a batch job sized by ``curvature_run_config`` (default
 ``run_config``; one rank per socket unless ``ranks_per_node`` is set, one node
 for mesh operations). Every rank gets its own cores (``srun --cpus-per-task``,
 TACC ``task_affinity`` or Open MPI ``slot:PE`` mapping) with

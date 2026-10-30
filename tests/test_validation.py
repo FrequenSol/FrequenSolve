@@ -1131,3 +1131,27 @@ def test_validation_rejects_volume_injection_in_elastic_physics(tmp_path):
         receiver_field="velocity_z",
     )
     assert "acquisition.source.kind.unsupported" in _codes(job.validate())
+
+
+@pytest.mark.parametrize(
+    "physics", ["elastic_axisym", "acoustic_axisym", "coupled_axisym"]
+)
+def test_axisymmetric_galerkin_helmholtz_fields(tmp_path, physics):
+    job = _simple_job(tmp_path, physics=physics, receiver_field="p_velocity_r")
+    job.simulation.discretization = Discretization(method="Galerkin")
+    job.simulation.extra["helmholtz_projection"] = {"parts": ["p", "s"]}
+    job += VtkOutput(name="split", fields=["velocity", "p_velocity", "s_velocity"])
+    report = job.validate()
+    assert report.ok, report.issues
+    job.simulation.extra["helmholtz_projection"]["s_projection"] = "solenoidal"
+    assert "helmholtz.axisymmetric.s_projection.unsupported" in _codes(job.validate())
+
+
+@pytest.mark.parametrize("physics", ["elastic_axisym", "coupled_axisym"])
+def test_validation_rejects_unavailable_field_for_galerkin_axisymmetric(
+    tmp_path, physics
+):
+    job = _simple_job(tmp_path, physics=physics, receiver_field="stress")
+    job.simulation.discretization = Discretization(method="Galerkin")
+
+    assert "field.unsupported" in _codes(job.validate())

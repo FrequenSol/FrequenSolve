@@ -63,6 +63,7 @@ from frequensolve.orchestrator.sites.base import (
     RunResult,
     _remove_emptied_directories,
 )
+from frequensolve.orchestrator.sites.execution import resolve_execution
 from frequensolve.project import Project
 from frequensolve.simulation.jobs.base import BaseJob
 
@@ -570,7 +571,7 @@ class Backend:
         submit_options: Optional[Mapping[str, Any]] = None,
         prefix: str = "imaging",
     ) -> None:
-        self.site = site
+        self._site = site
         self.workdir = Path(workdir).expanduser().resolve()
         self.submit_options: Dict[str, Any] = dict(submit_options or {})
         for key in ("check", "postprocess_only"):
@@ -584,6 +585,15 @@ class Backend:
         self._worker_seconds = 0.0
         self._unmeasured_runs = 0
         self._recorders: Dict[int, List[BaseJob]] = {}
+
+    @property
+    def site(self) -> BaseSite:
+        """The executor currently bound to this backend's caller-owned site."""
+        return resolve_execution(self._site)
+
+    @site.setter
+    def site(self, value: BaseSite) -> None:
+        self._site = value
 
     def timing_snapshot(self) -> Tuple[float, int]:
         """Return counters for measuring a complete stage through this backend."""

@@ -27,8 +27,11 @@ from frequensolve.simulation.study import *  # noqa: F403
 from frequensolve.simulation.study import __all__ as _study_all
 from frequensolve.simulation.task_index import *  # noqa: F403
 from frequensolve.simulation.task_index import __all__ as _task_index_all
+from frequensolve.simulation.time import *  # noqa: F403
+from frequensolve.simulation.time import __all__ as _time_all
 
 __all__ = unique_exports(
+    _time_all,
     _artifact_all,
     _catalog_all,
     _transfer_all,

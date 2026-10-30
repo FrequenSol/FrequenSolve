@@ -21,6 +21,22 @@ from frequensolve.orchestrator.sites.config_file import (
     load_site_config,
     site_config_path,
 )
+from frequensolve.orchestrator.sites.execution import PersistentAllocation
+
+AdaptiveWorkers = optional_class(
+    "AdaptiveWorkers",
+    "frequensolve.orchestrator.sites.hpc.AdaptiveWorkers",
+    extra="hpc",
+    dependencies=("paramiko", "keyring"),
+    module=__name__,
+)
+AllocationSession = optional_class(
+    "AllocationSession",
+    "frequensolve.orchestrator.sites.hpc.AllocationSession",
+    extra="hpc",
+    dependencies=("paramiko", "keyring"),
+    module=__name__,
+)
 
 LocalSite = optional_class(
     "LocalSite",
@@ -110,6 +126,9 @@ GraphQLClient = optional_class(
 )
 
 __all__ = [
+    "AdaptiveWorkers",
+    "AllocationSession",
+    "PersistentAllocation",
     "AWSSite",
     "AWSSiteConfig",
     "BaseSite",

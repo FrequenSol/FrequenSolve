@@ -117,18 +117,35 @@ guide <../../guides/ssh-connection-sharing.md>`.
 Test The Site Configuration
 ---------------------------
 
-Verify access, ``$WORK`` resolution, the solver path, and preset modules without
-submitting a Slurm job:
+Verify access, work-directory (``$WORK`` or ``$SCRATCH``) resolution, the solver
+path, and preset modules without submitting a Slurm job:
 
 .. code-block:: bash
 
    frequensolve site check
 
-The default remote work directory is ``$WORK/frequensolve``. An advanced
-profile may instead set a concrete absolute ``work_dir``. TOML does not expand
-remote shell variables, so do not write ``work_dir = "$WORK/frequensolve"``.
+The default remote work directory is ``$WORK/frequensolve``. When the work
+filesystem is slow or overloaded, run on ``$SCRATCH`` instead by adding one
+line to the profile:
+
+.. code-block:: toml
+
+   [sites.stampede3]
+   # ...
+   storage = "scratch"
+
+``storage = "scratch"`` moves the work directory to ``$SCRATCH/frequensolve``,
+and with it the project, simulation and job files, persistent-session
+directories, scheduler heartbeat and status files, and curvature mirrors.
+``frequensolve site check`` prints the resolved directory. For another
+location, set ``work_dir`` (without ``storage``); it may start with ``$WORK``
+or ``$SCRATCH``, which FrequenSolve resolves once on the login node, for
+example ``work_dir = "$SCRATCH/frequensolve-runs"``. ``scratch_dir`` and
+``tmp_dir`` accept the same form.
+
 Stampede3 ``$SCRATCH`` is not backed up and is subject to purge; consult TACC's
-current storage policy before configuring alternate job storage.
+current storage policy, fetch the results you need to keep, and do not leave
+inputs there that you cannot regenerate.
 
 Solver Router And Precision
 ---------------------------
@@ -183,6 +200,41 @@ solver logs, and only then scale the mesh, frequencies, nodes, or duration.
 
 FrequenSolve submits computation to SLURM compute nodes; do not run solver work
 on a Stampede3 login node.
+
+Run On The PVC GPU Nodes
+------------------------
+
+The ``pvc`` partition has four Intel Data Center GPU Max 1550 GPUs per node,
+each with two stacks. A solver installation built with Intel GPU support
+assembles and solves on the GPU stacks when it runs there, and solves on the
+CPU on every other partition, so one installation serves both. Select the
+partition for a run:
+
+.. code-block:: python
+
+   site = fs.Site(queue="pvc", nodes=1, duration="01:00:00")
+   run = site.submit(job, fetch=True)
+
+On ``pvc`` FrequenSolve starts one MPI rank per GPU stack (eight per node, 12
+OpenMP threads each) unless the run passes ``ranks_per_node``; the profile's
+``ranks_per_node`` applies to the CPU partitions. Frequencies that run at the
+same time get separate stacks, and each frequency's rank count accounts for the
+64 GiB of device memory per stack as well as host memory. The packaged preset
+allows up to four ``pvc`` nodes and 48 hours per job; TACC also limits each user
+to two running ``pvc`` jobs.
+
+Ranks exchange data directly between GPU stacks through GPU-aware Intel MPI:
+the preset's ``pvc`` environment enables Intel MPI's GPU support with a
+compatible runtime, and the solver uses it whenever it is on. To stage the
+exchanges through host memory instead, add ``FS_CUDA_AWARE_MPI = "0"`` to the
+profile's ``[sites.stampede3.environment]`` table.
+
+To keep a job on the CPU of a ``pvc`` node, for example to compare results,
+disable the GPU solve before saving the simulation:
+
+.. code-block:: python
+
+   sim.solver.extra["gpu_backend"] = "none"
 
 Troubleshooting
 ---------------

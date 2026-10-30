@@ -515,9 +515,11 @@ class LayeredAuthoringMixin:
         property_units: Optional[Any] = None,
         property_system: Optional[str] = None,
         subdomain_name: Optional[str] = None,
+        fracture_model: str = "volumetric",
+        constitutive: Optional[Mapping[str, float]] = None,
         **kwargs,
     ) -> Fracture:
-        """Add a curve-based fracture opened by the layered mesh generator.
+        """Add a fracture represented as an opened volume or a closed interface.
 
         ``gap`` is the fracture aperture as a one-dimensional curve, usually an
         ``xarray.DataArray`` over the horizontal coordinate. ``depth`` locates
@@ -549,6 +551,11 @@ class LayeredAuthoringMixin:
             property_units: Default units for fracture material properties.
             property_system: Coordinate-system name for fracture material
                 property grids.
+            fracture_model: ``volumetric`` (default), ``fluid_filled``,
+                ``linear_slip``, ``lower_dimensional_fluid`` (acoustic waves),
+                ``lower_dimensional_viscous_fluid`` (viscous acoustic flow), or
+                ``hydraulic`` (diffusion/storage/leakoff). Reduced selectors
+                currently support 2D mesh generation only.
             subdomain_name: Optional name for the generated material subdomain.
             **kwargs: Extra serialized fracture fields preserved on export.
 
@@ -584,6 +591,8 @@ class LayeredAuthoringMixin:
             property_units=property_units,
             property_system=property_system,
             subdomain_name=subdomain_name,
+            fracture_model=fracture_model,
+            constitutive=constitutive,
             **kwargs,
         )
         self += fracture

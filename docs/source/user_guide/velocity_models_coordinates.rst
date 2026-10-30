@@ -126,8 +126,8 @@ to that ordering and tells the mesher where the model is truncated.
      - Adds geometry and optional subdomains that meshing and output requests
        can reference.
    * - :term:`Fracture <fracture>`
-     - Defines a curve that the mesh generator opens into an explicit gap, or
-       can later use as the support for a reduced fracture model.
+     - Defines an opened volume or a closed interface with aperture-defined
+       support for a reduced fracture model.
    * - Uniform sampled view
      - ``model.sample_uniform(...)`` creates an ``xarray.Dataset`` for QC,
        plotting, and export.
@@ -191,6 +191,57 @@ Use an :term:`xarray` ``DataArray`` when the aperture varies along the fracture:
        physics="acoustic",
        properties={"vp": 1.5, "rho": 1.0},
    )
+
+The ``fracture_model`` selector defaults to ``"volumetric"``. Use
+``"fluid_filled"`` with fluid material ``properties`` to create an explicitly
+acoustic volume. Use ``"linear_slip"``, ``"lower_dimensional_fluid"`` (acoustic waves),
+``"lower_dimensional_viscous_fluid"`` (viscous acoustic flow), or
+``"hydraulic"`` (diffusion/storage/leakoff) to
+mesh an unopened interface in 2D or 3D:
+
+.. code-block:: python
+
+   model.add_fracture(
+       "slip", depth=500.0, gap=gap,
+       fracture_model="linear_slip", interface=False,
+   )
+
+Reduced models retain the aperture field to locate closure boundaries and the
+positive-aperture support, but create no fracture volume cells or material
+subdomains. They reject volume ``mesh_block_id``, ``properties``, ``physics``,
+and ``p_enrich``. The two generated surface aliases remain: ``slip_top`` tags
+the active interface; ``slip_bottom`` tags its welded continuation.
+
+Reduced selectors support native transient Galerkin elasticity or coupled
+acoustic–elastic jobs: multiple non-intersecting fractures, piecewise-straight in
+Cartesian or axisymmetric 2D, or non-planar height graphs ``z(x,y)`` in Cartesian
+3D; one MPI rank, average-acceleration Newmark, and a monolithic CPU solver. Fractures must
+stay outside PML. Frequency jobs and block-Schur coupling are rejected.
+In 3D, closure contours must follow generated surface-cell edges. The generator
+fits aperture grid knots and coordinate-aligned closure roots. Borehole sketches
+retain reduced fractures in formation while excluding borehole fluid and casing.
+Mixed reduced/volumetric stacks are supported; volumetric pinch-out must follow
+complete plan-cell edges. Borehole closure must fit the sketch cells. Intersecting
+fracture junctions and arbitrary closure footprints remain unsupported.
+
+Use ``constitutive`` to supply SI-valued ``fluid_density`` (kg/m³),
+``fluid_bulk_modulus`` (Pa), ``dynamic_viscosity`` (Pa·s), ``leakoff``
+(m/(Pa·s)), and normal/tangential stiffness (Pa/m). Defaults are water density
+1000, bulk modulus 2.25e9, viscosity 0.001, and zero leakoff/tangential
+stiffness. Omitted normal stiffness is bulk modulus divided by aperture for
+linear slip and zero for the fluid models.
+
+``lower_dimensional_fluid`` includes fluid inertia and acoustic propagation.
+``lower_dimensional_viscous_fluid`` also resolves viscous shear through aperture
+modes (``aperture_modes``, an integer from 1 to 64, default 12), using
+``dynamic_viscosity`` in Pa s. Both support Cartesian 2D/3D and axisymmetric 2D coupling. Each viscous aperture
+mode has two tangential components in 3D.
+``hydraulic`` uses viscous diffusion, storage, and leakoff. These fluid models couple to
+solid aperture motion and have sealed fracture boundaries. Request
+``elastic:fracture_pressure`` for the first reduced entry's interface pressure.
+Additional entries use ``elastic:fracture_pressure_f2``, ``_f3``, etc.; each has
+independent constitutive data and aperture-mode count. Resolved
+``fluid_filled`` volumes use ordinary coupled acoustic–elastic physics.
 
 When ``properties`` are provided, the :term:`Python API` assigns or uses the fracture
 ``mesh_block_id`` and creates the matching ``ModelSubdomain``. Material

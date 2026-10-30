@@ -47,8 +47,10 @@ class Stampede3Site(SlurmSite):
         ssh_key: Optional SSH private-key path.
         solver: Remote path to the ``FS_seismic`` solver router executable.
         work_dir: Remote base directory used to resolve relative FrequenSolve
-            paths. It may be on any writable remote filesystem and defaults to
-            ``$WORK/frequensolve``.
+            paths. It may be on any writable remote filesystem, may start with
+            ``$WORK`` or ``$SCRATCH``, and defaults to ``$WORK/frequensolve``.
+        storage: ``"scratch"`` moves the default ``work_dir`` to
+            ``$SCRATCH/frequensolve``; ``"work"`` (default) keeps ``$WORK``.
         scratch_dir: Optional remote scratch directory reserved for future
             model and high-I/O storage.
         modules: Environment modules loaded before solver execution.
@@ -64,7 +66,6 @@ class Stampede3Site(SlurmSite):
     pool: PoolInfo
     transfer_method: Literal["rsync", "sftp"] = "rsync"
     _login_client: SSHClientClass
-    _compute_client: SSHClientClass
     _work_dir: Path
     _executable: str
 
@@ -95,6 +96,7 @@ class Stampede3Site(SlurmSite):
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
         curvature_run_config: Optional[SlurmRunConfig] = None,
+        storage: Optional[str] = None,
         background_layout: str = "rank",
     ):
         super().__init__(
@@ -115,5 +117,6 @@ class Stampede3Site(SlurmSite):
             run_config=run_config,
             verbose=verbose,
             curvature_run_config=curvature_run_config,
+            storage=storage,
             background_layout=background_layout,
         )

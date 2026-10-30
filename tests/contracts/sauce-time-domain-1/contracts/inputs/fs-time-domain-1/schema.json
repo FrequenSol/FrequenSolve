@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-time-domain-1/schema.json",
+  "title": "FS Time Domain v1",
+  "description": "Fixed-step implicit time integration and time-indexed output controls.",
+  "x-fs-contract": "fs-time-domain-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "type": "object",
+  "required": [
+    "start",
+    "end",
+    "time_step"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-time-domain-1"
+    },
+    "method": {
+      "enum": [
+        "newmark",
+        "backward_euler"
+      ],
+      "description": "Implicit scheme. Newmark is used by acoustic, elastic, and coupled acoustic-elastic Galerkin waves; backward Euler is used by pressure-form Darcy flow and temperature-form thermal diffusion."
+    },
+    "start": {
+      "type": "number",
+      "description": "Initial physical time in seconds."
+    },
+    "end": {
+      "type": "number",
+      "description": "Final physical time in seconds."
+    },
+    "time_step": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Fixed physical step size in seconds."
+    },
+    "newmark": {
+      "type": "object",
+      "properties": {
+        "beta": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.25,
+          "description": "Newmark beta; acoustic/elastic PML requires 0.25."
+        },
+        "gamma": {
+          "type": "number",
+          "minimum": 0.5,
+          "default": 0.5,
+          "description": "Newmark gamma; acoustic/elastic PML requires 0.5."
+        }
+      },
+      "additionalProperties": false
+    },
+    "source": {
+      "$ref": "#/$defs/timeFunction",
+      "description": "Shared physical-time signature. Acoustic volume injection loads its first derivative; acoustic scalar/monopole moments load its second derivative times compressibility. Forces and elastic moments load its value. Fresh waves start from zero state; volume injection requires an initially quiet signature. Impulsive step derivatives are unsupported."
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "stride": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        },
+        "write_initial": {
+          "type": "boolean",
+          "default": true
+        },
+        "interval": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Output interval in seconds, measured from start."
+        },
+        "times": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "number"
+          },
+          "description": "Strictly increasing physical times in seconds within the integration interval."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Shared receiver, wavefield and ParaView schedule. Select stride, interval or explicit times; default every step. Final output is always written. Explicit times and intervals must align with the integration grid.",
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "stride",
+              "interval"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "stride",
+              "times"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "interval",
+              "times"
+            ]
+          }
+        }
+      ]
+    },
+    "checkpoint": {
+      "type": "object",
+      "properties": {
+        "stride": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "path": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        }
+      },
+      "additionalProperties": false
+    },
+    "restart": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "timeFunction": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "constant",
+            "ricker",
+            "gaussian",
+            "sine",
+            "step"
+          ],
+          "default": "constant"
+        },
+        "amplitude": {
+          "type": "number",
+          "default": 1
+        },
+        "delay": {
+          "type": "number",
+          "default": 0,
+          "description": "Physical delay in seconds."
+        },
+        "frequency": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Frequency in Hz for ricker and sine functions."
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Standard deviation in seconds for a gaussian function."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "ricker",
+                  "sine"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "frequency"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "gaussian"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "width"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "newmark"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "newmark"
+          ]
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

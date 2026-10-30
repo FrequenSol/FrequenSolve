@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import shlex
@@ -11,17 +12,78 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 import uuid
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import Any, Callable, Iterable, Optional, Sequence, TypeVar, Union
 
 from frequensolve.orchestrator.sites.base import _wait_for_path
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import ssh_exit_status
-from frequensolve.orchestrator.utils.ssh import control_socket_ssh_options
+from frequensolve.orchestrator.utils.ssh import (
+    SSHProxy,
+    SSHTransportError,
+    control_socket_ssh_options,
+)
 from frequensolve.util.setup_logger import init_logger
 
+try:
+    from paramiko import SSHException
+except ModuleNotFoundError:  # pragma: no cover - the hpc extra provides it
+
+    class SSHException(Exception):  # type: ignore[no-redef]
+        """Placeholder when Paramiko is unavailable."""
+
+
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
+
+__all__ = [
+    "DEFAULT_TRANSFER_ATTEMPTS",
+    "DEFAULT_TRANSFER_STALL_TIMEOUT",
+    "SlurmTransferManager",
+]
+
+# Seconds an rsync/SFTP transfer may make no progress before it is stopped.
+DEFAULT_TRANSFER_STALL_TIMEOUT = 120.0
+# Attempts per upload/download after a stall or SSH connection failure.
+DEFAULT_TRANSFER_ATTEMPTS = 3
+# Backoff before the second, third, ... attempt; doubled per attempt.
+_RETRY_BACKOFF_SECONDS = 2.0
+_RETRY_BACKOFF_LIMIT = 30.0
+# rsync exit codes for socket I/O (10), protocol stream (12), I/O timeout
+# (30), connection timeout (35) and SSH failure (255): the connection, not the
+# files, failed.
+_RSYNC_TRANSIENT_STATUSES = frozenset({10, 12, 30, 35, 255})
+
+_T = TypeVar("_T")
+# Retry backoff; a module attribute so tests replace it, not ``time.sleep``.
+_sleep = time.sleep
+
+
+class _TransientTransferError(RuntimeError):
+    """A transfer failed in a way a retry over a live connection may fix."""
+
+
+def _is_transient(error: BaseException) -> bool:
+    """Return whether a transfer error is a stall or connection failure.
+
+    Missing files, permissions, invalid paths and verification failures are
+    not retried; neither are other provider errors.
+    """
+
+    return isinstance(
+        error,
+        (
+            TimeoutError,  # includes socket.timeout and stalled SFTP
+            subprocess.TimeoutExpired,
+            ConnectionError,  # resets, broken pipes, lost OpenSSH SFTP
+            EOFError,
+            SSHException,
+            SSHTransportError,
+            _TransientTransferError,
+        ),
+    )
+
 
 _REMOTE_USERNAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 _REMOTE_HOST = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])\Z")
@@ -88,13 +150,13 @@ class SlurmTransferManager:
         local_path = Path(local_path)
         validated_remote_path = _validated_remote_path(remote_path)
 
-        try:
+        def attempt() -> None:
             site.run_login(
                 f"mkdir -p -- {shlex.quote(str(validated_remote_path.parent))}"
             )
 
             if self._uses_sftp():
-                sftp = site.login_client.open_sftp()
+                sftp = self._open_sftp()
                 try:
                     if local_path.is_dir():
                         self._put_dir(sftp, local_path, validated_remote_path)
@@ -110,13 +172,8 @@ class SlurmTransferManager:
                     compress=compress,
                 )
 
-            logger.debug("Transfer completed successfully")
-
-        except (FileNotFoundError, ValueError, RuntimeError):
-            raise
-        except Exception as exc:
-            logger.error("HPC upload failed (%s)", type(exc).__name__)
-            raise RuntimeError(f"HPC upload failed ({type(exc).__name__})") from None
+        self._with_retries("upload", attempt)
+        logger.debug("Transfer completed successfully")
 
     def get(
         self,
@@ -139,13 +196,12 @@ class SlurmTransferManager:
             RuntimeError: If rsync fails.
         """
 
-        site = self.site
         logger.debug("Starting HPC download")
 
         local_path = Path(local_path)
         validated_remote_path = _validated_remote_path(remote_path)
 
-        try:
+        def attempt() -> None:
             local_path.parent.mkdir(parents=True, exist_ok=True)
             if self._uses_sftp():
                 logger.debug(
@@ -153,7 +209,7 @@ class SlurmTransferManager:
                     validated_remote_path,
                     local_path,
                 )
-                sftp = site.login_client.open_sftp()
+                sftp = self._open_sftp()
                 try:
                     if self._sftp_is_dir(sftp, validated_remote_path):
                         self._get_dir(sftp, validated_remote_path, local_path)
@@ -172,13 +228,117 @@ class SlurmTransferManager:
                     self._remote_spec(remote_str), local_str, compress=compress
                 )
 
-            logger.debug("Transfer completed successfully")
+        self._with_retries("download", attempt)
+        logger.debug("Transfer completed successfully")
 
-        except (FileNotFoundError, ValueError, RuntimeError):
-            raise
-        except Exception as exc:
-            logger.error("HPC download failed (%s)", type(exc).__name__)
-            raise RuntimeError(f"HPC download failed ({type(exc).__name__})") from None
+    def _transfer_setting(self, name: str, default: Any) -> Any:
+        return getattr(getattr(self.site, "config", None), name, default)
+
+    def _stall_timeout(self) -> float:
+        return float(
+            self._transfer_setting(
+                "transfer_stall_timeout", DEFAULT_TRANSFER_STALL_TIMEOUT
+            )
+        )
+
+    def _open_sftp(self) -> Any:
+        """Open SFTP whose data transfers fail after ``transfer_stall_timeout``."""
+
+        client = self.site.login_client
+        stall = self._stall_timeout()
+        if isinstance(client, SSHProxy):
+            return client.open_sftp(stall_timeout=stall)
+        sftp = client.open_sftp()
+        # Paramiko: a blocked channel read raises socket.timeout.
+        get_channel = getattr(sftp, "get_channel", None)
+        channel = get_channel() if callable(get_channel) else None
+        settimeout = getattr(channel, "settimeout", None)
+        if callable(settimeout):
+            settimeout(stall)
+        return sftp
+
+    def _with_retries(self, action: str, operation: Callable[[], _T]) -> _T:
+        """Run one transfer, retrying stalls and SSH connection failures.
+
+        rsync keeps partially transferred files (``--partial``), so a retry
+        resumes from them; an SFTP retry restarts the file. Before a retry the
+        site checks its login connection and switches to another live control
+        socket when its own no longer answers.
+        """
+
+        attempts = int(
+            self._transfer_setting("transfer_attempts", DEFAULT_TRANSFER_ATTEMPTS)
+        )
+        attempt = 1
+        while True:
+            try:
+                return operation()
+            except (FileNotFoundError, ValueError):
+                raise
+            except Exception as exc:
+                transient = _is_transient(exc)
+                recoverable = transient and attempt < attempts
+                if recoverable:
+                    recover = getattr(self.site, "_recover_login_connection", None)
+                    try:
+                        recoverable = not callable(recover) or bool(recover())
+                    except Exception as recovery_error:
+                        logger.warning(
+                            "Could not check the SSH connection (%s)",
+                            type(recovery_error).__name__,
+                        )
+                if recoverable:
+                    delay = min(
+                        _RETRY_BACKOFF_LIMIT,
+                        _RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1),
+                    )
+                    logger.warning(
+                        "HPC %s attempt %d of %d failed (%s); retrying in %g s",
+                        action,
+                        attempt,
+                        attempts,
+                        self._describe(exc),
+                        delay,
+                    )
+                    _sleep(delay)
+                    attempt += 1
+                    continue
+                if not transient and isinstance(exc, RuntimeError):
+                    raise
+                logger.error("HPC %s failed (%s)", action, type(exc).__name__)
+                raise RuntimeError(self._failure_message(action, exc, attempt)) from (
+                    exc if transient else None
+                )
+
+    def _describe(self, error: BaseException) -> str:
+        """Name an error without echoing provider output, which may be private."""
+
+        if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+            return (
+                f"{type(error).__name__}: no progress within "
+                f"{self._stall_timeout():g} s (transfer_stall_timeout)"
+            )
+        if isinstance(error, (_TransientTransferError, SSHTransportError)):
+            return str(error)  # FrequenSolve's own message
+        return type(error).__name__
+
+    def _failure_message(self, action: str, error: BaseException, attempts: int) -> str:
+        if not _is_transient(error):
+            return f"HPC {action} failed ({type(error).__name__})"
+        plural = "s" if attempts != 1 else ""
+        message = (
+            f"HPC {action} failed after {attempts} attempt{plural} "
+            f"({self._describe(error)})"
+        )
+        if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+            return message + (
+                "; raise transfer_stall_timeout or transfer_attempts in the site "
+                "profile if the filesystem is slow"
+            )
+        return message + (
+            "; the SSH connection failed. Check it with `frequensolve site check` "
+            "(reconnect with `frequensolve site connect`) and retry"
+        )
 
     def get_files(
         self,
@@ -202,7 +362,10 @@ class SlurmTransferManager:
         if missing_ok:
             return self._get_files_sftp(remote_root, local_root, paths)
         if self._uses_sftp():
-            self._get_files_tar(remote_root, local_root, paths)
+            self._with_retries(
+                "download",
+                lambda: self._get_files_tar(remote_root, local_root, paths),
+            )
         else:
             with tempfile.NamedTemporaryFile(
                 mode="wb",
@@ -216,10 +379,13 @@ class SlurmTransferManager:
                     "--from0",
                     f"--files-from={file_list.name}",
                 ]
-                self._run_rsync(
-                    self._remote_spec(f"{remote_root}/"),
-                    f"{local_root}/",
-                    options=options,
+                self._with_retries(
+                    "download",
+                    lambda: self._run_rsync(
+                        self._remote_spec(f"{remote_root}/"),
+                        f"{local_root}/",
+                        options=options,
+                    ),
                 )
 
         local_paths = [local_root / Path(*path.parts) for path in paths]
@@ -260,6 +426,8 @@ class SlurmTransferManager:
         rsync_cmd = ["rsync", rsync_flags]
         if not debug_output:
             rsync_cmd.append("--partial")
+        # rsync's own I/O timeout stops a transfer that stalls.
+        rsync_cmd.append(f"--timeout={max(1, math.ceil(self._stall_timeout()))}")
         rsync_cmd.extend(options)
         rsync_cmd.extend([source, target])
         if self.site._login_client.is_proxy():
@@ -277,7 +445,12 @@ class SlurmTransferManager:
         else:
             result = subprocess.run(rsync_cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"rsync transfer failed with status {result.returncode}")
+            error = (
+                _TransientTransferError
+                if result.returncode in _RSYNC_TRANSIENT_STATUSES
+                else RuntimeError
+            )
+            raise error(f"rsync transfer failed with status {result.returncode}")
 
     @staticmethod
     def _verify_sftp_size(
@@ -392,7 +565,7 @@ class SlurmTransferManager:
         """Fetch a small optional set through exact SFTP requests."""
 
         downloaded = []
-        sftp = self.site.login_client.open_sftp()
+        sftp = self._open_sftp()
         try:
             for path in paths:
                 local = local_root / Path(*path.parts)
@@ -427,7 +600,7 @@ class SlurmTransferManager:
         ) as tar_file:
             local_tar = Path(tar_file.name)
 
-        sftp = self.site.login_client.open_sftp()
+        sftp = self._open_sftp()
         try:
             self.site.run_login(f"mkdir -p {shlex.quote(str(remote_tar.parent))}")
             sftp.put(str(local_list), str(remote_list))

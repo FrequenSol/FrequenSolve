@@ -1,7 +1,6 @@
 import base64
 import hashlib
 import json
-import shlex
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -875,34 +874,6 @@ def test_installed_sdk_artifact_uses_pip_direct_url_and_record(monkeypatch, tmp_
     assert installed_frequensolve_artifact_sha256() is None
 
 
-def test_attached_submit_validates_observed_pool_before_transfer(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-    site.pool.id = "24680"
-    site.pool.nhost = 3
-    site.pool.nproc = 8
-    site.pool.ncore = 16
-    transferred = []
-    monkeypatch.setattr(_Site, "provisioned", property(lambda self: True))
-
-    def preflight(**kwargs):
-        validated = validate_contract()
-        site._enterprise_hpc_limits = validated.limits
-        return validated.result
-
-    monkeypatch.setattr(site, "_enterprise_hpc_preflight", preflight)
-    monkeypatch.setattr(site, "prepare_job", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        site,
-        "_submit_attached",
-        lambda *args, **kwargs: transferred.append(args),
-    )
-
-    with pytest.raises(EnterpriseHPCPreflightError, match="max_nodes"):
-        site.submit(object(), mode="attached", force=True)
-
-    assert transferred == []
-
-
 @pytest.mark.parametrize(
     ("override", "error"),
     [
@@ -946,36 +917,11 @@ def test_enterprise_provision_preflights_before_transfer_or_scheduler_spend(
         lambda *args, **kwargs: side_effects.append("sbatch"),
     )
 
-    with pytest.raises(EnterpriseHPCPreflightError, match="synthetic stop"):
-        site.provision(nodes=1, tasks=4, duration="00:30:00")
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(EnterpriseHPCPreflightError, match="synthetic stop"):
+            site.provision(nodes=1, tasks=4, duration="00:30:00")
 
     assert side_effects == ["preflight"]
-
-
-def test_enterprise_provision_preserves_the_existing_sbatch_shape(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-    events = []
-    submissions = []
-    monkeypatch.setattr(
-        site,
-        "_enterprise_hpc_preflight",
-        lambda *args, **kwargs: events.append("preflight"),
-    )
-    monkeypatch.setattr(site, "put", lambda *args, **kwargs: events.append("put"))
-    monkeypatch.setattr(
-        site,
-        "_submit_sbatch",
-        lambda command: (
-            events.append("sbatch") or submissions.append(command) or "24680"
-        ),
-    )
-    monkeypatch.setattr(site, "_allocation_handle", lambda job_id: job_id)
-
-    assert site.provision(nodes=1, tasks=4, duration="00:30:00") == "24680"
-    assert events == ["preflight", "put", "preflight", "sbatch"]
-    submission = shlex.split(submissions[0])
-    assert submission[0] == "sbatch"
-    assert len(submission) == 2
 
 
 def test_run_record_contains_sanitized_enterprise_identities(monkeypatch, tmp_path):
