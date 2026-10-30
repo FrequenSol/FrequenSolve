@@ -97,10 +97,10 @@
       "defaults": {
         "solve_on": "final",
         "max_iter": 300,
-        "tolerance": 0.0001,
+        "tolerance": null,
         "precision": "single"
       },
-      "tolerance_guidance": "Use relative tolerance 1e-4 by default for iterative solvers, smoothers, and regularization/proximal solves, not only TV. It rarely needs to change; most seismic imaging problems do not require tighter accuracy. Preserve explicit user-selected tolerances. A smaller tolerance may be justified for very hard problems or unusually high accuracy requirements, with a documented need and verified downstream benefit. Keep relative tolerances strictly above 1e-7 for single-precision solves. Do not transfer stringent diagnostic/test tolerances into production settings. Absolute tolerances depend on residual scaling and units and are not interchangeable with relative tolerances.",
+      "tolerance_guidance": "Leaving SolverConfig.tolerance unset omits it from solver JSON: transient Newmark and Gauss solves default to 1e-3, and frequency-domain solves default to 1e-4. Preserve explicit user-selected tolerances. Use 1e-4 by default for other iterative solvers, smoothers and regularization/proximal solves. Keep relative tolerances strictly above 1e-7 for single-precision solves; tighter tolerances need a documented accuracy benefit. Absolute tolerances depend on residual scaling and units.",
       "additional_fields_status": "contract-dependent"
     },
     "frequencies": {
@@ -1955,7 +1955,7 @@
       "severity": "error",
       "path": "model.surfaces[*].fracture_model",
       "explanation": "Reduced fracture seismic solves require native transient Galerkin coupling.",
-      "remediation": "Use a 2D Cartesian elastic or coupled TransientJob with one internal straight fracture and the monolithic CPU solver. Frequency-domain reduced-fracture solves are not supported."
+      "remediation": "Use a supported Cartesian or axisymmetric native TransientJob with Galerkin coupling. Match fracture geometry, solver and parallel settings to the paired Sauce build; frequency-domain reduced-fracture solves are not supported."
     },
     {
       "code": "model.property.coordinate_units.invalid",

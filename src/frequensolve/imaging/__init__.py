@@ -123,3 +123,7 @@ __all__ += ["CoarseCorrection", "ReceiverBlockDiagonal"]
 from .rwi import RWILinearization, RWIProblem
 
 __all__ += ["RWILinearization", "RWIProblem"]
+
+from .weighted_objective import WeightedObjective
+
+__all__ += ["WeightedObjective"]

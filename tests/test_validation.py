@@ -271,6 +271,40 @@ def test_validation_allows_backend_grid_selection_for_galerkin(tmp_path, grids):
     assert job.simulation.to_fs()["Discretization"] == {"method": "galerkin"}
 
 
+@pytest.mark.parametrize("physics", ["coupled", "coupled_axisym"])
+def test_validation_accepts_coupled_galerkin(tmp_path, physics):
+    job = _simple_job(tmp_path, physics=physics)
+    job.simulation.discretization = Discretization(method="Galerkin")
+    assert "discretization.method.incompatible" not in _codes(job.validate())
+
+
+def test_validation_accepts_source_on_exposed_pinching_surface(tmp_path):
+    import xarray as xr
+
+    job = _simple_job(tmp_path, source_coords=[[0.0, -0.1]])
+    model = LayeredModel(dimension=2, x_limits=[0.0, 1.0])
+    model.add_surface(name="water_top", depth=0.0)
+    model.add_layer(name="water", properties={"vp": 1.5, "rho": 1.0})
+    model.add_surface(
+        name="seabed",
+        depth=xr.DataArray([-0.1, 0.2], dims=["x"], coords={"x": [0.0, 1.0]}),
+    )
+    model.add_layer(name="sediment", properties={"vp": 2.5, "rho": 2.0})
+    model.add_surface(name="bottom", depth=1.0)
+    job.simulation.model = model
+    # The nominal meshing box still starts at the old water top.
+    assert job.simulation.mesh.mesh.l_bound == [0.0, 0.0]
+    assert "coordinates.domain.outside" not in _codes(job.validate())
+    job.simulation.mesh.mesh.clip_to_envelope = True
+    assert "coordinates.domain.outside" in _codes(job.validate())
+    job.simulation.mesh.mesh.clip_to_envelope = False
+    job.save()
+    restored = FrequencyDomainJob.from_fs(job.to_fs())
+    assert "coordinates.domain.outside" not in _codes(restored.validate())
+    restored.simulation.mesh.mesh.u_bound[0] = -0.5
+    assert "coordinates.domain.outside" in _codes(restored.validate())
+
+
 def test_validation_catches_bad_source_kind(tmp_path):
     with pytest.raises(ValueError, match="Unsupported source kind"):
         _simple_job(tmp_path, source_kind="moment")

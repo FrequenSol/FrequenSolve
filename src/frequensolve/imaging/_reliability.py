@@ -12,7 +12,9 @@ from ._backend import fingerprint
 from .misfit import Preprocess
 
 
-def point_weights(keys, simulated, floor, *, pool=None, relative_floor=None):
+def point_weights(
+    keys, simulated, floor, *, pool=None, relative_floor=None, attribute_pool=None
+):
     """Return source/component/receiver weights from native cache coordinates."""
     keys = np.asarray(keys, dtype=np.int64) - 1
     values = np.asarray(simulated, dtype=np.float64)
@@ -30,6 +32,16 @@ def point_weights(keys, simulated, floor, *, pool=None, relative_floor=None):
     ):
         raise ValueError("Confidence cache shapes disagree")
     power = np.sum(values**2, axis=1)
+    shape = (source.max() + 1, component.max() + 1, receiver.max() + 1)
+    dense_power = np.zeros(shape)
+    dense_power[source, component, receiver] = power
+    if attribute_pool is not None:
+        if len(keys) != np.prod(shape):
+            raise ValueError("Array confidence requires a complete receiver layout")
+        dense_power = attribute_pool.apply(
+            dense_power.reshape(-1, shape[-1]).T
+        ).T.reshape(shape)
+        power = dense_power[source, component, receiver]
     if pool is not None:
         if (
             relative_floor is None
@@ -37,9 +49,6 @@ def point_weights(keys, simulated, floor, *, pool=None, relative_floor=None):
             or relative_floor <= 0
         ):
             raise ValueError("Local confidence requires a positive relative floor")
-        shape = (source.max() + 1, component.max() + 1, receiver.max() + 1)
-        dense_power = np.zeros(shape)
-        dense_power[source, component, receiver] = power
         envelope = pool.apply(dense_power.reshape(-1, shape[-1]).T).T.reshape(shape)
         epsilon2 = relative_floor**2 * envelope[source, component, receiver]
     else:
@@ -74,10 +83,6 @@ def freeze(problem, v=None, *, relative_floor=None, window=None):
         raise ValueError(
             "Frozen confidence currently requires an unwindowed global problem"
         )
-    if any(terms[i].comparison.array is not None for i in selected):
-        raise ValueError(
-            "Native frozen confidence currently supports point receivers only"
-        )
     # Keep the same comparison, stabilization, projections and preprocessing;
     # only remove the model-dependent weight while preparing its snapshot.
     raw_misfit = copy.copy(problem.misfit)
@@ -85,12 +90,20 @@ def freeze(problem, v=None, *, relative_floor=None, window=None):
         replace(t, comparison=replace(t.comparison, reliability=None)) for t in terms
     )
     raw = problem.with_misfit(raw_misfit)
-    pools = {}
-    if window is not None:
+    pools, attribute_pools = {}, {}
+    if window is not None or any(
+        terms[i].comparison.array is not None for i in selected
+    ):
         from ._synthetic_comparison import receiver_coordinates
 
         coordinates = receiver_coordinates(raw)
-        pools = {i: window.bind(coordinates[terms[i].id]) for i in selected}
+        if window is not None:
+            pools = {i: window.bind(coordinates[terms[i].id]) for i in selected}
+        attribute_pools = {
+            i: terms[i].comparison.array.bind(coordinates[terms[i].id])
+            for i in selected
+            if terms[i].comparison.array is not None
+        }
     reference = raw.linearize(v, gradient=False)
     weights = {i: [] for i in selected}
     for task, frequency in enumerate(reference.frequencies, 1):
@@ -117,6 +130,7 @@ def freeze(problem, v=None, *, relative_floor=None, window=None):
                         floor,
                         pool=pools.get(i),
                         relative_floor=relative_floor,
+                        attribute_pool=attribute_pools.get(i),
                     )
                 )
     identity = fingerprint(frequencies=reference.frequencies, weights=weights)
@@ -127,11 +141,14 @@ def freeze(problem, v=None, *, relative_floor=None, window=None):
         with h5py.File(temporary, "w") as h:
             h.attrs["reference_job"] = str(reference.job.job_file)
             h.attrs["policy"] = (
-                "predicted power / (predicted power + relative_floor squared * local predicted power); frozen; attributes unpooled"
+                "predicted power / (predicted power + relative_floor squared * local predicted power); frozen; power uses each term's attribute array"
                 if window is not None
                 else "predicted power / (predicted power + observed reference floor squared); frozen"
             )
             h.attrs["window"] = json.dumps(None if window is None else window.to_dict())
+            h.attrs["attribute_arrays"] = json.dumps(
+                {str(i): terms[i].comparison.array.to_dict() for i in attribute_pools}
+            )
             h.attrs["relative_floor"] = -1 if relative_floor is None else relative_floor
             h.create_dataset("reference_model", data=reference.point.values)
             for i in selected:

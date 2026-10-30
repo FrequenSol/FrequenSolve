@@ -17,6 +17,8 @@ from frequensolve.simulation.outputs import *  # noqa: F403
 from frequensolve.simulation.outputs import __all__ as _output_all
 from frequensolve.simulation.physics import *  # noqa: F403
 from frequensolve.simulation.physics import __all__ as _physics_all
+from frequensolve.simulation.reservoir import *  # noqa: F403
+from frequensolve.simulation.reservoir import __all__ as _reservoir_all
 from frequensolve.simulation.sampling import *  # noqa: F403
 from frequensolve.simulation.sampling import __all__ as _sampling_all
 from frequensolve.simulation.simulation import *  # noqa: F403
@@ -31,6 +33,7 @@ from frequensolve.simulation.time import *  # noqa: F403
 from frequensolve.simulation.time import __all__ as _time_all
 
 __all__ = unique_exports(
+    _reservoir_all,
     _time_all,
     _artifact_all,
     _catalog_all,

@@ -239,8 +239,8 @@ rm -f "$sizing_json"
 begin_step init "$dir_out/init.log"
 set +e
 if [ "$skip_sizing" = "1" ]; then
-    echo "$mpi_exec -n $init_ranks ${place[*]+${place[*]} }$executable -nthreads $n_threads --job $job_file $fresh_flag --init-no-size"
-    "$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$init_ranks" ${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag --init-no-size > "$dir_out/init.log" 2>&1
+    echo "$mpi_exec -n $init_ranks ${place[*]+${place[*]} }$executable -nthreads $n_threads --job $job_file $fresh_flag {{init_flag|default('--init-no-size')}}"
+    "$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$init_ranks" ${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" --job "$job_file" $fresh_flag {{init_flag|default('--init-no-size')}} > "$dir_out/init.log" 2>&1
 else
     echo "$mpi_exec -n $init_ranks ${place[*]+${place[*]} }$executable -nthreads $n_threads --job $job_file --fresh --init --sizing $sizing_json"
     "$mpi_exec" ${mpi_args[@]+"${mpi_args[@]}"} -n "$init_ranks" ${place[@]+"${place[@]}"} "$executable" -nthreads "$n_threads" --job "$job_file" --fresh --init --sizing "$sizing_json" > "$dir_out/init.log" 2>&1

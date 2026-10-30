@@ -249,8 +249,8 @@ class HVReceiverNormal:
         self.applications = 0
 
     def apply(self, direction):
-        from .controls import ControlVector, _check_artifact_basis
         from ._artifacts import ControlVectorFile
+        from .controls import ControlVector, _check_artifact_basis
         from .jobs import FWIOperatorJob
         from .problem import _vector_from_file
 

@@ -474,6 +474,7 @@ def test_student_loss_reduces_large_spread_influence():
 
 def test_regularization_uses_the_receiver_pullback_job():
     from types import SimpleNamespace
+
     from frequensolve.imaging.awi import AWILinearization
 
     lin = object.__new__(AWILinearization)
@@ -567,8 +568,9 @@ def test_awi_material_view_accepts_wave_physics(tmp_path, physics):
 @pytest.mark.parametrize("filter_kind", ["real", "complex"])
 @pytest.mark.parametrize("regularization", ["identity", "gain_invariant"])
 def test_array_filter_scatter_and_identity_pool(filter_kind, regularization):
-    from frequensolve.imaging.receiver_pool import ReceiverPool
     from scipy.sparse import eye
+
+    from frequensolve.imaging.receiver_pool import ReceiverPool
 
     rng = np.random.default_rng(110)
     u, d, du = [
@@ -613,6 +615,7 @@ def test_array_filter_scatter_and_identity_pool(filter_kind, regularization):
 
 def test_array_binding_keeps_shots_and_components_separate(tmp_path):
     from types import SimpleNamespace
+
     from frequensolve import Q_
     from tests.imaging_fakes import FakeImagingSite
     from tests.test_imaging_problem import _problem

@@ -126,3 +126,10 @@ Simulation
    :members:
    :show-inheritance:
    :noindex:
+
+Reservoir Models
+----------------
+
+.. automodule:: frequensolve.simulation.reservoir
+   :members:
+   :noindex:

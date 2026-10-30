@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
 from frequensolve import imaging as im
 from frequensolve.imaging.spectral_attributes import (
     SpectralAttribute,

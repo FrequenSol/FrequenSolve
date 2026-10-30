@@ -3,10 +3,10 @@
 import numpy as np
 import pytest
 import xarray as xr
-from frequensolve.model.layered import LayeredModel
 
 from frequensolve import imaging as im
 from frequensolve.mesh import BoundaryCondition, BoundaryConditions
+from frequensolve.model.layered import LayeredModel
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project import Project
 from frequensolve.simulation import Discretization, FrequencyDomainJob, SolverConfig

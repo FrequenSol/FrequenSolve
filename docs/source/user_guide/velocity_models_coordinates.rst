@@ -215,8 +215,11 @@ the active interface; ``slip_bottom`` tags its welded continuation.
 Reduced selectors support native transient Galerkin elasticity or coupled
 acoustic–elastic jobs: multiple non-intersecting fractures, piecewise-straight in
 Cartesian or axisymmetric 2D, or non-planar height graphs ``z(x,y)`` in Cartesian
-3D; one MPI rank, average-acceleration Newmark, and a monolithic CPU solver. Fractures must
-stay outside PML. Frequency jobs and block-Schur coupling are rejected.
+3D with average-acceleration Newmark. Direct monolithic CPU solves use one MPI
+rank. Backends implementing coupled fracture FGMRES also support multiple ranks
+with replicated mesh topology and selected GPU configurations; use the solver
+contract shipped with your backend for those execution settings. Fractures must
+stay outside PML, and frequency jobs are unsupported.
 In 3D, closure contours must follow generated surface-cell edges. The generator
 fits aperture grid knots and coordinate-aligned closure roots. Borehole sketches
 retain reduced fractures in formation while excluding borehole fluid and casing.
@@ -238,9 +241,10 @@ modes (``aperture_modes``, an integer from 1 to 64, default 12), using
 mode has two tangential components in 3D.
 ``hydraulic`` uses viscous diffusion, storage, and leakoff. These fluid models couple to
 solid aperture motion and have sealed fracture boundaries. Request
-``elastic:fracture_pressure`` for the first reduced entry's interface pressure.
-Additional entries use ``elastic:fracture_pressure_f2``, ``_f3``, etc.; each has
-independent constitutive data and aperture-mode count. Resolved
+``elastic:fracture_pressure`` for interface pressure. Current backends expose
+this field over the union of fluid-bearing fractures; older backends may use
+entry-specific names. Each entry retains independent constitutive data and
+aperture-mode count. Resolved
 ``fluid_filled`` volumes use ordinary coupled acoustic–elastic physics.
 
 When ``properties`` are provided, the :term:`Python API` assigns or uses the fracture

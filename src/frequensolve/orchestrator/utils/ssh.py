@@ -202,6 +202,23 @@ class SSHProxy:
         master, slave = pty.openpty()
 
         cmd = [*self._login_ssh_command()[:-1], "-q", self._login_ssh_command()[-1]]
+        if self.compute_host is not None:
+            cmd.insert(-1, "-tt")
+            cmd.append(
+                shlex.join(
+                    [
+                        "ssh",
+                        "-tt",
+                        "-o",
+                        "StrictHostKeyChecking=yes",
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
+                        f"{self.username}@{self.compute_host}",
+                    ]
+                )
+            )
 
         process = subprocess.Popen(
             cmd,
@@ -213,16 +230,6 @@ class SSHProxy:
 
         os.close(slave)
         master_file = os.fdopen(master, "rb+", buffering=0)
-
-        if self.compute_host is not None:
-            master_file.write(
-                (
-                    "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes "
-                    f"{shlex.quote(str(self.compute_host))}\n"
-                ).encode()
-            )
-            master_file.flush()
-            time.sleep(1)
 
         master_file.flush()
         process.stdin = process.stdout = master_file
@@ -320,15 +327,9 @@ class SSHProxy:
         """Execute a command on a compute node via the login node."""
         if self.compute_host is None:
             raise RuntimeError("Compute host is not configured")
-        proxy_command = shlex.join(
-            [
-                *self._login_ssh_command()[:-1],
-                "-W",
-                "%h:%p",
-                self._login_ssh_command()[-1],
-            ]
-        )
-        cmd = [
+        # Match invoke_shell: use the cluster login node's compute-host trust
+        # and credentials, rather than requiring compute keys on the laptop.
+        compute_command = [
             "ssh",
             "-o",
             "StrictHostKeyChecking=yes",
@@ -340,11 +341,10 @@ class SSHProxy:
             f"ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECONDS}",
             "-o",
             f"ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}",
-            "-o",
-            f"ProxyCommand={proxy_command}",
             f"{self.username}@{self.compute_host}",
             command,
         ]
+        cmd = [*self._login_ssh_command(), shlex.join(compute_command)]
         return self._run_ssh(cmd, target=self.compute_host, timeout=timeout)
 
     def _run_ssh(

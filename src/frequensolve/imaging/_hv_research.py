@@ -79,9 +79,10 @@ class HVResearchSolver:
         rhs = np.bincount(self.nodes.ravel(), weights=load.ravel(), minlength=self.size)
         a = self.assemble(local) + lam * self.stiff
         cross = np.sqrt(epsilon) * self.stiff
-        return sparse.bmat([[a, cross], [cross, -self.mass]], format="csr"), np.r_[
-            rhs, np.zeros(self.size)
-        ]
+        return (
+            sparse.bmat([[a, cross], [cross, -self.mass]], format="csr"),
+            np.r_[rhs, np.zeros(self.size)],
+        )
 
     @staticmethod
     def solve_free(matrix, rhs, free):

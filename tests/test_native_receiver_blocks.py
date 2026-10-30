@@ -69,9 +69,11 @@ def test_receiver_blocks_match_selected_columns(tmp_path, mode, probes):
                 nu=2,
                 c2=0.01,
                 comparison=im.Comparison.phase_derivative(
-                    array=None
-                    if reliable
-                    else im.SyntheticArray.gaussian(sigma=75 * fs.ureg.m),
+                    array=(
+                        None
+                        if reliable
+                        else im.SyntheticArray.gaussian(sigma=75 * fs.ureg.m)
+                    ),
                     reliability="predicted" if reliable else None,
                     relative_amplitude_floor=0.2 if reliable else 0.005,
                     confidence_floor=0 if reliable else 0.05,

@@ -290,9 +290,11 @@ def _read_leases(site, root, timeout):
     """Return ``{client id: lease}`` for the client leases of a session."""
     leases = root / "leases"
     output = site._run_session_command(
+        f"[ -r {shlex.quote(str(leases))} ] && "
+        f"[ -x {shlex.quote(str(leases))} ] || exit 1; "
         f"for f in {shlex.quote(str(leases))}/*.json; do "
-        '[ -f "$f" ] || continue; printf "%s\t" "${f##*/}"; head -n 1 -- "$f"; '
-        "echo; done; true",
+        '[ -f "$f" ] || continue; printf "%s\t" "${f##*/}"; '
+        'head -n 1 -- "$f" || exit 1; echo; done',
         timeout=timeout,
         action="lease listing",
         path=leases,
@@ -300,14 +302,17 @@ def _read_leases(site, root, timeout):
     found = {}
     for line in output.splitlines():
         name, _, text = line.partition("\t")
-        if not name.endswith(".json") or not text.strip():
+        if not name.endswith(".json"):
             continue
         try:
             lease = json.loads(text)
-        except ValueError:
-            continue
-        if isinstance(lease, dict):
-            found[name[: -len(".json")]] = lease
+        except ValueError as error:
+            raise RuntimeError(
+                f"Could not read client lease {leases / name}"
+            ) from error
+        if not isinstance(lease, dict):
+            raise RuntimeError(f"Invalid client lease {leases / name}")
+        found[name[: -len(".json")]] = lease
     return found
 
 
@@ -1250,15 +1255,18 @@ class AllocationSession(BaseSite):
             raise RuntimeError(f"allocation session is unavailable: {status}")
 
     def _command(self, kind, **payload):
+        command_id = uuid4().hex
         self._publish(
-            self.root / "commands" / f"{uuid4().hex}.json",
+            self.root / "commands" / f"{command_id}.json",
             {"generation": self.generation, "kind": kind, **payload},
             immutable=True,
         )
+        return command_id
 
     def _submit_request(
         self, request, job, *, request_id=None, fetch=False, check=False, task_plan=None
     ):
+        progress_not_before = int(time.time())
         run_id = self._id(request_id or uuid4().hex)
         self._publish(
             self.root / "requests" / f"{run_id}.json",
@@ -1272,6 +1280,10 @@ class AllocationSession(BaseSite):
         handle = self._run_handle(
             job, run_id, fetch=fetch, check=check, task_plan=task_plan
         )
+        if request_id is None:
+            # Explicit ids may reconnect to an earlier immutable request. Only
+            # newly generated runs are known to begin after this submission.
+            handle.backend["progress_not_before"] = progress_not_before
         self._handles[run_id] = handle
         return handle
 
@@ -1413,6 +1425,10 @@ class AllocationSession(BaseSite):
                     raise ValueError("ranks_per_task exceeds the worker rank limit")
                 minimum = rank_override
             task_ranks = site._fitting_task_ranks(pins, tasks, limit=limit)
+            transient = getattr(job, "workflow", None) == "transient"
+            if transient:
+                for task in tasks:
+                    task_ranks.setdefault(task, rank_override or limit)
             local, remote = job.save_for_remote(site.__class__.__name__, site.work_dir)
             site._transfer_remote_simulation_inputs(job)
             site.put(Path(local), Path(remote))
@@ -1424,7 +1440,10 @@ class AllocationSession(BaseSite):
                 "min_ranks": minimum,
                 "max_ranks_per_task": limit,
                 "task_ranks": {str(task): ranks for task, ranks in task_ranks.items()},
-                "skip_sizing": len(tasks) <= 1 or set(tasks) <= set(task_ranks),
+                "mesh_only_init": transient,
+                "skip_sizing": transient
+                or len(tasks) <= 1
+                or set(tasks) <= set(task_ranks),
                 "sizing_json": str(logs / "FS_sizing.json"),
             }
             run = self._submit_request(
@@ -1615,14 +1634,19 @@ class AllocationSession(BaseSite):
             return
         self._closed = True
         self._ready = False
-        keep_lease = False
+        # Until cleanup succeeds, preserve the reconnection grace period.
+        # In particular a failed client listing must not release shared work.
+        keep_lease = True
         try:
             if self.owned and self.allocation_id:
                 others = self._other_clients()
                 if self.linger > 0 or others:
                     self._detach(drain, others)
+                    keep_lease = False
                 else:
-                    keep_lease = self._release(drain)
+                    keep_lease = self._release(drain, only_if_unshared=True)
+            else:
+                keep_lease = False
         finally:
             self._end_lease(revoke=not keep_lease)
 
@@ -1639,12 +1663,12 @@ class AllocationSession(BaseSite):
             self._load()
         if self._released:
             return
-        self._released = True
         self._closed = True
         self._ready = False
-        keep_lease = False
+        keep_lease = True
         try:
             keep_lease = self._release(drain)
+            self._released = not keep_lease
         finally:
             self._end_lease(revoke=not keep_lease)
 
@@ -1654,10 +1678,11 @@ class AllocationSession(BaseSite):
             status = self._read(self.root / "status.json")
             leases = _read_leases(self.base_site, self.root, self.command_timeout)
         except Exception as error:
-            logger.debug(
-                "Could not list the clients of %s: %s", self._identity(), error
-            )
-            return 0
+            raise RuntimeError(
+                f"Could not list the clients of {self._identity()}: {error}. "
+                "The allocation was left running to protect other clients; "
+                f"reconnect with site.attach_session({self.session_id!r})."
+            ) from error
         if not status or status.get("generation") != self.generation:
             status = None
         return len(_live_leases(leases, status) - {self._client_id})
@@ -1729,21 +1754,30 @@ class AllocationSession(BaseSite):
                 announced = True
             time.sleep(min(2.0, _POLL_INTERVAL + elapsed / 30))
 
-    def _release(self, drain):
+    def _release(self, drain, *, only_if_unshared=False):
         """Close the owned allocation; return True when it is left running."""
         outcome, error = None, None
         try:
-            self._command("close", drain=drain)
-            outcome = self._await_close(drain)
+            command_id = self._command(
+                "close",
+                drain=drain,
+                only_client=self._client_id if only_if_unshared else None,
+            )
+            outcome = self._await_close(drain, command_id=command_id)
         except Exception as caught:
             error = caught
         except BaseException:
             # Interrupted while waiting: the caller asked to stop now.
             self._cancel_allocation(best_effort=True)
             raise
-        if outcome in {"closed", "unstarted"} or not drain:
+        if outcome == "shared":
+            self._detach(drain, self._last_close_status["close_response"]["others"])
+            return False
+        if outcome in {"closed", "unstarted"} or (not drain and not only_if_unshared):
             # A closed controller leaves nothing to protect; a cancellation
-            # (drain=False) must not leave the allocation running.
+            # explicitly requested through release() ends the allocation.
+            # Automatic cleanup with an unconfirmed response must not scancel:
+            # the controller may have deferred closure for a new borrower.
             if outcome == "closed" and error is None and self._allocation_ended():
                 return False
             self._cancel_allocation(
@@ -1785,8 +1819,8 @@ class AllocationSession(BaseSite):
         warnings.warn(message, RuntimeWarning, stacklevel=4)
         return True
 
-    def _await_close(self, drain):
-        """Wait for the controller: ``closed``, ``unstarted``, ``cap`` or ``lost``."""
+    def _await_close(self, drain, *, command_id=None):
+        """Wait for closure, deferral to another client, or a bounded failure."""
         cap = self.cleanup_timeout
         if cap is None and not drain:
             # Cancellation is quick unless the controller is stuck; then the
@@ -1798,6 +1832,15 @@ class AllocationSession(BaseSite):
         while True:
             status = self.status()
             self._last_close_status = status
+            if command_id:
+                response = self._read(self.root / "commands" / f"{command_id}.result")
+                if (
+                    response
+                    and response.get("generation") == self.generation
+                    and response.get("state") == "shared"
+                ):
+                    self._last_close_status = dict(status, close_response=response)
+                    return "shared"
             if status.get("heartbeat_expired"):
                 return "lost"
             if self._controller_state is None:

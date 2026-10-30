@@ -3030,7 +3030,7 @@ freezes its baseline to keep this contract consistent. Existing solver builds
 without these operations must be updated before using the API.
 
 Fixed waveform-derivative objectives
------------------------------------
+------------------------------------
 
 ``SpectralObjective`` composes native spectral states and model adjoints with
 standard ``FWI`` stages, regularization and checkpoints. For one frequency per
@@ -3130,3 +3130,21 @@ floor can bias weak damped traces toward zero traveltime. Stabilization and
 relative amplitudes within an array limit exact gain invariance. Gradients use
 the standard native spectral pullbacks and retain material-control field and
 regularization access. This research API is not a replacement for ``problem.hv``.
+
+Weighted objectives
+-------------------
+
+Compose existing problem views with ``im.WeightedObjective``. Each component
+keeps its own misfit and observed data while sharing the model, control basis,
+current point, and frequencies::
+
+   objective = im.WeightedObjective([pressure_problem, velocity_problem],
+                                    weights=[1.0, 0.25])
+   value = objective.value()
+   gradient = objective.gradient()
+
+Weights multiply objective values, gradients, and receiver diagonals. They must
+be finite and nonnegative, with at least one positive weight. Restrict each
+component's misfit before composing it. This interface currently supports
+first-order FWI; Jacobian and normal-operator workflows are unsupported. FWI
+applies native regularization once outside the weighted data-objective sum.

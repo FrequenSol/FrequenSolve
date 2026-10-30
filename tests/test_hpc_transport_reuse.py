@@ -1,5 +1,6 @@
 import os
 import pty
+import shlex
 import subprocess
 import tarfile
 from pathlib import Path
@@ -16,6 +17,30 @@ from frequensolve.orchestrator.utils.ssh import (
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
+
+
+def test_compute_command_uses_login_node_trust_and_preserves_command(monkeypatch):
+    calls = []
+
+    def capture(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return _result(stdout=b"compute-001\n")
+
+    monkeypatch.setattr(subprocess, "run", capture)
+    proxy = SSHProxy("/tmp/control.sock", "user", "login.example.edu", "compute-001")
+    command = "printf '%s\\n' 'path with spaces; $(literal)'"
+    _, stdout, _ = proxy.exec_command(command, timeout=7)
+
+    assert stdout.read() == b"compute-001"
+    argv, kwargs = calls[0]
+    assert argv[-2] == "user@login.example.edu"
+    assert "ControlPath=/tmp/control.sock" in argv
+    inner = shlex.split(argv[-1])
+    assert inner[0] == "ssh"
+    assert "StrictHostKeyChecking=yes" in inner
+    assert "BatchMode=yes" in inner
+    assert inner[-2:] == ["user@compute-001", command]
+    assert kwargs["timeout"] == 7
 
 
 def _result(*, stdout=b"", stderr=b"", returncode=0):
@@ -414,3 +439,27 @@ def test_unknown_transfer_method_fails_before_starting_subprocess():
 
     with pytest.raises(ValueError, match="transfer_method"):
         SlurmTransferManager(site)._uses_sftp()
+
+
+def test_interactive_compute_shell_connects_before_accepting_commands(monkeypatch):
+    calls = []
+    stream = SimpleNamespace(flush=lambda: None)
+    process = SimpleNamespace(stdin=None, stdout=None)
+    monkeypatch.setattr(pty, "openpty", lambda: (10, 11))
+    monkeypatch.setattr(os, "close", lambda _: None)
+    monkeypatch.setattr(os, "fdopen", lambda *args, **kwargs: stream)
+
+    def popen(argv, **kwargs):
+        calls.append(argv)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    proxy = SSHProxy("/tmp/control.sock", "user", "login.example.edu", "compute-001")
+    assert proxy.invoke_shell() is process
+    argv = calls[0]
+    assert argv[-2] == "user@login.example.edu"
+    command = shlex.split(argv[-1])
+    assert command[:2] == ["ssh", "-tt"]
+    assert "StrictHostKeyChecking=yes" in command
+    assert command[-1] == "user@compute-001"
+    assert process.stdin is stream

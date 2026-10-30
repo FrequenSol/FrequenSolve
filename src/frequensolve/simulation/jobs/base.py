@@ -583,6 +583,8 @@ class BaseJob(
                 frequency layout.
         """
 
+        if getattr(self.simulation, "azimuthal_mode", None) is not None:
+            raise ValueError("azimuthal_mode requires TransientJob")
         ordinary_vtk = [
             output
             for output in self.outputs.vtk

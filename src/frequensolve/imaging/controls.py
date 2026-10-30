@@ -387,7 +387,13 @@ def _open_uniform_knots(
 
 def _mechanism_components(kind: str, dimension: int) -> int:
     kind = str(kind).strip().lower()
-    if kind in {"scalar", "monopole", "volume_injection"}:
+    if kind in {
+        "scalar",
+        "monopole",
+        "volume_injection",
+        "pressure_monopole",
+        "isotropic_moment",
+    }:
         return 1
     if kind in {"vector", "dipole"}:
         return int(dimension)

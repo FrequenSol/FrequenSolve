@@ -1339,6 +1339,7 @@ class SlurmSite(BaseSite):
             extra_kwargs["min_ranks"] = 1
             extra_kwargs["round_to"] = 1
             extra_kwargs["skip_sizing"] = True
+        progress_not_before = time.time()
         job_id = self._submit_slurm_batch(
             job,
             run_config,
@@ -1354,6 +1355,7 @@ class SlurmSite(BaseSite):
             **extra_kwargs,
         )
         handle = self.handle(job, job_id=job_id, mode="batch")
+        handle.backend["progress_not_before"] = progress_not_before
         handle.poll_interval = run_config.poll_interval or self.config.poll_interval
         handle.backend["scheduler_heartbeat_timeout"] = (
             run_config.scheduler_heartbeat_timeout
@@ -2433,11 +2435,15 @@ class SlurmSite(BaseSite):
         """Fetch authoritative task metadata and named operation results."""
 
         postprocess_only = bool(getattr(job, "postprocess_only", False))
-        operation_only = (
-            postprocess_only or getattr(job, "workflow", None) == "transient"
+        modal = getattr(job, "n_modes", None) is not None
+        transient_operation = (
+            getattr(job, "workflow", None) == "transient" and not modal
         )
+        if modal:
+            operations = tuple(op for op in operations if op != "transient")
+        operation_only = postprocess_only or transient_operation
         tasks = () if operation_only else tuple(range(1, job.n_tasks + 1))
-        if getattr(job, "workflow", None) == "transient":
+        if transient_operation:
             operations = (*operations, "transient")
         requested_operations = tuple(
             dict.fromkeys((*operations, "smooth") if postprocess_only else operations)
@@ -2504,10 +2510,7 @@ class SlurmSite(BaseSite):
                 raise RuntimeError(
                     "Current successful smooth operation metadata is missing"
                 )
-            if (
-                getattr(job, "workflow", None) == "transient"
-                and "transient" not in operation_results
-            ):
+            if transient_operation and "transient" not in operation_results:
                 raise RuntimeError(
                     "Current successful transient operation metadata is missing"
                 )
@@ -2561,6 +2564,28 @@ class SlurmSite(BaseSite):
                 "Remote staged provenance is missing; restage the job before fetching"
             )
         for task in tasks:
+            if getattr(job, "n_modes", None) is not None:
+                result = (
+                    catalog.results.get(task)
+                    if not isinstance(catalog, TaskIndex)
+                    else None
+                )
+                current = bool(
+                    result is not None
+                    and result.successful
+                    and result.partition.task == task
+                    and result.partition.task_count == job.n_tasks
+                    and result.partition.azimuthal_mode == task - 1
+                    and all(
+                        result.fingerprints.get(k) == v
+                        for k, v in expected_fingerprints.items()
+                    )
+                )
+                if not current:
+                    raise RuntimeError(
+                        f"Remote angular task {task} does not match the current staged job"
+                    )
+                continue
             expected_frequency = complex(job.f_list[task - 1])
             if isinstance(catalog, TaskIndex):
                 current = catalog.is_task_current(
@@ -3186,6 +3211,17 @@ class SlurmSite(BaseSite):
             return record.logs_dir
         return job._remote_path(self.work_dir) / "logs"
 
+    def _read_transient_progress(self, run: RunHandle):
+        root = self._remote_result_dir(run.job)
+        return {
+            task: self._read_remote_json(
+                run.job.task_manifest_file(task, result_path=root).with_name(
+                    "progress.json"
+                )
+            )
+            for task in range(1, run.job.n_tasks + 1)
+        }
+
     def _poll_run(self, run: RunHandle) -> JobStatus:
         status = self.update_status(str(run.id))
         scheduler_status = (
@@ -3394,6 +3430,9 @@ class SlurmSite(BaseSite):
             )
         task_indices = [int(index) + 1 for index in task_plan["pending_indices"]]
         kwargs.setdefault("skip_sizing", len(task_indices) == 1)
+        if getattr(job, "workflow", None) == "transient":
+            kwargs["mesh_only_init"] = True
+            kwargs["skip_sizing"] = True
         task_ranks = self._task_partitions(job, task_indices)
         if task_ranks:
             kwargs["task_ranks"] = task_ranks
@@ -3648,7 +3687,7 @@ class SlurmSite(BaseSite):
 
         lines = [f"module load {shlex.quote(module)}" for module in self.modules]
         if self.modules:
-            lines.append("module list")
+            lines.append("LMOD_PAGER=cat module list")
         site_environment = solver_environment(self._get_solver_path(), self.environment)
         inherited = {
             name: value
@@ -3933,8 +3972,18 @@ class SlurmSite(BaseSite):
             limit=min(n_nodes * ranks_per_node, max_ranks_per_task),
         )
         # Pinned tasks need no memory estimates; initialize without sizing.
-        skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1)) or (
-            bool(task_indices) and set(task_indices) <= set(task_ranks)
+        mesh_only_init = bool(kwargs.pop("mesh_only_init", False))
+        if mesh_only_init:
+            # Transient trajectories have no frequency sizing checkpoint. Give
+            # each unpinned trajectory the configured rank allowance.
+            for task in task_indices:
+                task_ranks.setdefault(
+                    task, min(n_nodes * ranks_per_node, max_ranks_per_task)
+                )
+        skip_sizing = (
+            bool(kwargs.pop("skip_sizing", n_tasks == 1))
+            or mesh_only_init
+            or (bool(task_indices) and set(task_indices) <= set(task_ranks))
         )
         proc_memory = rank_memory_gib(config, ranks_per_node)
         gpus_per_node = max(0, int(getattr(config, "gpus_per_node", 0) or 0))
@@ -3996,6 +4045,7 @@ class SlurmSite(BaseSite):
                 "none" if tolerate_failures is None else int(tolerate_failures)
             ),
             skip_sizing=1 if skip_sizing else 0,
+            init_flag="--mesh" if mesh_only_init else "--init-no-size",
             n_nodes=n_nodes,
             n_procs=n_nodes * ranks_per_node,
             init_ranks=min(n_nodes * ranks_per_node, max_ranks_per_task),

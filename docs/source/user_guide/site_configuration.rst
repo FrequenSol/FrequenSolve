@@ -27,6 +27,15 @@ controller to become ready. It remains active while the queue is empty::
        runs = [session.submit(job) for job in jobs]
        results = session.wait_all(runs, check=True)
 
+A session is itself a normal Slurm batch job, with a FrequenSolve controller
+as its resident process. The controller starts solver steps inside the actual
+allocation environment, accepts further runs and keeps their status on the
+shared filesystem. ``attach_session`` reconnects a Python client to that
+controller; it does not SSH into a compute node or reconstruct Slurm variables.
+An arbitrary batch or interactive allocation has no such controller and cannot
+be borrowed through this API. For a single independent simulation, the usual
+``site.run(job)`` batch workflow remains available.
+
 The resource values above are illustrative. Allocation resources are fixed;
 ``AdaptiveWorkers`` bounds the ranks of individual frequency tasks. Tasks use
 memory estimates when needed and retain MPI rank counts required by saved
@@ -98,6 +107,15 @@ completed (for example a lost SSH connection) are reported as a
 ``RuntimeWarning`` with the session and allocation ids instead of being
 raised, so results computed in the context are not lost. Cleanup does not
 close caller-owned site connections or delete solver artifacts.
+
+If the client cannot establish who else is attached, cleanup leaves the
+allocation running and warns instead of assuming it is unused. A failed drain
+also preserves the remaining lease grace period for reconnection. After a
+transport failure, ``session.release()`` can be retried; this explicitly ends
+the allocation, including other clients' work. Ordinary owner cleanup checks
+for other clients again on the controller before ending a shared allocation.
+If that response is lost, automatic cleanup preserves the lease grace period;
+it does not escalate to ``scancel`` and risk interrupting a new borrower.
 
 The controller writes a heartbeat with an increasing ``sequence`` from a
 dedicated thread, so per-run status writes on a slow work filesystem cannot

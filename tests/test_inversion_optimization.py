@@ -1695,3 +1695,21 @@ def test_history_records_digest_a_read_only_model_without_copying_it():
     assert peak < model.nbytes // 8
     with pytest.raises(ValueError, match="finite"):
         history.record_iteration(np.array([0.0, np.nan]), LossTerms(1.0))
+
+
+def test_proximal_unlimited_iterations_reaches_sparse_solution():
+    target = np.array([2.0, -1.0, 0.1])
+    result = minimize_proximal_gradient(
+        lambda x: 0.5 * float((x - target) @ (x - target)),
+        lambda x: x - target,
+        lambda x: 0.25 * float(np.abs(x).sum()),
+        lambda v, tau, bounds: _soft_threshold(v, 0.25 * tau),
+        np.zeros(3),
+        initial_step=0.2,
+        options=LBFGSOptions(
+            max_iterations=None, grad_rel_tole=1e-7, obj_rel_tol=0, step_tolerance=0
+        ),
+    )
+    assert result.success
+    assert result.iterations > 10
+    np.testing.assert_allclose(result.model, _soft_threshold(target, 0.25), atol=1e-6)

@@ -69,7 +69,9 @@ def test_distributed_methods_split_the_thread_budget_across_ranks(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("method", ["mesh_prior", "mesh_sample", "mesh_directions", "mesh_basis"])
+@pytest.mark.parametrize(
+    "method", ["mesh_prior", "mesh_sample", "mesh_directions", "mesh_basis"]
+)
 def test_single_rank_methods_keep_the_whole_budget_on_one_rank(
     tmp_path, monkeypatch, method
 ):

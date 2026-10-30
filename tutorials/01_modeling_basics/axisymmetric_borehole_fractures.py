@@ -15,6 +15,7 @@ termination. The fracture is confined to the formation outside the casing.
 Defaults use order 4, 2 elements per wavelength, fast solver mode, and a
 25 m PML thickness cap, running to 0.12 s. Mesh density and polynomial order are configurable.
 """
+
 from __future__ import annotations
 
 import argparse

@@ -242,7 +242,7 @@ def test_slurm_site_uses_configured_paths_and_runtime(monkeypatch):
     assert runtime_setup[:3] == [
         "module load compiler/1.0",
         "module load mpi",
-        "module list",
+        "LMOD_PAGER=cat module list",
     ]
     assert {
         "export MKL_DYNAMIC=FALSE",
@@ -1082,8 +1082,10 @@ def test_slurm_runtime_setup_expands_profile_environment_after_modules(monkeypat
     assert lines.index("module load dependency/1") < lines.index(
         "module load parallel-hdf5/2"
     )
-    assert lines.index("module load parallel-hdf5/2") < lines.index("module list")
-    assert lines.index("module list") < lines.index(
+    assert lines.index("module load parallel-hdf5/2") < lines.index(
+        "LMOD_PAGER=cat module list"
+    )
+    assert lines.index("LMOD_PAGER=cat module list") < lines.index(
         'export LD_LIBRARY_PATH="${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"'
     )
 

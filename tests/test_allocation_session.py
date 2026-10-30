@@ -118,7 +118,7 @@ if '--curvature' in args:
     open(request['output'], 'w').write('curvature output')
     sys.exit(0)
 job = json.load(open(args[args.index('--job')+1]))
-step = next((s for s in ('init', 'init-no-size', 'smooth', 'pack') if '--'+s in args), None)
+step = next((s for s in ('init', 'init-no-size', 'mesh', 'smooth', 'pack') if '--'+s in args), None)
 if '--task' in args: step = int(args[args.index('--task')+1])
 if '--sizing' in args:
     json.dump({{'schema':'fs-sizing-2','task':[{{'memory':job.get('memory','32 MB')}}]*job['tasks']}}, open(args[args.index('--sizing')+1],'w'))
@@ -1035,6 +1035,120 @@ def test_close_failure_after_successful_work_warns_and_keeps_results(
     assert "ssh connection reset" in runtime_warning(caught)
     assert session.session_id in runtime_warning(caught)
     assert not cluster.cancellations  # an unconfirmed drain is not cancelled
+    lease = json.loads(
+        (session.root / "leases" / f"{session._client_id}.json").read_text()
+    )
+    assert not lease["revoked"]  # retain the promised reconnection grace period
+
+
+def test_client_listing_failure_does_not_release_a_shared_session(cluster, monkeypatch):
+    owner = cluster.site.session()
+    owner.wait_ready()
+    with cluster.site.attach_session(owner.session_id) as borrower:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                session_module,
+                "_read_leases",
+                lambda *args: (_ for _ in ()).throw(RuntimeError("ssh reset")),
+            )
+            with pytest.raises(RuntimeError, match="clients"):
+                owner.close()
+        assert cluster.processes[0].poll() is None
+        assert not cluster.cancellations
+        assert borrower.run(
+            Job(cluster.root, "after-listing-failure"), check=True
+        ).successful
+        borrower.release()
+
+
+def test_explicit_release_can_retry_after_transport_failure(cluster, monkeypatch):
+    session = cluster.site.session()
+    session.wait_ready()
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session,
+            "_command",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ssh reset")),
+        )
+        with pytest.raises(RuntimeError, match="ssh reset"):
+            session.release()
+    session.release()
+    assert cluster.processes[0].poll() is not None
+
+
+def test_new_transient_session_run_ignores_previous_attempt_progress(
+    cluster, monkeypatch
+):
+    job = Job(cluster.root, "stale-progress", tasks=1, sleep=0.5)
+    job.workflow = "transient"
+    job.time = SimpleNamespace(steps=100)
+    monkeypatch.setattr(
+        cluster.site,
+        "_read_transient_progress",
+        lambda run: {
+            1: {
+                "schema": "fs-transient-progress-1",
+                "total_steps": 100,
+                "completed_steps": 80,
+                "started_at": "2000-01-01T00:00:00+0000",
+            }
+        },
+        raising=False,
+    )
+    with cluster.site.session() as session:
+        handle = session.submit(job)
+        wait_until(lambda: handle.status().is_running)
+        assert handle.status().progress is None
+        assert handle.wait(check=True).successful
+
+
+@pytest.mark.parametrize("drain", [True, False])
+@pytest.mark.parametrize("lost_acknowledgement", [True, False])
+def test_client_attaching_during_owner_close_keeps_allocation(
+    cluster, monkeypatch, drain, lost_acknowledgement
+):
+    owner = cluster.site.session()
+    owner.wait_ready()
+    borrower = cluster.site.attach_session(owner.session_id)
+    original = owner._other_clients
+
+    def attach_after_listing():
+        count = original()
+        assert count == 0
+        borrower.wait_ready()
+        return count
+
+    monkeypatch.setattr(owner, "_other_clients", attach_after_listing)
+    if lost_acknowledgement:
+        monkeypatch.setattr(
+            owner,
+            "_await_close",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ssh reset")),
+        )
+        with pytest.raises(RuntimeError, match="ssh reset"):
+            owner.close(drain=drain)
+    else:
+        owner.close(drain=drain)
+    try:
+        assert cluster.processes[0].poll() is None
+        assert borrower.run(
+            Job(cluster.root, "joined-during-close"), check=True
+        ).successful
+    finally:
+        borrower.release()
+
+
+@pytest.mark.parametrize("contents", ["{broken", "[]", ""])
+def test_unreadable_lease_is_not_treated_as_an_absent_client(cluster, contents):
+    with cluster.site.session(linger=60) as session:
+        bad = session.root / "leases" / "other.json"
+        bad.write_text(contents)
+        try:
+            with pytest.raises(RuntimeError, match="lease"):
+                session_module._read_leases(cluster.site, session.root, 10)
+        finally:
+            bad.unlink()
+    session.release()
 
 
 def test_failed_body_still_cancels_and_reports_original_error(cluster, monkeypatch):
@@ -1516,3 +1630,29 @@ def test_slurm_time_left_parsing():
     assert slurm_time_seconds("2-03") == 183600
     assert slurm_time_seconds("UNLIMITED") == float("inf")
     assert slurm_time_seconds("INVALID") is None
+
+
+@pytest.mark.parametrize("tasks", [1, 3])
+@pytest.mark.parametrize("rank_override", [None, 2])
+def test_transient_session_uses_mesh_init_without_frequency_sizing(
+    cluster, tasks, rank_override, monkeypatch
+):
+    monkeypatch.setattr(cluster.site, "_read_transient_progress", lambda run: {})
+    with cluster.site.session() as session:
+        job = Job(cluster.root, "transient", tasks=tasks)
+        job.workflow = "transient"
+        job.time = SimpleNamespace(steps=10)
+        job.supports_trace_packing = False
+        run = session.submit(job, ranks_per_task=rank_override)
+        assert run.wait(check=True).successful
+        request = published_request(session, run.id)
+        assert request["scheduler"]["skip_sizing"] is True
+        assert not Path(request["scheduler"]["sizing_json"]).exists()
+        events = [
+            json.loads(line)
+            for line in (cluster.root / "events.jsonl").read_text().splitlines()
+        ]
+        starts = [row for row in events if row["event"] == "start"]
+        assert starts[0]["step"] == "mesh"
+        assert sorted(row["step"] for row in starts[1:]) == list(range(1, tasks + 1))
+        assert all(row["ranks"] == (rank_override or 4) for row in starts[1:])

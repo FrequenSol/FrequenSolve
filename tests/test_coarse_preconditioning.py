@@ -13,10 +13,10 @@ from scipy.sparse.linalg import cg
 
 from frequensolve import imaging as im
 from frequensolve.imaging.workflows import _receiver_probe_request
+from tests.imaging_fakes import FakeImagingSite
 from tests.statistical_mesh_fixture import write_mesh
 from tests.test_imaging_statistical_refinement import _mesh_space
 from tests.test_imaging_workflows import _problem
-from tests.imaging_fakes import FakeImagingSite
 
 pytestmark = pytest.mark.unit
 

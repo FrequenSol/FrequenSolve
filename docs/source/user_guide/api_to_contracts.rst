@@ -53,7 +53,7 @@ The core workflow is intentionally repetitive across tutorials:
      - Frequency list or band, result path, logs, traces, and visualization requests.
    * - ``TransientJob`` / ``TimeIntegration`` / ``TimeOutput``
      - ``fs-job-1`` with ``fs-time-domain-1``
-     - Native time integration, analytic sources, explicit-time/interval/stride
+     - Native time integration, analytic/sampled sources, explicit-time/interval/stride
        snapshots, and checkpoint restart.
    * - ``TransientDataset``
      - ``fs-time-step-1`` and ``fs-operation-result-1``

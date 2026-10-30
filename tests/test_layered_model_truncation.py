@@ -2,6 +2,7 @@ import pytest
 import xarray as xr
 
 from frequensolve.model.layered import LayeredModel
+from frequensolve.model.property import Property
 from frequensolve.units import ureg as u
 
 
@@ -36,6 +37,17 @@ def _three_layer_model(*, ordering="top_down"):
         )
         model.add_surface(name=surface_name, depth=surface_depth * u.km)
     return model
+
+
+@pytest.mark.parametrize("ordering", ["top_down", "bottom_up"])
+def test_depth_envelope_includes_exposed_internal_horizon(ordering):
+    model = _three_layer_model(ordering=ordering)
+    model.surfaces["shallow"].depth = Property(-100 * u.m)
+    assert model.z_limits_in("km") == pytest.approx((-0.1, 3.0))
+    lower, upper, units = model._mesh_bounds()
+    assert units == "km"
+    assert lower[-1] == pytest.approx(-0.1)
+    assert upper[-1] == pytest.approx(3.0)
 
 
 def test_truncate_replaces_lower_boundary_and_discards_deeper_geometry():
@@ -88,6 +100,7 @@ def test_truncate_keeps_a_surface_that_crosses_the_cut():
     assert truncated.surface_names == ["top", "crossing", "cutting_surface"]
     assert truncated.layer_names == ["upper", "lower"]
     assert truncated.surfaces["crossing"].interface is True
+    assert truncated.z_limits == pytest.approx((0.0, 1.5))
     assert model.surface_names == ["top", "crossing", "bottom"]
 
 
@@ -106,6 +119,7 @@ def test_truncate_demotes_a_crossing_old_boundary_to_marker_surface():
 
     assert truncated.surface_names == ["top", "bottom", "cutting_surface"]
     assert truncated.surfaces["bottom"].interface is False
+    assert truncated.z_limits == pytest.approx((0.0, 1.5))
     assert truncated.layers[0].lower is truncated.surfaces["cutting_surface"]
     assert truncated.to_fs()["surfaces"][1]["interface"] is False
     assert model.surface_names == ["top", "bottom"]

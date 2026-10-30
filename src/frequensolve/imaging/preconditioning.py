@@ -11,9 +11,9 @@ backend calls. Setup always measures the current full regularized normal.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import inspect
 import operator
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Mapping
 

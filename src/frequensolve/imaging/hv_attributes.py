@@ -9,8 +9,8 @@ from dataclasses import asdict, dataclass
 import numpy as np
 
 from ._hv_research import HVResearchSolver, endpoint_projection
-from .spectral_attributes import SpectralJetLinearization, SpectralAttribute
 from .receiver_pool import ReceiverPool
+from .spectral_attributes import SpectralAttribute, SpectralJetLinearization
 
 
 @dataclass(frozen=True)

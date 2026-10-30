@@ -20,9 +20,10 @@
     "method": {
       "enum": [
         "newmark",
-        "backward_euler"
+        "backward_euler",
+        "gauss4"
       ],
-      "description": "Implicit scheme. Newmark is used by acoustic, elastic, and coupled acoustic-elastic Galerkin waves; backward Euler is used by pressure-form Darcy flow and temperature-form thermal diffusion."
+      "description": "Implicit scheme. Newmark is used by acoustic, elastic, low-frequency Biot poroelastic, and supported coupled Galerkin waves; backward Euler is used by pressure-form Darcy flow and temperature-form thermal diffusion. Gauss4 is fourth-order two-stage Gauss collocation for acoustic, elastic, their axisymmetric/coupled formulations, and low-frequency Biot with acoustic or bonded elastic coupling; its accepted state is real and its complex stage uses FGMRES. CPU execution supports Cartesian/cylindrical PML, GSLS, restart and MPI within the physics restrictions. Metal and CUDA/HIP support complex FGMRES stages on their existing execution paths; SYCL bulk histories, coupled interface actions and Cartesian PML filters are resident, including frequency-shifted interface filters. Bulk GSLS and composed GSLS/PML histories are also resident, with Cartesian 2D/3D MPI and checkpoint/restart support."
     },
     "start": {
       "type": "number",
@@ -87,7 +88,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "Shared receiver, wavefield and ParaView schedule. Select stride, interval or explicit times; default every step. Final output is always written. Explicit times and intervals must align with the integration grid.",
+      "description": "Spatial wavefield and ParaView schedule; receiver traces inherit it unless trace_output is supplied. Select stride, interval or explicit times; default every step. Final output is always written. Explicit times and intervals must align with the integration grid.",
       "allOf": [
         {
           "not": {
@@ -140,6 +141,78 @@
         }
       },
       "additionalProperties": false
+    },
+    "mass_damping": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0,
+      "description": "Uniform mass-proportional bulk wave damping alpha in inverse seconds: M u_tt + (C_boundary + alpha M) u_t + K u = f. Applies to acoustic pressure and elastic displacement, including coupled and axisymmetric waves. Nonzero values require Newmark waves without PML; history loads use the CPU path. This is not constant-Q attenuation."
+    },
+    "n_modes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000,
+      "description": "Number of real angular acoustic modes. Task i solves order i-1, for tasks 1 through n_modes. Requires axisymmetric 2D acoustics and no simulation azimuthal_mode. Omit for a legacy single transient task."
+    },
+    "trace_output": {
+      "$ref": "#/properties/output",
+      "description": "Optional independent receiver trace schedule with the same cadence rules as output. If omitted, traces inherit output. Does not change spatial wavefield or ParaView sampling."
+    },
+    "gauss": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "f_0": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Fitting frequency in Hz. Zero selects standard Gauss-4. Requires f_0*time_step < 0.5. The internal angle theta_0=2*pi*f_0*time_step sets the phase-fitted propagator coefficient."
+        }
+      }
+    },
+    "point_source": {
+      "type": "object",
+      "description": "Spatial policy for otherwise unregularized point loads. Explicit acquisition supports and footprints take precedence. Omission preserves legacy Dirac loading; the Python TransientJob API emits Gaussian defaults for Cartesian acoustic/elastic jobs.",
+      "properties": {
+        "type": {
+          "enum": [
+            "gaussian",
+            "dirac"
+          ]
+        },
+        "f_max": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Upper target frequency in Hz used with local material wavespeed to choose sigma."
+        },
+        "amplitude_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.98,
+          "description": "Untruncated Gaussian amplitude transfer at f_max; sigma=sqrt(-2 log(ratio))*c_min/(2*pi*f_max)."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "gaussian"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "f_max"
+            ]
+          }
+        }
+      ]
     }
   },
   "$defs": {
@@ -152,7 +225,8 @@
             "ricker",
             "gaussian",
             "sine",
-            "step"
+            "step",
+            "sampled"
           ],
           "default": "constant"
         },
@@ -174,6 +248,24 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "description": "Standard deviation in seconds for a gaussian function."
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "number"
+          },
+          "description": "Dimensionless recorded samples, preserved without normalization or filtering. Uniform clock t0 + n*dt, shifted by delay."
+        },
+        "dt": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Recorded sample interval in seconds; independent of the integration time_step."
+        },
+        "t0": {
+          "type": "number",
+          "default": 0,
+          "description": "Physical time of the first recorded sample before delay, in seconds. Negative times are preserved."
         }
       },
       "allOf": [
@@ -213,9 +305,63 @@
               "width"
             ]
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sampled"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "samples",
+              "dt"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "frequency"
+                  ]
+                },
+                {
+                  "required": [
+                    "width"
+                  ]
+                }
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "samples"
+                  ]
+                },
+                {
+                  "required": [
+                    "dt"
+                  ]
+                },
+                {
+                  "required": [
+                    "t0"
+                  ]
+                }
+              ]
+            }
+          }
         }
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "Analytic or sampled scalar source multiplier. Sampled sources use cubic Hermite interpolation with centered interior slopes, zero endpoint slopes and zero outside the recorded interval. First/second derivatives differentiate that interpolant and require zero endpoint samples; the piecewise second derivative uses the right interval at interior knots and the left interval at the last sample."
     }
   },
   "allOf": [
@@ -235,6 +381,42 @@
           "required": [
             "newmark"
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "backward_euler"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "mass_damping": {
+            "const": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "gauss"
+        ]
+      },
+      "then": {
+        "required": [
+          "method"
+        ],
+        "properties": {
+          "method": {
+            "const": "gauss4"
+          }
         }
       }
     }

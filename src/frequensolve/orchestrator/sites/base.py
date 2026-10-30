@@ -817,6 +817,9 @@ class RunHandle:
         handle = cls(
             site=site, job=job, id=status.job_id, mode="skipped", poll_interval=0.0
         )
+        from frequensolve.orchestrator.utils.transient_progress import update_progress
+
+        update_progress(handle, status)
         handle._last_status = status
         handle._result = handle._make_result(status)
         if hasattr(site, "_emit_status"):
@@ -863,6 +866,11 @@ class RunHandle:
             return self._result.status
         if self._status_fn is not None:
             self._last_status = self._status_fn(self)
+            from frequensolve.orchestrator.utils.transient_progress import (
+                update_progress,
+            )
+
+            update_progress(self, self._last_status)
         return self._last_status
 
     def _complete_from_status(self, status: JobStatus) -> RunResult:
@@ -877,6 +885,9 @@ class RunHandle:
             self._result = self._wait_fn(self, 0, 0)
         else:
             self._result = self._make_result(status)
+        from frequensolve.orchestrator.utils.transient_progress import update_progress
+
+        update_progress(self, self._result.status)
         return self._result
 
     def _run_record_finalizer(

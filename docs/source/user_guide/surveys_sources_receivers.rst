@@ -341,6 +341,24 @@ quantities with explicit units.
    )
    das.add_component(name="eps_tt", field="strain", direction=[1.0, 0.0])
 
+For measured channel locations with nonuniform spacing, use
+``coordinate_mode="gauge_centers"`` and supply those locations as the receiver
+group's coordinates in cable order. The native backend reconstructs the plain
+cable through the centers, extends endpoint tangents by half a gauge, and
+averages axial strain around each center. This mode requires at least two
+centers and omits ``channel_spacing`` and helical parameters. A field of
+``"elastic:strain"`` without an explicit direction follows the cable tangent.
+
+.. code-block:: python
+
+   das = fs.ReceiverFiber(
+       gauge_length=23.93 * u.m,
+       points_per_gauge=129,
+       coordinate_mode="gauge_centers",
+       components=[fs.ReceiverComponent(name="strain", field="elastic:strain")],
+   )
+   acquisition.add_receiver_group(name="das", device=das, coords=centers, domain=2)
+
 Survey Sources
 --------------
 
@@ -416,6 +434,14 @@ automatically.
 Source Amplitudes
 ~~~~~~~~~~~~~~~~~
 
+.. important::
+
+   Acoustic/coupled ``scalar`` now means ``pressure_monopole``: its physical
+   strength is in m³/s², with a default of 1 m³/s². To retain the former
+   moment-source loading and N·m amplitude, use ``kind="isotropic_moment"``
+   (or the legacy ``monopole`` spelling). Elastic ``scalar`` remains a moment
+   source. Check source kind and units when migrating acoustic simulations.
+
 ``amplitude`` follows the Sauce ``fs-acquisition-2`` source-basis contract.
 Without a physical strength, a source uses its kind's default strength:
 
@@ -423,7 +449,9 @@ Without a physical strength, a source uses its kind's default strength:
 - Opt-in acoustic ``volume_injection``: volume injection rate, 1 m³/s in every
   dimension. Planar 2D distributes this rate over a fixed 1 m out-of-plane thickness;
   the internal line-source rate is Q / 1 m, independent of coordinate units.
-- Seismic ``scalar``, ``monopole``, ``gradient``, ``dipole`` and ``tensor``: 1e9 N·m.
+- Acoustic/coupled ``scalar`` and ``pressure_monopole``: 1 m³/s².
+- Elastic ``scalar``, explicit ``isotropic_moment``, legacy ``monopole``,
+  ``gradient``, ``dipole`` and ``tensor``: 1e9 N·m.
 
 The default scales the direction or mechanism, so a force direction of length 2
 gives 2e6 N. A plain number is a dimensionless multiplier. It scales explicit
@@ -451,7 +479,8 @@ or explicit ``value``/``units`` mapping is an exact physical source strength:
    )
 
 Vector amplitudes have force dimensions, conventionally ``N``. Explicit acoustic
-``volume_injection`` amplitudes are volume rates; seismic scalar/monopole moments
+``volume_injection`` amplitudes are volume rates; acoustic/coupled ``scalar``
+amplitudes use ``m^3/s^2``. Explicit ``isotropic_moment`` and legacy ``monopole``
 retain ``N*m``. If a direction already contains physical units, use a dimensionless
 top-level amplitude; Sauce rejects simultaneous physical units on both the
 direction and amplitude. Physical strength belongs to ``source_geometry``;
@@ -470,9 +499,8 @@ typed source. These helpers define ideal measurements; they do not swap survey
 geometry, copy source signatures or instrument transfer functions, or run a
 reciprocal simulation. ``response`` remains unused.
 
-Volumetric injection is explicitly opt-in. Existing ``scalar`` and ``monopole``
-inputs retain their original units, default strengths, density scaling, and
-loading behavior. The pressure reciprocal helper requires ``volume_injection``;
+Volumetric injection is explicitly opt-in. Explicit ``isotropic_moment`` and
+legacy ``monopole`` retain their moment-source units and loading behavior. The pressure reciprocal helper requires ``volume_injection``;
 it does not reinterpret legacy sources. The new kind requires an updated Sauce
 build and is supported for ``physics="acoustic"`` only.
 For volume injection, transient acoustic pressure loads the analytic time
@@ -538,3 +566,65 @@ currently does not consume them. Older JSON containing ``eval_samples`` or
 ``trace_samples`` is rejected with a migration error; remove those tables and
 express receiver geometry and sampling through supported receiver-group APIs.
 Large supported trace catalogs continue to be packed into HDF5 automatically.
+
+Acoustic pressure-wavelet sources
+---------------------------------
+
+For a wavelet applied directly to the acoustic pressure equation, use
+``acq.add_sources(kind="pressure_monopole", coords=coords)`` or
+``SourceGeometry.pressure_monopole(coords)``. Physical amplitudes use
+``m^3/s^2`` and default to 1. The wavelet is not differentiated in transient
+Galerkin. A Ricker produces a Ricker-shaped direct pressure arrival in a
+homogeneous 3D medium, including an on-axis axisymmetric source; planar 2D
+propagation and heterogeneous media may alter the received shape.
+
+Explicit ``volume_injection`` remains a volume-rate history in ``m^3/s``.
+Acoustic/coupled ``scalar`` now aliases ``pressure_monopole`` in both
+transient and frequency jobs. Use ``isotropic_moment`` (or legacy ``monopole``)
+for the former moment convention in ``N*m``; elastic-only scalar is unchanged.
+The new kind requires a backend supporting ``pressure_monopole``; older
+backends reject it rather than silently reinterpret the source.
+
+Compact spatial sources
+-----------------------
+
+Cartesian acoustic/elastic ``TransientJob`` uses compact Gaussian point loads by
+default. Sauce chooses a physical width from the local material sizing speed and
+``time.f_max`` (or the larger of the mesh and source bandwidth). The default
+homogeneous-Gaussian transfer is 0.98 at that frequency: approximately
+``sigma = 0.032 * c_min / f_max``. It reports the resolved width and clipping.
+This preserves total strength and leaves the time wavelet unchanged. Explicit
+supports take precedence; ``TransientJob(..., point_source="dirac")`` opts out.
+Frequency-domain and axisymmetric defaults remain unchanged. Bandwidth-based
+smoothing does not replace adequate mesh resolution.
+
+``GaussianSupport`` attaches a finite spatial profile to one physical source.
+Its width has physical units and remains unchanged when the mesh is refined::
+
+    source = fs.PointSource(
+        "shot", coordinates=[0, 0] * fs.ureg.m,
+        kind="vector", direction=[0, 1], amplitude=1e6 * fs.ureg.N,
+        support=fs.GaussianSupport(sigma=2 * fs.ureg.m),
+    )
+    geometry = fs.SourceGeometry.inline(kind="vector", sources=[source], domain=2)
+    simulation.acquisition.set_sources(geometry)
+
+``SourceGeometry.points(..., support=fs.GaussianSupport(...))`` applies the same
+profile to every source without combining their identities. Time functions and
+source encoding are authored normally. The installed Sauce solver must support
+the spatial-support contract; older solvers must not be used with this option.
+
+Sauce integrates a radial Gaussian with a smooth taper to zero at four sigma.
+It subdivides intersecting elements for quadrature and normalizes the retained
+integral across ranks. ``boundary="truncate_renormalize"`` is the default;
+``boundary="reject"`` rejects clipped volume supports. Other materials are
+excluded by the geometry's ``domain`` selection, and PML is always excluded.
+Clipping preserves total force but shifts its centroid; the solver reports the
+retained mass and centroid displacement. Empty overlap is an error.
+
+For elastic surface traction, set ``surface="<mesh surface name>"`` on the
+support. This integrates along an exterior free/Neumann surface rather than
+through its adjacent volume; it requires ``truncate_renormalize``. The default
+quadrature tolerance is ``1e-4``. This API initially supports Cartesian acoustic
+and elastic forward simulations; source-control/inversion workflows and GSLS
+acoustic isotropic-moment supports are rejected. No state smoothing is applied.

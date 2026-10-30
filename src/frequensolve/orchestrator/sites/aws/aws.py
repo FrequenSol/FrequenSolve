@@ -838,12 +838,20 @@ class AWSSite(BaseSite):
     ):
         """Fetch authoritative task metadata and named operation results."""
 
+        if getattr(job, "n_modes", None) is not None:
+            operations = tuple(op for op in operations if op != "transient")
         tasks = (
             ()
-            if getattr(job, "workflow", None) == "transient"
+            if (
+                getattr(job, "workflow", None) == "transient"
+                and getattr(job, "n_modes", None) is None
+            )
             else tuple(range(1, job.n_tasks + 1))
         )
-        if getattr(job, "workflow", None) == "transient":
+        if (
+            getattr(job, "workflow", None) == "transient"
+            and getattr(job, "n_modes", None) is None
+        ):
             operations = (*operations, "transient")
         requested_operations = tuple(dict.fromkeys(operations))
         local_root = self._local_result_path(job, project_path)
@@ -866,7 +874,10 @@ class AWSSite(BaseSite):
         ) as temporary:
             stage = Path(temporary)
             use_index = False
-            if getattr(job, "workflow", None) == "transient":
+            if (
+                getattr(job, "workflow", None) == "transient"
+                and getattr(job, "n_modes", None) is None
+            ):
                 catalog = ArtifactCatalog.read_task_results(stage, tasks=())
             else:
                 self._download_s3_files(prefix, stage, (index_path,), missing_ok=True)
@@ -903,8 +914,8 @@ class AWSSite(BaseSite):
 
             if (
                 getattr(job, "workflow", None) == "transient"
-                and "transient" not in operation_results
-            ):
+                and getattr(job, "n_modes", None) is None
+            ) and "transient" not in operation_results:
                 raise RuntimeError(
                     "Current successful transient operation metadata is missing"
                 )
@@ -957,6 +968,27 @@ class AWSSite(BaseSite):
                 "Remote staged provenance is missing; restage the job before fetching"
             )
         for task in tasks:
+            if getattr(job, "n_modes", None) is not None:
+                result = (
+                    catalog.results.get(task)
+                    if not isinstance(catalog, TaskIndex)
+                    else None
+                )
+                current = bool(
+                    result is not None
+                    and result.successful
+                    and result.partition.task == task
+                    and result.partition.task_count == job.n_tasks
+                    and result.partition.azimuthal_mode == task - 1
+                    and all(
+                        result.fingerprints.get(k) == v for k, v in fingerprints.items()
+                    )
+                )
+                if not current:
+                    raise RuntimeError(
+                        f"Remote angular task {task} does not match the current staged job"
+                    )
+                continue
             frequency = complex(job.f_list[task - 1])
             if isinstance(catalog, TaskIndex):
                 current = catalog.is_task_current(

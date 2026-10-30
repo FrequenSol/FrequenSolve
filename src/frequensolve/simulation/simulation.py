@@ -297,6 +297,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             axisymmetric=axisymmetric,
             dimension=self.dimension,
         )
+        self._validate_azimuthal_mode()
         if self.project_path is None:
             raise ValueError(
                 "When initializing a simulation, you now must either call project.new_simulation() "
@@ -355,6 +356,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             physics=physics,
             dimension=dimension,
             axisymmetric=axisymmetric,
+            azimuthal_mode=data.pop("azimuthal_mode", None),
             project_path=project_path,
         )
 

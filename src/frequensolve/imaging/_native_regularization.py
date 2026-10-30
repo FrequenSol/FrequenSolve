@@ -18,8 +18,8 @@ from frequensolve.inversion.optimization import _shares_arrays
 from ._artifacts import (
     ControlVectorFile,
     SmoothingConfig,
-    control_smoothing,
     _fractional_scales,
+    control_smoothing,
     unqualified_block_name,
 )
 from ._block_digest import block_digest
@@ -582,8 +582,6 @@ def bind_workflow_regularization(
     smooth_bound = (
         None
         if not smooth
-        else smooth[0]
-        if len(smooth) == 1
-        else _BoundSum(specification, space, smooth)
+        else smooth[0] if len(smooth) == 1 else _BoundSum(specification, space, smooth)
     )
     return smooth_bound, native

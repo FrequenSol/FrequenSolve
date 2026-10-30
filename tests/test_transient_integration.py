@@ -361,3 +361,76 @@ def test_native_helmholtz_vtu_uses_current_time(tmp_path):
         energy += np.array([np.linalg.norm(value) for value in values]) ** 2
     assert np.all(energy > 0)
     assert job.is_run_current()
+
+
+def test_local_angular_tasks_loading_and_restart(tmp_path):
+    """One saved simulation drives independent modes, loading, retries and restart."""
+    payload = simulation(tmp_path / "project", "acoustic").to_fs()
+    payload.update(physics="acoustic_axisym", axisymmetric=True)
+    payload["BCs"][0]["boundaries"].remove("x_min")
+    payload["BCs"].append(dict(name="axis", boundaries=["x_min"], conditions=["axis"]))
+    sim = fs.SeismicSimulation.from_fs(payload)
+    job = fs.TransientJob(
+        "angular",
+        sim,
+        n_modes=3,
+        time=fs.TimeIntegration(0, 0.6, 0.005),
+        source=fs.TimeFunction.ricker(8, delay=0.2),
+        output_schedule=fs.TimeOutput(stride=10),
+        checkpoint=fs.CheckpointSchedule(stride=60),
+    )
+    job += fs.WavefieldOutput(
+        name="pressure",
+        field="pressure",
+        grid=fs.CartesianGrid(
+            x0=[0.1, 0.1], x1=[0.9, 0.4], n=[5, 3], dims=["r", "z"], units="km"
+        ),
+    )
+    job += fs.VtkOutput(name="frames", fields=["pressure"], format="xdmf")
+    site = LocalSite(
+        solver=os.environ["FS_TEST_TRANSIENT_EXECUTABLE"],
+        solver_policy="off",
+        n_workers=2,
+        threads_per_worker=1,
+        shutdown_on_completion=True,
+        environment={"OMPI_MCA_btl": "self", "VECLIB_MAXIMUM_THREADS": "1"},
+    )
+    result = site.run(job, check=True)
+    assert result.successful and job.is_run_current()
+    loaded = fs.BaseJob.load(job.job_file)
+    assert loaded.n_tasks == 3
+    data = loaded.wavefields.open()
+    modes = data.read_modes("pressure")
+    assert modes.sizes["mode"] == 3 and np.isfinite(modes).all()
+    assert not np.allclose(modes.sel(mode=0), modes.sel(mode=1), rtol=1e-3, atol=0)
+    expected = fs.reconstruct_azimuthal_pressure(
+        {m: modes.sel(mode=m, drop=True) for m in range(3)}, 0.7
+    )
+    np.testing.assert_allclose(data.read("pressure", delta_theta=0.7), expected)
+    for task in (1, 2, 3):
+        record = loaded.operation_result(task=task)
+        assert record.partition.azimuthal_mode == task - 1
+        assert record.partition.frequency is None
+        assert any(a.id == "visualization-series:frames" for a in record.artifacts)
+        assert (
+            job._result_path
+            / "checkpoints"
+            / "modes"
+            / f"mode_{task-1:06d}"
+            / "azimuthal_mode_R00000.txt"
+        ).exists()
+    # Retry one missing commit while retaining the other modes' exact publications.
+    retained = [job.task_manifest_file(i).read_bytes() for i in (1, 3)]
+    job.task_manifest_file(2).unlink()
+    assert job.plan_tasks()["pending_indices"] == [1]
+    assert site.run(job, check=True).successful
+    assert retained == [job.task_manifest_file(i).read_bytes() for i in (1, 3)]
+    cp = tmp_path / "checkpoint-copy"
+    shutil.copytree(job._result_path / "checkpoints", cp)
+    restarted = job.with_restart(cp, name="resumed_modes")
+    assert site.run(restarted, check=True).successful
+    resumed = restarted.wavefields.open().read_modes("pressure")
+    assert list(resumed.step.values) == [job.time.steps]
+    np.testing.assert_allclose(
+        resumed.values[:, 0], modes.values[:, -1], rtol=1e-4, atol=0
+    )

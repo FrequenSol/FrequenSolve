@@ -270,7 +270,10 @@ def _read_task_result(
     if result_path is None:
         return None
     job_data = json.loads(Path(job_file).read_text(encoding="utf-8"))
-    if job_data.get("workflow") in {"patch_prepare", "transient"}:
+    modal = job_data.get("workflow") == "transient" and "n_modes" in job_data.get(
+        "Time", {}
+    )
+    if job_data.get("workflow") in {"patch_prepare", "transient"} and not modal:
         if task_id != 0:
             raise ArtifactContractError("This workflow has exactly one operation")
         return load_operation_result(result_path, job_data["workflow"])
@@ -280,6 +283,13 @@ def _read_task_result(
         raise ArtifactContractError(
             f"task result {path} reports task {task_result.partition.task}, "
             f"expected {task_id + 1}"
+        )
+    if modal and (
+        task_result.partition.azimuthal_mode != task_id
+        or task_result.partition.task_count != job_data["Time"]["n_modes"]
+    ):
+        raise ArtifactContractError(
+            "Transient task result has the wrong angular partition"
         )
     expected_frequency = _job_task_frequency(job_file, task_id)
     if (
@@ -1056,6 +1066,7 @@ class LocalSite(BaseSite):
         Returns:
             RunHandle for the submitted tasks
         """
+        progress_not_before = int(time.time())
         check = bool(kwargs.pop("check", False))
         postprocess_only = bool(kwargs.pop("postprocess_only", False)) or bool(
             getattr(job, "postprocess_only", False)
@@ -1188,6 +1199,7 @@ class LocalSite(BaseSite):
             job.write_run_state(status="skipped", tasks=skipped)
             return RunHandle.skipped(self, job, "No frequency tasks need to run")
         handle = RunHandle(
+            backend={"progress_not_before": progress_not_before},
             site=self,
             job=job,
             id=f"local:{job.name}",
@@ -1332,6 +1344,13 @@ class LocalSite(BaseSite):
             message="Solver postprocess task running",
             raw=raw,
         )
+
+    def _read_transient_progress(self, run: RunHandle):
+        from frequensolve.orchestrator.utils.transient_progress import (
+            read_local_progress,
+        )
+
+        return read_local_progress(run.job)
 
     def _poll_local_run(self, run: RunHandle) -> JobStatus:
         futures = run.backend.get("futures", [])

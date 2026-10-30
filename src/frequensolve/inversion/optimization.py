@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import count
 from typing import Any, Callable, Optional, Sequence, Tuple, TypeVar
 
 import numpy as np
@@ -271,9 +272,11 @@ class LBFGSOptions:
 
     Absolute/relative stopping tolerances, their defaults and the fixed
     ``initial_objective`` reference follow :class:`InexactNewtonOptions`.
+    ``max_iterations=None`` removes the outer iteration limit; convergence,
+    evaluation limits, and failed line searches still stop the optimizer.
     """
 
-    max_iterations: int = 50
+    max_iterations: Optional[int] = 50
     max_objective_evaluations: Optional[int] = None
     max_line_search_trials: Optional[int] = None
     history_size: int = 10
@@ -295,9 +298,10 @@ class LBFGSOptions:
     bound_tolerance: float = 1.0e-12
 
     def __post_init__(self) -> None:
-        if int(self.max_iterations) < 1:
-            raise ValueError("max_iterations must be positive")
-        object.__setattr__(self, "max_iterations", int(self.max_iterations))
+        if self.max_iterations is not None:
+            if int(self.max_iterations) < 1:
+                raise ValueError("max_iterations must be positive")
+            object.__setattr__(self, "max_iterations", int(self.max_iterations))
         if int(self.objective_minimum_iterations) < 1:
             raise ValueError("objective_minimum_iterations must be positive")
         object.__setattr__(
@@ -1552,7 +1556,12 @@ def minimize_lbfgs(
             steepest_descent_fallbacks,
         )
 
-    for iteration in range(1, options.max_iterations + 1):
+    iteration_indices = (
+        count(1)
+        if options.max_iterations is None
+        else range(1, options.max_iterations + 1)
+    )
+    for iteration in iteration_indices:
         direction = -inverse_hessian_action(projected_gradient)
         if free is not None:
             direction[~free] = 0.0
@@ -1963,7 +1972,12 @@ def minimize_proximal_gradient(
             0,
         )
 
-    for iteration in range(1, options.max_iterations + 1):
+    iteration_numbers = (
+        count(1)
+        if options.max_iterations is None
+        else range(1, options.max_iterations + 1)
+    )
+    for iteration in iteration_numbers:
         accepted = False
         trials = 0
         # ``x`` and ``g`` are rebound, never written in place: no copies needed.

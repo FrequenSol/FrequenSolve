@@ -145,6 +145,10 @@ def _run_sweep(
 
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
     fake = FakeCluster(tmp_path, linux=linux)
+    hostnames = "\n".join(f"node{i}" for i in range(nodes))
+    scontrol = fake.bin / "scontrol"
+    scontrol.write_text(f"#!/bin/sh\nprintf '%s\\n' '{hostnames}'\n")
+    scontrol.chmod(0o755)
     if not linux:
         (fake.bin / "uname").write_text("#!/bin/bash\necho Darwin\n")
         (fake.bin / "uname").chmod(0o755)
@@ -199,6 +203,10 @@ def _run_sweep(
         PATH=f"{fake.bin}{os.pathsep}{env['PATH']}",
         FAKE_SWEEP_CALLS=str(calls),
         FAKE_SWEEP_TASKS=str(n_tasks),
+        SLURM_JOB_NODELIST="fake-allocation",
+        SLURM_TASKS_PER_NODE=f"{ranks_per_node}(x{nodes})",
+        SLURM_JOB_CPUS_PER_NODE=f"{cores_per_node}(x{nodes})",
+        SLURM_HET_SIZE="1",
     )
     env.update(
         slurm_allocation_environment(

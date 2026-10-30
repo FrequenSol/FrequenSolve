@@ -270,9 +270,7 @@ class AttenuationConfig(ExtraFieldsMixin):
         model = _normalize_model(self.model)
         payload: Dict[str, Any] = {"model": model}
         if self.reference_frequency is not None:
-            payload["reference_frequency"] = _frequency_to_fs(
-                self.reference_frequency
-            )
+            payload["reference_frequency"] = _frequency_to_fs(self.reference_frequency)
         if model == "gsls":
             if self.mechanisms is not None:
                 payload["mechanisms"] = _normalize_mechanisms(self.mechanisms)
@@ -283,9 +281,7 @@ class AttenuationConfig(ExtraFieldsMixin):
                 self.frequency_max, "frequency_max"
             )
             if self.fit_tolerance is not None:
-                payload["fit_tolerance"] = _normalize_fit_tolerance(
-                    self.fit_tolerance
-                )
+                payload["fit_tolerance"] = _normalize_fit_tolerance(self.fit_tolerance)
 
         reserved_extra = set(self.extra).intersection(_REFERENCE_FREQUENCY_KEYS)
         if reserved_extra:
@@ -401,8 +397,7 @@ def _frequency_hz(value: Any, name: str = "reference_frequency") -> float:
 def _normalize_mechanisms(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral):
         raise TypeError(
-            "attenuation mechanisms must be an integer in "
-            f"1..{_GSLS_MAX_MECHANISMS}"
+            "attenuation mechanisms must be an integer in " f"1..{_GSLS_MAX_MECHANISMS}"
         )
     count = int(value)
     if not 1 <= count <= _GSLS_MAX_MECHANISMS:

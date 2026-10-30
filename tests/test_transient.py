@@ -160,10 +160,13 @@ def _text(h5, name, value):
     h5.create_dataset(name, data=value, dtype=h5py.string_dtype())
 
 
-def commit(job, *, sparse=False, first_step=0):
+def commit(job, *, sparse=False, first_step=0, task=None):
     root = job._result_path
     root.mkdir(parents=True, exist_ok=True)
-    meta = root / "metadata.h5"
+    prefix = Path() if task is None else Path("modes") / f"mode_{task - 1:06d}"
+    (root / prefix).mkdir(parents=True, exist_ok=True)
+    meta_name = (prefix / "metadata.h5").as_posix()
+    meta = root / meta_name
     with h5py.File(meta, "w") as h5:
         _text(h5, "survey/receiver_groups/_catalog/group_name", ["pressure"])
         _text(h5, "survey/receiver_groups/_catalog/dataset_path", ["/pressure"])
@@ -188,23 +191,25 @@ def commit(job, *, sparse=False, first_step=0):
             role="trace_metadata",
             representation="hdf5_metadata",
             schema="fs_trace_metadata_v1",
-            path="metadata.h5",
+            path=meta_name,
             retention="durable",
             bytes=meta.stat().st_size,
         )
     ]
-    for step in job.output_schedule.steps(job.time):
+    schedule = job.trace_schedule or job.output_schedule
+    for step in schedule.steps(job.time):
         if step < first_step:
             continue
-        name = f"step_{step:012d}.h5"
+        name = (prefix / f"step_{step:012d}.h5").as_posix()
         p = root / name
         with h5py.File(p, "w") as h5:
             _text(h5, "sample_axis", "time")
-            _text(h5, "trace_metadata_file", "metadata.h5")
+            _text(h5, "trace_metadata_file", meta_name)
+            h5["task_id"] = task or 1
             h5["time_step"] = step
             h5["time"] = job.time.start + step * job.time.dt
             data = np.zeros((2, 2) if sparse else (1, 1, 2, 2))
-            data[..., 0] = step
+            data[..., 0] = step * (task or 1)
             h5["pressure"] = data
         records.append(
             dict(
@@ -225,8 +230,16 @@ def commit(job, *, sparse=False, first_step=0):
         status=dict(state="success", code=0),
         artifacts=records,
     )
-    job.result_manifest_file.parent.mkdir(parents=True, exist_ok=True)
-    job.result_manifest_file.write_text(json.dumps(payload))
+    path = job.result_manifest_file
+    if task is not None:
+        payload.pop("operation")
+        payload["schema"] = "fs-task-result-2"
+        payload["partition"] = dict(
+            task=task, task_count=job.n_tasks, azimuthal_mode=task - 1
+        )
+        path = job.task_manifest_file(task)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
     return payload
 
 
@@ -494,10 +507,7 @@ def test_transient_paraview_roundtrip(tmp_path, format):
     "output,message",
     [
         (fs.VtkOutput(), "explicit fields"),
-        (fs.VtkOutput(fields=["pressure"], properties=["Vp"]), "fields only"),
-        (fs.VtkOutput(items=[{"kind": "info", "info": "order"}]), "fields only"),
         (fs.VtkOutput(fields=["pressure"], parts=["im"]), "real"),
-        (fs.VtkOutput(fields=["p_velocity"]), "primary or constitutive"),
         (fs.VtkOutput(fields=["pressure"], post_process=True), "post_process"),
         (fs.VtkOutput(fields=["pressure"], execute_on="adapt"), "TimeOutput"),
         (fs.VtkOutput(fields=["pressure"], format="vtr"), "VTU and XDMF"),
@@ -522,9 +532,71 @@ def test_transient_helmholtz_outputs(tmp_path, field):
     job += fs.VtkOutput(fields=[field, f"p_{field}", f"s_{field}"])
     job.validate_outputs()
     assert not any(i.code == "field.unsupported" for i in job.validate().errors)
-    job.outputs.vtk = [fs.VtkOutput(fields=["pressure"])]
+    job.outputs.vtk = [
+        fs.VtkOutput(fields=["pressure", "displacement", "strain_zz", f"p_{field}"])
+    ]
+    job.validate_outputs()
+    other = "displacement" if field == "velocity" else "velocity"
+    job.outputs.vtk = [fs.VtkOutput(fields=[f"p_{other}"])]
     with pytest.raises(ValueError, match="must match"):
         job.validate_outputs()
+
+
+@pytest.mark.parametrize(
+    "physics",
+    [
+        "acoustic",
+        "elastic",
+        "coupled",
+        "acoustic_axisym",
+        "elastic_axisym",
+        "coupled_axisym",
+    ],
+)
+@pytest.mark.parametrize("output_kind", ["vtk", "wavefield", "receiver"])
+def test_transient_velocity_projection_is_automatic(tmp_path, physics, output_kind):
+    job = job_at(tmp_path)
+    job.simulation.physics = physics
+    job.simulation.axisymmetric = physics.endswith("_axisym")
+    if output_kind == "vtk":
+        job += fs.VtkOutput(fields=["velocity", "p_velocity", "s_velocity"])
+    elif output_kind == "wavefield":
+        job += fs.WavefieldOutput(
+            name="p",
+            field="p_velocity_x",
+            grid=fs.CartesianGrid(x0=[0, 0], x1=[1, 1], n=[3, 3]),
+        )
+    else:
+        job.simulation.acquisition.add_sources(
+            kind="vector" if physics.startswith("elastic") else "scalar",
+            coords=[[0.5, 0.5]],
+        )
+        job.simulation.acquisition.add_receiver_group(
+            "s",
+            fs.ReceiverNode(
+                components=[
+                    fs.ReceiverComponent(name="s", field="s_velocity", direction=[1, 0])
+                ]
+            ),
+            coords=[[0.5, 0.5]],
+        )
+    job.validate_outputs()
+    assert not any(
+        i.code in {"field.unsupported", "job.config.invalid"}
+        for i in job.validate().errors
+    )
+    job.save()
+    # The default selects the physical quantity; Sauce enables only requested
+    # parts and schedules solves. Native-only jobs keep projection disabled.
+    assert job.simulation.to_fs()["helmholtz_projection"] == {"field": "velocity"}
+    restored = fs.TransientJob.from_fs(job.to_fs())
+    restored.validate_outputs()
+    assert restored.simulation.extra["helmholtz_projection"] == {"field": "velocity"}
+
+
+def test_transient_native_velocity_does_not_enable_projection(tmp_path):
+    job = job_at(tmp_path, outputs=fs.VtkOutput(fields=["velocity"]))
+    assert job.simulation.to_fs()["helmholtz_projection"] == {"field": "velocity"}
 
 
 @pytest.mark.parametrize(
@@ -694,3 +766,188 @@ def test_slurm_transient_accepts_every_spelling_of_zero_tolerance(
         site.run(job, tolerate_failures=value)
     with pytest.raises(ValueError, match="tolerate_failures=0"):
         site.run(job, tolerate_failures=1)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        fs.VtkOutput(fields=["pressure"], properties=["Vp"]),
+        fs.VtkOutput(properties=["Vp", "Rho"], execute_on="initial"),
+        fs.VtkOutput(items=[{"kind": "info", "info": "order"}]),
+    ],
+)
+def test_transient_material_output_roundtrip(tmp_path, output):
+    job = job_at(tmp_path)
+    job += output
+    job.validate_outputs()
+    job.save()
+    restored = fs.TransientJob.from_fs(job.to_fs())
+    assert restored.outputs.vtk[0].to_fs() == output.to_fs()
+
+
+def test_displacement_projection_rejects_native_velocity(tmp_path):
+    job = job_at(tmp_path)
+    job.simulation.physics = "elastic"
+    job.simulation.extra["helmholtz_projection"] = {
+        "enabled": True,
+        "field": "displacement",
+        "parts": ["p", "s"],
+    }
+    job.outputs.vtk = [fs.VtkOutput(fields=["velocity"])]
+    with pytest.raises(ValueError, match="require velocity"):
+        job.validate_outputs()
+
+
+def test_independent_trace_schedule(tmp_path):
+    job = job_at(
+        tmp_path,
+        outputs=fs.TraceOutput(),
+        output_schedule=fs.TimeOutput(interval=0.5),
+        trace_schedule=fs.TimeOutput(interval=0.2, write_initial=False),
+    )
+    restored = fs.BaseJob.load(job.job_file)
+    assert restored.to_fs() == job.to_fs()
+    np.testing.assert_array_equal(restored.output_schedule.steps(job.time), [0, 5, 10])
+    commit(job)
+    traces = restored.traces.open()
+    np.testing.assert_array_equal(traces.steps, [2, 4, 6, 8, 10])
+    np.testing.assert_allclose(traces.times, [0.2, 0.4, 0.6, 0.8, 1])
+    before = job.task_fingerprint(1)
+    job.trace_schedule = fs.TimeOutput(stride=1)
+    assert job.task_fingerprint(1) != before
+    with pytest.raises(ValueError, match="saved job inputs"):
+        job.traces.open()
+
+
+def test_trace_schedule_requires_aligned_time(tmp_path):
+    with pytest.raises(ValueError, match="align"):
+        job_at(tmp_path, trace_schedule=fs.TimeOutput(interval=0.15))
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"dt": 0.1},
+        {"dt": 0.1, "f_0": 0.8},
+        {"f_max": 4, "period_error": 0.001},
+        {"f_max": 4, "window_error": fs.Q_(3, "degree")},
+    ],
+)
+def test_gauss_job_save_load_and_solver_contract(tmp_path, selection):
+    from jsonschema import Draft202012Validator
+    from referencing import Registry, Resource
+
+    job = job_at(tmp_path)
+    job.time = fs.TimeIntegration(0, 1, scheme="gauss", order=4, **selection)
+    job.save()
+    restored = fs.BaseJob.load(job.job_file)
+    assert restored.time == job.time
+    assert restored.to_fs() == job.to_fs()
+    payload = restored.to_fs()["Time"]
+    assert payload["method"] == "gauss4"
+    assert "newmark" not in payload and "window_error" not in payload
+    path = (
+        Path(__file__).parent
+        / "contracts/sauce-time-domain-1/contracts/inputs/fs-time-domain-1/schema.json"
+    )
+    registry = Registry()
+    for file in path.parents[2].rglob("*.json"):
+        schema = json.loads(file.read_text())
+        registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
+    Draft202012Validator(json.loads(path.read_text()), registry=registry).validate(
+        payload
+    )
+    fingerprint = restored.task_fingerprint(1)
+    restored.time = fs.TimeIntegration(0, 1, restored.time.dt, order=2)
+    assert restored.task_fingerprint(1) != fingerprint
+
+
+def test_gauss_restart_checks_method_and_interval(tmp_path):
+    job = job_at(tmp_path)
+    job.time = fs.TimeIntegration(0, 1, 0.1, order=4)
+    checkpoint = tmp_path / "gauss_checkpoint"
+    checkpoint.mkdir()
+    with h5py.File(checkpoint / "newmark_manifest_R00000.h5", "w") as h5:
+        h5["layout"] = [2, 0, 3, 5]
+        h5["scheme"] = [0.5, 0, 1, 0.1, 0, 0]
+    resumed = job.with_restart(checkpoint, name="gauss-resume")
+    resumed.save()
+    assert fs.BaseJob.load(resumed.job_file).restart_step() == 5
+    resumed.time = fs.TimeIntegration(0, 1, 0.1, order=4, f_0=0.8)
+    with pytest.raises(ValueError, match="theta_0"):
+        resumed.restart_step()
+    with h5py.File(checkpoint / "newmark_manifest_R00000.h5", "a") as h5:
+        h5["theta_0"] = 2 * np.pi * 0.8 * 0.1
+    assert resumed.restart_step() == 5
+    resumed.time = fs.TimeIntegration(0, 2, 0.1, order=4, f_0=0.8)
+    with pytest.raises(ValueError, match="Restart interval"):
+        resumed.restart_step()
+    resumed.time = fs.TimeIntegration(0, 1, 0.1, order=2)
+    with pytest.raises(ValueError, match="restart manifest"):
+        resumed.restart_step()
+
+
+@pytest.mark.parametrize("f_0", [0, 2])
+def test_gauss_accepts_pml_and_gsls_but_custom_newmark_remains_restricted(
+    tmp_path, f_0
+):
+    job = job_at(tmp_path)
+    job.simulation += fs.BoundaryCondition(
+        boundaries=["x_min"], conditions="pml:impedance"
+    )
+    job.time = fs.TimeIntegration(0, 1, 0.1, order=4, f_0=f_0)
+    job.validate_outputs()
+    job.simulation.model.attenuation_model = "gsls"
+    job.simulation.model._attenuation_extra = {"frequency_min": 1, "frequency_max": 10}
+    job.validate_outputs()
+    job.time = fs.TimeIntegration(0, 1, 0.1, fs.Newmark(beta=0.3))
+    with pytest.raises(ValueError, match="gsls"):
+        job.validate_outputs()
+    job.simulation.model.attenuation_model = "none"
+    job.simulation.model._attenuation_extra = {}
+    with pytest.raises(ValueError, match="PML"):
+        job.validate_outputs()
+
+
+def test_transient_configures_unset_defaults_and_preserves_explicit_choices(tmp_path):
+    project = fs.Project(name="defaults", path=tmp_path / "defaults")
+    sim = project.new_simulation(name="wave", physics="acoustic", dimension=2)
+    sim.discretization = fs.Discretization(geometry_tolerance=1e-5)
+    job = fs.TransientJob(
+        "pulse",
+        sim,
+        time=fs.TimeIntegration(0, 1, 0.01, f_max=20),
+        source=fs.TimeFunction.ricker(10, delay=0.3),
+    )
+    assert job.simulation is sim
+    assert sim.discretization.to_fs() == {
+        "geometry_tolerance": 1e-5,
+        "method": "Galerkin",
+    }
+    assert sim.model.attenuation_model == "none"
+    assert sim.mesh.adapt.f_adapt == 20
+    job.save()
+    assert fs.BaseJob.load(job.job_file).to_fs() == job.to_fs()
+    sim.mesh.set_adapt(elems_per_wave=3, order=4, f_adapt=fs.Q_(0.03, "kHz"))
+    sim.solver.tolerance = 2e-4
+    fs.TransientJob("second", sim, time=job.time, source=job.source)
+    assert (sim.mesh.adapt.f_adapt, sim.mesh.adapt.order, sim.solver.tolerance) == (
+        30,
+        4,
+        2e-4,
+    )
+    sim.discretization = fs.Discretization(method="DPG")
+    with pytest.raises(ValueError, match="Galerkin"):
+        fs.TransientJob("invalid", sim, time=job.time, source=job.source)
+
+
+def test_transient_defaults_do_not_guess_source_bandwidth(tmp_path):
+    project = fs.Project(name="p", path=tmp_path / "p")
+    sim = project.new_simulation(name="wave", physics="acoustic", dimension=2)
+    with pytest.raises(ValueError, match="bandwidth"):
+        fs.TransientJob(
+            "pulse",
+            sim,
+            time=fs.TimeIntegration(0, 1, 0.01),
+            source=fs.TimeFunction.ricker(10, delay=0.3),
+        )

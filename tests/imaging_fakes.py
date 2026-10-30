@@ -1814,9 +1814,9 @@ class FakeImagingSite(BaseSite):
                     )
                     # The surrogate's residual is simulated - observed (Sauce's
                     # contract is the opposite); record it so readers adapt.
-                    group["objective_residual"].attrs["convention"] = (
-                        "simulated_minus_observed"
-                    )
+                    group["objective_residual"].attrs[
+                        "convention"
+                    ] = "simulated_minus_observed"
                     modeled = simulated[layout.indices[select]]
                     group["simulated"] = np.column_stack((modeled.real, modeled.imag))
                     terms.append(
@@ -1891,9 +1891,9 @@ class FakeImagingSite(BaseSite):
                     group[name] = data
                 # The surrogate's residual is simulated - observed (Sauce's
                 # contract is the opposite); record it so readers adapt.
-                group["objective_residual"].attrs["convention"] = (
-                    "simulated_minus_observed"
-                )
+                group["objective_residual"].attrs[
+                    "convention"
+                ] = "simulated_minus_observed"
                 digests = {
                     name: flat_block_digest(data) for name, data in datasets.items()
                 }

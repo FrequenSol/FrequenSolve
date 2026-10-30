@@ -309,6 +309,12 @@ class TraceDataset:
         frequencies = TraceStore._read_trace_frequencies(path)
         laplace = TraceStore._read_trace_laplace_values(path)
         groups = TraceStore.discover_trace_groups(path)
+        from frequensolve.seismic.trace_pack import TracePackManifest
+
+        pack = TracePackManifest.from_file(path)
+        if pack is not None:
+            frequencies = [entry.frequency.real for entry in pack.entries]
+            laplace = [entry.frequency.imag for entry in pack.entries]
         manifest = TraceManifest(
             files=[path],
             frequencies={
@@ -320,6 +326,7 @@ class TraceDataset:
             result_path=path.parent,
             output_path=path.parent,
             project_path=path.parent,
+            pack=pack,
         )
         return cls.from_manifest(manifest, upscale=upscale)
 
@@ -451,6 +458,19 @@ class TraceDataset:
 
         return self.store.consolidate(
             cache_dir=cache_dir or self._default_cache_dir(),
+        )
+
+    def export_packed(self, path: Path) -> Path:
+        """Export selected native packed traces to a new standalone HDF5 file.
+
+        Unlike the reader's consolidation cache, this physically combines all
+        selected segments for consumers that require one native trace file.
+        Existing destinations and incompatible survey layouts are rejected.
+        """
+        from frequensolve.seismic.trace_export import export_packed
+
+        return export_packed(
+            self.metadata["packed_entries"], path, groups=self.manifest.groups
         )
 
     def times(self, upscale: Optional[int] = None) -> np.ndarray:

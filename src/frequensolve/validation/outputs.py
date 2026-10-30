@@ -399,7 +399,7 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
             allowed &= {"pressure", "velocity", "p_velocity", "s_velocity"}
         elif physics in {"elastic", "elastic_axisym"}:
             allowed &= {"velocity", "p_velocity", "s_velocity"}
-        elif physics == "coupled_axisym":
+        elif physics in {"coupled", "coupled_axisym"}:
             allowed &= {"pressure", "velocity", "p_velocity", "s_velocity"}
     if ctx.workflow == "transient":
         # Velocity samples the Newmark rate (solids) or the accumulated
@@ -409,6 +409,9 @@ def _validate_field(field: Any, path: str, ctx: _ValidationContext) -> None:
             "elastic": {"displacement", "velocity", "stress", "strain"},
             "coupled": {"pressure", "displacement", "velocity", "stress", "strain"},
         }.get(str(ctx.simulation.physics).removesuffix("_axisym"), set())
+        if allowed:
+            # Sauce enables velocity decomposition from the requested names.
+            allowed |= {"p_velocity", "s_velocity"}
         projection = ctx.simulation.extra.get("helmholtz_projection", {})
         if isinstance(projection, Mapping):
             if projection.get("enabled", False) or projection.get("parts"):

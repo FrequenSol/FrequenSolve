@@ -2784,12 +2784,26 @@ def _install_source_mechanism(
     dimension = int(simulation.dimension)
     real, phase = _real_components(values, block.name)
     physical = real * float(scale)
-    if kind in {"scalar", "monopole", "volume_injection", "pressure_monopole", "isotropic_moment"}:
+    if kind in {
+        "scalar",
+        "monopole",
+        "volume_injection",
+        "pressure_monopole",
+        "isotropic_moment",
+    }:
         if physical.size != 1:
             raise ValueError(f"{block.name!r} must have one component for {kind}")
-        default_units = {"volume_injection": "m^3/s", "pressure_monopole": "m^3/s^2"}.get(kind, "N*m")
+        default_units = {
+            "volume_injection": "m^3/s",
+            "pressure_monopole": "m^3/s^2",
+        }.get(kind, "N*m")
         if kind == "scalar" and str(simulation.physics).lower() in {
-            "acoustic", "acoustic_axisym", "coupled", "coupled_axisym", "coupled2", "coupled_aep"
+            "acoustic",
+            "acoustic_axisym",
+            "coupled",
+            "coupled_axisym",
+            "coupled2",
+            "coupled_aep",
         }:
             default_units = "m^3/s^2"
         point.amplitude = {"value": float(physical[0]), "units": units or default_units}

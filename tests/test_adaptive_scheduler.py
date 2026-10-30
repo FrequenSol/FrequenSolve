@@ -838,3 +838,33 @@ def test_failed_launch_cancels_existing_steps(monkeypatch, tmp_path):
     assert status["state"] == "failed"
     assert status["aborted_tasks"] == [1]
     assert status["running"] == status["launching"] == 0
+
+
+def test_ibrun_gpu_placement_survives_launcher_argument_reparsing(tmp_path):
+    scheduler = _idle_scheduler(
+        tmp_path,
+        mpi="ibrun",
+        total_ranks=8,
+        ranks_per_node=8,
+        gpus_per_node=8,
+    )
+    probe = tmp_path / "probe.sh"
+    probe.write_text('#!/bin/sh\nprintf "%s" "$FS_GPU_DEVICE"\n')
+    probe.chmod(0o700)
+    scheduler.executable = str(probe)
+    devices = []
+    for rank in range(4):
+        command = scheduler._launch_command(task_id=1, offset=4, ranks=4)
+        # TACC's launcher reconstructs the command; no inline shell program
+        # should depend on retained argv grouping.
+        placed = command[command.index("task_affinity") + 1 :]
+        result = subprocess.run(
+            " ".join(placed),
+            shell=True,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PMI_RANK": str(rank)},
+        )
+        devices.append(result.stdout)
+    assert devices == ["4", "5", "6", "7"]

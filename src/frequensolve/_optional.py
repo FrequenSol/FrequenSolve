@@ -73,6 +73,23 @@ class _LazyOptionalMeta(type):
         return issubclass(subclass, cls._load())
 
 
+class MissingOptionalValue:
+    """Importable placeholder for a value whose optional backend is absent."""
+
+    def __init__(self, symbol: str, error: ImportError):
+        self._symbol = symbol
+        self._message = str(error)
+
+    def __repr__(self) -> str:
+        return f"<{self._symbol}: optional dependency unavailable>"
+
+    def __getattr__(self, name: str) -> NoReturn:
+        raise ImportError(self._message)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise ImportError(self._message)
+
+
 def missing_optional_class(
     symbol: str,
     *,

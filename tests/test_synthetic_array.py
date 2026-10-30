@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 import frequensolve as fs
 from frequensolve import imaging as im
 
@@ -84,8 +85,9 @@ def test_comparison_binding_freezes_reliability_across_trials():
 @pytest.fixture
 def synthetic_problem(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from tests.test_imaging_problem import _problem
+
     from tests.imaging_fakes import FakeImagingSite
+    from tests.test_imaging_problem import _problem
 
     comparison = im.Comparison.phase_derivative(
         array=im.SyntheticArray.gaussian(sigma=fs.Q_(2000, "km")),
@@ -221,6 +223,7 @@ def test_array_configuration_distinguishes_problem_identities():
 @pytest.mark.parametrize("source_policy", ["frozen", "total"])
 def test_native_array_comparison_roundtrip_and_routing(kind, source_policy):
     from types import SimpleNamespace
+
     from frequensolve.imaging._synthetic_comparison import selected
 
     window = getattr(im.SyntheticArray, kind)(

@@ -184,10 +184,15 @@ def test_transient_job_rejects_gsls_without_band(tmp_path):
         _transient_job(tmp_path, "gsls")
 
 
-@pytest.mark.parametrize("model", ["kjartansson", None])
-def test_transient_job_rejects_kjartansson(tmp_path, model):
+def test_transient_job_rejects_kjartansson(tmp_path):
     with pytest.raises(ValueError, match="needs model.attenuation_model='gsls'"):
-        _transient_job(tmp_path, model)
+        _transient_job(tmp_path, "kjartansson")
+
+
+def test_transient_job_defaults_unset_attenuation_to_lossless(tmp_path):
+    job = _transient_job(tmp_path, None)
+    assert job.simulation.model.attenuation_model == "none"
+    assert job.simulation.model.to_fs()["attenuation"]["model"] == "none"
 
 
 def test_frequency_domain_job_rejects_gsls(tmp_path):

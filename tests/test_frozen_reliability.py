@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from frequensolve.imaging._reliability import freeze, point_weights
-from frequensolve.imaging.misfit import Comparison, Misfit, Loss
+from frequensolve.imaging.misfit import Comparison, Loss, Misfit
 
 
 def test_local_confidence_is_gain_invariant_and_targets_notches():
@@ -36,6 +36,23 @@ def test_weights_use_coordinate_keys_and_observed_floor():
     values = [[3, 4], [0, 0], [1, 0], [2, 0]]
     weight = point_weights(keys, values, [[2, 1]])
     np.testing.assert_allclose(weight[:, 0], [[0, 0.5], [0.5, 25 / 26]])
+
+
+def test_array_confidence_pools_energy_before_ratio():
+    from frequensolve.imaging.receiver_pool import ReceiverPool
+
+    pool = ReceiverPool.from_coordinates(np.arange(3)[:, None], 3, taper="uniform")
+    keys = [[1, 3, 1], [1, 1, 1], [1, 2, 1]]
+    values = np.array([[0, 0], [3, 0], [0, 0]])
+    for gain in (1e-20, 1, 1e20):
+        weight = point_weights(keys, gain * values, [[gain]], attribute_pool=pool)
+        np.testing.assert_allclose(weight, [[[0.75, 0.75, 0.75]]])
+    local = point_weights(
+        keys, values, [[1]], attribute_pool=pool, pool=pool, relative_floor=0.1
+    )
+    np.testing.assert_allclose(local, 1 / 1.01)
+    with pytest.raises(ValueError, match="complete receiver layout"):
+        point_weights(keys[:1], values[:1], [[1]], attribute_pool=pool)
 
 
 @pytest.mark.parametrize(
@@ -124,3 +141,35 @@ def test_snapshot_persists_across_trials_and_refresh_changes_identity(tmp_path):
     assert refreshed.reliability_snapshot != frozen.reliability_snapshot
     assert freeze(frozen, 3) is frozen
     assert freeze(problem, 1).reliability_snapshot == frozen.reliability_snapshot
+
+
+def test_array_snapshot_preserves_native_comparison_and_freezes_trials(
+    tmp_path, monkeypatch
+):
+    import frequensolve as fs
+    from frequensolve import imaging as im
+    from frequensolve.imaging import _synthetic_comparison
+
+    array = im.SyntheticArray.uniform(radius=fs.Q_(2, "m"))
+    misfit = Misfit(
+        comparison=Comparison.phase_derivative(
+            array=array, reliability="predicted", relative_amplitude_floor=0.1
+        ),
+        normalization=1,
+    )
+    monkeypatch.setattr(
+        _synthetic_comparison,
+        "receiver_coordinates",
+        lambda problem: {"p": fs.Q_([[0], [1]], "m")},
+    )
+    problem = Problem(tmp_path, misfit)
+    frozen = freeze(problem, 1)
+    term = frozen.misfit.objective_terms(["p"])[0]
+    assert term.comparison.array == array
+    assert term.comparison.reliability is None
+    frozen.linearize(10)
+    with h5py.File(frozen.reliability_snapshot) as h:
+        np.testing.assert_allclose(h["terms/0/frequency_0"][:], [[[1 / 3, 1 / 3]]])
+        assert json.loads(h.attrs["attribute_arrays"])["0"] == array.to_dict()
+    assert freeze(frozen, 3) is frozen
+    assert freeze(problem, 2).reliability_snapshot != frozen.reliability_snapshot

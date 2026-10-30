@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 
 import h5py
 import numpy as np
@@ -33,10 +34,10 @@ class TransientDataset:
     This reader never reconstructs signals from frequencies or globs payloads.
     """
 
-    def __init__(self, job, role, *, result_path=None):
+    def __init__(self, job, role, *, result_path=None, task=1):
         self.job = job
         self.role = role
-        self.result = job.operation_result(result_path=result_path)
+        self.result = job.operation_result(result_path=result_path, task=task)
         self._groups = {}
         metadata = {
             a.id: a
@@ -63,6 +64,8 @@ class TransientDataset:
             with h5py.File(artifact.path, "r") as h5:
                 if _strings(h5["sample_axis"][()]) != ["time"]:
                     raise ValueError("Expected a physical-time shard")
+                if job.n_modes is not None and _scalar(h5, "task_id") != task:
+                    raise ValueError("Time shard belongs to a different angular task")
                 step, time = _scalar(h5, "time_step"), float(_scalar(h5, "time"))
                 if not isinstance(step, int) or step < 0 or step > job.time.steps:
                     raise ValueError("Invalid completed time step")
@@ -84,9 +87,12 @@ class TransientDataset:
             if step in rows["steps"]:
                 raise ValueError("Duplicate output for a completed time step")
             rows["steps"][step] = artifact.path
-        expected_steps = set(job.output_schedule.steps(job.time))
+        schedule = job.output_schedule
+        if role == "simulated_traces" and job.trace_schedule is not None:
+            schedule = job.trace_schedule
+        expected_steps = set(schedule.steps(job.time))
         try:
-            first_step = job.restart_step()
+            first_step = job.restart_step(task)
         except FileNotFoundError:
             # Without the removed checkpoint copy, the committed series starts
             # at the restart step; coverage from there on is still required.
@@ -228,7 +234,7 @@ class TransientOutputHandle:
         )
         return handle(self.job)(*args, **kwargs)
 
-    def open(self, upscale=1, project_path=None):
+    def open(self, upscale=1, project_path=None, *, mode=None):
         """Open committed native samples without a frequency-domain pack step."""
         if upscale != 1:
             raise ValueError("Transient output uses native samples; upscale must be 1")
@@ -237,4 +243,76 @@ class TransientOutputHandle:
             if project_path is None
             else self.job._saved_layout().with_project(project_path).result_dir
         )
+        if self.job.n_modes is not None:
+            if mode is None:
+                return ModalTransientDataset(
+                    self.job, self.role, result_path=result_path
+                )
+            if isinstance(mode, bool) or not isinstance(mode, Integral):
+                raise ValueError("mode must be an integer angular order")
+            self.job.mode_for_task(mode + 1)
+            return TransientDataset(
+                self.job, self.role, result_path=result_path, task=mode + 1
+            )
+        if mode is not None:
+            raise ValueError("mode selection requires n_modes on TransientJob")
         return TransientDataset(self.job, self.role, result_path=result_path)
+
+
+class ModalTransientDataset:
+    """One angular task family, reconstructed directly from committed real time samples."""
+
+    def __init__(self, job, role, *, result_path=None):
+        self.job, self.role = job, role
+        self.datasets = {
+            m: TransientDataset(job, role, result_path=result_path, task=m + 1)
+            for m in range(job.n_modes)
+        }
+        first = self.datasets[0]
+        for dataset in self.datasets.values():
+            if dataset.groups != first.groups or not np.array_equal(
+                dataset.steps, first.steps
+            ):
+                raise ValueError(
+                    "Angular tasks must have identical output groups and time samples"
+                )
+        self.groups, self.steps, self.times = first.groups, first.steps, first.times
+
+    def read_modes(self, group, *, steps=None):
+        """Read signed pressure coefficients with an explicit leading mode coordinate."""
+        import xarray as xr
+
+        values = self._read(group, steps)
+        return xr.concat(
+            list(values.values()),
+            dim=xr.IndexVariable("mode", list(values)),
+            join="exact",
+        )
+
+    def _read(self, group, steps):
+        values = {m: d.read(group, steps=steps) for m, d in self.datasets.items()}
+        first = values[0]
+        for value in values.values():
+            if value.dims != first.dims or not value.coords.equals(first.coords):
+                raise ValueError(
+                    "Modal sample coordinates and dimensions must match exactly"
+                )
+        return values
+
+    def read(self, group, *, steps=None, delta_theta=0.0):
+        """Reconstruct pressure at receiver-minus-source angle(s), in radians."""
+        from frequensolve.seismic.azimuthal import reconstruct_azimuthal_pressure
+
+        return reconstruct_azimuthal_pressure(self._read(group, steps), delta_theta)
+
+    def time_domain(
+        self, group, component=None, source=None, *, steps=None, delta_theta=0.0
+    ):
+        data = self.read(group, steps=steps, delta_theta=delta_theta)
+        return data.sel(
+            **{
+                k: v
+                for k, v in (("component", component), ("source", source))
+                if v is not None
+            }
+        )

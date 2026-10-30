@@ -45,7 +45,16 @@ from .geometry import (
 from .outputs import _validate_field
 from .report import ValidationReport
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
+_SOURCE_KINDS = {
+    "scalar",
+    "vector",
+    "tensor",
+    "monopole",
+    "dipole",
+    "volume_injection",
+    "pressure_monopole",
+    "isotropic_moment",
+}
 _PROPERTY_SPACE_SCHEMA = "fs-property-space-3"
 
 
@@ -109,16 +118,15 @@ def _validate_formulation(
         "acoustic_axisym",
         "elastic",
         "elastic_axisym",
+        "coupled",
         "coupled_axisym",
     }
-    if workflow == "transient":
-        supported.add("coupled")
     if physics not in supported:
         report.error(
             "discretization.method.incompatible",
             f"Galerkin discretization is not supported by physics {physics!r}.",
             path="discretization.method",
-            hint="Use acoustic, elastic, or their axisymmetric variants; coupled_axisym is also supported.",
+            hint="Use acoustic, elastic, coupled, or their axisymmetric variants.",
         )
 
     # The backend selects MUMPS and a single grid for frequency-domain
@@ -1130,10 +1138,17 @@ def _validate_source_kind(
     kind: Any, path: str, report: ValidationReport, *, physics: Any
 ) -> None:
     value = str(kind).strip().lower()
-    if value == "volume_injection" and physics != "acoustic":
+    if value in {"volume_injection", "pressure_monopole"} and physics not in {
+        "acoustic",
+        "coupled",
+        "coupled2",
+        "coupled_aep",
+        "acoustic_axisym",
+        "coupled_axisym",
+    }:
         report.error(
             "acquisition.source.kind.unsupported",
-            "volume_injection requires acoustic physics.",
+            f"{value} requires acoustic or coupled physics.",
             path=path,
         )
         return

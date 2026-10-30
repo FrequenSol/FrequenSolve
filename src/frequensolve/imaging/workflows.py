@@ -1075,6 +1075,8 @@ class LBFGS(_OptimizerConfig):
         memory: Number of curvature pairs kept (``history_size``).
         max_iterations: Default iteration budget (a stage's ``iterations``
             overrides it).
+        until_converged: Ignore outer iteration budgets, including stage
+            budgets. Convergence and failed line searches still stop a stage.
         step_limit: RMS step cap per block in optimizer coordinates.
         scaling_max_ratio: Curvature floor ratio for block scaling.
         preconditioner_refresh: Re-estimate a bound preconditioner every
@@ -1082,6 +1084,7 @@ class LBFGS(_OptimizerConfig):
     """
 
     memory: int = 10
+    until_converged: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -1091,7 +1094,10 @@ class LBFGS(_OptimizerConfig):
         object.__setattr__(self, "kind", "lbfgs")
 
     def options(self, max_iterations: Optional[int] = None) -> LBFGSOptions:
-        return LBFGSOptions(history_size=self.memory, **self._common(max_iterations))
+        options = self._common(max_iterations)
+        if self.until_converged:
+            options["max_iterations"] = None
+        return LBFGSOptions(history_size=self.memory, **options)
 
 
 @dataclass(frozen=True)
@@ -1131,9 +1137,10 @@ class NewtonCG(_OptimizerConfig):
 class _StageObjective:
     """Cached misfit-plus-regularization objective of one stage.
 
-    One ``linearize`` (value and covector) per distinct point; the value,
-    gradient, curvature action (Gauss-Newton normal plus regularization curvature) and
-    loss terms of the last point are reused.  Every new evaluation is
+    Trial values request no covector. A gradient is requested lazily only
+    when the optimizer needs it, reusing a gradient-carrying cache entry when
+    one already exists. The last point's value, covector, curvature and loss
+    terms are reused.  Every new evaluation is
     appended to the history with the stage metrics. The optimizer callables
     below never write or keep their array arguments and return new arrays,
     so the optimizers pass them read-only views without copying.
@@ -1175,41 +1182,51 @@ class _StageObjective:
             _real_vector(x, size=self.space.size, name="model"), self.space
         )
 
-    def _evaluate(self, x: Any) -> None:
+    def _evaluate(self, x: Any, *, gradient: bool = False) -> None:
         point = _real_vector(x, size=self.space.size, name="model")
-        if self._point is not None and np.array_equal(point, self._point):
+        same_point = self._point is not None and np.array_equal(point, self._point)
+        if same_point and (not gradient or self._gradient is not None):
             return
         vector = ControlVector(point, self.space)
-        lin = self.view.linearize(vector, gradient=True)
-        if lin.gradient is None:  # pragma: no cover - defensive
+        lin = self.view.linearize(vector, gradient=gradient)
+        if gradient and lin.gradient is None:  # pragma: no cover - defensive
             raise RuntimeError("linearize returned no gradient")
-        gradient = np.array(lin.gradient.values, dtype=np.float64, copy=True)
-        regularization = 0.0
-        if self.regularization is not None:
-            regularization = float(self.regularization.value(vector))
-            gradient += _real_vector(
+        covector = (
+            None
+            if lin.gradient is None
+            else np.array(lin.gradient.values, dtype=np.float64, copy=True)
+        )
+        if covector is not None and self.regularization is not None:
+            covector += _real_vector(
                 self.regularization.gradient(vector),
                 size=point.size,
                 name="regularization gradient",
             )
-        if self.native_regularization is not None:
-            regularization += self.native_regularization.value(vector)
-        loss = LossTerms(data=lin.value, regularization=regularization)
-        self._point = np.array(point, copy=True)
+        if not same_point:
+            regularization = 0.0
+            if self.regularization is not None:
+                regularization = float(self.regularization.value(vector))
+            if self.native_regularization is not None:
+                regularization += self.native_regularization.value(vector)
+            self._loss = LossTerms(data=lin.value, regularization=regularization)
+            self._point = np.array(point, copy=True)
+            self.evaluations += 1
+            if self.history is not None:
+                self.history.record_evaluation(
+                    point,
+                    self._loss,
+                    gradient_norm=(
+                        None if covector is None else float(np.linalg.norm(covector))
+                    ),
+                    metrics=self.metrics,
+                )
+        # Preserve the value used to accept a trial when upgrading its gradient;
+        # a covector request is not another optimizer objective evaluation.
         self._linearization = lin
-        self._loss = loss
-        self._gradient = gradient
-        self.evaluations += 1
-        if self.history is not None:
-            self.history.record_evaluation(
-                point,
-                loss,
-                gradient_norm=float(np.linalg.norm(gradient)),
-                metrics=self.metrics,
-            )
+        self._gradient = covector
 
     def linearization(self, x: Any) -> Linearization:
-        self._evaluate(x)
+        self._evaluate(x, gradient=True)
         assert self._linearization is not None
         return self._linearization
 
@@ -1228,7 +1245,7 @@ class _StageObjective:
 
     @_shares_arrays
     def gradient(self, x: Any) -> np.ndarray:
-        self._evaluate(x)
+        self._evaluate(x, gradient=True)
         assert self._gradient is not None
         return np.array(self._gradient, copy=True)
 
@@ -1379,7 +1396,9 @@ class FWI:
         step_limit: RMS step cap per block (overrides the optimizer's).
         scaling: ``None``, ``"curvature"`` (estimate block curvatures with
             one JVP per block at every stage start) or a ``block ->
-            curvature`` mapping; applied as a diagonal change of variables.
+            curvature`` mapping, or a positive per-DOF scale array ``s``
+            (``x = s * y``). Arrays must match each stage's active space;
+            applied consistently to the gradient and native proximal metric.
         checkpoint: Checkpoint path (``fs-optimization-checkpoint-1`` plus a
             ``<stem>.state.h5`` control state); relative paths live in
             ``problem.workdir``.  ``None`` disables checkpointing.
@@ -1528,12 +1547,20 @@ class FWI:
                 raise ValueError("step_limit must be finite and positive")
             step_limit = limit
         self.step_limit = step_limit
-        if (
-            scaling is not None
-            and scaling != "curvature"
-            and not isinstance(scaling, Mapping)
-        ):
-            raise ValueError("scaling must be None, 'curvature' or a block mapping")
+        if isinstance(scaling, str):
+            if scaling != "curvature":
+                raise ValueError(
+                    "scaling must be None, 'curvature', a block mapping or a per-DOF array"
+                )
+        elif scaling is not None and not isinstance(scaling, Mapping):
+            scaling = np.array(scaling, dtype=np.float64, copy=True)
+            if (
+                scaling.ndim != 1
+                or np.any(~np.isfinite(scaling))
+                or np.any(scaling <= 0)
+            ):
+                raise ValueError("scaling must be a finite positive per-DOF array")
+            scaling.flags.writeable = False
         self.scaling = scaling
         self.checkpoint_path: Optional[Path] = None
         if checkpoint is not None:
@@ -2278,17 +2305,20 @@ class FWI:
                     ) from exc
         stage_iteration = int(meta.get("stage_iteration", 0))
         completed = bool(meta.get("stage_completed"))
+        stage_optimizer = self.optimizer if stage.optimizer is None else stage.optimizer
+        reached_budget = (
+            not getattr(stage_optimizer, "until_converged", False)
+            and stage_iteration >= stage.iterations
+        )
         # A stage that still owes end-of-stage factorizations is complete only
         # once its completed checkpoint exists: its last iteration checkpoint
         # already reaches the budget, and an optimizer may also stop early.
         finalize = (
             not completed
             and any(self._stage_factorizations(index))
-            and (
-                bool(meta.get("stage_finished")) or stage_iteration >= stage.iterations
-            )
+            and (bool(meta.get("stage_finished")) or reached_budget)
         )
-        if completed or (not finalize and stage_iteration >= stage.iterations):
+        if completed or (not finalize and reached_budget):
             return _ResumePlan(state, index + 1, 0, checkpoint, index)
         self._restore_restart(
             index, json.loads(meta.get("restart", "null")), checkpoint, meta
@@ -2360,6 +2390,12 @@ class FWI:
             return None
         if isinstance(self.scaling, Mapping):
             return dict(self.scaling)
+        if isinstance(self.scaling, np.ndarray):
+            if self.scaling.shape != (space.size,):
+                raise ValueError(
+                    "scaling array must match the active stage control space"
+                )
+            return self.scaling.copy()
         return block_curvatures(lin, seed=20260829)
 
     def solve_stage(
@@ -2415,8 +2451,12 @@ class FWI:
             if stage.regularization is None
             else stage.regularization
         )
-        remaining = stage.iterations - int(start_iteration)
-        if remaining < 1:
+        remaining = (
+            None
+            if getattr(optimizer, "until_converged", False)
+            else stage.iterations - int(start_iteration)
+        )
+        if remaining is not None and remaining < 1:
             raise ValueError(
                 f"stage {label!r} has no iterations left ({start_iteration} of "
                 f"{stage.iterations} done)"

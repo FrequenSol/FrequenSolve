@@ -4,8 +4,9 @@
 
 import numpy as np
 import pytest
+
 from frequensolve.imaging._hv_research import HVResearchSolver, endpoint_projection
-from frequensolve.imaging.hv_attributes import HVAttribute, AttributeFeatures
+from frequensolve.imaging.hv_attributes import AttributeFeatures, HVAttribute
 from frequensolve.imaging.receiver_pool import ReceiverPool
 
 

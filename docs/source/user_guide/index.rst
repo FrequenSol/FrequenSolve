@@ -26,4 +26,5 @@ unfamiliar, check the :doc:`../glossary`.
    traces_paraview_outputs
    eikonal
    transient
+   reservoir
    boreholes

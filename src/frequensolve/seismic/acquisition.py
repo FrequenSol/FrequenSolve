@@ -33,7 +33,16 @@ from frequensolve.util.named_list import NamedList
 
 __all__ = ["Acquisition"]
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
+_SOURCE_KINDS = {
+    "scalar",
+    "vector",
+    "tensor",
+    "monopole",
+    "dipole",
+    "volume_injection",
+    "pressure_monopole",
+    "isotropic_moment",
+}
 
 
 def _coerce_source_geometry(value: Any) -> Optional[SourceGeometry]:

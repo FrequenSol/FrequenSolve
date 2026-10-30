@@ -321,6 +321,20 @@ class SessionController:
                 if run is not None:
                     self._cancel(run)
             elif command["kind"] == "close":
+                # Recheck on the allocation: a client may have attached after
+                # the closing owner listed leases on the login node.
+                only_client = command.get("only_client")
+                others = set(self._live_clients()) - {only_client}
+                if only_client and others:
+                    _write_json_atomic(
+                        path.with_suffix(".result"),
+                        {
+                            "generation": self.generation,
+                            "state": "shared",
+                            "others": len(others),
+                        },
+                    )
+                    return
                 self.closing = True
                 if not command.get("drain", True):
                     for run in self.runs.values():
@@ -412,7 +426,9 @@ class SessionController:
             else:
                 log = Path(run["logs"]) / f"{step}.log"
                 if step == "init":
-                    if run["scheduler"]["skip_sizing"]:
+                    if run["scheduler"].get("mesh_only_init"):
+                        command += [*fresh, "--mesh"]
+                    elif run["scheduler"]["skip_sizing"]:
                         command += [*fresh, "--init-no-size"]
                     else:
                         command += [

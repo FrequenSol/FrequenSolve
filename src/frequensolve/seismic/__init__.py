@@ -5,6 +5,9 @@ from frequensolve.seismic.acquisition import *  # noqa: F403
 from frequensolve.seismic.acquisition import __all__ as _acquisition_all
 from frequensolve.seismic.airgun import *  # noqa: F403
 from frequensolve.seismic.airgun import __all__ as _airgun_all
+from frequensolve.seismic.azimuthal import (
+    reconstruct_azimuthal_pressure as reconstruct_azimuthal_pressure,
+)
 from frequensolve.seismic.boundary_loadings import *  # noqa: F403
 from frequensolve.seismic.boundary_loadings import __all__ as _boundary_loadings_all
 from frequensolve.seismic.eikonal import *  # noqa: F403
@@ -31,6 +34,7 @@ from frequensolve.seismic.wavelet import *  # noqa: F403
 from frequensolve.seismic.wavelet import __all__ as _wavelet_all
 
 __all__ = unique_exports(
+    ["reconstruct_azimuthal_pressure"],
     _transient_all,
     _airgun_all,
     _acquisition_all,

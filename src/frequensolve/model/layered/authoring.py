@@ -555,7 +555,7 @@ class LayeredAuthoringMixin:
                 ``linear_slip``, ``lower_dimensional_fluid`` (acoustic waves),
                 ``lower_dimensional_viscous_fluid`` (viscous acoustic flow), or
                 ``hydraulic`` (diffusion/storage/leakoff). Reduced selectors
-                currently support 2D mesh generation only.
+                support Cartesian 2D/3D and axisymmetric 2D meshes.
             subdomain_name: Optional name for the generated material subdomain.
             **kwargs: Extra serialized fracture fields preserved on export.
 

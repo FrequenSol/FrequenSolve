@@ -5,6 +5,7 @@
 import numpy as np
 import pytest
 from scipy.sparse import csr_matrix, eye
+
 import frequensolve as fs
 from frequensolve import imaging as im
 

@@ -429,7 +429,7 @@ def test_stage_objective_reads_the_optimizer_vectors_in_place(tmp_path, monkeypa
     monkeypatch.setattr(
         _StageObjective,
         "_evaluate",
-        lambda self, x: seen.append(x) or evaluate(self, x),
+        lambda self, x, **kw: seen.append(x) or evaluate(self, x, **kw),
     )
     LBFGS(max_iterations=3, **TIGHT).solve(objective, problem.space.zeros().values)
     assert len(seen) > 3 and all(not x.flags.writeable for x in seen)
@@ -508,6 +508,32 @@ def _stage_losses(history, index):
         for r in history.iterations
         if r.metrics["stage_index"] == index and r.metrics["stage"]
     ]
+
+
+def test_fwi_unlimited_lbfgs_resumes_beyond_nominal_stage_budget(
+    problem, fake, tmp_path
+):
+    J, d = _surrogate(fake, problem)
+    events = []
+
+    def interrupt(event):
+        events.append(event)
+        if event.stage_iteration == 2:
+            raise RuntimeError("planned interruption")
+
+    options = dict(
+        optimizer=LBFGS(until_converged=True, **TIGHT),
+        checkpoint=tmp_path / "unlimited.h5",
+        history=tmp_path / "unlimited.json",
+    )
+    stages = [Stage(tuple(problem.frequencies), iterations=1)]
+    with pytest.raises(RuntimeError, match="planned interruption"):
+        FWI(problem, stages, callback=interrupt, **options).run()
+    result = FWI(problem, stages, **options).run(resume=True)
+    assert result.stages[0].resumed
+    assert result.stages[0].stage_iteration > 2
+    assert "maximum" not in result.stages[0].message
+    np.testing.assert_allclose(result.state.values, _least_squares(J, d), atol=1e-5)
 
 
 def test_fwi_lbfgs_reduces_the_objective_and_converges_on_the_surrogate(
@@ -2067,3 +2093,131 @@ def test_transfer_policy_reaches_native_adaptation(
         else:
             problem.with_controls(controls, **options)
     assert received == expected
+
+
+def test_fwi_explicit_diagonal_scaling_preserves_solution(problem, fake):
+    J, d = _surrogate(fake, problem)
+    stage = Stage(frequencies=tuple(problem.frequencies), iterations=100)
+    scale = 1 / np.sqrt(np.sum(np.abs(J) ** 2, axis=0))
+    workflow = FWI(problem, [stage], scaling=scale, optimizer=LBFGS(**TIGHT))
+    np.testing.assert_allclose(workflow.scaling, scale)
+    result = workflow.run()
+    np.testing.assert_allclose(result.vector().values, _least_squares(J, d), atol=1e-4)
+    wrong = FWI(problem, [stage], scaling=np.ones(len(scale) + 1))
+    with pytest.raises(ValueError, match="active stage control space"):
+        wrong.run()
+
+
+@pytest.mark.parametrize("scale", [[1, 0], [1, -1], [1, np.nan], [[1, 2]]])
+def test_fwi_rejects_invalid_diagonal_scaling(problem, scale):
+    with pytest.raises(ValueError, match="scaling"):
+        FWI(problem, _stages(), scaling=scale)
+
+
+def test_diagonal_scaling_uses_same_native_proximal_metric():
+    diagonal = np.array([1.0, 10.0, 100.0])
+    target = np.array([2.0, -2.0, 0.01])
+    weight = 0.2
+    metrics = []
+
+    class Native:
+        def value(self, x):
+            return weight * np.abs(x).sum()
+
+        def prox(self, v, tau, metric, bounds):
+            metrics.append(metric.copy())
+            return np.clip(
+                np.sign(v) * np.maximum(abs(v) - tau * weight / metric, 0), *bounds
+            )
+
+    native = Native()
+
+    class Objective:
+        native_regularization = native
+
+        def smooth_value(self, x):
+            return 0.5 * np.sum(diagonal * (x - target) ** 2)
+
+        def value(self, x):
+            return self.smooth_value(x) + native.value(x)
+
+        def gradient(self, x):
+            return diagonal * (x - target)
+
+    seen = []
+    result = LBFGS(grad_rel_tole=1e-4, obj_rel_tol=0, step_tolerance=0).solve(
+        Objective(),
+        np.zeros(3),
+        scaling=1 / np.sqrt(diagonal),
+        max_iterations=10,
+        bounds=(np.full(3, -5.0), np.full(3, 5.0)),
+        callback=seen.append,
+    )
+    expected = np.sign(target) * np.maximum(abs(target) - weight / diagonal, 0)
+    np.testing.assert_allclose(result.x, expected, atol=1e-4)
+    assert metrics
+    for metric in metrics:
+        np.testing.assert_allclose(metric, diagonal)
+    np.testing.assert_allclose(seen[-1].gradient, diagonal * (seen[-1].model - target))
+
+
+def test_trial_values_defer_adjoints_without_changing_proximal_steps(problem):
+    from frequensolve.imaging.workflows import _StageObjective
+    from frequensolve.inversion import OptimizationHistory
+
+    space = problem.space
+    h = np.geomspace(1, 100, space.size)
+    target = np.linspace(-0.5, 0.7, space.size)
+    weight = 0.03
+
+    class Native:
+        def value(self, x):
+            x = x.values if isinstance(x, ControlVector) else x
+            return weight * np.abs(x).sum()
+
+        def prox(self, v, tau, metric, bounds):
+            return np.clip(
+                np.sign(v) * np.maximum(abs(v) - tau * weight / metric, 0), *bounds
+            )
+
+    class Eager(_StageObjective):
+        def _evaluate(self, x, *, gradient=False):
+            return super()._evaluate(x, gradient=True)
+
+    outputs = []
+    for cls in (_StageObjective, Eager):
+        calls = []
+
+        def linearize(v, *, gradient):
+            calls.append((v.values.copy(), gradient))
+            delta = v.values - target
+            return SimpleNamespace(
+                value=0.5 * float(h @ delta**2),
+                gradient=ControlVector(h * delta, space) if gradient else None,
+            )
+
+        history = OptimizationHistory()
+        objective = cls(SimpleNamespace(linearize=linearize), space, None, history, {})
+        objective.native_regularization = Native()
+        accepted = []
+        result = LBFGS(grad_rel_tole=1e-4, obj_rel_tol=0, step_tolerance=0).solve(
+            objective,
+            np.zeros(space.size),
+            max_iterations=6,
+            callback=accepted.append,
+            bounds=(np.full(space.size, -2.0), np.full(space.size, 2.0)),
+        )
+        outputs.append((result, accepted, calls, history, objective))
+    lazy, eager = outputs
+    np.testing.assert_array_equal(lazy[0].model, eager[0].model)
+    assert [s.step_length for s in lazy[1]] == [s.step_length for s in eager[1]]
+    assert [s.objective for s in lazy[1]] == [s.objective for s in eager[1]]
+    gradients = sum(want for _, want in lazy[2])
+    assert gradients == len(lazy[1]) + 1
+    assert gradients < sum(want for _, want in eager[2])
+    assert lazy[3].evaluation_count == eager[3].evaluation_count
+    assert any(r.gradient_norm is None for r in lazy[3].evaluations)
+    count = len(lazy[2])
+    lazy[4].gradient(lazy[0].model)
+    lazy[4].value(lazy[0].model)
+    assert len(lazy[2]) == count

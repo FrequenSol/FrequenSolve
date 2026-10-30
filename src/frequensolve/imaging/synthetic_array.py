@@ -5,6 +5,7 @@
 """Declarative synthetic arrays over existing receiver channels."""
 
 from dataclasses import dataclass
+
 import numpy as np
 
 from .receiver_pool import ReceiverPool

@@ -1158,6 +1158,11 @@ class ReceiverFiber(ReceiverDevice):
         sample_spacing: Physical spacing for integration samples along a gauge.
         points_per_gauge: Number of integration samples when sample spacing is
             not provided.
+        coordinate_mode: ``"path"`` generates uniformly spaced channels along
+            the supplied cable path. ``"gauge_centers"`` treats every supplied
+            coordinate as a gauge center, in cable order, with nonuniform spacing.
+            The latter supports plain fibers and extends the endpoint tangents
+            by half a gauge to include the first and last channels.
         radius: Optional helical-fiber radius. Required with ``angle`` or
             ``pitch``.
         pitch: Optional helical-fiber pitch, mutually exclusive with ``angle``.
@@ -1176,6 +1181,7 @@ class ReceiverFiber(ReceiverDevice):
     channel_spacing: Optional[Any] = None
     sample_spacing: Optional[Any] = None
     points_per_gauge: Optional[int] = None
+    coordinate_mode: Literal["path", "gauge_centers"] = "path"
     radius: Optional[Any] = None
     pitch: Optional[Any] = None
     angle: Optional[Any] = None
@@ -1189,6 +1195,7 @@ class ReceiverFiber(ReceiverDevice):
         channel_spacing: Optional[Any] = None,
         sample_spacing: Optional[Any] = None,
         points_per_gauge: Optional[int] = None,
+        coordinate_mode: Literal["path", "gauge_centers"] = "path",
         radius: Optional[Any] = None,
         pitch: Optional[Any] = None,
         angle: Optional[Any] = None,
@@ -1207,8 +1214,23 @@ class ReceiverFiber(ReceiverDevice):
         self.transfer = transfer
         self.response = response
         self.gauge_length = gauge_length
+        if coordinate_mode not in {"path", "gauge_centers"}:
+            raise ValueError(
+                "ReceiverFiber coordinate_mode must be path or gauge_centers"
+            )
+        if coordinate_mode == "gauge_centers" and channel_spacing is not None:
+            raise ValueError("Gauge-center coordinates determine channel spacing")
+        if coordinate_mode == "gauge_centers" and any(
+            v is not None for v in (radius, pitch, angle)
+        ):
+            raise ValueError(
+                "Gauge-center coordinates currently support plain fibers only"
+            )
+        self.coordinate_mode = coordinate_mode
         self.channel_spacing = (
-            channel_spacing if channel_spacing is not None else gauge_length
+            None
+            if coordinate_mode == "gauge_centers"
+            else channel_spacing if channel_spacing is not None else gauge_length
         )
         self.sample_spacing = sample_spacing
         self.points_per_gauge = points_per_gauge
@@ -1228,6 +1250,8 @@ class ReceiverFiber(ReceiverDevice):
         }
         if self.channel_spacing is not None:
             data["channel_spacing"] = value_and_units_to_fs(self.channel_spacing)
+        if self.coordinate_mode != "path":
+            data["coordinate_mode"] = self.coordinate_mode
         if self.sample_spacing is not None:
             data["sample_spacing"] = value_and_units_to_fs(self.sample_spacing)
         if self.points_per_gauge is not None:
@@ -1253,6 +1277,7 @@ class ReceiverFiber(ReceiverDevice):
             channel_spacing=data.get("channel_spacing"),
             sample_spacing=data.get("sample_spacing"),
             points_per_gauge=data.get("points_per_gauge"),
+            coordinate_mode=data.get("coordinate_mode", "path"),
             radius=data.get("radius"),
             pitch=data.get("pitch"),
             angle=data.get("angle"),

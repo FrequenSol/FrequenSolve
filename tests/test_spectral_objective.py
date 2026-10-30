@@ -2,8 +2,10 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
+
 import numpy as np
 import pytest
+
 from frequensolve.imaging.spectral_attributes import SpectralAttribute
 from frequensolve.imaging.spectral_objective import SpectralObjective
 
