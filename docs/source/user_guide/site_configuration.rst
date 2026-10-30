@@ -971,6 +971,9 @@ FrequenSolve sets ``MKL_NUM_THREADS=1`` and ``MKL_DYNAMIC=FALSE`` for local and
 SLURM solver processes so MKL does not add nested threading underneath the
 solver's own thread controls. HPC launch scripts also default to
 ``OMP_WAIT_POLICY=PASSIVE`` and ``KMP_STACKSIZE=20M``.
+Stampede3 PVC batch and persistent-session launches set ``KMP_BLOCKTIME=0``
+so idle OpenMP workers sleep immediately, leaving CPU time for GPU submission.
+Other HPC partitions retain the ``20ms`` block-time default.
 Explicit profile ``environment`` values override these defaults. Local users
 may set ``OMP_NUM_THREADS`` under the selected profile's ``environment`` table.
 HPC run scripts export ``OMP_NUM_THREADS=$n_threads`` alongside the existing

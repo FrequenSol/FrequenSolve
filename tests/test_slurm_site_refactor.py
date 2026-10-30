@@ -2244,6 +2244,34 @@ def test_stampede3_site_is_specific_slurm_subclass():
     assert config.for_partition("spr").cores_per_node == 112
 
 
+@pytest.mark.parametrize(
+    "partition, override, expected",
+    [("pvc", None, "0"), ("spr", None, "20ms"), ("pvc", "5ms", "5ms")],
+)
+def test_stampede3_worker_wait_policy(monkeypatch, partition, override, expected):
+    monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
+    monkeypatch.setattr(DummySlurmSite, "config_cls", Stampede3Config)
+    site = DummySlurmSite(
+        config=Stampede3Config(partition),
+        default_queue=partition,
+        environment={} if override is None else {"KMP_BLOCKTIME": override},
+    )
+    batch_script = site._sweep_SLURM_script(
+        n_tasks=1,
+        n_nodes=1,
+        stdout="/scratch/user/logs",
+        duration="00:10:00",
+    )
+    _, session_plan = site.session(
+        nodes=1, ranks_per_node=8, duration="00:10:00"
+    )._plan()
+    for setup in [batch_script.splitlines(), session_plan.runtime_setup]:
+        assert [line for line in setup if line.startswith("export KMP_BLOCKTIME=")] == [
+            f"export KMP_BLOCKTIME={expected}"
+        ]
+        assert "export OMP_WAIT_POLICY=PASSIVE" in setup
+
+
 @pytest.mark.parametrize("value", ["--wait=30", 30, None, {"wait": 30}, [None], [30]])
 def test_slurm_site_config_rejects_invalid_launcher_arguments(value):
     with pytest.raises(ValueError, match="launcher_args must be an array of strings"):

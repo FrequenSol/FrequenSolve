@@ -72,6 +72,8 @@ gpu_memory_per_gpu = 65536
 # (libur_loader) the SYCL runtime cannot use. FS_CUDA_AWARE_MPI = "0" in the
 # site environment stages exchanges through host memory instead.
 [presets.stampede3.partitions.pvc.environment]
+# Let idle OpenMP workers sleep immediately so GPU submission threads can run.
+KMP_BLOCKTIME = "0"
 ZE_FLAT_DEVICE_HIERARCHY = "FLAT"
 SYCL_CACHE_PERSISTENT = "1"
 I_MPI_ROOT = "/scratch/projects/compilers/intel25.2/mpi/2021.16"
