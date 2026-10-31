@@ -540,13 +540,15 @@ class GaussianSupport:
     at one sigma; ``cutoff`` is fixed at 1. ``surface`` selects
     a named exterior mesh surface; otherwise this is a volume source. The
     authored amplitude is the total integrated strength, including when clipped.
+    Sampling resolves the source width by default; set ``tolerance`` explicitly
+    to request adaptive quadrature.
     """
 
     sigma: Any
     cutoff: float = 1.0
     boundary: str = "truncate_renormalize"
     surface: Optional[str] = None
-    tolerance: float = 1e-4
+    tolerance: Optional[float] = None
 
     def __post_init__(self) -> None:
         sigma = value_and_units_to_fs(self.sigma)
@@ -565,7 +567,9 @@ class GaussianSupport:
             raise ValueError(
                 "GaussianSupport.boundary must be truncate_renormalize or reject"
             )
-        if not np.isfinite(self.tolerance) or not 1e-7 < self.tolerance <= 1e-2:
+        if self.tolerance is not None and (
+            not np.isfinite(self.tolerance) or not 1e-7 < self.tolerance <= 1e-2
+        ):
             raise ValueError("GaussianSupport.tolerance must be > 1e-7 and <= 1e-2")
         if self.surface is not None and (
             not isinstance(self.surface, str) or not self.surface.strip()
@@ -583,7 +587,11 @@ class GaussianSupport:
             "sigma": value_and_units_to_fs(self.sigma),
             "cutoff": float(self.cutoff),
             "boundary": self.boundary,
-            "tolerance": float(self.tolerance),
+            **(
+                {"tolerance": float(self.tolerance)}
+                if self.tolerance is not None
+                else {}
+            ),
             **({"surface": self.surface} if self.surface is not None else {}),
         }
 

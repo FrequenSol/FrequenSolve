@@ -82,36 +82,58 @@ the physical fitting frequency. Use these helpers instead of ``dataclasses.repla
 Integration scheme and temporal accuracy
 ----------------------------------------
 
-Select an order and optionally a scheme. Currently ``order=2`` defaults to
-``scheme="newmark"`` (average acceleration), and ``order=4`` defaults to
-``scheme="gauss"`` (two-stage Gauss collocation). A scheme without an order
-selects its supported order. Unsupported combinations are rejected.
-Existing ``TimeIntegration(0, 1, 0.001)`` calls retain their Newmark behavior;
-explicit ``method=fs.Newmark(...)`` and ``method=fs.Gauss()`` are also supported.
-Choose either ``method`` or ``scheme``/``order``.
+Select an order and optionally a scheme. Both ``order=3`` and ``order=4``
+currently default to two-stage Radau IIA. The ``order=4`` selector is a
+compatibility alias: the resolved configuration reports ``scheme="radau"`` and
+``order=3``, and emits ``Time/method: "radau3"``. It does not claim fourth-order
+solution accuracy. Explicit ``scheme="gauss"`` or ``method=fs.Gauss()`` selects
+fourth-order Gauss, including for loading saved Gauss jobs. Gauss phase fitting
+also requires this explicit selection.
+
+``order=2`` and calls omitting both order and scheme retain average-acceleration
+Newmark. A scheme without an order selects its supported order. Choose either
+``method`` or ``scheme``/``order``.
 
 .. code-block:: python
 
    job = fs.TransientJob(
-       "marine-gauss4", sim,
+       "marine-radau3", sim,
        time=fs.TimeIntegration(
-           start=0, end=5, scheme="gauss", order=4, dt=0.025,
+           start=0, end=5, order=4, dt=0.01,
        ),
        source=fs.TimeFunction.ricker(1.5, delay=1.0),
        output_schedule=fs.TimeOutput(stride=10),
    )
 
-Gauss uses one complex stage solve per timestep and retains a real accepted
-state. Sauce selects FGMRES for this scheme; do not explicitly request PCG.
+Radau and Gauss use one complex stage solve per timestep and retain real
+accepted state. Use a supported complex Krylov solver; PCG is invalid.
 PML and GSLS can be used within their existing physics restrictions. Reduced
 fractures still require average-acceleration Newmark.
+
+``scheme="radau", order=3`` (or ``method=fs.Radau()``) selects two-stage,
+third-order Radau IIA on Sauce backends supporting ``radau3``. For example:
+
+.. code-block:: python
+
+   job.time = fs.TimeIntegration(start=0, end=4, dt=0.005, scheme="radau")
+
+Radau also uses one complex solve and real accepted state, and supports CPU
+PML/GSLS histories and restart within the existing physics restrictions. It
+selects CPU execution; explicit GPU requests must be overridden with
+``sim.solver.extra["execution"] = "cpu"``. Its numerical damping suppresses underresolved
+high-frequency modes, but can also attenuate the desired signal when dt is too
+large. Compare amplitudes and phase after halving dt. Both explicit dt and
+phase-based automatic selection are supported; phase targets do not bound
+Radau's amplitude error. Gauss
+phase fitting and GPU PML reconstruction are unavailable, and checkpoints from
+Gauss or Newmark cannot restart a Radau run.
 
 To fit the temporal phase at one frequency, set ``f_0`` in Hz. Zero selects
 ordinary Gauss-4. For example, to fit a 40 Hz component with a 4 ms step:
 
 .. code-block:: python
 
-   time = fs.TimeIntegration(start=0, end=2, order=4, dt=0.004, f_0=40)
+   time = fs.TimeIntegration(start=0, end=2, scheme="gauss", dt=0.004, f_0=40)
    print(time.b)
    # Equivalent: method=fs.Gauss(f_0=fs.Q_(40, "Hz"))
    refined = time.with_dt(0.002)  # Retains the 40 Hz fitting frequency.
@@ -140,7 +162,7 @@ Instead of ``dt``, specify one of two harmonic phase-error targets:
 
    # At most three degrees of accumulated phase lag over the whole window.
    time = fs.TimeIntegration(
-       start=0, end=5, scheme="gauss", f_max=4,
+       start=0, end=5, scheme="radau", f_max=4,
        window_error=fs.Q_(3, "degree"),
    )
    # Equivalent angle units are accepted; a plain number means radians.
@@ -166,8 +188,11 @@ at least two samples per highest-frequency period. This is fixed-step selection
 performed once before submission, not runtime adaptivity. Custom Newmark
 coefficients require explicit ``dt``.
 
-For a five-second window, ``f_max=4`` and ``window_error=0.05`` give 171 Gauss
-steps (about 29.24 ms) or 1,818 Newmark steps (about 2.75 ms). These are undamped
+For a five-second window, ``f_max=4`` and ``window_error=0.05`` give 219 Radau
+steps (about 22.83 ms), 171 explicitly selected Gauss steps (about 29.24 ms),
+or 1,818 Newmark steps (about 2.75 ms). Radau uses its own harmonic propagator
+phase, with a stable small-step expansion; it does not reuse the Gauss estimate.
+These are undamped
 harmonic temporal-dispersion estimates, not bounds on total wavefield error:
 spatial discretization, iterative solves, source sampling, attenuation and PML
 introduce other errors. ``estimated_period_error`` and ``estimated_window_error``

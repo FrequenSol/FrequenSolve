@@ -25,6 +25,7 @@ from frequensolve.simulation.time import (
     CheckpointSchedule,
     Gauss,
     Newmark,
+    Radau,
     TimeFunction,
     TimeIntegration,
     TimeOutput,
@@ -376,11 +377,11 @@ class TransientJob(BaseJob):
                     "gsls attenuation requires Cartesian 2D/3D coordinates"
                 )
             if (
-                not isinstance(self.time.method, Gauss)
+                not isinstance(self.time.method, (Gauss, Radau))
                 and self.time.method != Newmark()
             ):
                 raise ValueError(
-                    "gsls attenuation requires average-acceleration Newmark or Gauss"
+                    "gsls attenuation requires average-acceleration Newmark, Gauss or Radau"
                 )
             # PML with gsls is composed in the solver (Sauce gsls-pml-qpqs change); no SDK gate.
         adapt = getattr(sim.mesh, "adapt", None)
@@ -408,11 +409,11 @@ class TransientJob(BaseJob):
             payload = bc.to_fs()
             if any(c.startswith("pml") for c in payload.get("conditions", [])):
                 if (
-                    not isinstance(self.time.method, Gauss)
+                    not isinstance(self.time.method, (Gauss, Radau))
                     and self.time.method != Newmark()
                 ):
                     raise ValueError(
-                        "Transient PML requires average-acceleration Newmark or Gauss"
+                        "Transient PML requires average-acceleration Newmark, Gauss or Radau"
                     )
         acquisition = getattr(sim, "acquisition", None)
         if acquisition is not None:
@@ -512,7 +513,7 @@ class TransientJob(BaseJob):
             or scheme.shape != (6,)
             or layout[0] != 2
             or layout[1] != 0
-            or layout[2] != (3 if isinstance(self.time.method, Gauss) else 2)
+            or layout[2] != {"newmark": 2, "gauss": 3, "radau": 4}[self.time.scheme]
         ):
             raise ValueError("Invalid time-integration restart manifest")
         expected_theta = self.time.theta_0

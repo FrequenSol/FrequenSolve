@@ -15,7 +15,11 @@ import frequensolve as fs
     [
         ({}, "newmark", 2),
         ({"order": 2}, "newmark", 2),
-        ({"order": 4}, "gauss", 4),
+        ({"order": 4}, "radau", 3),
+        ({"order": 3}, "radau", 3),
+        ({"scheme": "radau"}, "radau", 3),
+        ({"scheme": "radau", "order": 4}, "radau", 3),
+        ({"method": fs.Radau()}, "radau", 3),
         ({"scheme": "gauss"}, "gauss", 4),
         ({"scheme": "newmark"}, "newmark", 2),
         ({"scheme": "gauss", "order": 4}, "gauss", 4),
@@ -35,7 +39,7 @@ def test_scheme_defaults_and_legacy_roundtrip(options, scheme, order):
 @pytest.mark.parametrize(
     "options",
     [
-        {"order": 3},
+        {"order": 5},
         {"order": 4.0},
         {"order": True},
         {"scheme": "unknown"},
@@ -51,26 +55,31 @@ def test_invalid_scheme(options):
         fs.TimeIntegration(0, 1, 0.1, **options)
 
 
-def harmonic_lag(x, order):
+def harmonic_lag(x, scheme):
     z = 1j * x
-    if order == 2:
+    if scheme == "newmark":
         amplification = (1 + z / 2) / (1 - z / 2)
+    elif scheme == "radau":
+        # Independent full tableau solve; no reduced propagator coefficients.
+        tableau = np.array([[5 / 12, -1 / 12], [3 / 4, 1 / 4]])
+        stages = np.linalg.solve(np.eye(2) - z * tableau, np.ones(2))
+        amplification = 1 + z * np.dot([3 / 4, 1 / 4], stages)
     else:
         amplification = (1 + z / 2 + z * z / 12) / (1 - z / 2 + z * z / 12)
     return 1 - cmath.phase(amplification) / x
 
 
-@pytest.mark.parametrize("order", [2, 4])
+@pytest.mark.parametrize("scheme", ["newmark", "radau", "gauss"])
 @pytest.mark.parametrize(
     "mode,target", [("period_error", 0.001), ("window_error", 0.05)]
 )
-def test_selected_dt_meets_phase_bound_with_fewest_steps(order, mode, target):
-    time = fs.TimeIntegration(-1, 4, order=order, f_max=4, **{mode: target})
+def test_selected_dt_meets_phase_bound_with_fewest_steps(scheme, mode, target):
+    time = fs.TimeIntegration(-1, 4, scheme=scheme, f_max=4, **{mode: target})
     phase = 2 * math.pi * 4 * 5
     bound = target if mode == "period_error" else target / phase
-    actual = harmonic_lag(phase / time.steps, order)
+    actual = harmonic_lag(phase / time.steps, scheme)
     assert actual <= bound
-    assert harmonic_lag(phase / (time.steps - 1), order) > bound
+    assert harmonic_lag(phase / (time.steps - 1), scheme) > bound
     assert time.estimated_period_error == pytest.approx(actual, abs=1e-15)
     assert time.estimated_window_error == pytest.approx(actual * phase, abs=1e-13)
     assert time.times[0] == -1 and time.times[-1] == 4
@@ -80,20 +89,23 @@ def test_selected_dt_meets_phase_bound_with_fewest_steps(order, mode, target):
     )
 
 
-@pytest.mark.parametrize("order,denominator,power", [(2, 12, 2), (4, 720, 4)])
-def test_small_step_phase_estimates_do_not_cancel(order, denominator, power):
-    time = fs.TimeIntegration(0, 1, 1e-5, order=order, f_max=1)
+@pytest.mark.parametrize(
+    "scheme,denominator,power",
+    [("newmark", 12, 2), ("radau", 270, 4), ("gauss", 720, 4)],
+)
+def test_small_step_phase_estimates_do_not_cancel(scheme, denominator, power):
+    time = fs.TimeIntegration(0, 1, 1e-5, scheme=scheme, f_max=1)
     expected = (2 * math.pi * time.dt) ** power / denominator
     assert time.estimated_period_error == pytest.approx(expected, rel=1e-8, abs=0)
 
 
-@pytest.mark.parametrize("order", [2, 4])
-def test_period_target_independent_of_window_but_window_target_is_not(order):
-    short = fs.TimeIntegration(0, 1, order=order, f_max=4, period_error=0.001)
-    long = fs.TimeIntegration(0, 10, order=order, f_max=4, period_error=0.001)
+@pytest.mark.parametrize("scheme", ["newmark", "radau", "gauss"])
+def test_period_target_independent_of_window_but_window_target_is_not(scheme):
+    short = fs.TimeIntegration(0, 1, scheme=scheme, f_max=4, period_error=0.001)
+    long = fs.TimeIntegration(0, 10, scheme=scheme, f_max=4, period_error=0.001)
     assert long.dt == pytest.approx(short.dt, rel=0.03)
-    short = fs.TimeIntegration(0, 1, order=order, f_max=4, window_error=0.05)
-    long = fs.TimeIntegration(0, 10, order=order, f_max=4, window_error=0.05)
+    short = fs.TimeIntegration(0, 1, scheme=scheme, f_max=4, window_error=0.05)
+    long = fs.TimeIntegration(0, 10, scheme=scheme, f_max=4, window_error=0.05)
     assert long.dt < short.dt
 
 
@@ -181,7 +193,7 @@ def test_phase_fitted_propagator(theta):
         0,
         1,
         0.1,
-        order=4,
+        scheme="gauss",
         f_0=theta / (2 * math.pi * 0.1),
         f_max=theta / (2 * math.pi * 0.1) if theta else 1,
     )
@@ -209,7 +221,7 @@ def test_invalid_phase_fitting_frequency(frequency):
 
 def test_phase_fitting_requires_explicit_dt_and_gauss():
     with pytest.raises(ValueError, match="explicit dt"):
-        fs.TimeIntegration(0, 1, order=4, f_0=0.5, f_max=2, period_error=0.001)
+        fs.TimeIntegration(0, 1, scheme="gauss", f_0=0.5, f_max=2, period_error=0.001)
     with pytest.raises(ValueError, match="gauss scheme"):
         fs.TimeIntegration(0, 1, 0.1, order=2, f_0=0.5)
 
@@ -256,7 +268,7 @@ def test_unit_aware_time_source_and_schedule():
 def test_time_replacement_preserves_scheme_and_resolves_selection():
     time = fs.TimeIntegration(0, 1, 0.1, order=4, f_max=4)
     refined = time.with_dt(fs.Q_(50, "ms"))
-    assert refined.dt == 0.05 and refined.steps == 20 and refined.scheme == "gauss"
+    assert refined.dt == 0.05 and refined.steps == 20 and refined.scheme == "radau"
     assert time.dt == 0.1
     automatic = time.replace(window_error=0.01)
     assert automatic.window_error == 0.01 and automatic.estimated_window_error <= 0.01
@@ -274,11 +286,61 @@ def test_time_replacement_preserves_scheme_and_resolves_selection():
 
 
 def test_fitted_frequency_units_and_nyquist_limit():
-    time = fs.TimeIntegration(0, 2, dt=fs.Q_(4, "ms"), order=4, f_0=fs.Q_(0.04, "kHz"))
+    time = fs.TimeIntegration(
+        0, 2, dt=fs.Q_(4, "ms"), scheme="gauss", f_0=fs.Q_(0.04, "kHz")
+    )
     assert time.f_0 == 40
     assert time.theta_0 == pytest.approx(2 * math.pi * 40 * 0.004)
     assert time.to_fs()["gauss"] == {"f_0": 40.0}
     with pytest.raises(ValueError, match="below Nyquist"):
-        fs.TimeIntegration(0, 1, 0.1, order=4, f_0=5)
+        fs.TimeIntegration(0, 1, 0.1, scheme="gauss", f_0=5)
     with pytest.raises(ValueError):
         fs.Gauss(f_0=fs.Q_(1, "s"))
+
+
+@pytest.mark.parametrize("order", [3, 4])
+@pytest.mark.parametrize("mode", ["period_error", "window_error"])
+def test_radau_default_phase_selection_and_replacement_roundtrip(order, mode):
+    time = fs.TimeIntegration(0, 4, order=order, f_max=32, **{mode: 0.01})
+    assert time.method == fs.Radau() and time.order == 3
+    assert time.to_fs()["method"] == "radau3"
+    assert getattr(time, "estimated_" + mode) <= 0.01
+    assert (
+        fs.TimeIntegration.from_fs(time.to_fs(), selection=time.selection_payload())
+        == time
+    )
+    assert time.with_dt(time.dt / 2).method == fs.Radau()
+
+
+def test_radau_explicit_step_replacement_and_phase_estimate():
+    time = fs.TimeIntegration(0, 1, 0.01, fs.Radau(), f_max=8)
+    assert time.to_fs()["method"] == "radau3"
+    assert time.b is None and time.theta_0 == 0
+    assert time.estimated_period_error == pytest.approx(
+        harmonic_lag(2 * math.pi * 8 * 0.01, "radau"), abs=1e-15
+    )
+    assert time.estimated_window_error == pytest.approx(
+        time.estimated_period_error * 2 * math.pi * 8
+    )
+    assert time.with_dt(0.005).method == fs.Radau()
+    with pytest.raises(ValueError, match="gauss scheme"):
+        time.replace(f_0=0.0)
+    for field in ("gauss", "newmark"):
+        with pytest.raises(ValueError, match="coefficients"):
+            fs.TimeIntegration.from_fs({**time.to_fs(), field: {}})
+    with pytest.raises(ValueError, match="order=3"):
+        fs.Radau(order=5)
+
+
+@pytest.mark.parametrize("order", [3, 4])
+def test_radau_defaults_require_explicit_gauss_for_fitting(order):
+    with pytest.raises(ValueError, match="f_0 requires the gauss scheme"):
+        fs.TimeIntegration(0, 1, 0.01, order=order, f_0=1.0)
+
+
+@pytest.mark.parametrize("x", [0.001, 0.01, 0.099, 0.1, 0.5, 1.0, 2.0, math.pi])
+def test_radau_phase_model_matches_full_tableau(x):
+    time = fs.TimeIntegration(0, 1, 0.01, fs.Radau(), f_max=x / (2 * math.pi * 0.01))
+    assert time.estimated_period_error == pytest.approx(
+        harmonic_lag(x, "radau"), abs=6e-16
+    )

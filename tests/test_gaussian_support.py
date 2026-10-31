@@ -135,3 +135,12 @@ def test_one_sigma_default_preserves_normalized_support_contract():
     assert support.cutoff == 1
     assert support.to_fs()["cutoff"] == 1
     assert support.boundary == "truncate_renormalize"
+
+
+def test_lightweight_sampling_default_and_explicit_adaptive_tolerance():
+    default = GaussianSupport(2 * ureg.m)
+    assert default.tolerance is None
+    assert "tolerance" not in default.to_fs()
+    accurate = GaussianSupport(2 * ureg.m, tolerance=1e-4)
+    assert accurate.to_fs()["tolerance"] == 1e-4
+    assert GaussianSupport.from_fs(accurate.to_fs()).to_fs() == accurate.to_fs()

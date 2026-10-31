@@ -614,8 +614,9 @@ profile to every source without combining their identities. Time functions and
 source encoding are authored normally. The installed Sauce solver must support
 the spatial-support contract; older solvers must not be used with this option.
 
-Sauce integrates a radial Gaussian with a smooth taper to zero at four sigma.
-It subdivides intersecting elements for quadrature and normalizes the retained
+Sauce samples a radial Gaussian with a smooth taper to zero at one sigma.
+It subdivides intersecting elements into boxes at most half a sigma wide, uses
+a modest positive quadrature rule, and normalizes the retained
 integral across ranks. ``boundary="truncate_renormalize"`` is the default;
 ``boundary="reject"`` rejects clipped volume supports. Other materials are
 excluded by the geometry's ``domain`` selection, and PML is always excluded.
@@ -624,7 +625,9 @@ retained mass and centroid displacement. Empty overlap is an error.
 
 For elastic surface traction, set ``surface="<mesh surface name>"`` on the
 support. This integrates along an exterior free/Neumann surface rather than
-through its adjacent volume; it requires ``truncate_renormalize``. The default
-quadrature tolerance is ``1e-4``. This API initially supports Cartesian acoustic
-and elastic forward simulations; source-control/inversion workflows and GSLS
-acoustic isotropic-moment supports are rejected. No state smoothing is applied.
+through its adjacent volume; it requires ``truncate_renormalize``. Set an explicit
+``tolerance`` to opt into adaptive quadrature; ``boundary="reject"`` also uses
+adaptive quadrature, defaulting to ``1e-4``. Cartesian acoustic and elastic forward
+simulations include GSLS acoustic isotropic moments with sample-local materials
+and checkpoint/restart. Source-control/inversion workflows remain unsupported.
+No state smoothing is applied.

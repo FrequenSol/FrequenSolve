@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 __all__ = [
     "Newmark",
     "Gauss",
+    "Radau",
     "TimeIntegration",
     "TimeFunction",
     "CheckpointSchedule",
@@ -112,6 +113,21 @@ class Gauss:
         object.__setattr__(self, "f_0", frequency)
 
 
+@dataclass(frozen=True)
+class Radau:
+    """Third-order, two-stage L-stable Radau IIA with one complex solve per step.
+
+    Requires a Sauce backend supporting radau3. CPU execution is supported.
+    Choose dt or a phase-error target at f_max; phase targets do not bound damping.
+    """
+
+    order: int = 3
+
+    def __post_init__(self) -> None:
+        if _count(self.order, "Radau.order", 1) != 3:
+            raise ValueError("Radau currently supports order=3 only")
+
+
 def _gauss_b(theta: float) -> float:
     """Stable quadratic coefficient of the symmetric rational propagator."""
     if theta < 0.1:
@@ -134,6 +150,17 @@ def _window_radians(value: Any) -> float:
 
 def _period_lag(x: float, scheme: str, b: float = 1 / 12) -> float:
     """Fractional harmonic phase lag, evaluated without small-step cancellation."""
+    if scheme == "radau":
+        # R(z)=(1+z/3)/(1-2*z/3+z*z/6); its phase is continuous below Nyquist.
+        if x < 0.1:
+            y = x * x
+            return (
+                y
+                * y
+                * (1 / 270 + y * (-1 / 6804 + y * (-1 / 17496 + y * 31 / 3464208)))
+            )
+        phase = math.atan(x / 3) + math.atan2(2 * x / 3, 1 - x * x / 6)
+        return 1 - phase / x
     if x < 0.01:
         y = x * x
         if scheme == "newmark":
@@ -149,7 +176,10 @@ def _period_lag(x: float, scheme: str, b: float = 1 / 12) -> float:
 class TimeIntegration:
     """Fixed physical-time integration, using seconds and hertz.
 
-    Select ``scheme="newmark", order=2`` or ``scheme="gauss", order=4``.
+    Orders 3 and 4 default to third-order Radau IIA. Order 4 is a compatibility
+    selector and resolves to order=3; explicit ``scheme="gauss"`` or ``Gauss()``
+    selects fourth-order Gauss. Order 2 selects average-acceleration Newmark.
+    Phase-based selection bounds temporal phase error, not amplitude damping.
     Either selector can be omitted; both omitted select Newmark. Legacy
     ``TimeIntegration(start, end, dt, Newmark(...))`` calls remain supported.
 
@@ -167,7 +197,7 @@ class TimeIntegration:
     start: float
     end: float
     dt: float | None = None
-    method: Newmark | Gauss | None = None
+    method: Newmark | Gauss | Radau | None = None
     order: int | None = field(default=None, kw_only=True)
     scheme: str | None = field(default=None, kw_only=True)
     f_0: float | None = field(default=None, kw_only=True)
@@ -189,31 +219,44 @@ class TimeIntegration:
         if method is not None:
             if any(v is not None for v in (self.scheme, self.order, self.f_0)):
                 raise ValueError("Specify method or scheme/order/f_0, not both")
-            if not isinstance(method, (Newmark, Gauss)):
-                raise TypeError("method must be Newmark() or Gauss()")
-            scheme = "newmark" if isinstance(method, Newmark) else "gauss"
+            if not isinstance(method, (Newmark, Gauss, Radau)):
+                raise TypeError("method must be Newmark(), Gauss() or Radau()")
+            scheme = (
+                "newmark"
+                if isinstance(method, Newmark)
+                else "radau" if isinstance(method, Radau) else "gauss"
+            )
             # Non-average-acceleration Newmark remains available via method.
-            order = (2 if method.gamma == 0.5 else 1) if scheme == "newmark" else 4
+            order = (
+                (2 if method.gamma == 0.5 else 1)
+                if scheme == "newmark"
+                else method.order
+            )
         else:
-            defaults = {2: "newmark", 4: "gauss"}
-            orders = {"newmark": 2, "gauss": 4}
+            defaults = {2: "newmark", 3: "radau", 4: "radau"}
+            orders = {"newmark": 2, "radau": 3, "gauss": 4}
             scheme = (
                 self.scheme
                 if self.scheme is not None
                 else defaults.get(self.order or 2)
             )
             if not isinstance(scheme, str) or scheme not in orders:
-                raise ValueError("Supported schemes/orders are newmark/2 and gauss/4")
+                raise ValueError(
+                    "Supported schemes/orders are newmark/2, radau/3 and gauss/4"
+                )
             order = orders[scheme] if self.order is None else self.order
+            if scheme == "radau" and order == 4:
+                order = 3
             if order != orders[scheme]:
                 raise ValueError(f"scheme={scheme!r} requires order={orders[scheme]}")
-            if scheme == "newmark" and self.f_0 is not None:
+            if scheme != "gauss" and self.f_0 is not None:
                 raise ValueError("f_0 requires the gauss scheme")
-            method = (
-                Newmark()
-                if scheme == "newmark"
-                else Gauss(f_0=0.0 if self.f_0 is None else self.f_0)
-            )
+            if scheme == "newmark":
+                method = Newmark()
+            elif scheme == "radau":
+                method = Radau()
+            else:
+                method = Gauss(f_0=0.0 if self.f_0 is None else self.f_0)
         object.__setattr__(self, "method", method)
         object.__setattr__(self, "scheme", scheme)
         object.__setattr__(self, "order", order)
@@ -239,7 +282,7 @@ class TimeIntegration:
                 raise ValueError("Error-based timestep selection requires f_max in Hz")
             if isinstance(method, Newmark) and method != Newmark():
                 raise ValueError(
-                    "Error-based selection requires average-acceleration Newmark or Gauss"
+                    "Error-based selection requires average-acceleration Newmark, Gauss or Radau"
                 )
             if self.period_error is not None:
                 target = _number(self.period_error, "period_error")
@@ -375,11 +418,13 @@ class TimeIntegration:
             "start": float(self.start),
             "end": float(self.end),
             "time_step": float(self.dt),
-            "method": "newmark" if self.scheme == "newmark" else "gauss4",
+            "method": {"newmark": "newmark", "gauss": "gauss4", "radau": "radau3"}[
+                self.scheme
+            ],
         }
         if isinstance(self.method, Newmark):
             payload["newmark"] = self.method.to_fs()
-        elif self.method.f_0 != 0:
+        elif isinstance(self.method, Gauss) and self.method.f_0 != 0:
             payload["gauss"] = {"f_0": float(self.method.f_0)}
         return payload
 
@@ -395,17 +440,18 @@ class TimeIntegration:
         if data.get("schema", "fs-time-domain-1") != "fs-time-domain-1":
             raise ValueError("Expected fs-time-domain-1")
         name = data.get("method", "newmark")
-        if name not in {"newmark", "gauss4"}:
-            raise ValueError("Expected method newmark or gauss4")
-        if name == "gauss4" and "newmark" in data:
-            raise ValueError("Gauss does not accept newmark coefficients")
-        if name == "newmark" and "gauss" in data:
-            raise ValueError("Newmark does not accept gauss coefficients")
-        method = (
-            Newmark.from_fs(data.get("newmark", {}))
-            if name == "newmark"
-            else Gauss(**_fields(data.get("gauss", {}), {"f_0"}, "gauss"))
-        )
+        if name not in {"newmark", "gauss4", "radau3"}:
+            raise ValueError("Expected method newmark, gauss4 or radau3")
+        if name != "newmark" and "newmark" in data:
+            raise ValueError("Collocation methods do not accept newmark coefficients")
+        if name != "gauss4" and "gauss" in data:
+            raise ValueError("Only Gauss accepts gauss coefficients")
+        if name == "newmark":
+            method = Newmark.from_fs(data.get("newmark", {}))
+        elif name == "radau3":
+            method = Radau()
+        else:
+            method = Gauss(**_fields(data.get("gauss", {}), {"f_0"}, "gauss"))
         selection = (
             {}
             if selection is None

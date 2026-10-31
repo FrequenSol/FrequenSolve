@@ -864,7 +864,7 @@ def test_gauss_job_save_load_and_solver_contract(tmp_path, selection):
 
 def test_gauss_restart_checks_method_and_interval(tmp_path):
     job = job_at(tmp_path)
-    job.time = fs.TimeIntegration(0, 1, 0.1, order=4)
+    job.time = fs.TimeIntegration(0, 1, 0.1, scheme="gauss")
     checkpoint = tmp_path / "gauss_checkpoint"
     checkpoint.mkdir()
     with h5py.File(checkpoint / "newmark_manifest_R00000.h5", "w") as h5:
@@ -873,13 +873,13 @@ def test_gauss_restart_checks_method_and_interval(tmp_path):
     resumed = job.with_restart(checkpoint, name="gauss-resume")
     resumed.save()
     assert fs.BaseJob.load(resumed.job_file).restart_step() == 5
-    resumed.time = fs.TimeIntegration(0, 1, 0.1, order=4, f_0=0.8)
+    resumed.time = fs.TimeIntegration(0, 1, 0.1, scheme="gauss", f_0=0.8)
     with pytest.raises(ValueError, match="theta_0"):
         resumed.restart_step()
     with h5py.File(checkpoint / "newmark_manifest_R00000.h5", "a") as h5:
         h5["theta_0"] = 2 * np.pi * 0.8 * 0.1
     assert resumed.restart_step() == 5
-    resumed.time = fs.TimeIntegration(0, 2, 0.1, order=4, f_0=0.8)
+    resumed.time = fs.TimeIntegration(0, 2, 0.1, scheme="gauss", f_0=0.8)
     with pytest.raises(ValueError, match="Restart interval"):
         resumed.restart_step()
     resumed.time = fs.TimeIntegration(0, 1, 0.1, order=2)
@@ -895,7 +895,7 @@ def test_gauss_accepts_pml_and_gsls_but_custom_newmark_remains_restricted(
     job.simulation += fs.BoundaryCondition(
         boundaries=["x_min"], conditions="pml:impedance"
     )
-    job.time = fs.TimeIntegration(0, 1, 0.1, order=4, f_0=f_0)
+    job.time = fs.TimeIntegration(0, 1, 0.1, scheme="gauss", f_0=f_0)
     job.validate_outputs()
     job.simulation.model.attenuation_model = "gsls"
     job.simulation.model._attenuation_extra = {"frequency_min": 1, "frequency_max": 10}
@@ -951,3 +951,45 @@ def test_transient_defaults_do_not_guess_source_bandwidth(tmp_path):
             time=fs.TimeIntegration(0, 1, 0.01),
             source=fs.TimeFunction.ricker(10, delay=0.3),
         )
+
+
+def test_radau_job_persistence_memories_and_restart_identity(tmp_path):
+    job = job_at(tmp_path)
+    job.time = fs.TimeIntegration(0, 1, 0.01, fs.Radau())
+    job.simulation += fs.BoundaryCondition(
+        boundaries=["x_min"], conditions="pml:impedance"
+    )
+    job.simulation.model.attenuation_model = "gsls"
+    job.simulation.model._attenuation_extra = {"frequency_min": 1, "frequency_max": 10}
+    job.save()
+    restored = fs.BaseJob.load(job.job_file)
+    assert restored.time == job.time
+    assert restored.to_fs()["Time"]["method"] == "radau3"
+    checkpoint = tmp_path / "radau-checkpoint"
+    checkpoint.mkdir()
+    with h5py.File(checkpoint / "newmark_manifest_R00000.h5", "w") as h5:
+        h5["layout"] = [2, 0, 4, 50]
+        h5["scheme"] = [0.5, 0, 1, 0.01, 0, 0]
+    resumed = job.with_restart(checkpoint, name="radau-resume")
+    resumed.save()
+    assert fs.BaseJob.load(resumed.job_file).restart_step() == 50
+    resumed.time = fs.TimeIntegration(0, 1, 0.01, fs.Gauss())
+    with pytest.raises(ValueError, match="restart manifest"):
+        resumed.restart_step()
+
+
+@pytest.mark.parametrize("order", [3, 4])
+@pytest.mark.parametrize(
+    "selection", [{"dt": 0.01}, {"f_max": 20, "window_error": 0.01}]
+)
+def test_order_based_jobs_default_to_radau_and_persist_resolved_order(
+    tmp_path, order, selection
+):
+    job = job_at(tmp_path)
+    job.time = fs.TimeIntegration(0, 1, order=order, **selection)
+    job.save()
+    restored = fs.BaseJob.load(job.job_file)
+    assert restored.time == job.time
+    assert restored.time.order == 3 and restored.time.method == fs.Radau()
+    assert restored.to_fs()["Time"]["method"] == "radau3"
+    assert restored.time.replace(order=4).method == fs.Radau()
