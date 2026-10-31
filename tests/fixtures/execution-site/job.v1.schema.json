@@ -129,6 +129,12 @@
             },
             "mode": {
               "const": "independent-frequency.v1"
+            },
+            "gpusPerNode": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2,
+              "default": 0
             }
           },
           "allOf": [
@@ -137,6 +143,12 @@
                 "properties": {
                   "nodes": {
                     "const": 1
+                  },
+                  "gpusPerNode": {
+                    "enum": [
+                      0,
+                      1
+                    ]
                   }
                 }
               },
@@ -178,6 +190,71 @@
                   },
                   "mpiRanks": {
                     "const": 1
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "gpusPerNode"
+                ],
+                "properties": {
+                  "gpusPerNode": {
+                    "const": 1
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "nodes": {
+                    "const": 1
+                  },
+                  "mpiRanks": {
+                    "const": 1
+                  },
+                  "cpu": {
+                    "enum": [
+                      32,
+                      64
+                    ]
+                  },
+                  "allowCpuSharing": {
+                    "const": false
+                  },
+                  "memoryMiB": {
+                    "maximum": 124518
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": [
+                  "gpusPerNode"
+                ],
+                "properties": {
+                  "gpusPerNode": {
+                    "const": 2
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "nodes": {
+                    "const": 1
+                  },
+                  "mpiRanks": {
+                    "const": 2
+                  },
+                  "cpu": {
+                    "const": 64
+                  },
+                  "allowCpuSharing": {
+                    "const": false
+                  },
+                  "memoryMiB": {
+                    "maximum": 124518
                   }
                 }
               }
@@ -287,6 +364,75 @@
           "items": {
             "type": "string"
           }
+        },
+        "gpu": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "version",
+                "model",
+                "count",
+                "memoryMiB",
+                "nativeBundleDigest"
+              ],
+              "properties": {
+                "version": {
+                  "const": "cuda-single-gpu.v1"
+                },
+                "model": {
+                  "const": "NVIDIA T4g"
+                },
+                "count": {
+                  "const": 1
+                },
+                "memoryMiB": {
+                  "const": 16384
+                },
+                "nativeBundleDigest": {
+                  "type": "string",
+                  "pattern": "^sha256:[a-f0-9]{64}$"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "version",
+                "model",
+                "count",
+                "memoryMiB",
+                "nativeBundleDigest",
+                "allocatedCount"
+              ],
+              "properties": {
+                "version": {
+                  "const": "cuda-gpu.v2"
+                },
+                "model": {
+                  "const": "NVIDIA T4g"
+                },
+                "count": {
+                  "const": 2
+                },
+                "memoryMiB": {
+                  "const": 16384
+                },
+                "nativeBundleDigest": {
+                  "type": "string",
+                  "pattern": "^sha256:[a-f0-9]{64}$"
+                },
+                "allocatedCount": {
+                  "enum": [
+                    1,
+                    2
+                  ]
+                }
+              }
+            }
+          ]
         }
       },
       "required": [
@@ -325,6 +471,271 @@
           "required": [
             "scheduler"
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "resources"
+        ],
+        "properties": {
+          "resources": {
+            "required": [
+              "gpusPerNode"
+            ],
+            "properties": {
+              "gpusPerNode": {
+                "enum": [
+                  1,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "placement"
+        ],
+        "properties": {
+          "placement": {
+            "required": [
+              "gpu"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "placement"
+        ],
+        "properties": {
+          "placement": {
+            "required": [
+              "gpu"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "resources": {
+            "required": [
+              "gpusPerNode"
+            ],
+            "properties": {
+              "gpusPerNode": {
+                "enum": [
+                  1,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "placement"
+        ],
+        "properties": {
+          "placement": {
+            "required": [
+              "gpu"
+            ],
+            "properties": {
+              "gpu": {
+                "required": [
+                  "version"
+                ],
+                "properties": {
+                  "version": {
+                    "const": "cuda-single-gpu.v1"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "requiredCapabilities": {
+            "contains": {
+              "const": "cuda-single-gpu.v1"
+            }
+          },
+          "resources": {
+            "properties": {
+              "cpu": {
+                "const": 32
+              },
+              "memoryMiB": {
+                "maximum": 62259
+              },
+              "gpusPerNode": {
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "placement"
+        ],
+        "properties": {
+          "placement": {
+            "required": [
+              "gpu"
+            ],
+            "properties": {
+              "gpu": {
+                "required": [
+                  "version"
+                ],
+                "properties": {
+                  "version": {
+                    "const": "cuda-gpu.v2"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "requiredCapabilities": {
+            "contains": {
+              "const": "cuda-gpu.v2"
+            }
+          },
+          "resources": {
+            "properties": {
+              "cpu": {
+                "const": 64
+              },
+              "memoryMiB": {
+                "maximum": 124518
+              },
+              "gpusPerNode": {
+                "maximum": 2
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "placement",
+          "resources"
+        ],
+        "properties": {
+          "placement": {
+            "required": [
+              "gpu"
+            ],
+            "properties": {
+              "gpu": {
+                "required": [
+                  "version"
+                ],
+                "properties": {
+                  "version": {
+                    "const": "cuda-gpu.v2"
+                  }
+                }
+              }
+            }
+          },
+          "resources": {
+            "required": [
+              "gpusPerNode"
+            ],
+            "properties": {
+              "gpusPerNode": {
+                "const": 1
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "placement": {
+            "properties": {
+              "gpu": {
+                "properties": {
+                  "allocatedCount": {
+                    "const": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "placement",
+          "resources"
+        ],
+        "properties": {
+          "placement": {
+            "required": [
+              "gpu"
+            ],
+            "properties": {
+              "gpu": {
+                "required": [
+                  "version"
+                ],
+                "properties": {
+                  "version": {
+                    "const": "cuda-gpu.v2"
+                  }
+                }
+              }
+            }
+          },
+          "resources": {
+            "required": [
+              "gpusPerNode"
+            ],
+            "properties": {
+              "gpusPerNode": {
+                "const": 2
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "placement": {
+            "properties": {
+              "gpu": {
+                "properties": {
+                  "allocatedCount": {
+                    "const": 2
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

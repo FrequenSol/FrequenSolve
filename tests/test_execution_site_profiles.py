@@ -7,6 +7,37 @@ from frequensolve.orchestrator.sites.aws.execution_profile import (
 from frequensolve.orchestrator.sites.execution import ExecutionDetails
 
 
+def test_single_gpu_resource_serialization_and_invalid_shapes():
+    resources = {
+        "nodes": 1,
+        "mpi_ranks": 1,
+        "wall_time_seconds": 600,
+        "gpus_per_node": 1,
+    }
+    profile = ManagedExecutionProfile.from_mapping(
+        {"partition": "gpu", "execution_resources": resources}
+    )
+    assert profile.graphql_arguments()["execution_resources"]["gpusPerNode"] == 1
+    for override in (
+        {"gpus_per_node": True},
+        {"gpus_per_node": -1},
+        {"gpus_per_node": 3},
+        {"nodes": 2, "mpi_ranks": 2},
+        {"cpu": 16},
+        {"memory_mib": 62260},
+    ):
+        with pytest.raises(ManagedExecutionProfileError):
+            ManagedExecutionProfile.from_mapping(
+                {"execution_resources": {**resources, **override}}
+            )
+    assert (
+        "gpusPerNode"
+        not in ManagedExecutionProfile.from_mapping({}).graphql_arguments()[
+            "execution_resources"
+        ]
+    )
+
+
 @pytest.mark.parametrize("site_id", ["frequensol-shared-us-east-1", "research-slurm"])
 def test_named_site_uses_portable_submission_arguments(site_id):
     profile = ManagedExecutionProfile.from_mapping({"cluster_id": site_id})
@@ -181,3 +212,37 @@ def test_adaptive_pool_profile_preserves_resources_and_rejects_planner_mix():
             ManagedExecutionProfile.from_mapping(
                 {"execution_resources": {**resources, **changed}}
             )
+
+
+def test_two_gpu_profile_preserves_rank_and_full_node_resources():
+    value = {
+        "nodes": 1,
+        "mpi_ranks": 2,
+        "gpus_per_node": 2,
+        "cpu": 64,
+        "memory_mib": 124518,
+        "wall_time_seconds": 600,
+    }
+    arguments = ManagedExecutionProfile.from_mapping(
+        {"partition": "gpu", "execution_resources": value}
+    ).graphql_arguments()
+    assert arguments["execution_resources"]["gpusPerNode"] == 2
+    assert arguments["execution_resources"]["mpiRanks"] == 2
+    for change in (
+        {"mpi_ranks": 1},
+        {"mpi_ranks": 3},
+        {"cpu": 32},
+        {"memory_mib": 124519},
+        {"nodes": 2},
+    ):
+        with pytest.raises(ManagedExecutionProfileError):
+            ManagedExecutionProfile.from_mapping(
+                {"execution_resources": {**value, **change}}
+            )
+    single = {**value, "mpi_ranks": 1, "gpus_per_node": 1}
+    assert (
+        ManagedExecutionProfile.from_mapping(
+            {"execution_resources": single}
+        ).execution_resources
+        == single
+    )
