@@ -117,7 +117,8 @@ class Gauss:
 class Radau:
     """Third-order, two-stage L-stable Radau IIA with one complex solve per step.
 
-    Requires a Sauce backend supporting radau3. CPU execution is supported.
+    Requires a Sauce backend supporting radau3. Updated backends support GPU
+    execution with the same capabilities and fallbacks as Gauss.
     Choose dt or a phase-error target at f_max; phase targets do not bound damping.
     """
 

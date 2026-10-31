@@ -117,15 +117,17 @@ third-order Radau IIA on Sauce backends supporting ``radau3``. For example:
 
    job.time = fs.TimeIntegration(start=0, end=4, dt=0.005, scheme="radau")
 
-Radau also uses one complex solve and real accepted state, and supports CPU
-PML/GSLS histories and restart within the existing physics restrictions. It
-selects CPU execution; explicit GPU requests must be overridden with
-``sim.solver.extra["execution"] = "cpu"``. Its numerical damping suppresses underresolved
+Radau also uses one complex solve and real accepted state, with PML/GSLS
+histories and restart within the existing physics restrictions. Updated Sauce
+backends support GPU execution with the same capabilities and fallbacks as
+Gauss. SYCL retains accepted fields, bulk/interface actions, Cartesian PML/GSLS
+histories and PML reconstruction, including MPI and restart. Metal supports
+complex stages and resident GSLS with its existing host primary/PML paths. Its numerical damping suppresses underresolved
 high-frequency modes, but can also attenuate the desired signal when dt is too
 large. Compare amplitudes and phase after halving dt. Both explicit dt and
 phase-based automatic selection are supported; phase targets do not bound
 Radau's amplitude error. Gauss
-phase fitting and GPU PML reconstruction are unavailable, and checkpoints from
+phase fitting is unavailable, and checkpoints from
 Gauss or Newmark cannot restart a Radau run.
 
 To fit the temporal phase at one frequency, set ``f_0`` in Hz. Zero selects
