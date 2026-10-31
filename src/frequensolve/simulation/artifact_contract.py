@@ -344,7 +344,7 @@ class MaterialArtifactRecord:
         if (
             value.get("id") != f"material_space:{space}"
             or value.get("role") != "material_space"
-            or value.get("schema") != "fs-property-space-1"
+            or value.get("schema") not in {"fs-property-space-1", "fs-property-space-3"}
         ):
             raise ArtifactContractError(
                 f"material artifact for {space!r} has an unexpected id, role, or schema"
@@ -424,23 +424,44 @@ class TaskPartition:
     """Exact partition identity for one solver task."""
 
     task: int
-    frequency: complex
+    frequency: Optional[complex]
     task_count: Optional[int] = None
     source_batch: Optional[int] = None
     rhs_batch: Optional[int] = None
+    azimuthal_mode: Optional[int] = None
 
     @classmethod
     def from_fs(cls, value: Mapping[str, Any]) -> "TaskPartition":
-        """Parse an exact complex-frequency task partition."""
+        """Parse an exact frequency or angular-mode task partition."""
 
         value = _mapping(value, "partition")
         _reject_unknown(
             value,
-            {"task", "task_count", "frequency", "source_batch", "rhs_batch"},
+            {
+                "task",
+                "task_count",
+                "frequency",
+                "source_batch",
+                "rhs_batch",
+                "azimuthal_mode",
+            },
             "partition",
         )
-        frequency = _mapping(value.get("frequency"), "partition.frequency")
-        _reject_unknown(frequency, {"real", "imag"}, "partition.frequency")
+        mode = value.get("azimuthal_mode")
+        if ("azimuthal_mode" in value) == ("frequency" in value):
+            raise ArtifactContractError(
+                "partition requires exactly one of frequency or azimuthal_mode"
+            )
+        if mode is not None:
+            mode = _integer(mode, "partition.azimuthal_mode", minimum=0)
+            frequency_value = None
+        else:
+            frequency = _mapping(value.get("frequency"), "partition.frequency")
+            _reject_unknown(frequency, {"real", "imag"}, "partition.frequency")
+            frequency_value = complex(
+                _finite_float(frequency.get("real"), "partition.frequency.real"),
+                _finite_float(frequency.get("imag"), "partition.frequency.imag"),
+            )
         task = _integer(value.get("task"), "partition.task", minimum=1)
         task_count = value.get("task_count")
         if task_count is not None:
@@ -449,6 +470,10 @@ class TaskPartition:
                 raise ArtifactContractError(
                     "partition.task cannot exceed partition.task_count"
                 )
+        if mode is not None and (task_count is None or mode != task - 1):
+            raise ArtifactContractError(
+                "Angular partition requires task_count and azimuthal_mode == task - 1"
+            )
         source_batch = value.get("source_batch")
         if source_batch is not None:
             source_batch = _integer(source_batch, "partition.source_batch", minimum=0)
@@ -458,10 +483,8 @@ class TaskPartition:
         return cls(
             task=task,
             task_count=task_count,
-            frequency=complex(
-                _finite_float(frequency.get("real"), "partition.frequency.real"),
-                _finite_float(frequency.get("imag"), "partition.frequency.imag"),
-            ),
+            frequency=frequency_value,
+            azimuthal_mode=mode,
             source_batch=source_batch,
             rhs_batch=rhs_batch,
         )
@@ -471,10 +494,16 @@ class TaskPartition:
 
         result: Dict[str, Any] = {
             "task": self.task,
-            "frequency": {
-                "real": float(self.frequency.real),
-                "imag": float(self.frequency.imag),
-            },
+            **(
+                {"azimuthal_mode": self.azimuthal_mode}
+                if self.azimuthal_mode is not None
+                else {
+                    "frequency": {
+                        "real": float(self.frequency.real),
+                        "imag": float(self.frequency.imag),
+                    }
+                }
+            ),
         }
         if self.task_count is not None:
             result["task_count"] = self.task_count

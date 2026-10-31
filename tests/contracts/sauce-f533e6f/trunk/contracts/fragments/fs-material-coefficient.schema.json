@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://frequensolve.local/contracts/fragments/fs-material-coefficient.schema.json",
   "title": "Material coefficient",
-  "description": "A dimensioned scalar material expression or an elastic constitutive tensor in the selected packed basis. This specifies a factor W, not a metric W^H W.",
+  "description": "A dimensioned scalar material expression or an elastic constitutive tensor in the selected packed basis. This specifies a factor W, not a metric W^H W. Direct material derivatives of selected receiver-response coefficients are currently unsupported; wavefield and frequency derivatives remain supported.",
   "$defs": {
     "expression": {
       "oneOf": [
@@ -31,6 +31,19 @@
             "ref": {
               "type": "string",
               "minLength": 1
+            },
+            "domain": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ],
+              "description": "Select the incident material side independently of the receiver field domain. Missing selected-side incidence is an error; properties are not averaged or extrapolated."
             }
           },
           "additionalProperties": false
@@ -153,6 +166,19 @@
           ],
           "default": "engineering_voigt",
           "description": "Packed tensor basis. Receiver expressions use Mandel; physical acts on physical symmetric-tensor entries."
+        },
+        "domain": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ],
+          "description": "Select the incident material side independently of the receiver field domain. Missing selected-side incidence is an error; properties are not averaged or extrapolated."
         }
       },
       "additionalProperties": false

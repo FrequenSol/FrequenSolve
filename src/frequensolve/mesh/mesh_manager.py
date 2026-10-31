@@ -250,34 +250,6 @@ def _unwrap_hp_policy_literal(value: Any) -> Any:
     return value
 
 
-def _resolve_f_low(
-    f_low: Optional[float] = None,
-    *,
-    f_adapt: Optional[float] = None,
-) -> Optional[float]:
-    values = [
-        (name, value)
-        for name, value in (
-            ("f_low", f_low),
-            ("f_adapt", f_adapt),
-        )
-        if value is not None
-    ]
-    if not values:
-        return None
-    if len(values) > 1:
-        names = ", ".join(name for name, _ in values)
-        raise ValueError(f"Specify only one of {names}")
-    return values[0][1]
-
-
-def _pop_f_low(payload: Dict[str, Any]) -> Optional[float]:
-    return _resolve_f_low(
-        payload.pop("f_low", None),
-        f_adapt=payload.pop("f_adapt", None),
-    )
-
-
 def _normalize_grade_mode(mode: str) -> str:
     mode = str(mode).strip().lower()
     if mode not in _GRADE_MODES:
@@ -565,7 +537,8 @@ class MeshAdaptor(ExtraFieldsMixin):
             degrees of freedom.
         f_low: Low frequency used for adaptation.
         f_high: High frequency used for adaptation.
-        f_adapt: Alias for ``f_low``.
+        f_adapt: Explicit physical frequency in hertz used for adaptation.
+            Required and positive for transient wave simulations.
         adapt_order: Whether to adapt element order.
         source_grading: Optional distance grading around sources.
         receiver_grading: Optional distance grading around receivers.
@@ -575,8 +548,7 @@ class MeshAdaptor(ExtraFieldsMixin):
 
     Raises:
         TypeError: If no elements-per-wave argument is supplied.
-        ValueError: If multiple elements-per-wave aliases or low-frequency
-            aliases are supplied.
+        ValueError: If multiple elements-per-wave aliases are supplied.
     """
 
     elems_per_wave: Union[float, Dict[str, float]]
@@ -586,6 +558,7 @@ class MeshAdaptor(ExtraFieldsMixin):
     smooth_refs: Optional[bool] = None  # False
     f_low: Optional[float] = None
     f_high: Optional[float] = None
+    f_adapt: Optional[float] = None
     adapt_order: bool = False
     source_grading: Optional[DistanceGrading] = None
     receiver_grading: Optional[DistanceGrading] = None
@@ -626,8 +599,9 @@ class MeshAdaptor(ExtraFieldsMixin):
         self.jump_tolerance = jump_tolerance
         self.jump_factor = jump_factor
         self.smooth_refs = smooth_refs
-        self.f_low = _resolve_f_low(f_low, f_adapt=f_adapt)
+        self.f_low = f_low
         self.f_high = f_high
+        self.f_adapt = f_adapt
         self.adapt_order = adapt_order
         self.source_grading = source_grading
         self.receiver_grading = receiver_grading
@@ -665,18 +639,6 @@ class MeshAdaptor(ExtraFieldsMixin):
 
         self.elems_per_wave = value
 
-    @property
-    def f_adapt(self) -> Optional[float]:
-        """Alias for the low adaptation frequency ``f_low``."""
-
-        return self.f_low
-
-    @f_adapt.setter
-    def f_adapt(self, value: Optional[float]) -> None:
-        """Set ``f_low`` through the ``f_adapt`` alias."""
-
-        self.f_low = value
-
     def to_fs(self, ctx=None) -> Dict:
         """Serialize mesh adaptivity settings for solver input.
 
@@ -695,6 +657,7 @@ class MeshAdaptor(ExtraFieldsMixin):
             **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {}),
             **({"f_low": self.f_low} if self.f_low is not None else {}),
             **({"f_high": self.f_high} if self.f_high is not None else {}),
+            **({"f_adapt": self.f_adapt} if self.f_adapt is not None else {}),
             **({"adapt_order": self.adapt_order} if self.adapt_order else {}),
             **(
                 {"src_grading": self.source_grading.to_fs(ctx)}
@@ -740,8 +703,9 @@ class MeshAdaptor(ExtraFieldsMixin):
             jump_tolerance=data.pop("jump_tolerance", None),
             jump_factor=data.pop("jump_factor", None),
             smooth_refs=data.pop("smooth_refs", None),
-            f_low=_pop_f_low(data),
+            f_low=data.pop("f_low", None),
             f_high=data.pop("f_high", None),
+            f_adapt=data.pop("f_adapt", None),
             adapt_order=data.pop("adapt_order", False),
             source_grading=_pop_alias(data, "source_grading", "src_grading"),
             receiver_grading=_pop_alias(data, "receiver_grading", "rcv_grading"),
@@ -907,7 +871,8 @@ class MeshManager:
                 degrees of freedom.
             f_low: Low frequency used for adaptation.
             f_high: High frequency used for adaptation.
-            f_adapt: Alias for ``f_low``.
+            f_adapt: Explicit physical frequency in hertz used for adaptation.
+                Required and positive for transient wave simulations.
             adapt_order: Whether to adapt element order.
             source_grading: Optional distance grading around sources.
             receiver_grading: Optional distance grading around receivers.

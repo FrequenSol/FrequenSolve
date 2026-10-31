@@ -1,7 +1,6 @@
 import base64
 import hashlib
 import json
-import shlex
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +38,7 @@ COMPATIBILITY_SHA = "b" * 64
 BUNDLE_SCHEMA_SHA = "7" * 64
 COMPATIBILITY_SCHEMA_SHA = "8" * 64
 SOLVER_SHA = "9" * 64
+BACKEND_SHAS = {"fs2d_s": "c" * 64, "fs3d_s": "f" * 64}
 SDK_SHA = "d" * 64
 COMMIT = "1" * 40
 SOLVER_IDENTITY = {
@@ -116,6 +116,10 @@ def contract_pair():
             _installed_file(
                 COMPATIBILITY_SCHEMA_RELATIVE,
                 COMPATIBILITY_SCHEMA_SHA,
+            ),
+            *(
+                _installed_file(f"bin/{name}", digest, mode="0755")
+                for name, digest in BACKEND_SHAS.items()
             ),
         ],
         "executables": [
@@ -635,7 +639,14 @@ def _manifest_snapshot(payload, digest):
     return digest + "\n" + base64.b64encode(raw).decode()
 
 
-def _successful_remote_runner(site, *, identity=None, calls=None):
+def _backend_listing(directory="/opt/frequensolve/bin", digests=None):
+    lines = [f"FS_SOLVER_DIRECTORY {directory}"]
+    for name, digest in (BACKEND_SHAS if digests is None else digests).items():
+        lines.append(f"FS_SOLVER_BACKEND {name} {digest}")
+    return "\n".join(lines)
+
+
+def _successful_remote_runner(site, *, identity=None, calls=None, backends=None):
     profile = site.enterprise_hpc
     bundle, compatibility = contract_pair()
     bundle_schema, compatibility_schema = contract_schemas()
@@ -672,6 +683,8 @@ def _successful_remote_runner(site, *, identity=None, calls=None):
                     "frequensolve-solver-identity-ok",
                 ]
             )
+        elif "FS_SOLVER_BACKEND" in command:
+            output = _backend_listing() if backends is None else backends
         elif "/opt/frequensolve/bin/FS_seismic" in command and "hashlib" in command:
             output = SOLVER_SHA
         else:
@@ -701,6 +714,95 @@ def test_preflight_observes_bundle_scheduler_and_public_solver_identity(monkeypa
         for command in runtime_commands
     )
     assert all("/bin/activate" not in command for command in runtime_commands)
+    (probe,) = [command for command in calls if "FS_SOLVER_BACKEND" in command]
+    assert probe.startswith("module load frequensolve/1.0.0-synthetic && ")
+
+
+@pytest.mark.parametrize(
+    ("listing", "message"),
+    [
+        (
+            _backend_listing(digests={**BACKEND_SHAS, "fs3d_s": "0" * 64}),
+            "backend fs3d_s digest does not match",
+        ),
+        (
+            _backend_listing(digests={**BACKEND_SHAS, "fs2d": "c" * 64}),
+            "does not uniquely declare bin/fs2d",
+        ),
+        (_backend_listing(directory="/home/user/bin"), "outside the immutable"),
+        (
+            _backend_listing(directory="/opt/frequensolve/bin/../../evil/bin"),
+            "outside the immutable",
+        ),
+        (_backend_listing(digests={}), "no backend to verify"),
+        ("", "no backend to verify"),
+    ],
+)
+def test_preflight_verifies_the_backends_the_dispatcher_routes_to(
+    monkeypatch, listing, message
+):
+    site = _enterprise_site(monkeypatch)
+    monkeypatch.setattr(
+        site, "run_login_cmd", _successful_remote_runner(site, backends=listing)
+    )
+
+    with pytest.raises(EnterpriseHPCPreflightError, match=message):
+        site._enterprise_hpc_preflight()
+    assert site._enterprise_hpc_limits is None
+
+
+def _local_shell(command, timeout=None):
+    """Run a login command in a local shell, as the remote login node would."""
+
+    import subprocess
+
+    result = subprocess.run(["bash", "-c", command], capture_output=True)
+    return (
+        None,
+        _Stream(result.stdout.decode(), result.returncode),
+        _Stream(result.stderr.decode(), result.returncode),
+    )
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_backend_probe_reads_the_dispatcher_routing_directory(
+    monkeypatch, tmp_path, override
+):
+    """The real probe digests the backends in FS_SOLVER_PATH or beside FS_seismic."""
+
+    root = tmp_path / "bundle"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "FS_seismic").write_bytes(b"dispatcher")
+    installed = {}
+    for name in ("fs2d_s", "fs3d"):
+        (root / "bin" / name).write_bytes(name.encode())
+        installed[f"bin/{name}"] = hashlib.sha256(name.encode()).hexdigest()
+    bundle = {
+        "installedFiles": [
+            _installed_file(path, digest) for path, digest in installed.items()
+        ]
+    }
+    monkeypatch.setattr(hpc, "SSHClientClass", _WrappedLogin)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "fs2d_s").write_bytes(b"fs2d_s")
+    site = _Site(
+        config=SlurmSiteConfig(hostname="login.example.invalid", queue="q"),
+        solver=str(root / "bin" / "FS_seismic"),
+        work_dir="/synthetic/work",
+        environment={"FS_SOLVER_PATH": str(elsewhere)} if override else None,
+    )
+    monkeypatch.setattr(site, "run_login_cmd", _local_shell)
+
+    if override:
+        # Identical bytes outside the bundle root are still not the bundle's.
+        with pytest.raises(EnterpriseHPCPreflightError, match="outside the immutable"):
+            site._verify_enterprise_backends(bundle, str(root), site.executable)
+        return
+    site._verify_enterprise_backends(bundle, str(root), site.executable)
+    (root / "bin" / "fs3d").write_bytes(b"tampered")
+    with pytest.raises(EnterpriseHPCPreflightError, match="fs3d digest"):
+        site._verify_enterprise_backends(bundle, str(root), site.executable)
 
 
 def test_preflight_rejects_unproven_sdk_before_remote_use(monkeypatch):
@@ -772,34 +874,6 @@ def test_installed_sdk_artifact_uses_pip_direct_url_and_record(monkeypatch, tmp_
     assert installed_frequensolve_artifact_sha256() is None
 
 
-def test_attached_submit_validates_observed_pool_before_transfer(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-    site.pool.id = "24680"
-    site.pool.nhost = 3
-    site.pool.nproc = 8
-    site.pool.ncore = 16
-    transferred = []
-    monkeypatch.setattr(_Site, "provisioned", property(lambda self: True))
-
-    def preflight(**kwargs):
-        validated = validate_contract()
-        site._enterprise_hpc_limits = validated.limits
-        return validated.result
-
-    monkeypatch.setattr(site, "_enterprise_hpc_preflight", preflight)
-    monkeypatch.setattr(site, "prepare_job", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        site,
-        "_submit_attached",
-        lambda *args, **kwargs: transferred.append(args),
-    )
-
-    with pytest.raises(EnterpriseHPCPreflightError, match="max_nodes"):
-        site.submit(object(), mode="attached", force=True)
-
-    assert transferred == []
-
-
 @pytest.mark.parametrize(
     ("override", "error"),
     [
@@ -843,36 +917,11 @@ def test_enterprise_provision_preflights_before_transfer_or_scheduler_spend(
         lambda *args, **kwargs: side_effects.append("sbatch"),
     )
 
-    with pytest.raises(EnterpriseHPCPreflightError, match="synthetic stop"):
-        site.provision(nodes=1, tasks=4, duration="00:30:00")
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(EnterpriseHPCPreflightError, match="synthetic stop"):
+            site.provision(nodes=1, tasks=4, duration="00:30:00")
 
     assert side_effects == ["preflight"]
-
-
-def test_enterprise_provision_preserves_the_existing_sbatch_shape(monkeypatch):
-    site = _enterprise_site(monkeypatch)
-    events = []
-    submissions = []
-    monkeypatch.setattr(
-        site,
-        "_enterprise_hpc_preflight",
-        lambda *args, **kwargs: events.append("preflight"),
-    )
-    monkeypatch.setattr(site, "put", lambda *args, **kwargs: events.append("put"))
-    monkeypatch.setattr(
-        site,
-        "_submit_sbatch",
-        lambda command: (
-            events.append("sbatch") or submissions.append(command) or "24680"
-        ),
-    )
-    monkeypatch.setattr(site, "_allocation_handle", lambda job_id: job_id)
-
-    assert site.provision(nodes=1, tasks=4, duration="00:30:00") == "24680"
-    assert events == ["preflight", "put", "preflight", "sbatch"]
-    submission = shlex.split(submissions[0])
-    assert submission[0] == "sbatch"
-    assert len(submission) == 2
 
 
 def test_run_record_contains_sanitized_enterprise_identities(monkeypatch, tmp_path):

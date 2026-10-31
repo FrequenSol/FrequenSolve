@@ -90,6 +90,8 @@ GROUPS = {
         (Loss.l2(), {"kind": "l2"}),
         (Loss("none"), {"kind": "l2"}),
         (Loss.huber(), {"kind": "huber", "delta": 1.5}),
+        (Loss.tukey(0.15), {"kind": "tukey", "delta": 0.15}),
+        (Loss("bisquare", delta=0.3), {"kind": "tukey", "delta": 0.3}),
         (Loss("hybrid", delta=0.7), {"kind": "huber", "delta": 0.7}),
         (Loss.student_t(), {"kind": "student_t", "c2": 1.0, "nu": 2.0}),
         (Loss("StudentsT", nu=3.0), {"kind": "student_t", "c2": 1.0, "nu": 3.0}),
@@ -138,6 +140,49 @@ def test_comparison_waveform_and_phase_derivative_round_trip():
         Comparison.from_fs({"kind": "phase_derivative", "derivative_axis": "laplace"})
 
 
+def test_comparison_source_delay_fit_serializes_and_round_trips():
+    plain = Comparison.phase_derivative(source_derivative="total")
+    fitted = Comparison.phase_derivative(source_derivative="total", source_delay="FIT")
+
+    assert "source_delay" not in plain.to_fs()
+    assert fitted.source_delay == "fit"
+    assert fitted.to_fs() == {
+        "kind": "phase_derivative",
+        "derivative_axis": "frequency",
+        "source_derivative": "total",
+        "relative_amplitude_floor": 0.01,
+        "source_delay": "fit",
+    }
+    assert Comparison.from_fs(fitted.to_fs()) == fitted
+    assert Comparison.from_value(fitted.to_fs()) == fitted
+    term = ObjectiveTerm("das", comparison=fitted, id="das.phase")
+    assert term.to_fs()["comparison"]["source_delay"] == "fit"
+    assert ObjectiveTerm.from_fs(term.to_fs()) == term
+    for kind in ("waveform", "spectral_derivative"):
+        with pytest.raises(ValueError, match="requires phase_derivative"):
+            Comparison(kind=kind, source_delay="fit")
+    with pytest.raises(ValueError, match="source_delay"):
+        Comparison.phase_derivative(source_delay="mean")
+    with pytest.raises(ValueError, match="source delay"):
+        Comparison.phase_derivative(source_delay="fit").bind(None)
+
+
+def test_source_scalar_fit_variants_serialize():
+    default = Preprocess.source_scalar_fit()
+    phase_only = Preprocess.source_scalar_fit(variant="Phase_Only", norm="studentst")
+
+    assert "variant" not in default.params
+    assert phase_only.params["variant"] == "phase_only"
+    assert phase_only.stage == "trace_pair"
+    assert Preprocess.from_fs(phase_only.to_fs()).to_fs() == phase_only.to_fs()
+    assert (
+        Preprocess.source_scalar_fit(variant="amplitude_only").params["variant"]
+        == "amplitude_only"
+    )
+    with pytest.raises(ValueError, match="variant"):
+        Preprocess.source_scalar_fit(variant="real")
+
+
 def test_normalization_variants_serialize_units_and_round_trip():
     explicit = Normalization.explicit(2.5 * u.Pa)
     components = Normalization.explicit(
@@ -148,7 +193,7 @@ def test_normalization_variants_serialize_units_and_round_trip():
 
     assert explicit.to_fs() == {
         "scale": {"kind": "explicit", "value": {"value": 2.5, "units": "Pa"}},
-        "reduction": "weighted_mean",
+        "reduction": "sum",
     }
     assert components.to_fs()["scale"]["components"] == {
         "pressure": 1.0,
@@ -160,19 +205,46 @@ def test_normalization_variants_serialize_units_and_round_trip():
     }
     assert balance.to_fs() == {
         "scale": {"kind": "balance_artifact", "file": "calibrate/balance.h5"},
-        "reduction": "weighted_mean",
+        "reduction": "sum",
     }
     for normalization in (explicit, components, rms, balance):
         assert Normalization.from_fs(normalization.to_fs()) == normalization
     assert Normalization.from_value("observed_rms") == Normalization.observed_rms()
     assert Normalization.from_value(3.0) == Normalization.explicit(3.0)
-    assert Normalization.from_value(None) == Normalization.observed_rms()
+    assert Normalization.from_value(None) == Normalization.explicit(1.0)
+
+
+def test_normalization_defaults_and_explicit_legacy_options():
+    unit_sum = Normalization.explicit(1.0, reduction="sum")
+    for normalization in (
+        Normalization(),
+        Normalization.explicit(),
+        Normalization.from_value(None),
+        Normalization.from_fs({"scale": {"kind": "explicit", "value": 1.0}}),
+        Misfit.l2().normalization,
+        ObjectiveTerm("pressure").normalization,
+        Misfit.from_fs({"objective": {"kind": "l2"}}).normalization,
+    ):
+        assert normalization == unit_sum
+        assert normalization.to_fs() == {
+            "scale": {"kind": "explicit", "value": 1.0},
+            "reduction": "sum",
+        }
+
+    rms_mean = Normalization.observed_rms(reduction="weighted_mean")
+    assert Normalization.from_fs(rms_mean.to_fs()) == rms_mean
+    assert Misfit.l2(normalization=rms_mean).normalization == rms_mean
+    assert Normalization.observed_rms().reduction == "sum"
+    assert (
+        Normalization.explicit(1.0, reduction="weighted_mean").reduction
+        == "weighted_mean"
+    )
 
 
 @pytest.mark.parametrize(
     "factory",
     [
-        lambda: Normalization.explicit(),
+        lambda: Normalization.explicit(components={}),
         lambda: Normalization.explicit(1.0, components={"p": 1.0}),
         lambda: Normalization.explicit(-1.0),
         lambda: Normalization(kind="balance_artifact"),
@@ -328,7 +400,7 @@ def test_receiver_projection_rejects_invalid_configuration(factory):
             "trace_pair",
             {
                 "norm": "huber",
-                "max_iterations": 20,
+                "max_iterations": 100,
                 "relative_tolerance": 1e-8,
                 "delta": 1.2,
             },
@@ -508,8 +580,8 @@ def test_objective_term_defaults_and_round_trip(imaging_validator):
         "comparison": {"kind": "waveform"},
         "weight": 0.3,
         "normalization": {
-            "scale": {"kind": "observed_rms"},
-            "reduction": "weighted_mean",
+            "scale": {"kind": "explicit", "value": 1.0},
+            "reduction": "sum",
         },
     }
     assert ObjectiveTerm.from_fs(payload) == term
@@ -641,6 +713,70 @@ def test_spectral_waveform_terms_require_df_and_keep_independent_normalization(
     assert misfit.required_derivatives("hydrophone") == ("df",)
     with pytest.raises(ValueError, match="observed 'df' derivatives"):
         Misfit.l2(comparison=derivative).to_fs({"das": GROUPS["das"]})
+
+
+def _time_store(path: Path) -> Path:
+    with h5py.File(path, "w") as h5:
+        h5["data/time/value"] = np.zeros((2, 8), dtype=np.float32)
+        h5["data/time/dt"] = 0.004
+        h5["data/time/t0"] = 0.0
+    return path
+
+
+@pytest.mark.parametrize(
+    "comparison",
+    [
+        Comparison.phase_derivative(source_derivative="total"),
+        Comparison.spectral_derivative(source_derivative="total"),
+    ],
+)
+def test_derivative_comparisons_derive_df_from_time_domain_store(
+    tmp_path, imaging_validator, comparison
+):
+    store = _time_store(tmp_path / "observed_store.h5")
+    group = ObservedGroup("hydrophone", observed=TraceStoreRef(store))
+
+    payload = Misfit.l2(comparison=comparison).to_fs({"hydrophone": group})
+
+    _validate(imaging_validator, payload)
+    assert payload["receiver_groups"][0]["observed"] == {
+        "_type": "HDF5TraceStore",
+        "file": str(store),
+    }
+    assert "observed_derivatives" not in payload["receiver_groups"][0]
+    assert payload["objective_terms"][0]["comparison"]["source_derivative"] == "total"
+    frozen = Comparison(kind=comparison.kind, source_derivative="frozen")
+    with pytest.raises(ValueError, match="source_derivative='total'"):
+        Misfit.l2(comparison=frozen).to_fs({"hydrophone": group})
+
+
+def test_explicit_observed_df_takes_precedence_over_time_store(tmp_path):
+    store = _time_store(tmp_path / "observed_store.h5")
+    df = TraceStoreRef(tmp_path / "observed_df.h5", dataset="hydrophone")
+    group = ObservedGroup(
+        "hydrophone", observed=TraceStoreRef(store), derivatives={"df": df}
+    )
+
+    payload = Misfit.l2(comparison="phase_derivative").to_fs({"hydrophone": group})
+
+    assert payload["receiver_groups"][0]["observed_derivatives"] == {"df": df.to_fs()}
+    assert payload["objective_terms"][0]["comparison"]["source_derivative"] == "frozen"
+
+
+def test_derivative_comparisons_without_time_samples_still_require_df(tmp_path):
+    spectra = tmp_path / "spectra.h5"
+    with h5py.File(spectra, "w") as h5:
+        h5["data/frequency/value"] = np.zeros((2, 1, 2), dtype=np.float32)
+    total = Comparison.phase_derivative(source_derivative="total")
+    for observed in (
+        TraceStoreRef(spectra),
+        spectra,
+        TraceStoreRef(tmp_path / "absent.h5"),
+        None,
+    ):
+        group = ObservedGroup("hydrophone", observed=observed)
+        with pytest.raises(ValueError, match="observed 'df' derivatives"):
+            Misfit.l2(comparison=total).to_fs({"hydrophone": group})
 
 
 def test_misfit_rejects_inconsistent_construction():

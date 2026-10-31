@@ -307,7 +307,7 @@ class Project:
             dimension (int | float | str): The simulation dimension, accepting
                 2D, 2.5D, and 3D forms.
             **kwargs: Simulation options. Recognized keys include
-                ``axisymmetric``, ``units``, ``unit_config``, and
+                ``axisymmetric``, ``azimuthal_mode``, ``units``, ``unit_config``, and
                 ``default_units``; remaining keys are passed through as
                 simulation ``extra`` fields.
 
@@ -374,6 +374,7 @@ class Project:
             physics=physics,
             dimension=dimension,
             axisymmetric=options["axisymmetric"],
+            azimuthal_mode=options["azimuthal_mode"],
             project_path=self.path,
             extra=options["extra"],
         )
@@ -563,6 +564,9 @@ class Project:
             return
 
         remote = self._remote_project_root(site)
+        claim = getattr(site, "_claim_remote_project", None)
+        if callable(claim):
+            claim(self.path)
         project_file = self.path / f"{self.name}.json"
         if project_file.exists():
             site.put(project_file, remote / f"{self.name}.json")
@@ -1037,6 +1041,7 @@ class Project:
         options = dict(kwargs)
         extra = dict(options.pop("extra", {}) or {})
         axisymmetric = options.pop("axisymmetric", False)
+        azimuthal_mode = options.pop("azimuthal_mode", None)
         default_units = options.pop("default_units", None)
         units = options.pop("units", None)
         unit_config = options.pop("unit_config", None)
@@ -1054,6 +1059,7 @@ class Project:
         extra.update(options)
         return {
             "axisymmetric": axisymmetric,
+            "azimuthal_mode": azimuthal_mode,
             "default_units": default_units,
             "unit_config": unit_config,
             "extra": extra,

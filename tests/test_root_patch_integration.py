@@ -295,10 +295,17 @@ def test_preparation_closes_material_supports_before_buffering(
             space = h5["property_space"]
             identity = space["identity"][()].decode().strip()
             directory = space["root_directory"][()]
-            root_offset = space["root_control_offset"][()]
-            root_controls = space["root_control_ids"][()]
-            control_offset = space["control_root_offset"][()]
-            control_roots = space["control_roots"][()]
+            from frequensolve.imaging._property_records import PackedPropertyReader
+
+            # Independently reconstruct inverse support from the actual constraint rows.
+            root_controls = {}
+            control_roots = {}
+            for root in PackedPropertyReader(space, dimension).roots():
+                root_id = root["root_id"]
+                controls = set(map(int, root["global_ids"][root["index"] - 1]))
+                root_controls[root_id] = controls
+                for control in controls:
+                    control_roots.setdefault(control, set()).add(root_id)
         # Rows are (canonical root, GMP cell, material-layer slot, kind); the slot
         # is domain_to_layer(domain), the position of the GMP domain's subdomain.
         subdomains = json.loads(Path(parent._file).read_text())["Model"]["subdomains"]
@@ -310,31 +317,16 @@ def test_preparation_closes_material_supports_before_buffering(
         ]
         canonical = [int(directory[slot, 0]) for slot in physical_slots]
         physical = {root: i + 1 for i, root in enumerate(canonical)}
-        slot_of_root = {int(row[0]): slot for slot, row in enumerate(directory)}
 
-        # 0-based CSR tables in directory-slot order; control IDs are 1-based rows.
+        # Expected closure comes from constraints rather than the stored inverse incidence.
         def controls_of(roots):
             return sorted(
-                {
-                    int(control)
-                    for root in roots
-                    for control in root_controls[
-                        root_offset[slot_of_root[root]] : root_offset[
-                            slot_of_root[root] + 1
-                        ]
-                    ]
-                }
+                {int(control) for root in roots for control in root_controls[root]}
             )
 
         def roots_of(controls):
             return sorted(
-                {
-                    int(root)
-                    for control in controls
-                    for root in control_roots[
-                        control_offset[control - 1] : control_offset[control]
-                    ]
-                }
+                {int(root) for control in controls for root in control_roots[control]}
             )
 
         core = 1

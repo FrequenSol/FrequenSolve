@@ -237,7 +237,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
 
     @property
     def z_limits(self) -> Tuple[float, float]:
-        """Return model depth limits implied by the first and last surfaces.
+        """Return the depth envelope of the model's stratigraphic surfaces.
 
         Returns:
             Tuple ``(zmin, zmax)`` as floats.
@@ -246,11 +246,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             ValueError: If fewer than two surfaces are available.
         """
 
-        if len(self.surfaces) < 2:
-            raise ValueError("LayeredModel requires at least two surfaces for z_limits")
-        z0, _ = self.surfaces[0].extrema  # extrema returns values already
-        _, z1 = self.surfaces[-1].extrema
-        return float(z0), float(z1)
+        return self.z_limits_in()
 
     def z_limits_in(self, units: Optional[Any] = None) -> Tuple[float, float]:
         """Return model depth limits converted to requested units.
@@ -268,12 +264,25 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         if len(self.surfaces) < 2:
             raise ValueError("LayeredModel requires at least two surfaces for z_limits")
         target_units = unit_expression(units) if units is not None else None
-        z0, _ = self.surfaces[0].extrema
-        _, z1 = self.surfaces[-1].extrema
-        return (
-            float(_convert_surface_value(float(z0), self.surfaces[0], target_units)),
-            float(_convert_surface_value(float(z1), self.surfaces[-1], target_units)),
-        )
+        top, bottom = self.upper_surface(), self.lower_surface()
+
+        def limits(surface):
+            return tuple(
+                float(_convert_surface_value(float(z), surface, target_units))
+                for z in surface.extrema
+            )
+
+        # Pinching layers can expose an internal horizon beyond the nominal
+        # first/last surfaces. Marker surfaces do not extend the domain, and
+        # explicit cutting surfaces still bound a truncated model.
+        bounds = [
+            limits(surface)
+            for surface in self.surfaces
+            if surface.interface or surface is top or surface is bottom
+        ]
+        z0 = limits(top)[0] if top.cutting else min(lo for lo, _ in bounds)
+        z1 = limits(bottom)[1] if bottom.cutting else max(hi for _, hi in bounds)
+        return z0, z1
 
     def property_units(self, property: str) -> Optional[str]:
         """Return the first declared units for a model property.
@@ -495,7 +504,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             property_spaces=property_spaces,
         )
         if attenuation is not None:
-            model._attenuation_extra = attenuation.extra
+            model._attenuation_extra = attenuation.fs_extra()
         model.extra = data
 
         def add_model_surface(surface_payload: Mapping[str, Any]) -> None:

@@ -8,6 +8,7 @@ import pytest
 
 from frequensolve.imaging.jobs import ControlGradientJob
 from frequensolve.orchestrator.sites.base import BaseSite
+from frequensolve.orchestrator.sites.hpc.project_guard import claim_project
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
 from frequensolve.simulation.artifact_contract import (
     ArtifactCatalog,
@@ -307,7 +308,10 @@ def test_regularization_remote_scan_distinguishes_context_input(
     )
 
 
-@pytest.mark.parametrize("schema", ["fs-objective-vector-3", "fs-objective-vector-4"])
+@pytest.mark.parametrize(
+    "schema",
+    ["fs-objective-vector-3", "fs-objective-vector-4", "fs-objective-vector-5"],
+)
 def test_direct_remote_submission_stages_nested_and_absolute_vector_payloads(
     tmp_path, schema
 ):
@@ -337,18 +341,18 @@ def test_direct_remote_submission_stages_nested_and_absolute_vector_payloads(
         )
         payload = json.loads(manifest.read_text())
         data_path = (
-            manifest.with_suffix(".h5")
-            if schema.endswith("-4")
-            else DataVector.shard_path(manifest)
+            DataVector.shard_path(manifest)
+            if schema.endswith("-3")
+            else manifest.with_suffix(".h5")
         )
         nested = inputs / "data" / data_path.name
         nested.parent.mkdir(exist_ok=True)
         data_path.rename(nested)
         reference = str(nested) if task == 1 else f"data/{nested.name}"
-        if schema.endswith("-4"):
-            payload["file"] = reference
-        else:
+        if schema.endswith("-3"):
             payload["shards"][0]["file"] = reference
+        else:
+            payload["file"] = reference
         payload.pop("manifest_fingerprint")
         payload["manifest_fingerprint"] = canonical_json_sha256(payload)
         manifest.write_text(json.dumps(payload))
@@ -373,6 +377,9 @@ def test_direct_remote_submission_stages_nested_and_absolute_vector_payloads(
             SlurmSite._transfer_remote_simulation_inputs
         )
 
+        def _claim_remote_project(self, path):
+            claim_project(self.work_dir, str(Path(path).resolve()))
+
         def put(self, local, target):
             target = Path(target)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -390,3 +397,461 @@ def test_direct_remote_submission_stages_nested_and_absolute_vector_payloads(
         )
     assert len({p for p in uploads if p.suffix == ".h5"}) == 2
     assert not (remote / "jobs" / "client_inputs" / "dual.json").exists()
+
+
+def _acoustic_project(tmp_path):
+    from frequensolve.project import Project
+    from frequensolve.seismic import Acquisition, ReceiverNode
+
+    root = (tmp_path / "project").resolve()
+    project = Project(name="resident", path=root)
+    sim = project.new_simulation(name="sim", physics="acoustic", dimension=2)
+    acq = Acquisition()
+    acq.add_sources(kind="scalar", coords=[[0, 0]])
+    node = ReceiverNode(name="hydrophone")
+    node.add_component(name="p", field="pressure")
+    acq.add_receiver_group(name="surface", device=node, coords=[[0, 0], [1, 0]])
+    sim.acquisition = acq
+    return root, sim
+
+
+def _commit_outputs(job, task, frequency, names):
+    """Record ``names`` (relative to the result directory) as a task's outputs."""
+    root = job._result_path
+    result = root / "_fs_run" / "tasks" / f"task_{task:06d}" / "result.json"
+    result.parent.mkdir(parents=True, exist_ok=True)
+    artifacts = [
+        {
+            "id": f"output:{name}",
+            "role": "objective_linearization",
+            "representation": "json" if name.endswith(".json") else "hdf5",
+            "schema": "fs-objective-linearization-5",
+            "path": name,
+            "retention": "durable",
+            "bytes": (root / name).stat().st_size,
+        }
+        for name in names
+    ]
+    result.write_text(
+        json.dumps(
+            {
+                "schema": "fs-task-result-2",
+                "partition": {
+                    "task": task,
+                    "task_count": job.n_tasks,
+                    "frequency": {"real": frequency, "imag": 0.0},
+                },
+                "fingerprints": {
+                    key: "sha256:" + digit * 64
+                    for key, digit in (
+                        ("job", "1"),
+                        ("simulation", "2"),
+                        ("outputs", "3"),
+                    )
+                },
+                "status": {"state": "success", "code": 0},
+                "artifacts": artifacts,
+            }
+        )
+    )
+
+
+def _remote_linearization(tmp_path):
+    """A linearize job that ran on a site whose project root is ``remote``.
+
+    Its fetched result directory holds each task's version-5 state manifest
+    and cache (recorded by the task catalog) and, written by the client
+    beside them, version-5 duals for a ``vjp``.
+    """
+    from frequensolve.imaging.data import DataSpace
+    from frequensolve.imaging.jobs import FWIOperatorJob
+
+    root, sim = _acoustic_project(tmp_path)
+    remote = (tmp_path / "remote").resolve()
+    lin = FWIOperatorJob(
+        "lin",
+        sim,
+        [4.0, 6.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+    )
+    lin.save()
+    space = DataSpace.from_simulation(sim, [4.0, 6.0])
+    ops = lin._result_path / "ops" / "0001"
+    for task, frequency in ((1, 4.0), (2, 6.0)):
+        state = lin.state_file(task)
+        state.parent.mkdir(parents=True, exist_ok=True)
+        cache = state.with_name(f"{state.stem}_cache.h5")
+        cache.write_bytes(b"canonical rows" * 64)
+        state.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-objective-linearization-5",
+                    "terms": [{"id": "surface", "cache": {"file": cache.name}}],
+                }
+            )
+        )
+        _commit_outputs(lin, task, frequency, [state.name, cache.name])
+        space.ones().write_objective_vector(
+            ops / f"dual_{task}.json",
+            state_fingerprint="sha256:" + "a" * 64,
+            term_layout=space.term_layouts(frequency=frequency),
+            schema="fs-objective-vector-5",
+        )
+    lin.record_site_run(site="SlurmSite", work_dir=remote, status="completed")
+    vjp = FWIOperatorJob(
+        "vjp",
+        sim,
+        [4.0, 6.0],
+        action="vjp",
+        active=["model.vp"],
+        state=lin.state_file(),
+        objective_vector=ops / "dual.json",
+        covector="vjp.h5",
+    )
+    vjp.save()
+    return root, remote, lin, vjp, ops
+
+
+def test_remote_staging_reads_site_resident_objective_states_in_place(tmp_path):
+    from frequensolve.simulation.jobs.base import JobRecord
+
+    root, remote, lin, vjp, ops = _remote_linearization(tmp_path)
+    states = {lin.state_file(task) for task in (1, 2)}
+    caches = {path.with_name(f"{path.stem}_cache.h5") for path in states}
+    duals = {
+        ops / f"dual_{task}{suffix}" for task in (1, 2) for suffix in (".json", ".h5")
+    }
+
+    def staged():
+        return {
+            Path(local): Path(target)
+            for local, target in vjp.remote_input_files(remote)
+        }
+
+    pairs = staged()
+    # The site already holds the state where the payload points: no re-upload.
+    assert not (states | caches) & set(pairs)
+    # Client-written duals beside the outputs are not recorded: they travel.
+    assert duals <= set(pairs)
+    for local in duals:
+        assert pairs[local] == remote / local.relative_to(root)
+
+    def record(**changes):
+        current = lin.latest_run()
+        lin.write_run_record(JobRecord.from_fs({**current.to_fs(), **changes}))
+
+    # SLURM finalizes batch runs as "complete"; attached runs stay "running".
+    for status in ("complete", "running"):
+        record(status=status)
+        assert not (states | caches) & set(staged())
+    # Without evidence that this site holds the current files, they travel.
+    for status in ("failed", "cancelled", "timeout"):
+        record(status=status)
+        assert states | caches <= set(staged())
+    record(status="complete", work_dir=str(tmp_path / "elsewhere"))
+    assert states | caches <= set(staged())
+    record(work_dir=str(remote))
+    assert not (states | caches) & set(staged())
+    edited = lin.state_file(2)
+    edited.write_text(edited.read_text() + " ")  # no longer the recorded output
+    pairs = staged()
+    assert edited in pairs and edited.with_name("state_2_cache.h5") in pairs
+    assert lin.state_file(1) not in pairs
+
+
+def test_slurm_sites_upload_operator_inputs_once(tmp_path):
+    from frequensolve.imaging._backend import Backend
+
+    root, remote, lin, vjp, ops = _remote_linearization(tmp_path)
+    uploads = []
+
+    class Site:
+        # SlurmSite.submit uploads remote_input_files with the job JSON.
+        stages_job_inputs = SlurmSite.stages_job_inputs
+        work_dir = remote
+        _transfer_remote_simulation_inputs = (
+            SlurmSite._transfer_remote_simulation_inputs
+        )
+
+        def _claim_remote_project(self, path):
+            claim_project(self.work_dir, str(Path(path).resolve()))
+
+        def put(self, local, target):
+            uploads.append((Path(local), Path(target)))
+
+    site = Site()
+    Backend(site, root / "imaging")._stage_remote_inputs(vjp)
+    assert uploads == []
+    site._transfer_remote_simulation_inputs(vjp)
+    inputs = [pair for pair in uploads if pair[0].suffix in {".json", ".h5"}]
+    assert len(inputs) == len(set(inputs))
+    assert {ops / f"dual_{task}.h5" for task in (1, 2)} <= {
+        local for local, _ in inputs
+    }
+
+
+def _vp_coefficients(path):
+    """Return the inline sediment ``vp`` control coefficients of a saved simulation."""
+
+    def find(node):
+        if isinstance(node, dict):
+            parameterized = node.get("parameterized")
+            if isinstance(parameterized, dict) and parameterized.get("id") == "vp":
+                return parameterized["control"]["coefficients"]
+            nodes = node.values()
+        else:
+            nodes = node if isinstance(node, list) else ()
+        for value in nodes:
+            found = find(value)
+            if found is not None:
+                return found
+        return None
+
+    return find(json.loads(Path(path).read_text()))
+
+
+def test_job_saves_write_each_simulation_content_once(tmp_path, monkeypatch):
+    from frequensolve.imaging.jobs import FWIOperatorJob
+    from frequensolve.model.parameterization import (
+        ParameterizedProperty,
+        TensorHatControl,
+    )
+    from frequensolve.simulation import simulation as module
+    from tests.imaging_fakes import layered_simulation
+
+    simulation = layered_simulation(tmp_path / "project", save=False)
+    control = TensorHatControl(
+        axes=("x", "z"),
+        shape=(4, 3),
+        origin=(0.0, 200.0),
+        spacing=(1000.0, 500.0),
+        coefficients=np.arange(12.0),
+    )
+    sediment = next(s for s in simulation.model.subdomains if s.name == "sediment")
+    sediment.properties["vp"] = ParameterizedProperty(1900.0, id="vp", control=control)
+    written = []
+    write = module.atomic_write_json
+    monkeypatch.setattr(
+        module,
+        "atomic_write_json",
+        lambda path, *args, **kwargs: written.append(path)
+        or write(path, *args, **kwargs),
+    )
+
+    def job(name):
+        return FWIOperatorJob(
+            name,
+            simulation,
+            [4.0],
+            action="linearize",
+            active=["model.vp"],
+            state="s.json",
+            covector="g.h5",
+        )
+
+    file = simulation.save()
+    identity = (file.stat().st_ino, file.stat().st_mtime_ns)
+    digest = JobSerializationMixin._sha256_file(file)
+    # Every job saves its simulation; unchanged content is not written again.
+    jobs = [job(name) for name in ("first", "second", "third")]
+    for each in jobs:
+        each.save()
+    assert written == [file]
+    assert (file.stat().st_ino, file.stat().st_mtime_ns) == identity
+    assert jobs[-1]._artifact_contract_fingerprints()["simulation"] == digest
+    staged, _ = jobs[-1].save_simulation_for_remote("test", "/remote/project")
+    assert _vp_coefficients(staged) == list(range(12))
+    assert json.loads(staged.read_text())["project_path"] == "/remote/project"
+    # Any content change is written, including an in-place coefficient edit.
+    sediment.properties["vp"].control.coefficients[0] = 7.0
+    job("edited").save()
+    assert len(written) == 2 and _vp_coefficients(file)[0] == 7.0
+    sediment.properties["vp"] = sediment.properties["vp"].with_coefficients(
+        np.zeros(12)
+    )
+    job("replaced").save()
+    assert len(written) == 3 and not any(_vp_coefficients(file))
+    simulation.save()
+    assert len(written) == 3
+    # Other JSON options, or a file changed or removed by anyone else, are
+    # written again.
+    simulation.save(indent=None)
+    assert len(written) == 4 and "\n" not in file.read_text()
+    simulation.save()
+    assert len(written) == 5
+    file.write_text("{}")
+    simulation.save()
+    assert len(written) == 6 and not any(_vp_coefficients(file))
+    file.unlink()
+    simulation.save()
+    assert len(written) == 7 and file.is_file()
+
+    class Note:
+        def __init__(self, text):
+            self.text = text
+
+        def to_fs(self, ctx=None):
+            return {"text": self.text}
+
+    # Content without a reliable identity is always written.
+    simulation.extra["note"] = Note("first")
+    simulation.save()
+    simulation.save()
+    assert len(written) == 9
+    assert json.loads(file.read_text())["note"] == {"text": "first"}
+
+
+def test_jobs_share_one_remote_staging_of_an_unchanged_simulation(
+    tmp_path, monkeypatch
+):
+    from frequensolve.imaging.jobs import FWIOperatorJob
+    from frequensolve.model.parameterization import (
+        ParameterizedProperty,
+        TensorHatControl,
+    )
+    from frequensolve.simulation.jobs import remote as module
+    from tests.imaging_fakes import layered_simulation
+
+    simulation = layered_simulation(tmp_path / "project", save=False)
+    sediment = next(s for s in simulation.model.subdomains if s.name == "sediment")
+    sediment.properties["vp"] = ParameterizedProperty(
+        1900.0,
+        id="vp",
+        control=TensorHatControl(
+            axes=("x", "z"),
+            shape=(4, 3),
+            origin=(0.0, 200.0),
+            spacing=(1000.0, 500.0),
+            coefficients=np.arange(12.0),
+        ),
+    )
+    direction = tmp_path / "project" / "inputs" / "direction.h5"
+    direction.parent.mkdir(parents=True)
+    direction.write_bytes(b"direction")
+    loads = []
+    load = module.json.load
+    monkeypatch.setattr(
+        module.json, "load", lambda f, *a, **k: loads.append(f.name) or load(f, *a, **k)
+    )
+
+    def staged(name, remote="/remote/project"):
+        job = FWIOperatorJob(
+            name,
+            simulation,
+            [4.0],
+            action="jvp",
+            active=["model.vp"],
+            state="s.json",
+            objective_vector="jvp.json",
+            direction=direction,
+        )
+        job.save_for_remote("SlurmSite", remote)
+        path, _ = job.save_simulation_for_remote("SlurmSite", remote)
+        return job, path
+
+    first, first_path = staged("first")
+    simulation_file = str(simulation._file)
+    assert loads.count(simulation_file) == 1
+    inputs = first.remote_input_files("/remote/project")
+    second, second_path = staged("second")
+    # The second job copies the first mapping; nothing is reloaded or remapped.
+    assert loads.count(simulation_file) == 2  # the first job's input scan
+    assert second_path != first_path
+    assert second_path.read_bytes() == first_path.read_bytes()
+    assert second_path.stat().st_mtime_ns == first_path.stat().st_mtime_ns
+    assert second.staged_artifact_fingerprints("SlurmSite")["simulation"] == (
+        first.staged_artifact_fingerprints("SlurmSite")["simulation"]
+    )
+    assert json.loads(second_path.read_text())["project_path"] == "/remote/project"
+    assert second.downloaded_task_fingerprints() == [
+        second.staged_task_fingerprints("SlurmSite")
+    ]
+    # Input scans read each simulation content once and find the same files.
+    assert [Path(local) for local, _ in inputs] == [direction]
+    assert second.remote_input_files("/remote/project") == inputs
+    assert loads.count(simulation_file) == 2
+    # Another remote project, a new simulation content, or a staged copy
+    # changed since, are mapped again.
+    _, other = staged("other", "/elsewhere")
+    assert json.loads(other.read_text())["project_path"] == "/elsewhere"
+    assert loads.count(simulation_file) == 3
+    sediment.properties["vp"] = sediment.properties["vp"].with_coefficients(
+        np.zeros(12)
+    )
+    _, changed = staged("changed")
+    assert loads.count(simulation_file) == 4
+    assert changed.read_bytes() != first_path.read_bytes()
+    changed.write_text(changed.read_text() + "\n")
+    third, third_path = staged("third")
+    assert loads.count(simulation_file) == 5
+    assert third_path.read_text() == changed.read_text()[:-1]
+    assert third.downloaded_task_fingerprints() == [
+        third.staged_task_fingerprints("SlurmSite")
+    ]
+
+
+def test_input_scans_of_a_simulation_skeleton_match_the_full_payload(tmp_path):
+    from frequensolve.simulation.jobs.remote import (
+        JobRemoteMixin,
+        _reference_skeleton,
+    )
+
+    project = tmp_path / "project"
+    payload = {
+        "project_path": str(project),
+        "Model": {
+            "coefficients": [float(i) for i in range(1000)],
+            "nested": [[1.0, 2.0], [3, {"file": "grid.rsf"}], True, None],
+            "Subdomains": [
+                {"name": "a", "properties": {"vp": {"file": str(project / "vp.h5")}}},
+                {"value": 2.5, "receiver_file": "receivers.csv"},
+            ],
+        },
+        "Acquisition": {"observed": "observed.h5", "weights": [0.5, 1.5]},
+        "control_sensitivities": {"input": str(project / "jobs" / "x" / "in.h5")},
+    }
+    skeleton = _reference_skeleton(payload)
+    assert "coefficients" in skeleton["Model"] and not skeleton["Model"]["coefficients"]
+    assert list(JobRemoteMixin._iter_file_references(skeleton)) == list(
+        JobRemoteMixin._iter_file_references(payload)
+    )
+    assert JobRemoteMixin._payload_project_roots(
+        skeleton
+    ) == JobRemoteMixin._payload_project_roots(payload)
+
+
+def test_simulation_fingerprints_hash_each_saved_content_once(tmp_path, monkeypatch):
+    from frequensolve.simulation.jobs import serialization
+    from frequensolve.simulation.jobs.run_state import SkipPolicy
+
+    job, _ = _born_job(tmp_path, n_tasks=3)
+    BaseSite().prepare_job(job, validate=False)
+    simulation = Path(job.simulation._file)
+    loads = []
+    load = serialization.json.load
+    monkeypatch.setattr(
+        serialization.json,
+        "load",
+        lambda f, *a, **k: loads.append(Path(f.name)) or load(f, *a, **k),
+    )
+    whole = job.fingerprint()
+    tasks = [job.task_fingerprint(task) for task in (1, 2, 3)]
+    compatible = [
+        job.task_policy_fingerprint(task, SkipPolicy.compatible()) for task in (1, 2, 3)
+    ]
+    job.write_run_state(status="completed")
+    # One read of the saved simulation per hashed view (whole, without Solver).
+    assert loads.count(simulation) == 2
+    job.save()
+    assert job.fingerprint() == whole
+    assert [job.task_fingerprint(task) for task in (1, 2, 3)] == tasks
+    assert loads.count(simulation) == 2
+    # A changed file is hashed again.
+    payload = json.loads(simulation.read_text())
+    payload["scaling"] = "robust"
+    simulation.write_text(json.dumps(payload))
+    assert job.fingerprint() != whole
+    assert job.task_policy_fingerprint(1, SkipPolicy.compatible()) != compatible[0]
+    assert loads.count(simulation) == 4

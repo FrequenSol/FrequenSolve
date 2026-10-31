@@ -1,6 +1,7 @@
 """Simulation-level metadata shared by jobs, signals, and solver contracts."""
 
 from dataclasses import InitVar, dataclass, field
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -28,6 +29,7 @@ class SimulationConfig:
     physics: str
     dimension: int | float | str
     axisymmetric: InitVar[bool] = False
+    azimuthal_mode: Optional[int] = None
     _axisymmetric: bool = field(default=False, init=False, repr=False)
     _file: Optional[Path] = None
 
@@ -46,6 +48,19 @@ class SimulationConfig:
             axisymmetric=axisymmetric,
             dimension=self.dimension,
         )
+
+        self._validate_azimuthal_mode()
+
+    def _validate_azimuthal_mode(self) -> None:
+        """Validate a discrete real acoustic angular order independently of the job domain."""
+        mode = self.azimuthal_mode
+        if mode is None:
+            return
+        if isinstance(mode, bool) or not isinstance(mode, Integral) or mode < 0:
+            raise ValueError("azimuthal_mode must be a nonnegative integer")
+        if self.dimension != 2 or self.physics != "acoustic_axisym":
+            raise ValueError("azimuthal_mode requires axisymmetric 2D acoustic physics")
+        self.azimuthal_mode = int(mode)
 
     def _set_axisymmetric(self, axisymmetric: bool) -> None:
         axisymmetric = bool(axisymmetric)
@@ -82,6 +97,7 @@ class SimulationConfig:
             dimension values.
         """
 
+        self._validate_azimuthal_mode()
         project_path = getattr(ctx, "project_path", None)
         if project_path is None:
             project_path = getattr(self, "project_path", None)
@@ -91,6 +107,11 @@ class SimulationConfig:
             "dimension": self.dimension,
             "project_path": str(project_path),
             **({"axisymmetric": True} if self.axisymmetric else {}),
+            **(
+                {"azimuthal_mode": self.azimuthal_mode}
+                if self.azimuthal_mode is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -110,6 +131,7 @@ class SimulationConfig:
             physics=data.get("physics"),
             dimension=data.get("dimension"),
             axisymmetric=data.get("axisymmetric", False),
+            azimuthal_mode=data.get("azimuthal_mode"),
         )
 
 

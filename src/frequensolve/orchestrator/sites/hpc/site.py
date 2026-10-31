@@ -9,30 +9,31 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
+import posixpath
 import re
 import shlex
 import shutil
-import signal
 import socket
-import subprocess
 import tempfile
 import time
-from asyncio import Future
+import warnings
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib.resources import as_file, files
-from pathlib import Path
-from select import select
+from pathlib import Path, PurePosixPath
 from typing import (
     Any,
     Dict,
+    Iterable,
     List,
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     Type,
     Union,
@@ -60,9 +61,10 @@ from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
     RunHandle,
-    RunResult,
+    _background_layout,
     _check_if_notebook,
     _merge_task_status_with_plan,
+    _result_relative_paths,
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
@@ -77,9 +79,14 @@ from frequensolve.orchestrator.sites.hpc.enterprise import (
     _BundleSnapshot,
     _EnterpriseHPCProfile,
     _EnterpriseLimits,
+    _installed_file_digest,
     _RuntimeObservation,
     _validate_bundle_snapshot,
     installed_frequensolve_artifact_sha256,
+)
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    SESSION_JOB_NAME,
+    SLURM_QUEUE_STATES,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import as_list as _as_list
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
@@ -98,6 +105,12 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     seconds_to_hms as _seconds_to_hms,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    shell_word_batches as _shell_word_batches,
+)
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    slurm_time_seconds as _slurm_time_seconds,
+)
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     ssh_exit_status as _ssh_exit_status,
 )
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
@@ -106,7 +119,13 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
 from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
     validate_slurm_job_id as _validate_slurm_job_id,
 )
-from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
+from frequensolve.orchestrator.sites.hpc.transfer import (
+    DEFAULT_TRANSFER_ATTEMPTS,
+    DEFAULT_TRANSFER_STALL_TIMEOUT,
+    SlurmTransferManager,
+    _remote_command_failed,
+)
+from frequensolve.orchestrator.sites.partition import TaskPartition, task_partitions
 from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
 from frequensolve.orchestrator.utils.environment import (
@@ -158,9 +177,45 @@ _HPC_RUNTIME_DEFAULTS = {
     "KMP_STACKSIZE": "20M",
 }
 
-_ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 60.0
+# Scheduler heartbeats are files on the shared work filesystem, whose metadata
+# operations can stall for minutes during large writes; shorter windows report
+# healthy jobs as failed.
+_ADAPTIVE_SCHEDULER_HEARTBEAT_TIMEOUT = 300.0
+# Persistent-session directory creation and the ``mv``/``ln`` publishing every
+# lease renewal, request and command are metadata operations on the shared
+# work filesystem, which stalls for tens of seconds on busy Lustre. The 15 s
+# identity-query bound is far too short for them.
+_SESSION_COMMAND_TIMEOUT = 120.0
+
+# Quoted paths per removal command; well below Linux's 128 KiB argument cap.
+_REMOVE_COMMAND_BYTES = 64 * 1024
+
+# Digests of the backends FS_seismic routes to: FS_SOLVER_PATH, as the job
+# environment sets it, or the dispatcher's own directory.
+_BACKEND_DIGEST_READER = """\
+import hashlib, os, sys
+directory = os.environ.get("FS_SOLVER_PATH") or os.path.dirname(sys.argv[1])
+print("FS_SOLVER_DIRECTORY " + directory)
+for name in ("fs2d", "fs2d_s", "fs3d", "fs3d_s"):
+    path = os.path.join(directory, name)
+    if not os.path.exists(path):
+        continue
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            digest.update(chunk)
+    print("FS_SOLVER_BACKEND " + name + " " + digest.hexdigest())
+"""
 
 _SHELL_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+# A remote directory setting may start with one ``$NAME`` or ``${NAME}``,
+# resolved once in the remote login shell (for example ``$SCRATCH/fs``).
+_REMOTE_DIR_VARIABLE = re.compile(
+    r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(?=/|$)"
+)
+# ``storage`` selects the remote variable below which work_dir defaults to
+# ``frequensolve``.
+_STORAGE_VARIABLES = {"work": "WORK", "scratch": "SCRATCH"}
 
 
 def _job_requires_postprocess(job: Any) -> bool:
@@ -216,7 +271,14 @@ def _quote_runtime_environment_value(value: str) -> str:
 # ----------------------------------
 @dataclass(frozen=True)
 class SlurmPartitionConfig:
-    """Resource shape and scheduler limits for one SLURM partition."""
+    """Resource shape and scheduler limits for one SLURM partition.
+
+    ``gpus_per_node`` counts the GPU devices the solver binds ranks to (GPU
+    stacks on Intel Data Center GPU Max nodes); ``gpu_memory_per_gpu`` is one
+    device's memory in MiB, or 0 when unknown. ``environment`` holds non-secret
+    values exported by jobs on this partition, such as the GPU-aware MPI setup
+    of GPU nodes; the site ``environment`` overrides them.
+    """
 
     max_duration: str = "00-02:00:00"
     min_nodes: int = 1
@@ -225,6 +287,11 @@ class SlurmPartitionConfig:
     sockets_per_node: int = 1
     memory_per_node: int = 0
     gpus_per_node: int = 0
+    gpu_memory_per_gpu: int = 0
+    environment: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "environment", validate_environment(self.environment))
 
 
 @dataclass
@@ -233,6 +300,11 @@ class SlurmSiteConfig(BaseSiteConfig):
 
     Site-specific config classes can expose the same attributes and do not need
     to inherit from this class.
+
+    ``transfer_stall_timeout`` is how many seconds an rsync or SFTP transfer
+    may make no progress before it is stopped (default 120), and
+    ``transfer_attempts`` how many times an upload or download is attempted
+    after a stall or SSH connection failure (default 3).
     """
 
     hostname: str
@@ -253,9 +325,15 @@ class SlurmSiteConfig(BaseSiteConfig):
     sockets_per_node: int = 1
     memory_per_node: int = 0
     gpus_per_node: int = 0
+    gpu_memory_per_gpu: int = 0
+    partition_environment: Mapping[str, str] = field(default_factory=dict)
     partitions: Mapping[str, Union[SlurmPartitionConfig, Mapping[str, Any]]] = field(
         default_factory=dict
     )
+    transfer_stall_timeout: float = field(
+        default=DEFAULT_TRANSFER_STALL_TIMEOUT, kw_only=True
+    )
+    transfer_attempts: int = field(default=DEFAULT_TRANSFER_ATTEMPTS, kw_only=True)
 
     def __post_init__(self) -> None:
         try:
@@ -273,6 +351,20 @@ class SlurmSiteConfig(BaseSiteConfig):
         ):
             raise ValueError("launcher_args must be an array of strings")
         self.launcher_args = tuple(self.launcher_args)
+        try:
+            stall = float(self.transfer_stall_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("transfer_stall_timeout must be seconds") from exc
+        if isinstance(self.transfer_stall_timeout, bool) or not (
+            math.isfinite(stall) and stall > 0
+        ):
+            raise ValueError(
+                "transfer_stall_timeout must be finite and greater than zero"
+            )
+        self.transfer_stall_timeout = stall
+        attempts = self.transfer_attempts
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("transfer_attempts must be a positive integer")
         normalized: Dict[str, SlurmPartitionConfig] = {}
         for name, value in self.partitions.items():
             if isinstance(value, SlurmPartitionConfig):
@@ -328,7 +420,8 @@ class SlurmSiteConfig(BaseSiteConfig):
                 f"Unknown SLURM partition {partition!r}. Known partitions: {known}"
             ) from exc
         for item in dataclass_fields(SlurmPartitionConfig):
-            setattr(self, item.name, getattr(values, item.name))
+            name = "partition_environment" if item.name == "environment" else item.name
+            setattr(self, name, getattr(values, item.name))
 
     def validate_request(self, nodes: int, tasks: int, duration: Optional[str]) -> str:
         """Validate a SLURM allocation request and return a usable duration."""
@@ -365,6 +458,35 @@ _RANK_ALIASES = {
     "procs_per_node": "ranks_per_node",
     "procs_per_task": "ranks_per_task",
 }
+
+
+def rank_memory_gib(shape: Any, ranks_per_node: int) -> float:
+    """Return each rank's memory budget in GiB on a partition's nodes.
+
+    GPU solves hold their operators in device memory, so a GPU partition with
+    ``gpu_memory_per_gpu`` also bounds a rank by its share of the devices.
+    Each rank binds one device, so spare devices add no rank memory.
+    """
+
+    memory = shape.memory_per_node / ranks_per_node / 1024.0
+    gpus = max(0, int(getattr(shape, "gpus_per_node", 0) or 0))
+    gpu_memory = max(0, int(getattr(shape, "gpu_memory_per_gpu", 0) or 0))
+    if gpus and gpu_memory:
+        used = min(gpus, ranks_per_node)
+        memory = min(memory, gpu_memory * used / ranks_per_node / 1024.0)
+    return memory
+
+
+def partition_gpus_per_node(site_config: Any, partition: Optional[str]) -> int:
+    """Return the GPU devices per node of a site partition (0 for CPU partitions)."""
+
+    partitions = getattr(site_config, "partitions", None) or {}
+    shape = partitions.get(partition) if partition is not None else None
+    if shape is None:
+        if partitions or partition != getattr(site_config, "queue", None):
+            return 0
+        shape = site_config
+    return max(0, int(getattr(shape, "gpus_per_node", 0) or 0))
 
 
 def _normalize_rank_aliases(values: Mapping[str, Any]) -> Dict[str, Any]:
@@ -437,10 +559,15 @@ class SlurmRunConfig:
         notify_email: Optional notification email address.
         poll_interval: Polling interval in seconds.
         scheduler_heartbeat_timeout: Maximum seconds without a new adaptive
-            scheduler heartbeat before the run is reported failed. ``None``
-            disables heartbeat enforcement.
+            scheduler (or persistent-session controller) heartbeat before the
+            run is reported failed. Defaults to 300. ``None`` disables
+            heartbeat enforcement.
         mpi_health_check_timeout: Optional Slurm time limit for a full-rank MPI
             health check before solver initialization. ``None`` disables it.
+        session_command_timeout: Seconds one persistent-session filesystem
+            command on the login node (session directory creation, lease,
+            request and command publication) may take before it fails with
+            the command and path named. Defaults to 120.
         run_path: Remote run directory override.
         slurm_args: Additional raw ``sbatch`` arguments.
     """
@@ -460,6 +587,7 @@ class SlurmRunConfig:
     mpi_health_check_timeout: Optional[str] = None
     run_path: Optional[Union[str, Path]] = None
     slurm_args: List[str] = field(default_factory=list)
+    session_command_timeout: float = _SESSION_COMMAND_TIMEOUT
 
     def __init__(
         self,
@@ -481,6 +609,7 @@ class SlurmRunConfig:
         slurm_args: Optional[List[str]] = None,
         *,
         mpi_health_check_timeout: Optional[str] = None,
+        session_command_timeout: float = _SESSION_COMMAND_TIMEOUT,
         **aliases,
     ):
         values = _normalize_rank_aliases(
@@ -538,6 +667,15 @@ class SlurmRunConfig:
                 raise ValueError("mpi_health_check_timeout must be greater than zero")
             mpi_health_check_timeout = _seconds_to_hms(timeout_seconds)
         self.mpi_health_check_timeout = mpi_health_check_timeout
+        try:
+            session_command_timeout = float(session_command_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("session_command_timeout must be seconds") from exc
+        if not math.isfinite(session_command_timeout) or session_command_timeout <= 0:
+            raise ValueError(
+                "session_command_timeout must be finite and greater than zero"
+            )
+        self.session_command_timeout = session_command_timeout
         self.run_path = run_path
         self.slurm_args = list(slurm_args or [])
 
@@ -592,6 +730,7 @@ class SlurmRunConfig:
             "poll_interval": self.poll_interval,
             "scheduler_heartbeat_timeout": self.scheduler_heartbeat_timeout,
             "mpi_health_check_timeout": self.mpi_health_check_timeout,
+            "session_command_timeout": self.session_command_timeout,
             "run_path": self.run_path,
             "slurm_args": list(self.slurm_args),
         }
@@ -623,6 +762,11 @@ class SlurmRunConfig:
             config.queue = site_config.queue
         if config.poll_interval is None:
             config.poll_interval = site_config.poll_interval
+        # GPU partitions run one rank per GPU device unless this run sets
+        # ranks_per_node; the profile-wide value is sized for CPU nodes.
+        gpus = partition_gpus_per_node(site_config, config.queue)
+        if gpus > 0 and overrides.get("ranks_per_node") is None:
+            config.ranks_per_node = gpus
         extra = {k: v for k, v in overrides.items() if k not in run_keys}
         return config, extra
 
@@ -651,28 +795,53 @@ class SlurmSite(BaseSite):
         solver: Remote path to the ``FS_seismic`` solver router executable.
         work_dir: Remote base directory used to resolve relative FrequenSolve
             project, simulation, and job paths. It may be on any writable
-            remote filesystem and defaults to ``$WORK/frequensolve``.
+            remote filesystem and defaults to ``$WORK/frequensolve`` (see
+            ``storage``). Persistent-session directories, curvature mirrors
+            without ``scratch_dir``, and scheduler heartbeat and status files
+            live below it.
         scratch_dir: Optional remote scratch directory reserved for future
-            model and high-I/O storage.
+            model and high-I/O storage; curvature inputs are mirrored below
+            it when set.
+        storage: ``"work"`` (default) or ``"scratch"``: the remote filesystem
+            variable (``$WORK`` or ``$SCRATCH``) below which ``work_dir``
+            defaults to ``frequensolve``. Cannot be combined with
+            ``work_dir``.
+
+        ``work_dir``, ``scratch_dir`` and ``config.tmp_dir`` may start with a
+        remote environment variable such as ``$SCRATCH`` or ``${WORK}``. It is
+        resolved once in the remote login shell and the absolute result is
+        cached and logged.
         modules: Environment modules loaded before remote solver execution.
         environment: Non-secret environment values exported before remote
             solver execution.
         solver_policy: Compatibility behavior: ``"warn"`` (default),
             ``"strict"``, or ``"off"``.
         run_config: Default SLURM resource request.
+        curvature_run_config: Optional resource request for Sauce curvature
+            batch jobs; ``run_config`` is used when omitted.
+        background_layout: Files of a background capture, ``"rank"``
+            (default) or ``"shared"`` (see :attr:`BaseSite.background_layout`).
         config.tmp_dir: Optional remote directory for transient transfer
             tarballs and provisioning scripts. Defaults to ``/tmp``.
         verbose: Whether to print site status messages in addition to logging.
     """
 
+    supports_curvature = True
+    # Remote result directories persist below work_dir, and the adaptive
+    # scheduler launches each consuming task on its producer's ranks.
+    supports_background_reuse = True
+    # _transfer_remote_simulation_inputs uploads remote_input_files per submit.
+    stages_job_inputs = True
+
     credentials: SlurmLoginCredentials
     config: Any
     run_config: SlurmRunConfig
+    curvature_run_config: Optional[SlurmRunConfig] = None
     pool: PoolInfo
     transfer_method: Literal["rsync", "sftp"] = "rsync"
     _executable: str
     _login_client: SSHClientClass
-    _compute_client: Optional[SSHClientClass] = None
+    _provision_session: Any = None
     _work_dir: Path
     solver: Optional[Union[str, Path]]
     _configured_work_dir: Optional[Union[str, Path]]
@@ -720,6 +889,9 @@ class SlurmSite(BaseSite):
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
         solver_policy: Optional[str] = None,
+        curvature_run_config: Optional[Union[SlurmRunConfig, Mapping[str, Any]]] = None,
+        storage: Optional[str] = None,
+        background_layout: str = "rank",
     ):
         if (
             default_partition is not None
@@ -729,6 +901,7 @@ class SlurmSite(BaseSite):
             raise ValueError(
                 "Pass either default_partition or default_queue, not conflicting values"
             )
+        self.background_layout = _background_layout(background_layout)
         partition = (
             default_partition
             if default_partition is not None
@@ -792,12 +965,25 @@ class SlurmSite(BaseSite):
             if not getattr(self.config, "known_hosts_file", None):
                 raise ValueError("Enterprise HPC requires an explicit known-hosts file")
         self.solver = solver
+        if storage is not None and storage not in _STORAGE_VARIABLES:
+            raise ValueError("storage must be 'work' or 'scratch', got " f"{storage!r}")
+        if storage is not None and work_dir not in {None, ""}:
+            raise ValueError(
+                "storage selects the default work_dir; remove work_dir, or set "
+                'work_dir = "$SCRATCH/frequensolve" (or another path) without '
+                "storage"
+            )
+        self.storage = storage or "work"
+        # Reject malformed paths before authenticating; resolve them after.
+        for name, value in (
+            ("work_dir", work_dir),
+            ("scratch_dir", scratch_dir),
+        ):
+            self._remote_dir_variable(value, name=name)
         self._configured_work_dir = work_dir
+        self._configured_scratch_dir = scratch_dir
         self._rel_proj_path = Path(rel_path) if rel_path not in {None, ""} else None
-        self._scratch_dir = self._normalize_optional_remote_dir(
-            scratch_dir,
-            name="scratch_dir",
-        )
+        self._scratch_dir = None
         if isinstance(modules, str):
             raise ValueError("modules must be an array of module names")
         self.modules = [str(module) for module in (modules or [])]
@@ -809,18 +995,24 @@ class SlurmSite(BaseSite):
         self._enterprise_hpc_limits = None
         self.transfer_method = transfer_method
         self.run_config = run_config or SlurmRunConfig(queue=partition)
+        if isinstance(curvature_run_config, Mapping):
+            curvature_run_config = SlurmRunConfig(**curvature_run_config)
+        self.curvature_run_config = curvature_run_config
         self._authenticator = SlurmAuthenticator(self)
         self._transfer = SlurmTransferManager(self)
 
         self._login_client = SSHClientClass(self.authenticate())
         logger.info("SSH client authenticated successfully")
 
+        self._scratch_dir = self._resolve_remote_dir(
+            self._configured_scratch_dir, name="scratch_dir"
+        )
         self._work_dir = self._get_work_dir()
         self._executable = self._get_solver_path()
 
         self.pool = PoolInfo()
         self._is_notebook = _check_if_notebook()
-        self._compute_client = None
+        self._provision_session = None
 
         self._emit(f"{self.site_name} initialized with work_dir: {self._work_dir}")
 
@@ -834,24 +1026,6 @@ class SlurmSite(BaseSite):
                 "site.toml or pass solver= explicitly."
             )
         return self._executable
-
-    @property
-    def compute_client(self) -> SSHClient:
-        """Get the compute client."""
-        if self._compute_client is None:
-            raise RuntimeError(
-                "No compute client is attached; call provision/attach first"
-            )
-        return self._compute_client.client
-
-    @property
-    def compute_host(self) -> str:
-        """Get the compute host."""
-        if self._compute_client is None:
-            raise RuntimeError(
-                "No compute client is attached; call provision/attach first"
-            )
-        return self._compute_client.hostname
 
     @property
     def login_client(self) -> SSHClient:
@@ -896,16 +1070,19 @@ class SlurmSite(BaseSite):
         tmp_dir = getattr(self.config, "tmp_dir", None)
         if tmp_dir is None or str(tmp_dir).strip() == "":
             return Path("/tmp")
-        path = Path(str(tmp_dir))
-        if not path.is_absolute():
-            raise ValueError("SLURM tmp_dir must be an absolute remote path")
-        return path
+        return self._resolve_remote_dir(tmp_dir, name="tmp_dir")
 
     @property
     def provisioned(self):
-        """Check if the site is provisioned."""
-        self.update_status()
-        return self.pool.is_running
+        """Whether a persistent session started by :meth:`provision` is active."""
+
+        return self._active_session() is not None
+
+    def _active_session(self):
+        """Return the session behind :meth:`provision`, if it is still open."""
+
+        session = getattr(self, "_provision_session", None)
+        return session if session is not None and not session._closed else None
 
     def __enter__(self):
         """Enter a context manager without changing site state."""
@@ -921,9 +1098,11 @@ class SlurmSite(BaseSite):
     def close(self) -> None:
         """Close active SSH clients held by the site."""
 
-        if getattr(self, "_compute_client", None):
-            self._compute_client.close()
-            self._compute_client = None
+        session = getattr(self, "_provision_session", None)
+        if session is not None and not session._closed:
+            # An owned provisioned allocation drains and ends with this site;
+            # a reattached one only detaches.
+            session.close()
         if getattr(self, "_login_client", None):
             self._login_client.close()
             self._login_client = None
@@ -986,6 +1165,41 @@ class SlurmSite(BaseSite):
             ``RunHandle`` for the submitted or attached run.
         """
 
+        if mode not in {"auto", "attached", "batch"}:
+            raise ValueError("mode must be 'auto', 'attached', or 'batch'")
+        session = self._active_session() if mode != "batch" else None
+        if session is not None:
+            # provision() is a deprecated front for a persistent session.
+            if mpi_async_progress:
+                raise NotImplementedError(
+                    "persistent sessions do not support MPI async progress"
+                )
+            session.wait_ready()
+            resources = {
+                name: value
+                for name, value in {
+                    "queue": queue,
+                    "nodes": nodes,
+                    "ranks_per_node": ranks_per_node,
+                    "duration": duration,
+                }.items()
+                if value is not None
+            }
+            return session.submit(
+                job, force=force, fetch=fetch, check=check, **resources, **overrides
+            )
+        if mode == "attached":
+            raise RuntimeError(
+                "No persistent allocation is active; start one with "
+                "site.session(...) or submit with mode='batch'."
+            )
+
+        if getattr(job, "workflow", None) == "transient":
+            if _normalize_failure_tolerance(overrides.get("tolerate_failures", 0)) != 0:
+                raise ValueError(
+                    "TransientJob requires tolerate_failures=0; incomplete trajectories are failures"
+                )
+            overrides["tolerate_failures"] = 0
         overrides.update(
             {
                 name: value
@@ -1033,8 +1247,6 @@ class SlurmSite(BaseSite):
         if enterprise_hpc is None:
             self.check_solver_compatibility(policy=solver_policy)
         self.prepare_job(job, validate=validate)
-        if mode not in {"auto", "attached", "batch"}:
-            raise ValueError("mode must be 'auto', 'attached', or 'batch'")
 
         run_config, extra_kwargs = self.run_config.resolved(self.config, **overrides)
         if enterprise_hpc is not None:
@@ -1059,100 +1271,14 @@ class SlurmSite(BaseSite):
                     self.fetch_outputs(job)
                 return handle
 
-        if postprocess_only and mode == "attached":
-            raise ValueError(
-                "postprocess-only submissions run as batch jobs; use mode='batch' "
-                "or mode='auto'"
-            )
-        active_allocation = (
-            self.provisioned
-            if mode in {"auto", "attached"} and not postprocess_only
-            else False
-        )
-        use_attached = mode == "attached" or (mode == "auto" and active_allocation)
         if run_config.mpi_health_check_timeout is not None:
-            if use_attached or Path(self.mpi_cmd).name != "srun":
+            if Path(self.mpi_cmd).name != "srun":
                 raise ValueError(
                     "mpi_health_check_timeout requires batch mode with the srun launcher; "
                     "use mode='batch' with mpi_wrapper='srun', or disable the check "
                     "with mpi_health_check_timeout=None"
                 )
         self.prepare_job(job, sync_project=True, validate=False)
-        if use_attached:
-            if not active_allocation:
-                raise RuntimeError(
-                    "No active compute allocation is attached; use mode='batch' "
-                    "or allow mode='auto' to submit a batch job."
-                )
-            pool_id = self.pool.id
-            if not pool_id:
-                raise RuntimeError(
-                    "Active SLURM allocation is missing a valid scheduler job id"
-                )
-            try:
-                allocation_id = _validate_slurm_job_id(pool_id)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    "Active SLURM allocation is missing a valid scheduler job id"
-                ) from exc
-            if enterprise_hpc is not None:
-                if self._enterprise_hpc_limits is None:
-                    raise RuntimeError(
-                        "Enterprise HPC preflight limits are unavailable"
-                    )
-                self._enterprise_hpc_limits.validate_allocation(
-                    nodes=int(self.pool.nhost),
-                    ranks=int(self.pool.nproc),
-                    cores=int(self.pool.ncore),
-                )
-            pack = bool(extra_kwargs.pop("pack", True)) and bool(
-                getattr(job, "supports_trace_packing", True)
-            )
-            ranks_per_task = run_config.ranks_per_task
-            max_ranks = getattr(job, "max_ranks_per_task", None)
-            if ranks_per_task is None:
-                ranks_per_task = max_ranks or 2
-            if max_ranks is not None and ranks_per_task > max_ranks:
-                raise ValueError(
-                    f"{type(job).__name__} supports at most {max_ranks} MPI rank "
-                    f"per task; received {ranks_per_task}"
-                )
-            future = self._submit_attached(
-                job,
-                ranks_per_task=ranks_per_task,
-                mpi_async_progress=run_config.mpi_async_progress,
-                fresh=fresh_run,
-                **({"pack": pack} if not pack else {}),
-            )
-            job._job_id = allocation_id
-            self._emit(f"Submitted {job.name} to active {self.site_name} allocation")
-            if enterprise_hpc is not None:
-                self._record_site_run(
-                    job,
-                    scheduler_id=allocation_id,
-                    status="running",
-                )
-            else:
-                self._record_site_run(job, status="running")
-            handle = RunHandle(
-                site=self,
-                job=job,
-                id=allocation_id,
-                mode="attached",
-                poll_interval=run_config.poll_interval,
-                check=check,
-                _status_fn=self._poll_attached_run,
-                _wait_fn=self._wait_attached_run,
-                _wait_async_fn=self._wait_attached_run_async,
-                _generic_wait=False,
-                _cancel_fn=self._cancel_attached_run,
-                _pending_fetch_fn=(
-                    (lambda run: self.fetch_outputs(run.job)) if fetch else None
-                ),
-            )
-            handle.backend["future"] = future
-            handle.backend["mpi_async_progress"] = run_config.mpi_async_progress
-            return handle
 
         task_plan = None
         if hasattr(job, "task_run_plan"):
@@ -1213,6 +1339,7 @@ class SlurmSite(BaseSite):
             extra_kwargs["min_ranks"] = 1
             extra_kwargs["round_to"] = 1
             extra_kwargs["skip_sizing"] = True
+        progress_not_before = time.time()
         job_id = self._submit_slurm_batch(
             job,
             run_config,
@@ -1228,6 +1355,7 @@ class SlurmSite(BaseSite):
             **extra_kwargs,
         )
         handle = self.handle(job, job_id=job_id, mode="batch")
+        handle.backend["progress_not_before"] = progress_not_before
         handle.poll_interval = run_config.poll_interval or self.config.poll_interval
         handle.backend["scheduler_heartbeat_timeout"] = (
             run_config.scheduler_heartbeat_timeout
@@ -1240,6 +1368,124 @@ class SlurmSite(BaseSite):
         if task_plan is not None:
             handle.backend["task_plan"] = task_plan
         return handle
+
+    def run_curvature(
+        self,
+        request: Path,
+        *,
+        mode: Literal["auto", "attached", "batch"] = "auto",
+        **overrides: Any,
+    ) -> None:
+        """Run one Sauce curvature request on compute nodes and fetch its output.
+
+        Inputs are mirrored below ``<scratch_dir or work_dir>/curvature/``,
+        uploading only files without a same-size remote copy; factors computed
+        remotely are reused in place. ``mode="auto"`` runs inside an attached
+        running allocation when there is one and otherwise submits a batch job
+        sized by ``curvature_run_config`` (or ``run_config``) and ``overrides``
+        such as ``nodes``, ``ranks_per_node``, ``queue`` or ``duration``.
+        Row-distributed methods use every rank with ``cores_per_node //
+        ranks_per_node`` threads (default: one rank per socket); mesh transfer
+        and sampling use one rank and a whole node. The launcher gives each
+        rank its own cores (``srun --cpus-per-task``, ``ibrun task_affinity``
+        or Open MPI ``slot:PE`` mapping) and threads stay on them. The output
+        and ``solver.log`` are fetched beside the local request. Failures raise
+        :class:`RuntimeError` with the remote log tails.
+        """
+
+        from frequensolve.orchestrator.sites.hpc.curvature import (
+            SlurmCurvatureRunner,
+        )
+
+        SlurmCurvatureRunner(self).run(Path(request), mode=mode, **overrides)
+
+    def remove_curvature_files(
+        self,
+        workdir: Optional[Union[str, Path]] = None,
+        *,
+        older_than: Optional[Union[float, timedelta]] = None,
+        max_bytes: Optional[int] = None,
+    ) -> List[str]:
+        """Delete files :meth:`run_curvature` staged on this site.
+
+        Each local curvature directory (``NativeCurvature.workdir``; the
+        imaging backend uses ``<backend workdir>/curvature``) has one remote
+        mirror below ``<scratch_dir or work_dir>/curvature/`` holding its
+        histories, inputs and results, kept for reuse by later operations.
+
+        Args:
+            workdir: Remove only this directory's mirror. By default every
+                mirror on the site is considered.
+            older_than: Remove only mirrors with no file modified within this
+                many seconds (or :class:`~datetime.timedelta`), measured with
+                the login node's clock.
+            max_bytes: Then remove the least recently modified remaining
+                mirrors until those left total at most this many bytes.
+
+        Without ``older_than`` and ``max_bytes`` every considered mirror is
+        removed. Listing mirrors runs ``python3`` on the login node. Running
+        operations are not detected; ``older_than`` keeps recently used
+        mirrors. A later operation re-uploads what it needs.
+
+        Returns:
+            Remote mirror directories that were removed.
+        """
+
+        from frequensolve.orchestrator.sites.hpc.curvature import (
+            SlurmCurvatureRunner,
+        )
+
+        removed = SlurmCurvatureRunner(self).remove(
+            None if workdir is None else Path(workdir),
+            older_than=older_than,
+            max_bytes=max_bytes,
+        )
+        return [str(path) for path in removed]
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Remove files below ``job``'s remote result directory on the login node.
+
+        Paths follow :meth:`BaseSite.remove_result_files` and are validated
+        before any command runs. One ``rm -f`` login command removes them,
+        split only when the quoted list would exceed a safe command length,
+        then ``rmdir`` removes each file's parent directories, deepest first,
+        while they are empty and physically below the result directory.
+        Missing files (or a missing result directory) are not errors; a
+        directory fails the command before its batch removes anything.
+
+        Raises:
+            RuntimeError: If the remote command fails.
+        """
+
+        relative = _result_relative_paths(relative_paths)
+        if not relative:
+            return
+        root = self._remote_result_dir(job)
+        for batch in _shell_word_batches(
+            [shlex.quote(str(path)) for path in relative],
+            _REMOVE_COMMAND_BYTES,
+        ):
+            command = (
+                f"cd -- {shlex.quote(str(root))} 2>/dev/null || exit 0; "
+                f"set -- {batch}; "
+                'for f in "$@"; do if [ -d "$f" ] && [ ! -L "$f" ]; then '
+                'printf "%s is a directory\\n" "$f" >&2; exit 1; fi; done; '
+                'rm -f -- "$@" || exit; '
+                # rmdir each file's emptied parents (no symlinks, nothing above root).
+                'root=$(pwd -P); for f in "$@"; do d=$f; '
+                'while [ "${d%/*}" != "$d" ]; do d=${d%/*}; [ ! -L "$d" ] || break; '
+                'case $(cd -P -- "$d" 2>/dev/null && pwd) in "$root"/*) ;; '
+                '*) break ;; esac; rmdir -- "$d" 2>/dev/null || break; done; done; '
+                "exit 0"
+            )
+            _, stdout, stderr = self.run_login_cmd(command)
+            _read_stream(stdout)
+            error = _read_stream(stderr)
+            if _remote_command_failed(error, _ssh_exit_status(stdout, stderr)):
+                raise RuntimeError(
+                    f"Could not remove result files of {getattr(job, 'name', job)} "
+                    f"in {root} on {self.site_name}: {error or 'remote command failed'}"
+                )
 
     def check_solver_compatibility(
         self,
@@ -1285,6 +1531,38 @@ class SlurmSite(BaseSite):
             raise EnterpriseHPCPreflightError(
                 f"Enterprise HPC preflight could not verify {purpose} "
                 f"(remote exit status {status})"
+            )
+        return output
+
+    def _run_session_command(
+        self, command: str, *, timeout: float, action: str, path: Any
+    ) -> str:
+        """Run one bounded login-node filesystem command for a session.
+
+        Failures name the action, the remote path and, for a timeout, the
+        ``session_command_timeout`` that bounded it.
+        """
+
+        stdout = None
+        try:
+            _, stdout, stderr = self.run_login_cmd(command, timeout=timeout)
+            output = _read_stream(stdout)
+            error = _read_stream(stderr)
+            status = _ssh_exit_status(stdout, stderr)
+        except TimeoutError as exc:
+            close_channel = getattr(getattr(stdout, "channel", None), "close", None)
+            if callable(close_channel):
+                close_channel()
+            raise TimeoutError(
+                f"Remote {action} of {path} on {self.site_name} timed out after "
+                f"{timeout:g} s (session_command_timeout); the remote filesystem "
+                "may be slow. Raise run_config.session_command_timeout or pass "
+                "session_command_timeout= to site.session() if this recurs."
+            ) from exc
+        if _remote_command_failed(error, status):
+            raise RuntimeError(
+                f"Remote {action} of {path} on {self.site_name} failed "
+                f"(remote exit status {status}): {error or 'no error output'}"
             )
         return output
 
@@ -1518,9 +1796,56 @@ class SlurmSite(BaseSite):
             raise EnterpriseHPCPreflightError(
                 "Enterprise HPC solver executable digest does not match the bundle"
             )
+        if PurePosixPath(solver_path).name == "FS_seismic":
+            self._verify_enterprise_backends(bundle, profile.bundle_root, solver_path)
         self._enterprise_hpc_limits = validated.limits
         self._enterprise_hpc_preflight_result = result
         return result
+
+    def _verify_enterprise_backends(
+        self, bundle: Mapping[str, Any], bundle_root: str, solver_path: str
+    ) -> None:
+        """Verify every backend the ``FS_seismic`` dispatcher can route to.
+
+        The dispatcher runs ``fs{2,3}d[_s]`` from ``FS_SOLVER_PATH`` (as the
+        job environment sets it) or its own directory. Each backend present
+        there must lie inside the bundle root and match its installed digest.
+        """
+
+        output = self._run_login_checked(
+            self._runtime_probe_command(
+                f"python3 -c {shlex.quote(_BACKEND_DIGEST_READER)} "
+                f"{shlex.quote(solver_path)}"
+            ),
+            purpose="the solver backend digests",
+        )
+        directory: Optional[str] = None
+        backends: Dict[str, str] = {}
+        for line in output.splitlines():
+            if line.startswith("FS_SOLVER_DIRECTORY "):
+                directory = line.split(" ", 1)[1]
+            elif line.startswith("FS_SOLVER_BACKEND "):
+                _, name, digest = line.split(" ", 2)
+                backends[name] = digest.strip()
+        if directory is None or not backends:
+            raise EnterpriseHPCPreflightError(
+                "Enterprise HPC solver dispatcher has no backend to verify"
+            )
+        root = PurePosixPath(bundle_root)
+        for name, digest in sorted(backends.items()):
+            path = PurePosixPath(posixpath.normpath(posixpath.join(directory, name)))
+            try:
+                relative = str(path.relative_to(root))
+            except ValueError:
+                raise EnterpriseHPCPreflightError(
+                    "Enterprise HPC solver backends are outside the immutable "
+                    "bundle root"
+                ) from None
+            if _installed_file_digest(bundle, relative) != digest:
+                raise EnterpriseHPCPreflightError(
+                    f"Enterprise HPC solver backend {name} digest does not match "
+                    "the bundle"
+                )
 
     def handle(
         self, job, job_id: Optional[str] = None, mode: str = "attached"
@@ -1529,86 +1854,224 @@ class SlurmSite(BaseSite):
 
         return super().handle(job, job_id=job_id, mode=mode)
 
+    def session(self, **options):
+        """Create an owned persistent batch executor; enter it to await readiness.
+
+        Allocation resources (``nodes``, ``ranks_per_node``, ``queue``,
+        ``duration``) are fixed for its lifetime. An ``AdaptiveWorkers``
+        policy bounds individual solver workers. Every run, including
+        postprocessing and curvature, stays inside this allocation.
+
+        ``reuse=project`` (or a string) adopts a compatible, unattached
+        session this user started earlier with the same ``reuse`` instead of
+        queueing a new allocation; ``share=True`` also joins one another
+        client is using. ``linger="30m"`` keeps the allocation that long once
+        nothing is attached or running (default 0), so a later script can
+        reuse it; ``session.release()`` or :meth:`release_sessions` ends it.
+        See :class:`~frequensolve.orchestrator.sites.hpc.AllocationSession`.
+        """
+        from frequensolve.orchestrator.sites.hpc.session import AllocationSession
+
+        return AllocationSession(self, **options)
+
+    def attach_session(
+        self, session_id: Optional[str] = None, *, reuse: Any = None, **options
+    ):
+        """Borrow a persistent session by id, or adopt one by ``reuse`` scope.
+
+        With ``session_id``, context exit only detaches. With ``reuse``, a
+        compatible session started with that scope is adopted as with
+        ``site.session(reuse=...)``, but a missing one raises instead of
+        queueing a new allocation; pass the same resources as when it was
+        started.
+        """
+        from frequensolve.orchestrator.sites.hpc.session import AllocationSession
+
+        if (session_id is None) == (reuse is None):
+            raise TypeError("attach_session needs exactly one of session_id or reuse")
+        if session_id is not None:
+            return AllocationSession(self, session_id=session_id, **options)
+        session = AllocationSession(self, reuse=reuse, **options)
+        session._adopt_only = True
+        return session
+
+    def sessions(self, reuse: Any = None):
+        """List this user's queued and running persistent sessions on the site.
+
+        Returns :class:`~frequensolve.orchestrator.sites.hpc.SessionInfo`
+        records; ``reuse`` keeps those started with that reuse scope.
+        """
+        from frequensolve.orchestrator.sites.hpc.session import list_sessions
+
+        return list_sessions(self, reuse)
+
+    def release_sessions(self, reuse: Any = None, *, include_attached: bool = False):
+        """End this user's idle persistent sessions; return the released ones.
+
+        ``reuse`` limits this to sessions started with that reuse scope, such
+        as lingering allocations a project left for reuse. Sessions with an
+        attached client are kept unless ``include_attached=True``, which also
+        cancels their work.
+        """
+        from frequensolve.orchestrator.sites.hpc.session import release_sessions
+
+        return release_sessions(self, reuse, include_attached=include_attached)
+
+    def _session_allocations(self) -> Dict[str, Dict[str, Any]]:
+        """Return this user's queued or running session jobs.
+
+        Maps each Slurm job id to its normalized ``state`` and ``time_left``
+        (seconds; the time limit while pending).
+        """
+
+        user = shlex.quote(str(self.credentials.username))
+        output = self.run_login(
+            f"squeue -u {user} -h -n {SESSION_JOB_NAME} -o '%i %t %L'"
+        )
+        jobs = {}
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            try:
+                job_id = _validate_slurm_job_id(fields[0])
+            except ValueError:
+                continue
+            jobs[job_id] = {
+                "state": SLURM_QUEUE_STATES.get(fields[1], "unknown"),
+                "time_left": (
+                    _slurm_time_seconds(fields[2]) if len(fields) > 2 else None
+                ),
+            }
+        return jobs
+
     def provision(
         self, nodes: int, tasks: int, duration: Optional[str] = None, **kwargs
     ) -> RunHandle:
-        """Submit an interactive SLURM allocation and return a run handle.
+        """Deprecated: start a persistent session; use :meth:`session` instead.
 
-        The returned handle completes when the allocation is running and the
-        compute client is attached.
+        ``tasks`` MPI ranks are spread evenly over ``nodes``. The allocation
+        runs FrequenSolve's allocation-resident controller, so later
+        ``submit``/``run`` calls in ``"auto"`` or ``"attached"`` mode and
+        attached curvature run inside it with the batch job's environment. The
+        returned handle completes when the controller is ready, and
+        :meth:`deprovision` releases the allocation. As with any session, the
+        allocation also ends when this client stops renewing its lease.
         """
 
-        nhost = nodes
-        nproc = tasks
-        logger.info(
-            "Provisioning SLURM job with nhost=%d, nproc=%d, duration=%s",
-            nhost,
-            nproc,
-            duration,
+        warnings.warn(
+            "SlurmSite.provision() is deprecated; use `with site.session("
+            "nodes=..., ranks_per_node=..., duration=...) as session: "
+            "session.submit(job)`. provision() now starts such a session, "
+            "which site.run() and attached curvature use until deprovision().",
+            DeprecationWarning,
+            stacklevel=2,
         )
-        duration = duration or getattr(self.config, "max_duration", "00-02:00:00")
-        provision_config = None
-        if self.enterprise_hpc is not None:
-            provision_config = SlurmRunConfig(
-                queue=kwargs.get("queue", self.run_config.queue or self.config.queue),
-                nodes=nhost,
-                ranks_per_node=nproc,
-                duration=duration,
-                account=kwargs.get(
-                    "account",
-                    self.run_config.account or getattr(self.config, "account", None),
-                ),
+        if self._active_session() is not None:
+            raise RuntimeError(
+                "An allocation is already provisioned; call deprovision() first"
             )
-            self._enterprise_hpc_preflight(run_config=provision_config)
-        self._emit(
-            f"Submitting {self.site_name} allocation: nodes={nhost}, "
-            f"tasks={nproc}, duration={duration}"
-        )
-        duration = self.config.validate_request(nhost, nproc, duration)
-        script = self._generate_provision_script(nhost, nproc, duration, **kwargs)
-
-        with _temporary_text_file(
-            script,
-            suffix=".sh",
-            prefix="slurm_",
-            directory=_host_tmp_path_for_config(
-                getattr(self, "_site_config_path", None)
-            ),
-        ) as script_path:
-            logger.debug("Temporary SLURM script created at %s", script_path)
-            remote_path = self.remote_tmp_dir / os.path.basename(script_path)
-            try:
-                self.put(script_path, remote_path)
-
-                if provision_config is not None:
-                    self._enterprise_hpc_preflight(run_config=provision_config)
-
-                self.pool.id = self._submit_sbatch(
-                    f"sbatch {shlex.quote(str(remote_path))}"
-                )
-                logger.debug("Job submitted successfully with job ID: %s", self.pool.id)
-                self.pool._status.status = "pending"
-                self._emit(f"Allocation submitted: {self.pool.id}")
-
-            except Exception as e:
-                logger.exception("Exception occurred during provisioning: %s", str(e))
-                self.pool._status.status = "failed"
-                self.pool._status.stderr = str(e)
-                raise
-
-        return self._allocation_handle(self.pool.id)
+        if isinstance(nodes, bool) or isinstance(tasks, bool):
+            raise TypeError("nodes and tasks must be integers")
+        nodes, tasks = int(nodes), int(tasks)
+        if nodes < 1 or tasks < nodes or tasks % nodes:
+            raise ValueError(
+                "tasks must be a positive multiple of nodes; persistent sessions "
+                "run the same number of ranks on every node"
+            )
+        # Sessions name their batch job; the old allocation name has no effect.
+        kwargs.pop("name", None)
+        resources = {
+            "nodes": nodes,
+            "ranks_per_node": tasks // nodes,
+            **({"duration": duration} if duration is not None else {}),
+            **kwargs,
+        }
+        session = self.session(**resources)
+        session.start()
+        self._adopt_session(session)
+        return self._session_handle(session)
 
     def attach_allocation(self, job_id: Optional[str] = None) -> RunHandle:
-        """Create a handle for an existing SLURM allocation.
+        """Deprecated: reconnect to a provisioned allocation by Slurm job id.
 
-        If job_id is not provided, queued jobs will be listed and the user will
-        be prompted to select a job.
+        Only allocations running FrequenSolve's persistent-session controller
+        (started by :meth:`provision` or :meth:`session`) can take attached
+        work; reconnect to one with :meth:`attach_session` instead. Without
+        ``job_id``, the single queued job is used.
         """
+
+        warnings.warn(
+            "SlurmSite.attach_allocation() is deprecated; use "
+            "site.attach_session(session_id).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if job_id is None:
             job_id = self._select_job()
-        self.pool.id = job_id
-        self._emit(f"Tracking existing allocation: {self.pool.id}")
-        return self._allocation_handle(str(job_id))
+        job_id = _validate_slurm_job_id(job_id)
+        needle = f'"allocation_id": "{job_id}"'
+        sessions = self.work_dir / ".fs_sessions"
+        found = self.run_login(
+            f"grep -l -F -- {shlex.quote(needle)} "
+            f"{shlex.quote(str(sessions))}/*/allocation.json 2>/dev/null || true"
+        ).split()
+        if len(found) != 1:
+            raise RuntimeError(
+                f"Slurm job {job_id} is not a FrequenSolve persistent session, so "
+                "work cannot be launched inside it: an SSH shell on its nodes "
+                "lacks the job's Slurm and module environment. Start one with "
+                "site.session(...) or submit with mode='batch'."
+            )
+        session = self.attach_session(PurePosixPath(found[0]).parent.name)
+        session.start()
+        self._adopt_session(session)
+        self._emit(f"Attached to allocation {job_id} (session {session.session_id})")
+        return self._session_handle(session)
+
+    def _adopt_session(self, session) -> None:
+        """Route auto/attached submissions and curvature through ``session``."""
+
+        self._provision_session = session
+        self.pool.id = str(session.allocation_id)
+        config = session._config or {}
+        self.pool.nhost = int(config.get("nodes") or 0)
+        self.pool.nproc = int(config.get("total_ranks") or 0)
+
+    def _session_handle(self, session) -> RunHandle:
+        """Return an allocation handle that completes when the controller is ready."""
+
+        def status(run: RunHandle) -> JobStatus:
+            state = str(session.status().get("state"))
+            if state == "ready":
+                return JobStatus(
+                    state="completed",
+                    return_code=0,
+                    job_id=str(run.id),
+                    message="Persistent allocation is ready",
+                )
+            if state in {"failed", "cancelled", "timeout", "complete", "closed"}:
+                return JobStatus(
+                    state="failed" if state in {"complete", "closed"} else state,
+                    return_code=1,
+                    job_id=str(run.id),
+                    message=f"Persistent allocation ended ({state})",
+                )
+            return JobStatus(
+                state="pending" if state in {"new", "pending"} else "running",
+                return_code=-1,
+                job_id=str(run.id),
+            )
+
+        return RunHandle(
+            site=self,
+            job=None,
+            id=str(session.allocation_id),
+            mode="allocation",
+            poll_interval=self.config.poll_interval,
+            _status_fn=status,
+            _cancel_fn=lambda run: self.deprovision(),
+        )
 
     def run_cmd(self, client, cmd: str, *, timeout: Optional[float] = None):
         """Run a command using the connected SSH client."""
@@ -1619,18 +2082,9 @@ class SlurmSite(BaseSite):
             return client.exec_command(cmd, timeout=timeout)
         return client.client.exec_command(cmd)
 
-    def run_compute_cmd(self, cmd: str):
-        """Run a command on compute node using exec_command."""
-        return self.run_cmd(self._compute_client, cmd)
-
     def run_login_cmd(self, cmd: str, *, timeout: Optional[float] = None):
         """Run a command on login node using exec_command."""
         return self.run_cmd(self._login_client, cmd, timeout=timeout)
-
-    def run_compute(self, cmd: str) -> str:
-        """Run a command on compute node and return its stdout as a stripped string."""
-        _, stdout, _ = self.run_compute_cmd(cmd)
-        return stdout.read().decode().strip()
 
     def run_login(self, cmd: str, *, timeout: Optional[float] = None) -> str:
         """Run a command on login node and return its stdout as a stripped string."""
@@ -1645,6 +2099,47 @@ class SlurmSite(BaseSite):
                 close_channel()
             suffix = f" after {timeout} seconds" if timeout is not None else ""
             raise TimeoutError(f"SSH login command timed out{suffix}") from exc
+
+    def _recover_login_connection(self) -> bool:
+        """Check the login connection before a transfer retry.
+
+        A control-socket client whose master no longer completes a round trip
+        switches to another live socket under ``~/.ssh/control`` (for example
+        one reopened with ``frequensolve site connect``). The user's control
+        master is never closed, since reopening it needs MFA. Returns ``False``
+        when no live connection is available, so retrying is pointless.
+        """
+
+        client = self._login_client
+        if client.is_proxy():
+            control_path, _ = client.get_proxy_details()
+            host = getattr(client.client, "host", None) or self.config.hostname
+            if control_path and self._authenticator.control_socket_works(
+                control_path, host
+            ):
+                return True
+            replacement = self._authenticator.find_control_socket(
+                host, exclude=(control_path,) if control_path else ()
+            )
+            if replacement is None:
+                logger.warning(
+                    "SSH control connection %s to %s is no longer live and no "
+                    "other live control socket was found",
+                    control_path,
+                    host,
+                )
+                return False
+            logger.warning(
+                "SSH control connection %s to %s is no longer live; using %s",
+                control_path,
+                host,
+                replacement.control_path,
+            )
+            self._login_client = SSHClientClass(replacement)
+            return True
+        transport = client.get_transport()
+        is_active = getattr(transport, "is_active", None)
+        return not callable(is_active) or bool(is_active())
 
     def is_run_current(self, job: BaseJob) -> bool:
         """Return True when this site has current successful results for a job."""
@@ -1769,10 +2264,19 @@ class SlurmSite(BaseSite):
             self.pool._status.status = status
         return status
 
-    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]):
-        """Transfer files from a local path to a remote path."""
+    def put(
+        self,
+        local_path: Union[str, Path],
+        remote_path: Union[str, Path],
+        *,
+        compress: bool = True,
+    ):
+        """Transfer files from a local path to a remote path.
 
-        return self._transfer.put(local_path, remote_path)
+        ``compress=False`` skips rsync compression for numerical payloads.
+        """
+
+        return self._transfer.put(local_path, remote_path, compress=compress)
 
     def fetch_traces(
         self,
@@ -1810,7 +2314,11 @@ class SlurmSite(BaseSite):
                     operations=("pack",),
                 )
 
-                db = TraceDataset.from_job(j, upscale)
+                db = (
+                    j.traces.open(upscale=upscale)
+                    if getattr(j, "workflow", None) == "transient"
+                    else TraceDataset.from_job(j, upscale)
+                )
                 db_map[j.name] = db
 
             except Exception as e:
@@ -1834,6 +2342,19 @@ class SlurmSite(BaseSite):
 
         for j in jobs:
             try:
+                if getattr(j, "workflow", None) == "transient":
+                    if upscale != 1:
+                        raise ValueError(
+                            "Transient output uses native samples; upscale must be 1"
+                        )
+                    self.fetch_artifacts(
+                        j,
+                        requests=(ArtifactRequest(role="sampled_wavefield"),),
+                        include_defaults=False,
+                        operations=("transient",),
+                    )
+                    db_map[j.name] = j.wavefields.open()
+                    continue
                 wavefield_outputs = j.wavefield_trace_outputs
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
@@ -1914,7 +2435,16 @@ class SlurmSite(BaseSite):
         """Fetch authoritative task metadata and named operation results."""
 
         postprocess_only = bool(getattr(job, "postprocess_only", False))
-        tasks = () if postprocess_only else tuple(range(1, job.n_tasks + 1))
+        modal = getattr(job, "n_modes", None) is not None
+        transient_operation = (
+            getattr(job, "workflow", None) == "transient" and not modal
+        )
+        if modal:
+            operations = tuple(op for op in operations if op != "transient")
+        operation_only = postprocess_only or transient_operation
+        tasks = () if operation_only else tuple(range(1, job.n_tasks + 1))
+        if transient_operation:
+            operations = (*operations, "transient")
         requested_operations = tuple(
             dict.fromkeys((*operations, "smooth") if postprocess_only else operations)
         )
@@ -1939,7 +2469,7 @@ class SlurmSite(BaseSite):
             stage = Path(temporary)
             use_index = False
             catalog: Union[ArtifactCatalog, TaskIndex]
-            if postprocess_only:
+            if operation_only:
                 catalog = ArtifactCatalog.read_task_results(stage, tasks=())
             else:
                 self._transfer.get_files(
@@ -1980,6 +2510,10 @@ class SlurmSite(BaseSite):
                 raise RuntimeError(
                     "Current successful smooth operation metadata is missing"
                 )
+            if transient_operation and "transient" not in operation_results:
+                raise RuntimeError(
+                    "Current successful transient operation metadata is missing"
+                )
             candidates = (index_path,) if use_index else result_paths
             publish = [path for path in candidates if (stage / path).is_file()]
             publish.extend(
@@ -1992,7 +2526,7 @@ class SlurmSite(BaseSite):
                 target = local_root / relative
                 with atomic_output_path(target) as temporary_path:
                     shutil.copyfile(source, temporary_path)
-            if not use_index and not postprocess_only:
+            if not use_index and not operation_only:
                 (local_root / index_path).unlink(missing_ok=True)
             for operation, relative in operation_paths.items():
                 if operation not in operation_results:
@@ -2030,6 +2564,28 @@ class SlurmSite(BaseSite):
                 "Remote staged provenance is missing; restage the job before fetching"
             )
         for task in tasks:
+            if getattr(job, "n_modes", None) is not None:
+                result = (
+                    catalog.results.get(task)
+                    if not isinstance(catalog, TaskIndex)
+                    else None
+                )
+                current = bool(
+                    result is not None
+                    and result.successful
+                    and result.partition.task == task
+                    and result.partition.task_count == job.n_tasks
+                    and result.partition.azimuthal_mode == task - 1
+                    and all(
+                        result.fingerprints.get(k) == v
+                        for k, v in expected_fingerprints.items()
+                    )
+                )
+                if not current:
+                    raise RuntimeError(
+                        f"Remote angular task {task} does not match the current staged job"
+                    )
+                continue
             expected_frequency = complex(job.f_list[task - 1])
             if isinstance(catalog, TaskIndex):
                 current = catalog.is_task_current(
@@ -2333,10 +2889,14 @@ class SlurmSite(BaseSite):
         remote_path: Union[str, Path],
         local_path: Union[str, Path],
         overwrite: bool = False,
+        *,
+        compress: bool = True,
     ):
         """Transfer files from a remote path to a local path."""
 
-        return self._transfer.get(remote_path, local_path, overwrite=overwrite)
+        return self._transfer.get(
+            remote_path, local_path, overwrite=overwrite, compress=compress
+        )
 
     def cancel_job(self, job_id: Optional[str] = None) -> bool:
         """Cancel a job."""
@@ -2351,8 +2911,22 @@ class SlurmSite(BaseSite):
         return True
 
     def deprovision(self, **kwargs):
-        """Release HPC resources."""
-        return self.cancel_job(self.pool.id)
+        """Release the allocation started by :meth:`provision` (deprecated).
+
+        Outstanding work is cancelled. Returns whether an allocation was
+        released.
+        """
+
+        session = self._active_session()
+        if session is None:
+            return False
+        allocation = session.allocation_id
+        session.close(drain=False)
+        if not session.owned:
+            # A reattached session only detaches on close; release it too.
+            self.cancel_job(allocation)
+        self._provision_session = None
+        return True
 
     def sync(self, project):
         """Sync the project to the site."""
@@ -2637,6 +3211,17 @@ class SlurmSite(BaseSite):
             return record.logs_dir
         return job._remote_path(self.work_dir) / "logs"
 
+    def _read_transient_progress(self, run: RunHandle):
+        root = self._remote_result_dir(run.job)
+        return {
+            task: self._read_remote_json(
+                run.job.task_manifest_file(task, result_path=root).with_name(
+                    "progress.json"
+                )
+            )
+            for task in range(1, run.job.n_tasks + 1)
+        }
+
     def _poll_run(self, run: RunHandle) -> JobStatus:
         status = self.update_status(str(run.id))
         scheduler_status = (
@@ -2787,115 +3372,46 @@ class SlurmSite(BaseSite):
         successful = int(payload.get("successful") or payload.get("succeeded") or 0)
         failed = int(payload.get("failed") or 0)
         running = int(payload.get("running") or 0)
+        launching = int(payload.get("launching") or 0)
         pending = int(
-            payload.get("pending") or max(0, total - successful - failed - running)
+            payload.get(
+                "pending", max(0, total - successful - failed - running - launching)
+            )
         )
+        launch_text = f"{launching} launching, " if launching else ""
+        waiting = len(payload.get("waiting_for_step_tasks") or [])
+        if waiting:
+            launch_text = f"{launching} launching ({waiting} waiting for Slurm step), "
         return (
             "tasks: "
             f"{successful} successful, {failed} failed, {running} running, "
-            f"{pending} pending, {total} total"
+            f"{launch_text}{pending} pending, {total} total"
         )
-
-    def _allocation_handle(self, job_id: str) -> RunHandle:
-        return RunHandle(
-            site=self,
-            job=None,
-            id=str(job_id),
-            mode="allocation",
-            poll_interval=self.config.poll_interval,
-            _status_fn=self._poll_allocation,
-            _wait_fn=self._wait_allocation,
-            _wait_async_fn=self._wait_allocation_async,
-            _finalize_fn=self._finalize_allocation,
-            _cancel_fn=lambda run: self.cancel_job(str(run.id)),
-        )
-
-    def _poll_allocation(self, run: RunHandle) -> JobStatus:
-        status = self.update_status(str(run.id))
-        if status == "running":
-            return JobStatus(
-                state="completed",
-                return_code=0,
-                job_id=str(run.id),
-                message="Allocation is running",
-                raw={"scheduler_state": status},
-            )
-        return_code = (
-            1 if status in {"failed", "cancelled", "timeout", "complete"} else -1
-        )
-        return JobStatus(
-            state=status,
-            return_code=return_code,
-            job_id=str(run.id),
-            raw={"scheduler_state": status},
-        )
-
-    def _finalize_allocation(self, run: RunHandle, status: JobStatus) -> RunResult:
-        if status.is_successful:
-            self._attach_compute_client()
-        return run._make_result(status)
-
-    def _wait_allocation(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        interval = self.config.poll_interval if poll_interval is None else poll_interval
-        start = time.monotonic()
-        last_state = object()
-        while True:
-            status = self._poll_allocation(run)
-            if status.state != last_state:
-                self._emit_status(status)
-                last_state = status.state
-            if status.is_successful:
-                self._attach_compute_client()
-                return run._make_result(status)
-            if status.is_complete:
-                return run._make_result(status)
-            if timeout is not None and time.monotonic() - start > timeout:
-                return run._make_result(
-                    JobStatus(
-                        state="timeout",
-                        job_id=str(run.id),
-                        message=f"Timed out waiting for allocation after {timeout} seconds",
-                    )
-                )
-            time.sleep(interval)
-
-    async def _wait_allocation_async(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        interval = self.config.poll_interval if poll_interval is None else poll_interval
-        start = time.monotonic()
-        last_state = object()
-        while True:
-            status = await asyncio.to_thread(self._poll_allocation, run)
-            if status.state != last_state:
-                self._emit_status(status)
-                last_state = status.state
-            if status.is_successful:
-                await asyncio.to_thread(self._attach_compute_client)
-                return run._make_result(status)
-            if status.is_complete:
-                return run._make_result(status)
-            if timeout is not None and time.monotonic() - start > timeout:
-                return run._make_result(
-                    JobStatus(
-                        state="timeout",
-                        job_id=str(run.id),
-                        message=f"Timed out waiting for allocation after {timeout} seconds",
-                    )
-                )
-            await asyncio.sleep(interval)
 
     def _sync_project(self, project):
         """Sync the project to the site."""
         project._transfer(self)
+
+    def _claim_remote_project(self, project_path):
+        """Reject cross-project uploads before changing persistent remote inputs."""
+        source = str(Path(project_path).expanduser().resolve())
+        script = Path(__file__).with_name("project_guard.py").read_text()
+        command = "python3 -c " + shlex.quote(script)
+        command += " " + shlex.quote(str(self.work_dir)) + " " + shlex.quote(source)
+        response = self.run_login(command, timeout=30)
+        try:
+            result = json.loads(response)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Could not verify remote project ownership; no project files were uploaded"
+            ) from exc
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            detail = (
+                result.get("error", "invalid response")
+                if isinstance(result, dict)
+                else "invalid response"
+            )
+            raise RuntimeError(f"Remote project ownership check failed: {detail}")
 
     def _sync_result(self, result):
         """Sync a result with the site."""
@@ -2935,6 +3451,12 @@ class SlurmSite(BaseSite):
             )
         task_indices = [int(index) + 1 for index in task_plan["pending_indices"]]
         kwargs.setdefault("skip_sizing", len(task_indices) == 1)
+        if getattr(job, "workflow", None) == "transient":
+            kwargs["mesh_only_init"] = True
+            kwargs["skip_sizing"] = True
+        task_ranks = self._task_partitions(job, task_indices)
+        if task_ranks:
+            kwargs["task_ranks"] = task_ranks
         job_rank_limit = getattr(job, "max_ranks_per_task", None)
         if job_rank_limit is not None:
             kwargs["max_ranks_per_task"] = min(
@@ -3007,137 +3529,136 @@ class SlurmSite(BaseSite):
         self._record_site_run(job, scheduler_id=job_id, status="submitted")
         return job_id
 
-    def _poll_attached_run(self, run: RunHandle) -> JobStatus:
-        future = run.backend.get("future")
-        if future is None:
-            return JobStatus(state="unknown", job_id=run.id)
-        if future.done():
-            if future.exception() is not None:
-                return JobStatus(
-                    state="failed",
-                    return_code=1,
-                    job_id=run.id,
-                    message=str(future.exception()),
-                )
-            return JobStatus(state="completed", return_code=0, job_id=run.id)
-        return JobStatus(state="running", job_id=run.id)
+    def _task_partitions(
+        self, job: BaseJob, tasks: Iterable[int]
+    ) -> Dict[int, TaskPartition]:
+        """Return the rank count each task of ``job`` must run on.
 
-    def _cancel_attached_run(self, _run: RunHandle) -> None:
-        raise NotImplementedError(
-            "Cancelling one attached run without cancelling its shared allocation "
-            "is not supported; wait for the run or cancel the allocation explicitly."
+        Partitioned inputs (saved objective states and vectors, receiver
+        states, background checkpoints) fetched with their producing job are
+        read locally; the rest from the remote project in one login command
+        (two for receiver bundles).
+        """
+
+        return task_partitions(
+            job,
+            tasks,
+            read_remote=lambda requests: self._read_remote_manifests(job, requests),
         )
 
-    def _wait_attached_run(
-        self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        future = run.backend.get("future")
-        if future is None:
-            status = JobStatus(state="unknown", job_id=run.id)
-            return RunResult(job=run.job, status=status, site=self)
+    def _remote_manifest_path(self, root: Path, path: Path) -> Optional[Path]:
+        """Map a local project path, or a path Sauce wrote remotely, to the site."""
 
-        if self._is_notebook:
-            import nest_asyncio
+        for local in (Path(os.path.abspath(path)), Path(os.path.realpath(path))):
+            try:
+                return self.work_dir / local.relative_to(root)
+            except ValueError:
+                continue
+        for base in (self.work_dir, self.scratch_dir):
+            if base is not None and Path(path).is_absolute():
+                try:
+                    Path(path).relative_to(base)
+                    return Path(path)
+                except ValueError:
+                    continue
+        return None
 
-            nest_asyncio.apply()
+    def _read_remote_manifests(
+        self, job: BaseJob, requests: Mapping[Any, Sequence[Path]]
+    ) -> Dict[Any, Any]:
+        """Read JSON manifests where this site keeps project files.
+
+        Each request lists local candidate paths in lookup order; the first
+        remote copy found is parsed.
+        """
 
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = self._get_or_create_event_loop()
-        else:
-            if loop.is_running():
-                raise RuntimeError(
-                    "Cannot call run.wait() for an attached SLURM run while an "
-                    "asyncio loop is already running; use 'await run' instead."
+            root = Path(job._project_path())
+        except (AttributeError, ValueError):
+            return {}
+        keys: List[Any] = []
+        commands: List[str] = []
+        for key, candidates in requests.items():
+            remote = [
+                path
+                for path in (
+                    self._remote_manifest_path(root, Path(item)) for item in candidates
                 )
-        if timeout is not None:
-            loop.run_until_complete(asyncio.wait_for(future, timeout=timeout))
-        else:
-            loop.run_until_complete(future)
-        status = self._poll_attached_run(run)
-        self._emit_status(status)
-        return run._make_result(status)
+                if path is not None
+            ]
+            if not remote:
+                continue
+            tests = "; el".join(
+                f"if [ -f {shlex.quote(str(path))} ]; then "
+                f"cat -- {shlex.quote(str(path))}"
+                for path in remote
+            )
+            commands.append(
+                f"printf 'FS_MANIFEST {len(keys)}\\n'; {tests}; fi; printf '\\n';"
+            )
+            keys.append(key)
+        payloads: Dict[Any, Any] = {}
+        for batch in _shell_word_batches(commands, _REMOVE_COMMAND_BYTES):
+            try:
+                text = self.run_login(batch)
+            except Exception as exc:
+                logger.debug("Could not read remote manifests: %s", exc)
+                continue
+            current: Optional[int] = None
+            lines: List[str] = []
+            for line in [*text.splitlines(), "FS_MANIFEST -"]:
+                if not line.startswith("FS_MANIFEST "):
+                    lines.append(line)
+                    continue
+                if current is not None:
+                    try:
+                        payloads[keys[current]] = json.loads("\n".join(lines))
+                    except json.JSONDecodeError:
+                        pass
+                marker = line.split()[1]
+                current, lines = (int(marker) if marker.isdigit() else None), []
+        return payloads
 
-    async def _wait_attached_run_async(
+    def _fitting_task_ranks(
         self,
-        run: RunHandle,
-        timeout: Optional[float] = None,
-        poll_interval: Optional[float] = None,
-    ) -> RunResult:
-        future = run.backend.get("future")
-        if future is None:
-            status = JobStatus(state="unknown", job_id=run.id)
-            return RunResult(job=run.job, status=status, site=self)
-
-        if timeout is not None:
-            await asyncio.wait_for(future, timeout=timeout)
-        else:
-            await future
-        status = self._poll_attached_run(run)
-        self._emit_status(status)
-        return run._make_result(status)
-
-    def _submit_attached(
-        self,
-        job: BaseJob,
-        ranks_per_task: int = 2,
+        task_ranks: Optional[Mapping[int, Union[int, TaskPartition]]],
+        task_indices: Iterable[int],
         *,
-        pack: bool = True,
-        fresh: bool = False,
-        mpi_async_progress: bool = False,
-        **aliases,
-    ) -> Future:
-        """Submit a job into an already attached compute allocation."""
+        limit: int,
+    ) -> Dict[int, int]:
+        """Keep pins of submitted tasks that fit ``limit`` ranks.
 
-        alias_values = _normalize_rank_aliases(
-            {"ranks_per_task": ranks_per_task, **aliases}
-        )
-        ranks_per_task = int(alias_values.get("ranks_per_task") or 2)
+        Raises:
+            ValueError: If a task must run on more ranks than the job has,
+                because Sauce rejects its saved inputs on any other count. A
+                pin that only preserves background reuse is dropped instead.
+        """
 
-        loop = self._get_or_create_event_loop()
-        future = loop.create_future()
-        if self._compute_client is None:
-            self._attach_compute_client()
-
-        remote_script, remote_job = self._transfer_job(
-            job,
-            pack=pack,
-            fresh=fresh,
-            mpi_async_progress=mpi_async_progress,
-        )
-        ntasks_per_item = max(ranks_per_task, self.pool.nproc // job.n_tasks)
-        max_ranks = getattr(job, "max_ranks_per_task", None)
-        if max_ranks is not None:
-            ntasks_per_item = min(ntasks_per_item, max_ranks)
-
-        if self._compute_client.is_proxy():
-            interactive = self.compute_client.invoke_shell()
-            cmd = (
-                f"cd {shlex.quote(str(self.work_dir))} && "
-                f"{shlex.quote(str(remote_script))} "
-                f"{shlex.quote(str(remote_job))} {ntasks_per_item}\n"
+        submitted = set(task_indices)
+        fitting: Dict[int, int] = {}
+        for task, pin in sorted(dict(task_ranks or {}).items()):
+            if int(task) not in submitted:
+                continue
+            if isinstance(pin, TaskPartition):
+                ranks, required, inputs = pin.ranks, pin.required, pin.inputs
+            else:
+                ranks, required, inputs = int(pin), False, ("background",)
+            if 1 <= ranks <= limit:
+                fitting[int(task)] = ranks
+                continue
+            message = (
+                f"Task {task} reads {', '.join(inputs)} written on {ranks} MPI "
+                f"ranks, but this job runs tasks on at most {limit}; request at "
+                "least as many ranks per task as the producing job"
             )
-            interactive.stdin.write(cmd.encode())
-            interactive.stdin.flush()
-            monitor = self._monitor_command_output(future, job, interactive)
-        else:
-            cmd = (
-                f"cd {shlex.quote(str(self.work_dir))} && "
-                f"{shlex.quote(str(remote_script))} "
-                f"{shlex.quote(str(remote_job))} {ntasks_per_item}"
+            if required:
+                raise ValueError(message)
+            self._emit(
+                f"{message} to reuse its background checkpoint.",
+                level=logging.WARNING,
+                force=True,
             )
-            interactive = self.login_client.invoke_shell()
-            interactive.send(f"ssh {self.compute_host}\n")
-            time.sleep(1)
-            interactive.send(cmd)
-            monitor = self._monitor_command_output(future, job, interactive)
-
-        loop.create_task(monitor)
-        return future
+        return fitting
 
     @staticmethod
     def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
@@ -3173,28 +3694,35 @@ class SlurmSite(BaseSite):
             .render(**context)
         )
 
-    def _runtime_setup_lines(self) -> List[str]:
-        """Return safely quoted module and environment setup commands."""
+    def _runtime_setup_lines(
+        self, partition_environment: Optional[Mapping[str, str]] = None
+    ) -> List[str]:
+        """Return safely quoted module and environment setup commands.
+
+        Jobs pass their partition's environment, which the site environment
+        overrides; login-node commands use the site environment only. A site
+        value that references its own variable, such as
+        ``LD_LIBRARY_PATH = "/lib:${LD_LIBRARY_PATH}"``, extends the
+        partition's value instead of replacing it.
+        """
 
         lines = [f"module load {shlex.quote(module)}" for module in self.modules]
         if self.modules:
-            lines.append("module list")
-        runtime_environment = {
-            **_HPC_RUNTIME_DEFAULTS,
-            **solver_environment(self._get_solver_path(), self.environment),
+            lines.append("LMOD_PAGER=cat module list")
+        site_environment = solver_environment(self._get_solver_path(), self.environment)
+        inherited = {
+            name: value
+            for name, value in {
+                **_HPC_RUNTIME_DEFAULTS,
+                **dict(partition_environment or {}),
+            }.items()
+            if name not in site_environment or f"${{{name}}}" in site_environment[name]
         }
         lines.extend(
             f"export {name}={_quote_runtime_environment_value(value)}"
-            for name, value in runtime_environment.items()
+            for name, value in (*inherited.items(), *site_environment.items())
         )
         return lines
-
-    def _attach_compute_client(self):
-        """Connect to the current pool's compute host and populate pool metadata."""
-
-        compute_client = self._authenticator.connect_to_job_host(self.pool.id)
-        self._compute_client = SSHClientClass(compute_client)
-        self._set_pool_info()
 
     def _submit_sbatch(self, cmd: str) -> str:
         """Run an sbatch command and return the submitted job id."""
@@ -3224,51 +3752,6 @@ class SlurmSite(BaseSite):
                 "site.toml or pass solver= explicitly."
             )
         return executable
-
-    def _set_pool_info(self):
-        """Get information about the pool."""
-        logger.debug("Getting pool info for job %s", self.pool.id)
-
-        # Get SLURM job details using scontrol
-        stdout = self.run_login(f"scontrol show job {self.pool.id}")
-        entries = stdout.split()
-
-        deets = {}
-        for entry in entries:
-            try:
-                key, value = entry.split("=")
-                deets[key] = value
-            except ValueError:
-                continue
-
-        host = deets["BatchHost"]
-        nproc = int(deets["NumTasks"])
-        nhost = int(deets["NumNodes"])
-        ncore = int(deets["NumCPUs"])
-        start_time = deets["StartTime"]
-        end_time = deets["EndTime"]
-        time_limit = deets["TimeLimit"]
-        run_time = deets["RunTime"]
-        seconds = _hms_to_seconds(time_limit) - _hms_to_seconds(run_time)
-        _seconds_to_hms(seconds)
-
-        logger.info(
-            "Pool info - host: %s, nodes: %d, tasks: %d, cores: %d, start: %s, end: %s",
-            host,
-            nhost,
-            nproc,
-            ncore,
-            start_time,
-            end_time,
-        )
-
-        self.pool.hostnode = host
-        self.pool.nhost = nhost
-        self.pool.nproc = nproc
-        self.pool.ncore = ncore
-        self.pool.start_time = start_time
-        self.pool.end_time = end_time
-        logger.info("Current status of pool %s: %s", self.pool.id, self.pool.status)
 
     def _list_jobs(self):
         """List all queued jobs."""
@@ -3305,6 +3788,7 @@ class SlurmSite(BaseSite):
             Path(remote_job).parent / "logs" / "batch" / f"sweep-{uuid4().hex}.slurm"
         )
         remote_runner = self._adaptive_scheduler_remote_path()
+        self._transfer_remote_simulation_inputs(job)
         with _temporary_text_file(
             script,
             suffix=".slurm",
@@ -3316,7 +3800,6 @@ class SlurmSite(BaseSite):
             logger.debug("Temporary sweep script created at %s", script_path)
             self.put(script_path, remote_script)
 
-        self._transfer_remote_simulation_inputs(job)
         logger.debug("Transferring job file to remote path: %s", remote_job)
         self.put(Path(local_job), Path(remote_job))
         runner_resource = (
@@ -3361,58 +3844,10 @@ class SlurmSite(BaseSite):
             return path
         return self.work_dir / relative
 
-    def _transfer_job(
-        self,
-        job: BaseJob,
-        *,
-        pack: bool = True,
-        fresh: bool = False,
-        mpi_async_progress: bool = False,
-    ):
-        """Submit a simulation job to the remote site.
-
-        Args:
-            job (BaseJob): The simulation job to submit
-        """
-        if self._compute_client is None:
-            raise NotImplementedError("Batch sweep job not implemented yet.")
-
-        # Note: job must be saved for remote **before** script is generated
-        local_job, remote_job = job.save_for_remote(
-            self.__class__.__name__, self.work_dir
-        )
-        script = self._sweep_script(
-            job,
-            pack=pack,
-            fresh=fresh,
-            mpi_async_progress=mpi_async_progress,
-        )
-
-        self._transfer_remote_simulation_inputs(job)
-        logger.debug("Transferring job file to remote path: %s", remote_job)
-        self.put(Path(local_job), Path(remote_job))
-
-        remote_script = (
-            Path(remote_job).parent / "logs" / "batch" / f"sweep-{uuid4().hex}.sh"
-        )
-        with _temporary_text_file(
-            script,
-            suffix=".sh",
-            prefix="sweep",
-            directory=_host_tmp_path_for_config(
-                getattr(self, "_site_config_path", None)
-            ),
-        ) as script_path:
-            logger.debug("Temporary sweep script created at %s", script_path)
-            self.put(script_path, remote_script)
-
-        self.run_login(f"chmod 700 {shlex.quote(str(remote_script))}")
-
-        return remote_script, remote_job
-
     def _transfer_remote_simulation_inputs(self, job: BaseJob) -> None:
         """Transfer the simulation JSON and direct file inputs for a staged job."""
 
+        self._claim_remote_project(job.project_path)
         local_sim, remote_sim = job.save_simulation_for_remote(
             self.__class__.__name__, self.work_dir
         )
@@ -3466,52 +3901,6 @@ class SlurmSite(BaseSite):
             "export I_MPI_ASYNC_PROGRESS_THREADS=1",
             f"export I_MPI_ASYNC_PROGRESS_PIN={progress_pins}",
         ]
-
-    def _sweep_script(self, job: BaseJob, **kwargs) -> str:
-        """Generate a script for sweeping through tasks on pre-provisioned resources."""
-
-        n_tasks = job.n_tasks
-        dir_out = str(job._remote_path(self.work_dir) / "logs")
-        pack_job = kwargs.pop("pack", None)
-        if pack_job is None:
-            pack_job = kwargs.pop("pack_job", True)
-        mpi_async_progress = kwargs.pop("mpi_async_progress", False)
-        kwargs.pop("executable", None)
-        if "run_path" in kwargs:
-            kwargs.setdefault("run_path_shell", shlex.quote(str(kwargs["run_path"])))
-        n_threads = self.pool.ncore // self.pool.nproc
-        mpi_async_progress_setup: List[str] = []
-        if mpi_async_progress:
-            nodes = int(self.pool.nhost or 1)
-            if self.pool.ncore % nodes or self.pool.nproc % nodes:
-                raise ValueError(
-                    "mpi_async_progress requires allocation cores and ranks to "
-                    "divide evenly across nodes"
-                )
-            n_threads, mpi_async_progress_setup = self._mpi_async_progress_layout(
-                cores_per_node=self.pool.ncore // nodes,
-                ranks_per_node=self.pool.nproc // nodes,
-            )
-        return self._render_template(
-            "sweep/sweep_SLURM.sh",
-            batch_job=False,
-            n_tasks=n_tasks,
-            n_procs=self.pool.nproc,
-            init_ranks=min(
-                self.pool.nproc,
-                getattr(job, "max_ranks_per_task", None) or self.pool.nproc,
-            ),
-            n_threads=n_threads,
-            mpi_shell=shlex.quote(str(self.mpi_cmd)),
-            dir_out_shell=shlex.quote(dir_out),
-            executable_shell=shlex.quote(str(self.executable)),
-            postprocess_job=_job_requires_postprocess(job),
-            mpi_args_shell=" ".join(shlex.quote(value) for value in self.mpi_args),
-            pack_job=bool(pack_job),
-            runtime_setup=self._runtime_setup_lines(),
-            mpi_async_progress_setup=mpi_async_progress_setup,
-            **kwargs,
-        )
 
     def _sweep_SLURM_script(
         self,
@@ -3571,6 +3960,8 @@ class SlurmSite(BaseSite):
         ranks_per_node = int(rank_values.get("ranks_per_node") or 8)
         mem_cushion = float(kwargs.pop("mem_cushion", 1.5))
         min_ranks = int(kwargs.pop("min_ranks", 1))
+        if min_ranks < 1:
+            raise ValueError("min_ranks must be positive")
         round_to = int(kwargs.pop("round_to", 1))
         cap_fraction = float(kwargs.pop("cap_fraction", 1.0))
         max_ranks_per_task = int(
@@ -3597,8 +3988,27 @@ class SlurmSite(BaseSite):
             task_indices = list(range(1, n_job_tasks + 1))
         else:
             task_indices = [int(index) for index in task_indices]
-        skip_sizing = bool(kwargs.pop("skip_sizing", n_tasks == 1))
-        proc_memory = (config.memory_per_node / ranks_per_node) / 1024.0
+        task_ranks = self._fitting_task_ranks(
+            kwargs.pop("task_ranks", None),
+            task_indices,
+            limit=min(n_nodes * ranks_per_node, max_ranks_per_task),
+        )
+        # Pinned tasks need no memory estimates; initialize without sizing.
+        mesh_only_init = bool(kwargs.pop("mesh_only_init", False))
+        if mesh_only_init:
+            # Transient trajectories have no frequency sizing checkpoint. Give
+            # each unpinned trajectory the configured rank allowance.
+            for task in task_indices:
+                task_ranks.setdefault(
+                    task, min(n_nodes * ranks_per_node, max_ranks_per_task)
+                )
+        skip_sizing = (
+            bool(kwargs.pop("skip_sizing", n_tasks == 1))
+            or mesh_only_init
+            or (bool(task_indices) and set(task_indices) <= set(task_ranks))
+        )
+        proc_memory = rank_memory_gib(config, ranks_per_node)
+        gpus_per_node = max(0, int(getattr(config, "gpus_per_node", 0) or 0))
         duration = config.validate_request(n_nodes, n_nodes * ranks_per_node, duration)
         n_threads = config.cores_per_node // ranks_per_node
         mpi_async_progress_setup: List[str] = []
@@ -3628,13 +4038,25 @@ class SlurmSite(BaseSite):
             "require_all_tasks": bool(postprocess_job),
             "sizing_json": str(sizing_json),
             "launch_delay_seconds": launch_delay_seconds,
+            "ranks_per_node": ranks_per_node,
+            "gpus_per_node": gpus_per_node,
         }
+        if task_ranks:
+            scheduler_config["task_ranks"] = {
+                str(task): ranks for task, ranks in sorted(task_ranks.items())
+            }
 
         return self._render_template(
             "sweep/adaptive_sweep.sh",
             batch_job=True,
             name=name,
             dir_out=stdout,
+            ranks_per_node=ranks_per_node,
+            # Every rank needs its threads' CPUs in the allocation; TACC's
+            # ibrun allocates whole nodes and places ranks itself.
+            cpus_per_task=(
+                None if Path(str(self.mpi_cmd)).name == "ibrun" else n_threads
+            ),
             proc_memory=proc_memory,
             mem_cushion=mem_cushion,
             min_ranks=min_ranks,
@@ -3645,6 +4067,7 @@ class SlurmSite(BaseSite):
                 "none" if tolerate_failures is None else int(tolerate_failures)
             ),
             skip_sizing=1 if skip_sizing else 0,
+            init_flag="--mesh" if mesh_only_init else "--init-no-size",
             n_nodes=n_nodes,
             n_procs=n_nodes * ranks_per_node,
             init_ranks=min(n_nodes * ranks_per_node, max_ranks_per_task),
@@ -3666,7 +4089,9 @@ class SlurmSite(BaseSite):
                 if mpi_health_check_timeout is not None
                 else ""
             ),
-            runtime_setup=self._runtime_setup_lines(),
+            runtime_setup=self._runtime_setup_lines(
+                getattr(config, "partition_environment", None)
+            ),
             mpi_async_progress_setup=mpi_async_progress_setup,
             scheduler_config_shell=shlex.quote(json.dumps(scheduler_config, indent=2)),
             sizing_json_shell=shlex.quote(str(sizing_json)),
@@ -3684,59 +4109,6 @@ class SlurmSite(BaseSite):
             **({"notify_on": notify_on.upper()} if notify_on is not None else {}),
             **({"notify_email": notify_email} if notify_email is not None else {}),
             **kwargs,
-        )
-
-    def _generate_provision_script(
-        self,
-        n_nodes: int,
-        ranks_per_node: int,
-        duration: str = "00-02:00:00",
-        queue: Optional[str] = None,
-        account: Optional[str] = None,
-        notify_email: Optional[str] = None,
-        **kwargs,
-    ) -> str:
-        """Generate a script for provisioning a SLURM allocation.
-
-        Args:
-            n_nodes:        Number of nodes to provision
-            ranks_per_node: Number of MPI ranks per node
-            duration:       Duration of the job (DD-HH:MM:SS)
-            queue:          Queue/partition to run on (optional, defaults to site queue)
-            account:        Account/allocation to run on
-            notify_email:   Email address to notify (optional)
-        """
-        if "procs_per_node" in kwargs:
-            values = _normalize_rank_aliases(
-                {
-                    "ranks_per_node": ranks_per_node,
-                    "procs_per_node": kwargs.pop("procs_per_node"),
-                }
-            )
-            ranks_per_node = int(values["ranks_per_node"])
-        name = _safe_slurm_directive(kwargs.get("name", "FS_cluster"), "name")
-        queue = _safe_slurm_directive(queue or self.config.queue, "queue")
-        account = _safe_slurm_directive(
-            account or self.run_config.account or self.config.account,
-            "account",
-        )
-        duration = _safe_slurm_directive(duration, "duration") or duration
-        notify_email = _safe_slurm_directive(notify_email, "notify_email")
-
-        return self._render_template(
-            "provision/provision_SLURM.sh",
-            keep_trailing_newline=True,
-            name=name,
-            n_nodes=n_nodes,
-            nhost=n_nodes,
-            nproc=n_nodes * ranks_per_node,
-            ranks_per_node=ranks_per_node,
-            queue=queue,
-            account=account,
-            duration=duration,
-            work_dir_shell=shlex.quote(str(self.work_dir)),
-            mpi=self.config.mpi_wrapper,
-            **({"notify_email": notify_email} if notify_email is not None else {}),
         )
 
     def _print_batch_logs(
@@ -3785,24 +4157,78 @@ class SlurmSite(BaseSite):
         print(f"\n{'=' * 60}\n{header}\n{path}\n{'=' * 60}\n{text}\n")
 
     @staticmethod
-    def _normalize_optional_remote_dir(
-        value: Optional[Union[str, Path]],
-        *,
-        name: str,
-    ) -> Optional[Path]:
-        """Normalize an optional absolute directory on the remote system."""
+    def _remote_dir_variable(
+        value: Optional[Union[str, Path]], *, name: str
+    ) -> Optional[Tuple[Optional[str], str]]:
+        """Split a remote directory setting into ``(variable, remainder)``.
+
+        Returns ``None`` when unset. ``variable`` is the leading ``$NAME`` (or
+        ``None`` for an absolute path); other ``$`` references are rejected.
+        """
 
         if value is None or str(value).strip() == "":
             return None
+        text = str(value)
+        if text.startswith("$"):
+            match = _REMOTE_DIR_VARIABLE.match(text)
+            remainder = text[match.end() :].lstrip("/") if match else ""
+            if match is None or "$" in remainder:
+                raise ValueError(
+                    f"SLURM {name} may start with one remote variable such as "
+                    f"$SCRATCH or ${{WORK}} followed by /path; got {text!r}"
+                )
+            return match.group(1) or match.group(2), remainder
+        if "$" in text:
+            raise ValueError(
+                f"SLURM {name} may reference a remote variable only at its "
+                f"start (for example $SCRATCH/frequensolve); got {text!r}"
+            )
+        if not Path(text).is_absolute():
+            raise ValueError(f"SLURM {name} must be an absolute remote path")
+        return None, text
+
+    def _remote_variable(self, variable: str) -> Path:
+        """Resolve a remote environment variable once in the login shell."""
+
+        cache = self.__dict__.setdefault("_remote_variables", {})
+        if variable in cache:
+            return cache[variable]
+        # The name was validated as a shell identifier, so this is not an
+        # injection point.
+        _, stdout, _ = self._login_client.client.exec_command(f"echo ${variable}")
+        value = stdout.read().decode().strip()
+        if not value:
+            raise RuntimeError(
+                f"Failed to determine ${variable} for {self.site_name}; configure "
+                "an absolute path in site.toml or pass it explicitly"
+            )
         path = Path(value)
         if not path.is_absolute():
-            raise ValueError(f"SLURM {name} must be an absolute remote path")
+            raise ValueError(
+                f"${variable} on {self.site_name} is not an absolute path: {value!r}"
+            )
+        cache[variable] = path
+        logger.info("Resolved $%s on %s to %s", variable, self.site_name, path)
         return path
+
+    def _resolve_remote_dir(
+        self, value: Optional[Union[str, Path]], *, name: str
+    ) -> Optional[Path]:
+        """Return an absolute remote directory, expanding a leading ``$NAME``."""
+
+        parts = self._remote_dir_variable(value, name=name)
+        if parts is None:
+            return None
+        variable, remainder = parts
+        if variable is None:
+            return Path(remainder)
+        base = self._remote_variable(variable)
+        return base / remainder if remainder else base
 
     def _get_work_dir(self) -> Path:
         """Resolve the remote base directory for relative FrequenSolve paths."""
 
-        configured = self._normalize_optional_remote_dir(
+        configured = self._resolve_remote_dir(
             self._configured_work_dir,
             name="work_dir",
         )
@@ -3813,14 +4239,9 @@ class SlurmSite(BaseSite):
             if legacy_rel_path is not None:
                 work_dir = work_dir / legacy_rel_path
         else:
-            _, stdout, stderr = self._login_client.client.exec_command("echo $WORK")
-            work_root = stdout.read().decode().strip()
-            if not work_root:
-                raise RuntimeError(
-                    f"Failed to determine $WORK for {self.site_name}; configure "
-                    "an absolute work_dir base in site.toml or pass work_dir= explicitly"
-                )
-            work_dir = Path(work_root) / (legacy_rel_path or "frequensolve")
+            storage = getattr(self, "storage", None) or "work"
+            work_root = self._remote_variable(_STORAGE_VARIABLES[storage])
+            work_dir = work_root / (legacy_rel_path or "frequensolve")
 
         self._work_dir = Path(work_dir)
         logger.info("Work directory: %s", self._work_dir)
@@ -3831,93 +4252,3 @@ class SlurmSite(BaseSite):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("localhost", 0))
             return s.getsockname()[1]
-
-    async def _monitor_command_output(self, future, job, interactive=None):
-        """Monitor command output and update future accordingly."""
-        try:
-            output_buffer = ""
-            error_buffer = ""
-
-            while True:
-                # Handle subprocess case
-                if isinstance(interactive, subprocess.Popen):
-                    # Check if process has ended
-                    if interactive.poll() is not None:
-                        if not future.done():
-                            future.set_exception(
-                                RuntimeError("Process ended unexpectedly")
-                            )
-                        return
-
-                    # Read from stdout/stderr
-                    reads, _, _ = select(
-                        [interactive.stdout, interactive.stderr], [], [], 0.1
-                    )
-                    for fd in reads:
-                        data = fd.read(4096).decode("utf-8", errors="replace")
-                        if fd == interactive.stdout:
-                            output_buffer += data
-                        else:
-                            error_buffer += data
-
-                # Process output buffer
-                while "\n" in output_buffer:
-                    line, output_buffer = output_buffer.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        self._emit(line)
-                    if "Sweep Complete" in line:
-                        future.set_result(job.traces)
-                        logger.info("Sweep job completed successfully")
-                        if interactive:
-                            if isinstance(interactive, subprocess.Popen):
-                                try:
-                                    pgid = os.getpgid(interactive.pid)
-                                    os.killpg(pgid, signal.SIGKILL)
-                                except Exception:
-                                    try:
-                                        interactive.kill()
-                                    except Exception:
-                                        pass
-                            else:
-                                interactive.close()
-                        return
-
-                # Process error buffer
-                while "\n" in error_buffer:
-                    line, error_buffer = error_buffer.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        self._emit(line, level=logging.ERROR)
-                        future.set_exception(RuntimeError(f"Sweep job failed: {line}"))
-                        if interactive:
-                            if isinstance(interactive, subprocess.Popen):
-                                try:
-                                    pgid = os.getpgid(interactive.pid)
-                                    os.killpg(pgid, signal.SIGKILL)
-                                except Exception:
-                                    try:
-                                        interactive.kill()
-                                    except Exception:
-                                        pass
-                            else:
-                                interactive.close()
-                        return
-
-                await asyncio.sleep(0.2)
-
-        except Exception as e:
-            logger.exception("Error in monitor task")
-            future.set_exception(e)
-            if interactive:
-                if isinstance(interactive, subprocess.Popen):
-                    try:
-                        pgid = os.getpgid(interactive.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except Exception:
-                        try:
-                            interactive.kill()
-                        except Exception:
-                            pass
-                else:
-                    interactive.close()

@@ -39,6 +39,7 @@ from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
     RunHandle,
+    _result_relative_paths,
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
@@ -262,7 +263,28 @@ class AWSSite(BaseSite):
         2. Authenticates with cached credentials (or prompts for login)
         3. Fetches your infrastructure details (S3 bucket, etc.)
         4. Ready to submit simulations and upload files!
+
+    Background checkpoints (``supports_background_reuse``) are not supported:
+    each batch worker stages inputs only from local files and uploads its
+    results under a fresh prefix, and checkpoint HDF5 files are never
+    transferred by default, so a later worker cannot read a producer's
+    checkpoints.
     """
+
+    supports_background_reuse = False
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Validate ``relative_paths``; AWS keeps no reusable result files.
+
+        Uploaded results are immutable per run, so there is nothing to
+        remove; see :meth:`BaseSite.remove_result_files` for path rules.
+        """
+
+        if _result_relative_paths(relative_paths):
+            logger.debug(
+                "AWSSite keeps no reusable result files; nothing removed for %s",
+                getattr(job, "name", job),
+            )
 
     def __init__(
         self,
@@ -816,7 +838,21 @@ class AWSSite(BaseSite):
     ):
         """Fetch authoritative task metadata and named operation results."""
 
-        tasks = tuple(range(1, job.n_tasks + 1))
+        if getattr(job, "n_modes", None) is not None:
+            operations = tuple(op for op in operations if op != "transient")
+        tasks = (
+            ()
+            if (
+                getattr(job, "workflow", None) == "transient"
+                and getattr(job, "n_modes", None) is None
+            )
+            else tuple(range(1, job.n_tasks + 1))
+        )
+        if (
+            getattr(job, "workflow", None) == "transient"
+            and getattr(job, "n_modes", None) is None
+        ):
+            operations = (*operations, "transient")
         requested_operations = tuple(dict.fromkeys(operations))
         local_root = self._local_result_path(job, project_path)
         prefix = self._s3_result_prefix(job)
@@ -837,26 +873,24 @@ class AWSSite(BaseSite):
             prefix=".fs-catalog-", dir=local_root.parent
         ) as temporary:
             stage = Path(temporary)
-            self._download_s3_files(
-                prefix,
-                stage,
-                (index_path,),
-                missing_ok=True,
-            )
             use_index = False
-            try:
-                catalog = TaskIndex.read(stage)
-                self._validate_remote_catalog(job, catalog, tasks)
-                use_index = True
-            except (ArtifactContractError, OSError, RuntimeError):
-                self._download_s3_files(
-                    prefix,
-                    stage,
-                    result_paths,
-                    missing_ok=True,
-                )
-                catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
-                self._validate_remote_catalog(job, catalog, tasks)
+            if (
+                getattr(job, "workflow", None) == "transient"
+                and getattr(job, "n_modes", None) is None
+            ):
+                catalog = ArtifactCatalog.read_task_results(stage, tasks=())
+            else:
+                self._download_s3_files(prefix, stage, (index_path,), missing_ok=True)
+                try:
+                    catalog = TaskIndex.read(stage)
+                    self._validate_remote_catalog(job, catalog, tasks)
+                    use_index = True
+                except (ArtifactContractError, OSError, RuntimeError):
+                    self._download_s3_files(
+                        prefix, stage, result_paths, missing_ok=True
+                    )
+                    catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
+                    self._validate_remote_catalog(job, catalog, tasks)
 
             if operation_paths:
                 self._download_s3_files(
@@ -878,6 +912,13 @@ class AWSSite(BaseSite):
                 self._validate_remote_operation(job, result)
                 operation_results[operation] = result
 
+            if (
+                getattr(job, "workflow", None) == "transient"
+                and getattr(job, "n_modes", None) is None
+            ) and "transient" not in operation_results:
+                raise RuntimeError(
+                    "Current successful transient operation metadata is missing"
+                )
             candidates = (index_path,) if use_index else result_paths
             publish = [path for path in candidates if (stage / path).is_file()]
             publish.extend(
@@ -927,6 +968,27 @@ class AWSSite(BaseSite):
                 "Remote staged provenance is missing; restage the job before fetching"
             )
         for task in tasks:
+            if getattr(job, "n_modes", None) is not None:
+                result = (
+                    catalog.results.get(task)
+                    if not isinstance(catalog, TaskIndex)
+                    else None
+                )
+                current = bool(
+                    result is not None
+                    and result.successful
+                    and result.partition.task == task
+                    and result.partition.task_count == job.n_tasks
+                    and result.partition.azimuthal_mode == task - 1
+                    and all(
+                        result.fingerprints.get(k) == v for k, v in fingerprints.items()
+                    )
+                )
+                if not current:
+                    raise RuntimeError(
+                        f"Remote angular task {task} does not match the current staged job"
+                    )
+                continue
             frequency = complex(job.f_list[task - 1])
             if isinstance(catalog, TaskIndex):
                 current = catalog.is_task_current(
@@ -1606,7 +1668,11 @@ class AWSSite(BaseSite):
                     operations=("pack",),
                 )
                 project = Path(path).resolve() if path is not None else job.project_path
-                db = TraceDataset.from_job(job, upscale, project_path=project)
+                db = (
+                    job.traces.open(upscale=upscale, project_path=project)
+                    if getattr(job, "workflow", None) == "transient"
+                    else TraceDataset.from_job(job, upscale, project_path=project)
+                )
                 db_map[job.name] = db
 
             except Exception as e:
@@ -1644,6 +1710,20 @@ class AWSSite(BaseSite):
 
         for item in jobs:
             try:
+                if getattr(item, "workflow", None) == "transient":
+                    if upscale != 1:
+                        raise ValueError(
+                            "Transient output uses native samples; upscale must be 1"
+                        )
+                    self.fetch_artifacts(
+                        item,
+                        requests=(ArtifactRequest(role="sampled_wavefield"),),
+                        include_defaults=False,
+                        project_path=path,
+                        operations=("transient",),
+                    )
+                    db_map[item.name] = item.wavefields.open(project_path=path)
+                    continue
                 wavefield_outputs = item.wavefield_trace_outputs
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")

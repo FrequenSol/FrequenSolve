@@ -5,6 +5,166 @@ prepared.
 
 ## Unreleased
 
+- Persistent sessions can be reused across scripts.
+  `site.session(reuse=project, linger="30m")` adopts a compatible session
+  that the same user started with the same reuse scope and that no client is
+  attached to, instead of queueing a new allocation; `share=True` also joins
+  one in use. Only the user's own `FS_session` jobs recorded under the site's
+  work directory qualify. `linger` (default 0) keeps the allocation that long
+  once nothing is attached or running, so the context only detaches on exit;
+  `session.release()` and `site.release_sessions(...)` end it and
+  `site.sessions(...)` lists sessions. `site.attach_session(reuse=...)` adopts
+  without queueing, and `PersistentAllocation` takes the same options.
+- `SlurmSite.provision()` and `attach_allocation()` are deprecated in favor of
+  `site.session(...)`. `provision()` now starts a persistent session (`tasks`
+  ranks spread evenly over `nodes`) that `site.run`/`site.submit` in `"auto"`
+  or `"attached"` mode and attached curvature use until `deprovision()` or
+  `close()`; `attach_allocation(job_id)` reconnects only to a FrequenSolve
+  session's allocation. The SSH-launched attached sweep is removed: on
+  Stampede3 an SSH shell on a held node lacks the job's Slurm and module
+  environment, so `ibrun` could not launch there. `compute_client`,
+  `compute_host` and `run_compute`/`run_compute_cmd` are removed with it.
+- Persistent sessions on GPU partitions export the partition environment, size
+  workers by device memory and give each `ibrun` step's ranks the device under
+  their slot. GPU placement runs through an `fs-gpu-place` wrapper file
+  because TACC's `ibrun` re-splits launch arguments.
+- Background checkpoints follow Sauce's `fs-background-state-2`: one HDF5 file
+  per MPI rank (`"rank"`) or one file per task written by every rank
+  (`"shared"`). The new site option and `site.toml` key `background_layout`
+  (`LocalSite` and SLURM sites; default `"rank"`) reaches background-capturing
+  linearize jobs as `fwi_operator.background_layout`
+  (`FWIOperatorJob(background_layout=...)`); Sauce's `FS_BACKGROUND_LAYOUT`
+  overrides it. `background_checkpoint_files`, `Backend.release_background`
+  and the background budget cover both layouts and version-1 checkpoints, and
+  `remove_result_files` on local and SLURM sites also removes the directories
+  (`<stem>/generations/<run>/` and its parents) it leaves empty, never
+  recursively. Consumers keep their non-required pin to the producer's rank
+  count. Version-2 checkpoints need a matching solver; Sauce treats version-1
+  manifests as a cache miss.
+- Imaging reads Sauce's `fs-objective-linearization-5` states and reads and
+  writes `fs-objective-vector-5` vectors: one manifest and one canonical HDF5
+  file per task, with every dataset identified by its `fs-block-sha256-1`
+  digest flattened to one axis (`f4` now supported) instead of whole-file
+  SHA-256. Versions 3 and 4 are still read. Operator duals of a version-5
+  state carry no partition and store values in the state's precision;
+  `ObjectiveState.vector_options()` supplies a state's dual format, and
+  `write_task_objective_vectors` gains `schema` and `dtype`. Version-5 states
+  are no longer pinned to the linearize task's MPI rank count (Sauce rejects
+  one only when its realized mesh differs), so sites size their consumer tasks
+  normally; background checkpoints still prefer their recorded count, and
+  `ObjectiveState.n_ranks` is `None` for states without a partition (version
+  4 and current version 5). Manifest fingerprints hash floats exactly as
+  Sauce's nlohmann/json prints them. Remote staging no longer re-uploads a
+  state or vector (manifest and cache/data file) that a completed run on the
+  same site wrote, and SLURM submissions upload operator inputs once instead
+  of twice (`BaseSite.stages_job_inputs`). Control-registry manifests without rank
+  descriptors (current Sauce) or their per-rank `file` entries are accepted.
+  `objective_layout_fingerprint` is O(N log N) instead of quadratic in the row
+  count.
+- `NativeCurvature` deletes each operation's staged `input.h5` once its
+  result is verified, unless the result has an HDF5 external link into it
+  (warm-start factors link their unchanged `/modes`); a failed operation
+  keeps its input. The optimizers pass the SDK's own objective,
+  preconditioner and proximal adapters read-only views of their vectors and
+  adopt the arrays they return (about 6 fewer model-sized allocations per
+  L-BFGS iteration, 17 per Newton-CG iteration with 5 CG steps); user
+  callables still receive private copies and their results are copied.
+  With `scaling`, the physical-coordinate iteration records passed to
+  callbacks rescale each vector on first access. Native proximal
+  regularization rewrites a staged metric or bound file only when its content
+  changes.
+- `SeismicSimulation.save()` (called by every `job.save()`) skips rewriting
+  the simulation JSON when the serialized content equals what the object last
+  wrote and the file is unchanged since; inline `DepthProfile`/`GridParameters`
+  coefficients made every job pay an O(controls) re-save. Remote staging
+  copies one mapped simulation JSON per content and remote project
+  (preserving its mtime, so rsync skips it) and scans input references
+  without the coefficients. Job, task and compatibility fingerprints hash a
+  saved JSON document once per file state.
+- Added persistent SLURM allocation sessions with an allocation-resident
+  scheduler, adaptive frequency workers, per-run cancellation and reconnectable
+  run handles. Initialization, smoothing, packing and curvature share the same
+  resource pool. `FWI.run(execution=PersistentAllocation(...))` owns a session
+  through the complete inversion and releases it on exit; an open session may
+  also be borrowed. Controller liveness is judged by an advancing heartbeat
+  sequence on the client's monotonic clock (`heartbeat_timeout`, default the
+  site's `scheduler_heartbeat_timeout`), never by comparing hosts' clocks;
+  leases renew during uploads and tolerate clock skew. Owned sessions drain
+  without `scancel` while the controller is alive (`cleanup_timeout=None` by
+  default), and cleanup failures after successful work warn instead of
+  discarding results. `FWI.run` saves the final result before releasing its
+  allocation.
+- `scheduler_heartbeat_timeout` now defaults to 300 seconds (was 60) for
+  adaptive-scheduler batch runs and persistent sessions, and the starter site
+  configuration writes 300: shared scratch filesystems can stall heartbeat
+  writes for minutes. Explicitly configured values are honoured; a session
+  whose window is below 120 seconds logs a warning when it starts.
+- Persistent-session filesystem commands on the login node (session directory
+  creation and the `mv`/`ln` that publish lease renewals, requests and
+  commands) are bounded by the new `run_config.session_command_timeout`
+  (default 120 s; also `site.session(session_command_timeout=...)` and
+  `PersistentAllocation(session_command_timeout=...)`) instead of the 15 s
+  solver identity-query bound, which failed sessions on slow work
+  filesystems. A timeout or failure names the command and remote path instead
+  of reporting "Enterprise HPC preflight could not verify operate allocation
+  session".
+- SLURM uploads and downloads retry stalls and SSH connection failures:
+  `transfer_attempts` (site profile, default 3) attempts with a short backoff,
+  after checking that the login connection still answers and switching to
+  another live `~/.ssh/control` socket if it does not (the user's control
+  master is never closed). `transfer_stall_timeout` (default 120 s) sets how
+  long a transfer may make no progress; rsync now also passes it as
+  `--timeout`, and rsync retries resume partial files. OpenSSH SFTP
+  connection failures raise `ConnectionError` and control-socket status 255
+  raises `SSHTransportError` (both subclasses of the previous `OSError` and
+  `RuntimeError`).
+- SLURM profiles can run on the scratch filesystem: `storage = "scratch"`
+  (site profile or `SlurmSite(storage=...)`) moves the default `work_dir` from
+  `$WORK/frequensolve` to `$SCRATCH/frequensolve`, and with it persistent
+  session directories, heartbeat/status files and curvature mirrors. The
+  default stays `"work"`. `work_dir`, `scratch_dir` and `tmp_dir` may start
+  with a remote variable such as `$SCRATCH` or `${WORK}`, resolved once in the
+  login shell, cached and logged; a `$` elsewhere in these paths is rejected.
+- A dying session controller leaves a trace: it enables `faulthandler`, so
+  fatal signals dump every thread's traceback to `controller.log`, and it logs
+  an unhandled error's traceback before cleanup, so a failing final status
+  write no longer hides the cause. Client statuses for a lost heartbeat, a
+  failed controller or an ended Slurm job include the remote `controller.log`
+  path (`session.controller_log`).
+
+- Optimizer iteration records (`InexactNewtonIteration`) share the accepted
+  model, gradients and steps as read-only views instead of copying five
+  vectors per iteration; callbacks must copy a vector before modifying it.
+  `NativeCurvature` deletes a staged BFGS history once its operation finishes
+  (`NativeCurvature.retain(history)` keeps it for several operations). Native
+  regularization caches key the optimizer vector by a parallel block digest
+  without forming the full model. `CurvatureTransfer.refresh` and
+  `NativeCurvature.refresh_curvature` accept Sauce's `symmetry_tolerance`;
+  refreshed factors must report `hessian_asymmetry`, which the transfer
+  provenance records.
+- FWI checkpoints (`fs-imaging-fwi-checkpoint-2`) keep L-BFGS restart arrays
+  as float64 HDF5 files in a bounded `<stem>.restart` directory instead of
+  JSON metadata, writing each secant pair once; `fs-imaging-fwi-checkpoint-1`
+  checkpoints are rejected. `minimize_lbfgs` reports `LBFGSRestart` states
+  (`fs-lbfgs-restart-2`) that reference the optimizer's arrays; dict restart
+  states are no longer accepted. A stage interrupted during its end-of-stage
+  curvature/uncertainty factorization is finished on resume, and each stage
+  factorizes at most once. Fingerprints identify arrays with at least 4096
+  elements by their bytes, so large-array fingerprints change once.
+- `LSRTM` runs native `Tikhonov` with CG for every `method` (no proximal
+  jobs, no gradient job at the zero image, no final residual product). TV/TGV
+  proximal iterations start from `1/lambda_max` (two power iterations) and
+  stop relative to the initial proximal-gradient mapping, so they no longer
+  depend on data or image units. CG is an in-house safeguarded PCG: a non-SPD
+  preconditioner raises, nonpositive curvature stops with `status == -1`, and
+  convergence on the last iteration counts. `info["jobs"]` and
+  `info["background"]` report job counts and checkpoint reuse/misses.
+  Background reuse also requires `site.supports_background_reuse`; the run
+  deletes the checkpoint it created unless `keep_background=True`, evicted
+  linearizations delete theirs, and `LinearizationCache.background_budget`
+  bounds retained checkpoint bytes. `minimize_proximal_gradient` gains
+  `initial_step`, `relative_tolerance` and `curvature_steps`. FWI requests
+  receiver probes for `Diagonal(probes="receiver")`; patch FWI rejects them.
 - Deferred the experimental HV and AWI objectives; removed their Python
   configurations and `ImagingProblem` adapters.
 - Receiver linearization, JVP and VJP cover multiple groups sharing the same

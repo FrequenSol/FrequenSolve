@@ -14,6 +14,20 @@ from tests.test_imaging_integration import FREQUENCY, START_VP, _executable, _si
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(1800)]
 
 
+def _artifact_roots(h5):
+    from frequensolve.imaging.property_mesh import _roots, _text
+
+    group = h5["property_space"]
+    schema = _text(group["schema"])
+    if schema == "fs-property-space-1":
+        yield from group["roots"].items()
+    else:
+        for root_id, root in zip(
+            group["root_directory"][:, 0], _roots(group, schema, 2, reference=True)
+        ):
+            yield str(root_id), root
+
+
 @pytest.fixture
 def site():
     with LocalSite(
@@ -186,7 +200,7 @@ def test_material_averaging_reduces_thin_slow_feature_refinement(tmp_path, site)
     with h5py.File(next(tmp_path.glob("initial*.h5")), "r") as h5:
         group = h5["property_space"]
         offset = group["material_ranges"][1, 0]
-        for root in group["roots"].values():
+        for _, root in _artifact_roots(h5):
             if root["meta"][0] != 2:
                 continue
             points = root["physical_vertices"][:]
@@ -208,7 +222,7 @@ def test_material_averaging_reduces_thin_slow_feature_refinement(tmp_path, site)
     def minimum_cell_span(adapted):
         spans = []
         with h5py.File(adapted.full_space.specs["vp"].artifact, "r") as h5:
-            for root in h5["property_space/roots"].values():
+            for _, root in _artifact_roots(h5):
                 if root["meta"][0] == 2:
                     spans.append(np.ptp(read_reference_vertices(root), axis=1).min())
         return min(spans)
@@ -271,7 +285,7 @@ def _projection_roots(problem):
     roots = {}
     with h5py.File(problem.full_space.specs["vp"].artifact) as h5:
         offset, count = h5["property_space/material_ranges"][1]
-        for name, root in h5["property_space/roots"].items():
+        for name, root in _artifact_roots(h5):
             if root["meta"][0] != 2:
                 continue
             vertices = read_reference_vertices(root)[:, :4]
@@ -477,3 +491,61 @@ def test_wavelength_smoothing_uses_accepted_local_wavespeed(tmp_path, site, dire
         default.state.values, explicit.state.values, rtol=1e-8, atol=1e-10
     )
     np.testing.assert_array_equal(problem.state.values, values)
+
+
+def test_mesh_offset_halo_is_rank_invariant(tmp_path, site):
+    """Half-offset halos borrow distributed mesh storage on every participating rank."""
+    import json
+    import shutil
+
+    if shutil.which("mpiexec") is None:
+        pytest.skip("MPI launcher is not available")
+    problem, _ = mesh_problem(tmp_path, site, fixed_geometry=True)
+    initial = problem.state
+    problem.state = im.ControlState(
+        initial.space, np.full(initial.space.full_size, np.log(0.9))
+    )
+    extended = problem.extend(
+        im.Extension(
+            [im.HalfOffsets("vp", [[-25.0, 0.0], [0.0, 0.0], [25.0, 0.0]])],
+            damping=0.1,
+        )
+    )
+    serial = extended.linearize()
+    value, covector = serial.baseline_value, serial.covector.values.copy()
+    assert value > 0 and np.linalg.norm(covector) > 0
+    extended.clear_cache()
+    problem.backend.submit_options["procs_per_job"] = 2
+    distributed = extended.linearize()
+    record = distributed.job._result_path / "_fs_run/tasks/task_000001/result.json"
+    assert json.loads(record.read_text())["execution"]["mpi_ranks"] == 2
+    np.testing.assert_allclose(distributed.baseline_value, value, rtol=2e-5)
+    relative_error = np.linalg.norm(
+        distributed.covector.values - covector
+    ) / np.linalg.norm(covector)
+    assert relative_error < 2e-4
+
+
+def test_mesh_smoothing_is_rank_invariant(tmp_path, site):
+    """The distributed smoothing consumer preserves the serial constrained projection."""
+    import shutil
+
+    if shutil.which("mpiexec") is None:
+        pytest.skip("MPI launcher is not available")
+    problem, coarse = mesh_problem(tmp_path, site, fixed_geometry=True)
+    state = problem.state
+    problem.state = im.ControlState(
+        state.space,
+        0.06 * np.random.default_rng(182).standard_normal(len(state.values)),
+    )
+    target = dataclasses.replace(coarse, frequency=12.0, epw=2.0)
+    serial = problem.with_controls(
+        {"vp": target}, mesh_transfer="l2", mesh_smoothing_length=50.0
+    )
+    problem.backend.submit_options["procs_per_job"] = 2
+    distributed = problem.with_controls(
+        {"vp": target}, mesh_transfer="l2", mesh_smoothing_length=50.0
+    )
+    np.testing.assert_allclose(
+        distributed.state.values, serial.state.values, rtol=2e-7, atol=2e-9
+    )

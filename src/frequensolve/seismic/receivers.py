@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from numbers import Integral, Number
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     Iterator,
@@ -43,6 +44,9 @@ from frequensolve.util.mixins import (
     merge_extra,
 )
 from frequensolve.util.store import SimulationStore
+
+if TYPE_CHECKING:
+    from frequensolve.physics import ReceiverExpression
 
 __all__ = [
     "CoordsArray",
@@ -169,7 +173,7 @@ class ReceiverComponent:
     """
 
     name: str = "name"
-    field: str
+    field: Union[str, "ReceiverExpression"]
     expression: Optional[Dict[str, Any]] = None
     direction: Optional[Union[List[float], Direction]] = None
     units: Optional[str] = None
@@ -178,9 +182,74 @@ class ReceiverComponent:
     response: Optional[Any] = dataclasses.field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        self.field = canonical_field(self.field)
+        from frequensolve.physics import ReceiverExpression
+
+        if not isinstance(self.field, ReceiverExpression):
+            self.field = canonical_field(self.field)
         if self.weight is not None:
             _complex_to_fs(self.weight, label="receiver component weight")
+
+    def resolved_components(
+        self, ctx: Optional[ExportContext] = None
+    ) -> List["ReceiverComponent"]:
+        """Expand a typed quantity into the device's named physical output channels."""
+        from frequensolve.physics import ReceiverExpression
+
+        if not isinstance(self.field, ReceiverExpression):
+            return [self]
+        expression = self.field
+        dimension = getattr(ctx, "dimension", None) or expression.dimension
+        if dimension is None:
+            raise ValueError(
+                "Typed receiver components need a simulation or explicit physics dimension"
+            )
+        if self.units is not None:
+            expression = expression.to(self.units)
+        if self.direction is not None:
+            if expression.rank != 1:
+                raise ValueError(
+                    "Directions apply to vector quantities; select a tensor component with .xx or .xz"
+                )
+            try:
+                direction = np.asarray(self.direction, dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    "Typed receiver directions must be constant numeric vectors"
+                ) from exc
+            axes = (
+                ("x", "z")
+                if dimension == 2 and expression.physics != "em"
+                else ("x", "y", "z")
+            )
+            if direction.shape != (len(axes),) or not np.all(np.isfinite(direction)):
+                raise ValueError(
+                    "Receiver direction must be a finite vector matching the physical dimension"
+                )
+        output = expression.receiver_components(
+            self.name, dimension, getattr(ctx, "physics", None)
+        )
+        if self.direction is not None:
+            nodes = []
+            for component, value in zip(output, direction):
+                node = copy.deepcopy(component.expression)
+                node["factor"] *= float(value)
+                nodes.append(node)
+            node = nodes[0]
+            for other in nodes[1:]:
+                node = {"kind": "add", "args": [node, other]}
+            component = copy.copy(output[0])
+            component.expression = node
+            output = [component]
+        for component in output:
+            component.name = (
+                self.name
+                if expression.rank == 0 or self.direction is not None
+                else f"{self.name}.{component.name}"
+            )
+            component.weight = self.weight
+            component.transfer = self.transfer
+            component.response = self.response
+        return output
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
         """Serialize scalar component metadata for solver input.
@@ -193,6 +262,15 @@ class ReceiverComponent:
             raise ValueError(
                 "ReceiverTransferFunction requires export through a ReceiverGroup"
             )
+        from frequensolve.physics import ReceiverExpression
+
+        if isinstance(self.field, ReceiverExpression):
+            components = self.resolved_components(ctx)
+            if len(components) != 1:
+                raise ValueError(
+                    "Export a multicomponent quantity through its receiver device"
+                )
+            return components[0].to_fs(ctx)
         return {
             "name": self.name,
             "field": canonical_field(self.field),
@@ -421,7 +499,7 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
     def add_component(
         self,
         name: str,
-        field: str,
+        field: Union[str, "ReceiverExpression"],
         direction: Optional[List[float]] = None,
         *,
         units: Optional[str] = None,
@@ -432,7 +510,7 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
 
         Args:
             name: Component name used in trace output.
-            field: Physical field to measure.
+            field: String field name or typed physical field/expression to measure.
             direction: Optional measurement direction for vector fields.
             units: Optional output units.
             weight: Optional constant complex component weight.
@@ -444,7 +522,7 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
 
         component = ReceiverComponent(
             name=name,
-            field=canonical_field(field),
+            field=field,
             direction=direction,
             units=units,
             weight=weight,
@@ -452,6 +530,25 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
         )
         self.components.append(component)
         return component
+
+    def resolved_components(
+        self, ctx: Optional[ExportContext] = None
+    ) -> List[ReceiverComponent]:
+        """Resolve scalar and shaped components without mutating the reusable device."""
+        from frequensolve.physics import ReceiverExpression
+
+        components = [
+            output
+            for component in self.components
+            for output in component.resolved_components(ctx)
+        ]
+        names = [component.name for component in components]
+        if any(
+            isinstance(component.field, ReceiverExpression)
+            for component in self.components
+        ) and len(set(names)) != len(names):
+            raise ValueError("Receiver device output component names must be unique")
+        return components
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> dict:
         """Serialize this receiver device for solver input."""
@@ -463,13 +560,13 @@ class ReceiverDevice(TypeTaggedMixin, ABC):
 
         return {
             **({"name": self.name} if self.name is not None else {}),
-            "components": [c.to_fs(ctx) for c in self.components],
+            "components": [c.to_fs(ctx) for c in self.resolved_components(ctx)],
         }
 
     def output_components(self) -> Iterator[ReceiverComponent]:
         """Iterate the component names exposed in receiver trace output."""
 
-        return iter(self.components)
+        return iter(self.resolved_components())
 
     def output_receiver_count(self, point_count: int) -> int:
         """Return the number of receiver rows emitted for ``point_count`` points."""
@@ -1061,6 +1158,11 @@ class ReceiverFiber(ReceiverDevice):
         sample_spacing: Physical spacing for integration samples along a gauge.
         points_per_gauge: Number of integration samples when sample spacing is
             not provided.
+        coordinate_mode: ``"path"`` generates uniformly spaced channels along
+            the supplied cable path. ``"gauge_centers"`` treats every supplied
+            coordinate as a gauge center, in cable order, with nonuniform spacing.
+            The latter supports plain fibers and extends the endpoint tangents
+            by half a gauge to include the first and last channels.
         radius: Optional helical-fiber radius. Required with ``angle`` or
             ``pitch``.
         pitch: Optional helical-fiber pitch, mutually exclusive with ``angle``.
@@ -1079,6 +1181,7 @@ class ReceiverFiber(ReceiverDevice):
     channel_spacing: Optional[Any] = None
     sample_spacing: Optional[Any] = None
     points_per_gauge: Optional[int] = None
+    coordinate_mode: Literal["path", "gauge_centers"] = "path"
     radius: Optional[Any] = None
     pitch: Optional[Any] = None
     angle: Optional[Any] = None
@@ -1092,6 +1195,7 @@ class ReceiverFiber(ReceiverDevice):
         channel_spacing: Optional[Any] = None,
         sample_spacing: Optional[Any] = None,
         points_per_gauge: Optional[int] = None,
+        coordinate_mode: Literal["path", "gauge_centers"] = "path",
         radius: Optional[Any] = None,
         pitch: Optional[Any] = None,
         angle: Optional[Any] = None,
@@ -1110,8 +1214,23 @@ class ReceiverFiber(ReceiverDevice):
         self.transfer = transfer
         self.response = response
         self.gauge_length = gauge_length
+        if coordinate_mode not in {"path", "gauge_centers"}:
+            raise ValueError(
+                "ReceiverFiber coordinate_mode must be path or gauge_centers"
+            )
+        if coordinate_mode == "gauge_centers" and channel_spacing is not None:
+            raise ValueError("Gauge-center coordinates determine channel spacing")
+        if coordinate_mode == "gauge_centers" and any(
+            v is not None for v in (radius, pitch, angle)
+        ):
+            raise ValueError(
+                "Gauge-center coordinates currently support plain fibers only"
+            )
+        self.coordinate_mode = coordinate_mode
         self.channel_spacing = (
-            channel_spacing if channel_spacing is not None else gauge_length
+            None
+            if coordinate_mode == "gauge_centers"
+            else channel_spacing if channel_spacing is not None else gauge_length
         )
         self.sample_spacing = sample_spacing
         self.points_per_gauge = points_per_gauge
@@ -1131,6 +1250,8 @@ class ReceiverFiber(ReceiverDevice):
         }
         if self.channel_spacing is not None:
             data["channel_spacing"] = value_and_units_to_fs(self.channel_spacing)
+        if self.coordinate_mode != "path":
+            data["coordinate_mode"] = self.coordinate_mode
         if self.sample_spacing is not None:
             data["sample_spacing"] = value_and_units_to_fs(self.sample_spacing)
         if self.points_per_gauge is not None:
@@ -1156,6 +1277,7 @@ class ReceiverFiber(ReceiverDevice):
             channel_spacing=data.get("channel_spacing"),
             sample_spacing=data.get("sample_spacing"),
             points_per_gauge=data.get("points_per_gauge"),
+            coordinate_mode=data.get("coordinate_mode", "path"),
             radius=data.get("radius"),
             pitch=data.get("pitch"),
             angle=data.get("angle"),
@@ -2335,6 +2457,22 @@ class ReceiverGroup(ExtraFieldsMixin):
                 "Receiver device must be a ReceiverDevice or physical expression"
             )
         self.device = device
+        self._authored_device = device
+        if self._expressions is None and any(
+            isinstance(component.field, ReceiverExpression)
+            for component in device.components
+        ):
+            self._expression_dimension = next(
+                (
+                    component.field.dimension
+                    for component in device.components
+                    if isinstance(component.field, ReceiverExpression)
+                    and component.field.dimension is not None
+                ),
+                None,
+            )
+            if self._expression_dimension is None and isinstance(coords, CoordsArray):
+                self._expression_dimension = coords.coordinates.shape[-1]
         self.materials = dict(materials or {})
         self.coordinates = coords
         if isinstance(domain, bool) or (
@@ -2361,6 +2499,18 @@ class ReceiverGroup(ExtraFieldsMixin):
     def resolve_expressions(self, ctx: Optional[ExportContext] = None) -> None:
         """Bind symbolic outputs to the simulation dimension before export or pairing."""
         if not self._expressions:
+            from frequensolve.physics import ReceiverExpression
+
+            if not any(
+                isinstance(component.field, ReceiverExpression)
+                for component in self._authored_device.components
+            ):
+                return
+            context = copy.copy(ctx or ExportContext())
+            context.dimension = context.dimension or self._expression_dimension
+            device = copy.copy(self._authored_device)
+            device.components = self._authored_device.resolved_components(context)
+            self.device = device
             return
         dimension = getattr(ctx, "dimension", None) or self._expression_dimension
         if dimension is None:

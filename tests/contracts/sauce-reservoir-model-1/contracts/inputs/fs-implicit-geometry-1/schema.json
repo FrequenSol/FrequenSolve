@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-implicit-geometry-1/schema.json",
+  "title": "FS Implicit Geometry v1",
+  "description": "JSON surface registry for implicit geometry objects.",
+  "x-fs-contract": "fs-implicit-geometry-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "$defs": {
+    "vecD": {
+      "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/numericVector"
+    },
+    "surfaceRef": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "oneOf": [
+            { "type": "integer", "not": { "const": 0 } },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "scale": {
+          "type": "number",
+          "default": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "rbfControl": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/]+$",
+          "description": "Globally unique name of the authored-order coefficient block."
+        },
+        "maximum_displacement": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Maximum sampled normal interface displacement per accepted optimizer step. Defaults to one quarter of support_radius."
+        },
+        "feasibility_band": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "description": "Distance band around the current zero set used by the geometric step limiter. Defaults to support_radius."
+        }
+      },
+      "additionalProperties": false
+    },
+    "surface": {
+      "type": "object",
+      "required": ["_type"],
+      "properties": {
+        "_type": {
+          "enum": [
+            "simple",
+            "elevation",
+            "plane",
+            "sphere",
+            "ellipsoid",
+            "cone",
+            "cylinder",
+            "box",
+            "rbf",
+            "rbf_level_set",
+            "transform",
+            "abs",
+            "offset",
+            "capsule",
+            "repeat",
+            "angular_repeat",
+            "union",
+            "intersection",
+            "difference",
+            "smooth_union",
+            "smooth_intersection",
+            "smooth_difference",
+            "nunion",
+            "nintersection",
+            "ndifference",
+            "nsmooth_union",
+            "nsmooth_intersection",
+            "nsmooth_difference"
+          ]
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "p0": { "$ref": "#/$defs/vecD" },
+        "axis": {
+          "description": "Simple-surface coordinate axis name, or vector axis for vector-axis surfaces.",
+          "oneOf": [
+            { "type": "string" },
+            { "$ref": "#/$defs/vecD" }
+          ]
+        },
+        "coord_system": {
+          "type": "string",
+          "default": "global"
+        },
+        "function": {
+          "description": "Simple-surface axis function. May be a scalar, quantity object, file-backed xarray property, or inline xarray object with data.",
+          "oneOf": [
+            { "type": "number" },
+            { "type": "object" }
+          ]
+        },
+        "units": { "type": "string" },
+        "periodic": { "type": "boolean" },
+        "period": {
+          "oneOf": [
+            { "type": "number", "exclusiveMinimum": 0.0 },
+            { "$ref": "#/$defs/vecD" }
+          ]
+        },
+        "n": {
+          "oneOf": [
+            { "$ref": "#/$defs/vecD" },
+            { "type": "number" }
+          ]
+        },
+        "c": { "$ref": "#/$defs/vecD" },
+        "r": { "type": "number" },
+        "center": { "$ref": "#/$defs/vecD" },
+        "apex": { "$ref": "#/$defs/vecD" },
+        "radii": {
+          "allOf": [
+            { "$ref": "#/$defs/vecD" },
+            { "type": "array", "items": { "type": "number", "exclusiveMinimum": 0.0 } }
+          ],
+          "description": "Positive axis-aligned ellipsoid radii."
+        },
+        "half_angle": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "exclusiveMaximum": 1.5707963267948966,
+          "description": "Cone half-angle in radians."
+        },
+        "radius": { "type": "number" },
+        "half_length": { "type": "number" },
+        "capped": { "type": "boolean", "default": false },
+        "half_size": { "$ref": "#/$defs/vecD" },
+        "kernel": {
+          "type": "string",
+          "const": "wendland_c2",
+          "default": "wendland_c2"
+        },
+        "support_radius": { "type": "number", "exclusiveMinimum": 0.0 },
+        "bias": { "type": "number", "default": 0.0 },
+        "centers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/vecD" },
+          "minItems": 1
+        },
+        "coefficients": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 1
+        },
+        "control": { "$ref": "#/$defs/rbfControl" },
+        "oriented": { "type": "boolean", "default": false },
+        "id": {
+          "type": "integer",
+          "not": { "const": 0 }
+        },
+        "scale": { "type": "number", "default": 1.0 },
+        "t": { "$ref": "#/$defs/vecD" },
+        "s": { "type": "number", "exclusiveMinimum": 0.0, "default": 1.0 },
+        "R": {
+          "type": "array",
+          "items": { "type": "number" }
+        },
+        "delta": { "type": "number", "default": 0.0 },
+        "eps": { "type": "number", "default": 0.0 },
+        "a": {
+          "oneOf": [
+            { "type": "integer", "not": { "const": 0 } },
+            { "type": "string", "minLength": 1 },
+            { "$ref": "#/$defs/vecD" }
+          ]
+        },
+        "b": {
+          "oneOf": [
+            { "type": "integer", "not": { "const": 0 } },
+            { "type": "string", "minLength": 1 },
+            { "$ref": "#/$defs/vecD" }
+          ]
+        },
+        "sa": { "type": "number", "default": 1.0 },
+        "sb": { "type": "number", "default": 1.0 },
+        "k": { "type": "number", "default": 0.0 },
+        "shift": { "$ref": "#/$defs/vecD" },
+        "ntheta": { "type": "integer", "minimum": 0, "default": 0 },
+        "dtheta": { "type": "number", "default": 0.0 },
+        "theta0": { "type": "number", "default": 0.0 },
+        "pz": { "type": "number", "default": 0.0 },
+        "z0": { "type": "number", "default": 0.0 },
+        "theta_stagger": { "type": "number", "default": 0.0 },
+        "stagger_half": { "type": "boolean", "default": false },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/surfaceRef" },
+          "minItems": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "_type": { "enum": ["rbf", "rbf_level_set"] }
+            }
+          },
+          "then": {
+            "required": ["support_radius", "centers", "coefficients"]
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "fs-implicit-geometry-1"
+    },
+    "surfaces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/surface"
+      }
+    }
+  },
+  "required": ["surfaces"],
+  "additionalProperties": true
+}

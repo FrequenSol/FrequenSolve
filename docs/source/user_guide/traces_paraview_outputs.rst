@@ -311,11 +311,16 @@ real time-moment representation. Frequency-domain reads remain raw and
 unchanged.
 
 The ``p_velocity`` and ``s_velocity`` fields request the compressional and
-shear Helmholtz projections. Sauce enables the decomposition automatically
-when either field is present, so no separate simulation option is required for
-the default projection. Component forms such as ``p_velocity_x`` and
+shear Helmholtz projections. Sauce enables decomposition automatically when either
+field is requested, for both frequency-domain and transient jobs. No separate
+simulation option is required. Component forms such as ``p_velocity_x`` and
 ``s_velocity_z`` are also accepted. Advanced projection settings can still be
 passed as the simulation's ``helmholtz_projection`` option.
+
+Native ``velocity`` alone needs no projection. In transient jobs, projection runs
+at spatial output times and receiver sample times that need projected fields;
+ordinary traces do not trigger additional solves. See :doc:`transient` for the
+supported transient outputs and projection settings.
 
 Request ``velocity``, ``p_velocity``, and ``s_velocity`` together to retain
 undecomposed velocity alongside both projections in one job. The same names
@@ -328,8 +333,19 @@ work for receivers, wavefields, and ParaView. For example:
        for field in ("velocity", "p_velocity", "s_velocity")
    ]
 
-Use ``helmholtz_projection={"s_projection": "solenoidal"}`` for a dedicated
-S projection instead of the default complementary field (raw minus P).
+Axisymmetric harmonic acoustic, elastic, and coupled simulations support the
+same fields with the default ``s_projection="complement"``. The projection uses
+cylindrical volume weighting and physical radial velocity, including Galerkin's
+regularized radial displacement. Use ``p_velocity_r`` / ``s_velocity_r`` for
+radial components and ``_z`` for axial components; ``_x`` aliases ``_r``.
+S is weakly orthogonal to discrete potential gradients. Axisymmetric transient velocity projection uses the same complementary split;
+ordinary pressure, displacement, and strain outputs may accompany it. Torsional
+projection channels remain unsupported.
+
+For Cartesian frequency-domain jobs, use
+``helmholtz_projection={"s_projection": "solenoidal"}`` for a dedicated S
+projection instead of the default complementary field (raw minus P).
+Axisymmetric simulations and transient jobs reject this mode.
 Both potentials share one auxiliary solve. Do not set the legacy ``part``
 option when retaining ordinary velocity: that option intentionally replaces it
 with the selected part. The undecomposed output is the auxiliary element-local

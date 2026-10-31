@@ -83,6 +83,8 @@ ssh_key = "~/.ssh/id_ed25519"
 solver = "/remote/path/to/solver-installation/FS_seismic"
 # Compatibility policy: "warn" (default), "strict", or "off".
 solver_policy = "warn"
+# Remote paths may be absolute or start with one remote variable such as
+# $WORK or $SCRATCH, resolved once in the login shell.
 work_dir = "/remote/writable/directory/frequensolve"
 # Optional future location for models and other high-I/O data.
 scratch_dir = "/remote/scratch/directory/frequensolve"
@@ -90,6 +92,10 @@ tmp_dir = "/remote/tmp/directory"
 default_partition = "debug"
 account = "allocation"
 transfer_method = "rsync"
+# Stop a transfer after this many seconds without progress, and attempt each
+# upload/download this many times after a stall or SSH connection failure.
+# transfer_stall_timeout = 120
+# transfer_attempts = 3
 modules = []
 launcher_args = []
 verbose = true
@@ -103,7 +109,10 @@ max_nodes = 4
 cores_per_node = 64
 sockets_per_node = 2
 memory_per_node = 262144 # MiB
+# GPU partitions: devices (stacks) per node and one device's memory in MiB.
+# Runs there default to one MPI rank per device.
 gpus_per_node = 0
+gpu_memory_per_gpu = 0
 
 [sites.hpc.environment]
 # Values may reference module-defined variables with simple ${NAME} syntax.
@@ -115,7 +124,7 @@ duration = "00:30:00"
 ranks_per_node = 4
 ranks_per_task = 1
 poll_interval = 10
-scheduler_heartbeat_timeout = 60
+scheduler_heartbeat_timeout = 300
 # Optional full-rank solver MPI check before sizing, using a Slurm step limit.
 # mpi_health_check_timeout = "00:02:00"
 
@@ -127,13 +136,17 @@ username = "your-tacc-username"
 account = "your-tacc-allocation"
 # HPC launches route every solver phase through this executable.
 solver = "/remote/path/to/solver-installation/FS_seismic"
-# work_dir defaults to $WORK/frequensolve. It may point to any writable remote
-# filesystem; TOML does not expand $WORK or $SCRATCH.
-# work_dir = "/another/remote/path/frequensolve"
+# work_dir defaults to $WORK/frequensolve. If the work filesystem is slow,
+# storage = "scratch" moves it, with session, heartbeat, status and curvature
+# files, to $SCRATCH/frequensolve. $SCRATCH is not backed up and is purged:
+# fetch results you need to keep.
+# storage = "scratch"
+# Paths may also start with $WORK or $SCRATCH (resolved on the login node):
+# work_dir = "$SCRATCH/frequensolve"
 # Optional future location for models and other high-I/O data.
-# scratch_dir = "/scratch/your-tacc-username/frequensolve"
-# Remote transfer/provision staging. Use a concrete absolute path.
-# tmp_dir = "/scratch/your-tacc-username/frequensolve/tmp"
+# scratch_dir = "$SCRATCH/frequensolve"
+# Remote transfer/provision staging; defaults to /tmp on the login node.
+# tmp_dir = "$SCRATCH/frequensolve/tmp"
 default_partition = "skx-dev"
 transfer_method = "rsync"
 verbose = true

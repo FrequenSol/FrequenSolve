@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -343,14 +343,82 @@ class TraceManifest:
             if manifest.groups != groups:
                 raise ValueError("Cannot combine trace manifests with different groups")
 
-        entries: Dict[float, tuple[Path, float]] = {}
+        if any(manifest.pack is not None for manifest in manifests) and not all(
+            manifest.pack is not None for manifest in manifests
+        ):
+            raise ValueError("Cannot combine packed traces with legacy trace shards")
+        if any(manifest.wavefield_packs for manifest in manifests):
+            raise ValueError("Combining packed wavefield families is not supported")
+
+        if all(manifest.pack is not None for manifest in manifests):
+            # Packed inputs have one file per segment, not one file per task.
+            # Keep the exact segment/dataset selection through the merge.
+            selected = {}
+            duplicates = []
+            for source_index, manifest in enumerate(manifests):
+                for entry in manifest.pack.entries:
+                    if entry.task not in manifest.frequencies:
+                        continue
+                    key = (entry.frequency.real, entry.frequency.imag)
+                    if key in selected:
+                        duplicates.append(key[0])
+                        if duplicate == "error":
+                            raise ValueError(
+                                f"Duplicate trace frequency: {entry.frequency}"
+                            )
+                        if duplicate == "first":
+                            continue
+                    selected[key] = (source_index, entry)
+            segments = {}
+            merged_entries = []
+            for task, key in enumerate(sorted(selected), 1):
+                source_index, entry = selected[key]
+                product = manifests[source_index].pack
+                if product.family_id != manifests[0].pack.family_id:
+                    raise ValueError("Cannot combine different packed trace families")
+                segment = next(s for s in product.segments if s.id == entry.segment_id)
+                segment_id = f"source{source_index}/{segment.id}"
+                segments[segment_id] = replace(segment, id=segment_id)
+                merged_entries.append(replace(entry, task=task, segment_id=segment_id))
+            first = manifests[0]
+            pack = replace(
+                first.pack,
+                segments=tuple(segments.values()),
+                entries=tuple(merged_entries),
+            )
+            run = first.run
+            if duplicates:
+                run = replace(
+                    run,
+                    state={
+                        **run.state,
+                        "duplicate_frequencies": sorted(set(duplicates)),
+                    },
+                )
+            return replace(
+                first,
+                files=list(dict.fromkeys(s.path for s in segments.values())),
+                frequencies={e.task: e.frequency.real for e in merged_entries},
+                laplace={e.task: e.frequency.imag for e in merged_entries},
+                pack=pack,
+                run=run,
+                artifacts=[a for m in manifests for a in m.artifacts],
+            )
+
+        entries: Dict[tuple[float, float], tuple[Path, float]] = {}
         duplicates = []
         for manifest in manifests:
             ordered = sorted(
                 manifest.frequencies.items(), key=lambda item: int(item[0])
             )
             for (task_index, freq), file in zip(ordered, manifest.files):
-                if freq in entries:
+                laplace = float(
+                    manifest.laplace.get(
+                        task_index, manifest.laplace.get(str(task_index), 0.0)
+                    )
+                )
+                key = (freq, laplace)
+                if key in entries:
                     duplicates.append(freq)
                     if duplicate == "error":
                         raise ValueError(f"Duplicate trace frequency: {freq}")
@@ -361,10 +429,10 @@ class TraceManifest:
                         task_index, manifest.laplace.get(str(task_index), 0.0)
                     )
                 )
-                entries[freq] = (file, laplace)
+                entries[key] = (file, laplace)
 
         frequencies = {
-            index: float(freq) for index, freq in enumerate(sorted(entries), start=1)
+            index: float(freq[0]) for index, freq in enumerate(sorted(entries), start=1)
         }
         files = [entries[freq][0] for freq in sorted(entries)]
         laplace = {

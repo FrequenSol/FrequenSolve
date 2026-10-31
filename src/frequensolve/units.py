@@ -7,6 +7,7 @@ contract form: {"value": ..., "units": "..."}.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Real
 from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
 import numpy as np
@@ -126,6 +127,26 @@ def is_quantity(value: Any) -> bool:
         return False
     pint = _load_pint()
     return isinstance(value, pint.Quantity)
+
+
+def _scalar_in_units(value: Any, units: str, name: str) -> float:
+    """Normalize a finite scalar at an authoring boundary; plain numbers use units."""
+    if isinstance(value, Mapping):
+        if set(value) != {"value", "units"}:
+            raise ValueError(f"{name} requires a value/units mapping")
+        value = Q_(value["value"], value["units"])
+    if is_quantity(value):
+        try:
+            value = value.to(units).magnitude
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must have units compatible with {units}") from exc
+    if (
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, Real)
+        or not np.isfinite(value)
+    ):
+        raise ValueError(f"{name} must be a finite real scalar in {units}")
+    return float(value)
 
 
 def _plain_value(value: Any) -> Any:

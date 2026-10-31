@@ -352,7 +352,10 @@
               "minimum": 1
             },
             "tolerance": {
-              "type": "number",
+              "type": [
+                "number",
+                "null"
+              ],
               "exclusiveMinimum": 0
             },
             "precision": {

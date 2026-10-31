@@ -123,14 +123,15 @@ class SolverConfig(ExtraFieldsMixin):
         solve_on: Whether to solve only on the final adaptive mesh or on all
             adaptive steps.
         max_iter: Maximum Krylov/nonlinear iterations.
-        tolerance: Solver convergence tolerance.
+        tolerance: Solver convergence tolerance. None uses the backend default
+            (1e-3 for transient solves, 1e-4 for frequency-domain solves).
         precision: Floating-point precision used by the solver executable.
         **kwargs: Additional solver-facing configuration fields.
     """
 
     solve_on: Literal["final", "all"] = "final"
     max_iter: int = 300
-    tolerance: float = 1.0e-4
+    tolerance: Optional[float] = None
     precision: Literal["single", "double"] = "single"
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -138,7 +139,7 @@ class SolverConfig(ExtraFieldsMixin):
         self,
         solve_on: Literal["final", "all"] = "final",
         max_iter: int = 300,
-        tolerance: float = 1.0e-4,
+        tolerance: Optional[float] = None,
         precision: Literal["single", "double"] = "single",
         **kwargs: Any,
     ) -> None:
@@ -167,7 +168,7 @@ class SolverConfig(ExtraFieldsMixin):
         obj = cls(
             solve_on=payload.pop("solve_on", "final"),
             max_iter=payload.pop("max_iter", 300),
-            tolerance=payload.pop("tolerance", 1.0e-4),
+            tolerance=payload.pop("tolerance", None),
             precision=payload.pop("precision", "single"),
         )
         obj._init_extra(payload)
@@ -202,9 +203,10 @@ class SolverConfig(ExtraFieldsMixin):
         payload = {
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
-            "tolerance": self.tolerance,
             "precision": self.precision,
         }
+        if self.tolerance is not None:
+            payload["tolerance"] = self.tolerance
         return merge_extra(
             payload,
             _serialize_solver_extra(self.extra, ctx),

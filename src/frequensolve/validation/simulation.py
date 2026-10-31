@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import glob
+import re
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -43,13 +45,24 @@ from .geometry import (
 from .outputs import _validate_field
 from .report import ValidationReport
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
+_SOURCE_KINDS = {
+    "scalar",
+    "vector",
+    "tensor",
+    "monopole",
+    "dipole",
+    "volume_injection",
+    "pressure_monopole",
+    "isotropic_moment",
+}
+_PROPERTY_SPACE_SCHEMA = "fs-property-space-3"
 
 
 def _validate_simulation(ctx: _ValidationContext) -> None:
     simulation = ctx.simulation
     _validate_simulation_identity(simulation, ctx.report)
-    _validate_formulation(simulation, ctx.report)
+    _validate_formulation(simulation, ctx.report, workflow=ctx.workflow)
+    _validate_helmholtz_projection(simulation, ctx.report)
     _validate_coordinate_systems(ctx)
     _validate_unit_config(getattr(simulation, "units", None), ctx.report)
     _validate_model(getattr(simulation, "model", None), ctx)
@@ -90,7 +103,9 @@ def _validate_simulation_identity(simulation: Any, report: ValidationReport) -> 
             )
 
 
-def _validate_formulation(simulation: Any, report: ValidationReport) -> None:
+def _validate_formulation(
+    simulation: Any, report: ValidationReport, *, workflow=None
+) -> None:
     discretization = getattr(simulation, "discretization", None)
     settings = getattr(discretization, "extra", {}) or {}
     method = str(settings.get("method", "DPG")).strip().lower()
@@ -98,17 +113,42 @@ def _validate_formulation(simulation: Any, report: ValidationReport) -> None:
         return
 
     physics = str(getattr(simulation, "physics", ""))
-    if physics not in {"acoustic", "acoustic_axisym", "elastic"}:
+    supported = {
+        "acoustic",
+        "acoustic_axisym",
+        "elastic",
+        "elastic_axisym",
+        "coupled",
+        "coupled_axisym",
+    }
+    if physics not in supported:
         report.error(
             "discretization.method.incompatible",
             f"Galerkin discretization is not supported by physics {physics!r}.",
             path="discretization.method",
-            hint="Use acoustic, acoustic_axisym, or elastic physics.",
+            hint="Use acoustic, elastic, coupled, or their axisymmetric variants.",
         )
 
     # The backend selects MUMPS and a single grid for frequency-domain
     # Galerkin, unless its explicit galerkin_multigrid option is enabled.
     # Authoring a Galerkin job therefore needs no grid-count override.
+
+
+def _validate_helmholtz_projection(simulation: Any, report: ValidationReport) -> None:
+    """Reject Cartesian stream-potential projection for cylindrical physics."""
+    physics = str(getattr(simulation, "physics", ""))
+    axisymmetric = getattr(simulation, "axisymmetric", False) or "axisym" in physics
+    projection = (getattr(simulation, "extra", {}) or {}).get(
+        "helmholtz_projection", {}
+    )
+    if not axisymmetric or not isinstance(projection, Mapping):
+        return
+    if str(projection.get("s_projection", "complement")).lower() != "complement":
+        report.error(
+            "helmholtz.axisymmetric.s_projection.unsupported",
+            "Axisymmetric Helmholtz decomposition requires s_projection='complement'.",
+            path="helmholtz_projection.s_projection",
+        )
 
 
 def _validate_model(model: Any, ctx: _ValidationContext) -> None:
@@ -129,6 +169,31 @@ def _validate_model(model: Any, ctx: _ValidationContext) -> None:
             path="model.dimension",
         )
 
+    for index, surface in enumerate(getattr(model, "surfaces", []) or []):
+        if not getattr(surface, "is_reduced", False):
+            continue
+        path = f"model.surfaces[{index}].fracture_model"
+        if ctx.workflow not in {None, "mesh", "transient"}:
+            ctx.report.error(
+                "model.fracture.solve.unsupported",
+                "Reduced fracture seismic solves require the transient workflow.",
+                path=path,
+            )
+
+    attenuation = getattr(model, "attenuation_model", None)
+    if (
+        isinstance(attenuation, str)
+        and attenuation.strip().casefold() == "gsls"
+        and ctx.workflow not in {None, "mesh", "transient"}
+    ):
+        ctx.report.error(
+            "model.attenuation.gsls.unsupported",
+            "gsls attenuation is transient-only; use kjartansson for "
+            "frequency-domain workflows.",
+            path="model.attenuation_model",
+            hint="Use TransientJob for gsls, or set attenuation_model='kjartansson'.",
+        )
+
     seen_ids: set[int] = set()
     for index, subdomain in enumerate(getattr(model, "subdomains", []) or []):
         sub_path = f"model.subdomains[{index}]"
@@ -142,6 +207,53 @@ def _validate_model(model: Any, ctx: _ValidationContext) -> None:
                 )
             seen_ids.add(mesh_block_id)
         _validate_property_map(getattr(subdomain, "properties", {}), sub_path, ctx)
+    _validate_property_space_artifacts(model, ctx)
+
+
+def _validate_property_space_artifacts(model: Any, ctx: _ValidationContext) -> None:
+    """Reject existing artifacts that Sauce cannot stage, before queue wait."""
+
+    for name, space in (getattr(model, "property_spaces", None) or {}).items():
+        declared = _resolve_project_file(getattr(space, "artifact", None), ctx)
+        if declared is None:
+            continue
+        # Sauce reuses the declared file; otherwise a job-sized generated mesh
+        # selects the mesh-keyed sibling <stem>.<16 hex digits>.h5.
+        if declared.is_file():
+            candidates = [declared]
+        else:
+            keyed = re.compile(rf"{re.escape(declared.stem)}\.[0-9a-f]{{16}}\.h5")
+            try:
+                siblings = declared.parent.glob(f"{glob.escape(declared.stem)}.*.h5")
+                candidates = sorted(p for p in siblings if keyed.fullmatch(p.name))
+            except OSError:
+                candidates = []
+        for file in candidates:
+            schema = _property_space_schema(file)
+            if schema == _PROPERTY_SPACE_SCHEMA:
+                continue
+            found = "no readable schema" if schema is None else f"schema {schema!r}"
+            ctx.report.error(
+                "model.property_space.artifact.unsupported",
+                f"Property space {name!r} artifact {file} has {found}; solver jobs "
+                f"stage only {_PROPERTY_SPACE_SCHEMA} artifacts.",
+                path=f"model.property_spaces.{name}.artifact",
+                hint="Move the artifact aside so the job regenerates the space. "
+                "The regenerated basis has a new identity, so control states "
+                "saved for the old basis no longer match it. PropertyMesh.read "
+                "still reads fs-property-space-1 offline.",
+            )
+
+
+def _property_space_schema(file: Path) -> Optional[str]:
+    try:
+        with h5py.File(file, "r") as h5:
+            value = h5["property_space/schema"][()]
+    except (OSError, KeyError):
+        return None
+    if isinstance(value, bytes):
+        value = value.decode(errors="replace")
+    return str(value).rstrip(" \0")
 
 
 def _validate_property_map(
@@ -1026,10 +1138,17 @@ def _validate_source_kind(
     kind: Any, path: str, report: ValidationReport, *, physics: Any
 ) -> None:
     value = str(kind).strip().lower()
-    if value == "volume_injection" and physics != "acoustic":
+    if value in {"volume_injection", "pressure_monopole"} and physics not in {
+        "acoustic",
+        "coupled",
+        "coupled2",
+        "coupled_aep",
+        "acoustic_axisym",
+        "coupled_axisym",
+    }:
         report.error(
             "acquisition.source.kind.unsupported",
-            "volume_injection requires acoustic physics.",
+            f"{value} requires acoustic or coupled physics.",
             path=path,
         )
         return

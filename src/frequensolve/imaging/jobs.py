@@ -21,6 +21,7 @@ Task-suffixed outputs follow Sauce's ``<stem>_<task><ext>`` rule.
 from __future__ import annotations
 
 import copy
+import functools
 import inspect
 import json
 import math
@@ -51,6 +52,7 @@ from frequensolve.imaging._artifacts import (
     ControlVectorFile,
     ImageSet,
     SmoothingConfig,
+    _fractional_scales,
     control_smoothing,
     qualified_block_name,
     unqualified_block_name,
@@ -59,6 +61,7 @@ from frequensolve.simulation.jobs.artifacts import TraceOutputSpec
 from frequensolve.simulation.jobs.base import BaseJob
 from frequensolve.simulation.outputs import JobOutputs, Output
 from frequensolve.simulation.simulation import BaseSimulation
+from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.class_registry import register_class
 from frequensolve.util.mixins import ExportContext
 
@@ -93,10 +96,12 @@ _STATE_ACTIONS = frozenset({"linearize", "jvp", "vjp", "normal", "solve"})
 _SOURCE_CONTROL_ACTIONS = frozenset({"linearize", "jvp", "vjp", "normal"})
 _KERNEL_RESIDUALS_FWI = ("derivative", "window")
 _KERNEL_RESIDUALS_CONTROL = ("derivative", "window", "jet")
+# Cartesian image kernels also accept the frozen base-data dual of the physical kernel.
+_KERNEL_RESIDUALS_IMAGE = ("base", "derivative", "window", "jet")
 _REFLECTIVITY_PARAMETERIZATIONS = ("vp_ip", "vp_vs_ip", "ip_is_rho")
 _FIELD_RETENTION = ("none", "forward", "adjoint", "all")
 _IMAGE_WORKFLOWS = ("rtm", "born", "lsrtm_gradient")
-_CONTROL_KINDS = ("rtm", "born")
+_CONTROL_KINDS = ("rtm", "born", "lsrtm_gradient")
 _DEFAULT_MISFIT: Dict[str, Any] = {"objective": {"kind": "l2"}}
 
 
@@ -196,6 +201,30 @@ def _task_path(path: Path, task: Optional[int]) -> Path:
     if int(task) < 1:
         raise ValueError("task numbers are one-based and positive")
     return path.with_name(f"{path.stem}_{int(task)}{path.suffix}")
+
+
+def _paths(
+    values: Iterable[Union[str, Path]], resolve: Callable[[Any], Optional[Path]]
+) -> List[Path]:
+    """Resolve every entry of a path list; entries are never null."""
+
+    paths = [resolve(value) for value in values]
+    if any(path is None for path in paths):
+        raise ValueError("path lists cannot contain null entries")
+    return [Path(path) for path in paths if path is not None]
+
+
+def _resolve_regularization(
+    request: Mapping[str, Any], resolve: Callable[[Any], Optional[Path]]
+) -> Dict[str, Any]:
+    """Resolve the paths of a serialized native regularization request."""
+
+    resolved = dict(request)
+    for key in ("context", "result"):
+        resolved[key] = _paths([resolved[key]], resolve)[0]
+    for key in ("inputs", "outputs"):
+        resolved[key] = _paths(resolved[key], resolve)
+    return resolved
 
 
 def _raw_path(path: Path) -> Path:
@@ -682,21 +711,34 @@ class _ImagingJobBase(BaseJob):
 
 
 def _validate_receiver_diagonal(value: Mapping[str, Any]) -> Dict[str, Any]:
-    """Validate shared probes; an omitted count uses min(16, source RHS)."""
+    """Validate probe count, seed and optional stratified shot sample count."""
     if not isinstance(value, Mapping):
         raise TypeError("receiver_diagonal must be a mapping")
-    unknown = set(value) - {"probes", "seed", "output"}
+    unknown = set(value) - {"probes", "seed", "output", "source_samples", "blocks"}
     if unknown:
         raise ValueError(f"unsupported receiver_diagonal options: {sorted(unknown)}")
     payload = dict(value)
-    for key in ("probes", "seed"):
+    if "blocks" in payload:
+        blocks = payload["blocks"]
+        if not isinstance(blocks, Mapping) or set(blocks) - {"controls", "output"}:
+            raise ValueError("receiver blocks require controls and an optional output")
+        names = blocks.get("controls")
+        if not isinstance(names, (list, tuple)) or len(names) < 2:
+            raise ValueError("receiver blocks require at least two controls")
+        if any(not isinstance(n, str) or not n.strip() for n in names):
+            raise ValueError("receiver block controls must be nonempty names")
+        names = [n.removeprefix("model.") for n in names]
+        if len(set(names)) != len(names):
+            raise ValueError("receiver block controls must be distinct")
+        payload["blocks"] = {**blocks, "controls": names}
+    for key in ("probes", "seed", "source_samples"):
         if key not in payload:
             continue
         number = payload[key]
         if isinstance(number, bool) or not isinstance(number, (int, np.integer)):
             raise ValueError(f"receiver_diagonal {key} must be an integer")
-        if key == "probes" and number <= 0:
-            raise ValueError("receiver_diagonal probes must be positive")
+        if key in {"probes", "source_samples"} and number <= 0:
+            raise ValueError(f"receiver_diagonal {key} must be positive")
         if not -(2**31) <= number < 2**31:
             raise ValueError(
                 f"receiver_diagonal {key} exceeds the native integer range"
@@ -1037,10 +1079,12 @@ def _validate_extension(
     return payload
 
 
-def _validate_reflectivity(value: Mapping[str, Any]) -> Dict[str, Any]:
+def _validate_reflectivity(
+    value: Mapping[str, Any], result_dir: Path
+) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError("reflectivity must be a mapping")
-    allowed = {"parameterization", "workspace_mb", "fields"}
+    allowed = {"parameterization", "workspace_mb", "fields", "solver"}
     unknown = sorted(set(value).difference(allowed))
     if unknown:
         raise ValueError(f"unsupported reflectivity option(s): {', '.join(unknown)}")
@@ -1100,6 +1144,17 @@ def _validate_reflectivity(value: Mapping[str, Any]) -> Dict[str, Any]:
     }
     if "workspace_mb" in value:
         warnings.warn(WORKSPACE_DEPRECATION, DeprecationWarning, stacklevel=3)
+    if "solver" in value:
+        from .rwi import _solver_options
+
+        payload["solver"] = _solver_options(value["solver"])
+        for key, suffix in (("solution", ".h5"), ("report", ".json")):
+            output = _output_path(payload["solver"][key], result_dir)
+            if output is None or output.suffix != suffix:
+                raise ValueError(
+                    f"reflectivity solver {key} must have {suffix} extension"
+                )
+            payload["solver"][key] = output
     return payload
 
 
@@ -1148,13 +1203,26 @@ class FWIOperatorJob(_ImagingJobBase):
             ``source.<i>.<quantity>``, ``reflectivity.<name>``; bare material
             IDs are qualified as ``model.<id>``). Required (may be empty) for
             state actions; must be ``None`` for ``calibrate`` and ``wri``.
-        state: ``fs-objective-linearization-4`` stem: an output for
-            ``linearize`` (result-relative), an input otherwise.
+        state: ``fs-objective-linearization-5`` stem: an output for
+            ``linearize`` and reflectivity ``solve`` (result-relative), an input otherwise.
+        background: Optional native background checkpoint manifest; output
+            for linearize, input for ordinary material JVP/VJP/normal.
+        background_layout: Files of a linearize ``background`` capture,
+            ``"rank"`` (one HDF5 file per MPI rank) or ``"shared"`` (one file
+            per task); ``None`` keeps Sauce's default (``"rank"``).
         covector: ``fs-control-vector-1`` output stem (``model_covector`` for
             ``wri``).
         direction: ``fs-control-vector-1`` input (``model_direction`` for
             ``wri``).
-        objective_vector: ``fs-objective-vector-4`` output (``jvp``) or input
+        directions: Several ``fs-control-vector-1`` inputs of one material
+            ``normal``; each task applies all of them after one background
+            solve (or restore) per source batch.
+        covectors: One ``fs-control-vector-1`` output stem per entry of
+            ``directions``.
+        regularization: Native ``control_sensitivities.Regularization``
+            request with ``inputs``/``outputs`` lists that a ``normal`` job's
+            postprocess applies after its tasks (requires ``control_active``).
+        objective_vector: ``fs-objective-vector-5`` output (``jvp``) or input
             (``vjp``, optional ``solve`` target).
         objective: Optional scalar objective report output.
         control_state: ``fs-control-state-1`` baseline input.
@@ -1210,8 +1278,13 @@ class FWIOperatorJob(_ImagingJobBase):
         field_retention: Optional[str] = None,
         field_reuse: Optional[str] = None,
         state: Optional[Union[str, Path]] = None,
+        background: Optional[Union[str, Path]] = None,
+        background_layout: Optional[str] = None,
         covector: Optional[Union[str, Path]] = None,
         direction: Optional[Union[str, Path]] = None,
+        directions: Optional[Sequence[Union[str, Path]]] = None,
+        covectors: Optional[Sequence[Union[str, Path]]] = None,
+        regularization: Optional[Mapping[str, Any]] = None,
         objective_vector: Optional[Union[str, Path]] = None,
         objective: Optional[Union[str, Path]] = None,
         control_state: Optional[Union[str, Path]] = None,
@@ -1276,7 +1349,19 @@ class FWIOperatorJob(_ImagingJobBase):
         self.source_derivative = source_derivative
         self.field_retention = field_retention
         self.field_reuse = field_reuse
-        state_is_output = action == "linearize"
+        state_is_output = action == "linearize" or (
+            action == "solve" and reflectivity is not None
+        )
+        self.background = (
+            _output_path(background, result_dir)
+            if state_is_output
+            else _input_path(background, simulation)
+        )
+        if background_layout not in (None, "rank", "shared"):
+            raise ValueError(
+                f"background_layout must be 'rank' or 'shared', not {background_layout!r}"
+            )
+        self.background_layout = background_layout
         self.state = (
             _output_path(state, result_dir)
             if state_is_output
@@ -1284,6 +1369,19 @@ class FWIOperatorJob(_ImagingJobBase):
         )
         self.covector = _output_path(covector, result_dir)
         self.direction = _input_path(direction, simulation)
+        input_path = functools.partial(_input_path, simulation=simulation)
+        output_path = functools.partial(_output_path, result_dir=result_dir)
+        self.directions = None if directions is None else _paths(directions, input_path)
+        self.covectors = None if covectors is None else _paths(covectors, output_path)
+        self.regularization: Optional[Dict[str, Any]] = None
+        if regularization is not None:
+            request = dict(regularization)
+            request.setdefault("result", "regularization_result.json")
+            request["context"] = _paths([request["context"]], input_path)[0]
+            request["result"] = _paths([request["result"]], output_path)[0]
+            request["inputs"] = _paths(request["inputs"], input_path)
+            request["outputs"] = _paths(request["outputs"], output_path)
+            self.regularization = request
         self.objective_vector = (
             _output_path(objective_vector, result_dir)
             if action == "jvp"
@@ -1381,13 +1479,22 @@ class FWIOperatorJob(_ImagingJobBase):
             self.receiver_diagonal["output"] = _output_path(
                 self.receiver_diagonal.get("output", "receiver_diagonal.h5"), result_dir
             )
+            if "blocks" in self.receiver_diagonal:
+                blocks = self.receiver_diagonal["blocks"]
+                blocks["output"] = _output_path(
+                    blocks.get("output", "receiver_blocks.h5"), result_dir
+                )
+                if Path(blocks["output"]).suffix != ".h5":
+                    raise ValueError("receiver blocks output must have .h5 extension")
         self.extension = (
             None
             if extension is None
             else _validate_extension(extension, simulation, result_dir)
         )
         self.reflectivity = (
-            None if reflectivity is None else _validate_reflectivity(reflectivity)
+            None
+            if reflectivity is None
+            else _validate_reflectivity(reflectivity, result_dir)
         )
         self.reduced_normal = (
             None if reduced_normal is None else _validate_reduced_normal(reduced_normal)
@@ -1439,6 +1546,39 @@ class FWIOperatorJob(_ImagingJobBase):
 
     def _validate(self) -> None:
         action = self.action
+        if self.directions is not None or self.covectors is not None:
+            self._validate_directions()
+        if self.regularization is not None:
+            request = self.regularization
+            if action != "normal" or self.control_active is None:
+                raise ValueError(
+                    "job regularization requires a normal with control_active"
+                )
+            if (
+                request.get("operation") in {"prepare", "proximal"}
+                or not request["inputs"]
+                or len(request["inputs"]) != len(request["outputs"])
+            ):
+                raise ValueError(
+                    "job regularization needs a prepared operation and one output per input"
+                )
+        if self.background is not None:
+            if (
+                action not in {"linearize", "jvp", "vjp", "normal"}
+                or self.extension is not None
+                or self.kernel_derivative is not None
+            ):
+                raise ValueError(
+                    "background reuse requires ordinary material linearize/JVP/VJP/normal"
+                )
+            if self.source_controls is not None or self.reflectivity is not None:
+                raise ValueError(
+                    "background reuse currently requires material-only controls"
+                )
+        if self.background_layout is not None and (
+            action != "linearize" or self.background is None
+        ):
+            raise ValueError("background_layout requires a linearize background")
         if action in _RECEIVER_ACTIONS:
             self._validate_receiver()
             return
@@ -1511,6 +1651,13 @@ class FWIOperatorJob(_ImagingJobBase):
                 raise ValueError("receiver_diagonal requires material linearize")
             if self.gram_derivative == "total":
                 raise ValueError("receiver_diagonal requires frozen Gram derivatives")
+            if (
+                "blocks" in self.receiver_diagonal
+                and self.kernel_derivative is not None
+            ):
+                raise ValueError(
+                    "receiver blocks currently support waveform and phase-derivative comparisons"
+                )
         for path in (
             (
                 None
@@ -1551,10 +1698,17 @@ class FWIOperatorJob(_ImagingJobBase):
                 "extension jobs cannot carry control_sensitivities "
                 "(smoothing, weights, control_active, gram_derivative)"
             )
-        if self.reflectivity is not None and action not in _STATE_ACTIONS - {"solve"}:
+        if self.reflectivity is not None and action not in _STATE_ACTIONS:
             raise ValueError(
-                "reflectivity supports linearize, jvp, vjp and normal only"
+                "reflectivity supports linearize, jvp, vjp, normal and solve only"
             )
+
+        if (
+            self.reflectivity is not None
+            and self.reflectivity.get("solver") is not None
+            and action != "solve"
+        ):
+            raise ValueError("reflectivity.solver requires action = solve")
 
         if action in _STATE_ACTIONS:
             if self.active is None:
@@ -1675,10 +1829,29 @@ class FWIOperatorJob(_ImagingJobBase):
                         "extension normal uses extension.direction/covector"
                     )
             else:
-                if self.direction is None or self.covector is None:
+                if (
+                    self.direction is None or self.covector is None
+                ) and self.directions is None:
                     raise ValueError("normal requires direction and covector")
                 if not self.active:
                     raise ValueError("normal requires a nonempty active subspace")
+        elif action == "solve" and self.reflectivity is not None:
+            if self.reflectivity.get("solver") is None:
+                raise ValueError("reflectivity solve requires reflectivity.solver")
+            if self.reflectivity["parameterization"] != "vp_ip":
+                raise ValueError("RWI currently supports acoustic vp_ip reflectivity")
+            if self.covector is None or not self.active:
+                raise ValueError("RWI requires active controls and a covector output")
+            if self.direction is not None or self.objective_vector is not None:
+                raise ValueError("RWI fits observed data without an external direction")
+            if (
+                self.reduced_normal is not None
+                or self.source_controls is not None
+                or self.model_gradient
+            ):
+                raise ValueError(
+                    "RWI requires fixed sources and has no reduced normal or model_gradient flag"
+                )
         elif action == "solve":
             if not has_extension:
                 raise ValueError("solve requires an extension")
@@ -1739,6 +1912,32 @@ class FWIOperatorJob(_ImagingJobBase):
             and self.covector is None
         ):
             raise ValueError("weights require a smoothed covector postprocess")
+
+    def _validate_directions(self) -> None:
+        """Check one covector output per direction of a multi-direction normal."""
+
+        if self.action != "normal" or self.extension is not None:
+            raise ValueError("directions and covectors require a material normal")
+        if self.direction is not None or self.covector is not None:
+            raise ValueError(
+                "normal takes direction/covector or directions/covectors, not both"
+            )
+        if (
+            not self.directions
+            or self.covectors is None
+            or len(self.covectors) != len(self.directions)
+        ):
+            raise ValueError("normal needs one covector output per direction")
+        if len(set(self.covectors)) != len(self.covectors):
+            raise ValueError("normal covector outputs must be distinct")
+        if (
+            self.source_controls is not None
+            or self.reflectivity is not None
+            or self.kernel_derivative is not None
+        ):
+            raise ValueError(
+                "several normal directions require material-only ordinary or phase normals"
+            )
 
     def _validate_receiver(self) -> None:
         """Validate the raw receiver actions independently of objective states."""
@@ -1860,9 +2059,28 @@ class FWIOperatorJob(_ImagingJobBase):
             raise ValueError("this job has no objective state path")
         return _task_path(self.state, task)
 
-    def covector_file(self, task: Optional[int] = None, *, raw: bool = False) -> Path:
-        """Return the covector stem, one task part, or the raw smoothing aggregate."""
+    def background_file(self, task: Optional[int] = None) -> Path:
+        """Return the immutable background manifest stem or one task's manifest."""
+        if self.background is None:
+            raise ValueError("this job has no background checkpoint path")
+        return _task_path(self.background, task)
 
+    def covector_file(
+        self,
+        task: Optional[int] = None,
+        *,
+        raw: bool = False,
+        output: Optional[int] = None,
+    ) -> Path:
+        """Return the covector stem, one task part, or the raw smoothing aggregate.
+
+        ``output`` selects the covector of one entry of ``directions``.
+        """
+
+        if output is not None:
+            if self.covectors is None:
+                raise ValueError("this job has no per-direction covector outputs")
+            return _task_path(self.covectors[output], task)
         if self.covector is None:
             raise ValueError("this job has no covector output")
         if raw:
@@ -1881,6 +2099,13 @@ class FWIOperatorJob(_ImagingJobBase):
         if path is None:
             raise ValueError("this job has no curvature diagonal output")
         return _task_path(path, task)
+
+    def receiver_blocks_file(self, task: Optional[int] = None) -> Path:
+        """Return one task's collocated receiver-probe curvature blocks."""
+        blocks = (self.receiver_diagonal or {}).get("blocks")
+        if blocks is None:
+            raise ValueError("this job has no receiver-block output")
+        return _task_path(blocks["output"], task)
 
     def wri_reduction_weights(self, weights: Any = None) -> np.ndarray:
         """Combine task-normalized WRI products using one full-survey energy."""
@@ -1971,13 +2196,15 @@ class FWIOperatorJob(_ImagingJobBase):
     @property
     def frequency_groups(self) -> int:
         """Number of retained frequency workers participating in one shared fit."""
-        weights = (self.extension or {}).get("solver", {}).get("frequency_weights")
+        weights = (
+            (self.extension or self.reflectivity or {})
+            .get("solver", {})
+            .get("frequency_weights")
+        )
         if weights is None:
             return 1
         if self.action != "solve" or len(weights) != self.n_tasks:
-            raise ValueError(
-                "shared extension weights must match every solve frequency"
-            )
+            raise ValueError("shared solve weights must match every frequency")
         return self.n_tasks
 
     def objective_value(self) -> float:
@@ -2073,6 +2300,18 @@ class FWIOperatorJob(_ImagingJobBase):
             raise ValueError(f"this job has no extension.{'.'.join(keys)} path")
         return Path(value)
 
+    def reflectivity_solution_file(self, task: Optional[int] = None) -> Path:
+        """Return the complete fitted control state for one RWI task."""
+        if self.reflectivity is None or "solver" not in self.reflectivity:
+            raise ValueError("this job has no reflectivity solver")
+        return _task_path(Path(self.reflectivity["solver"]["solution"]), task)
+
+    def reflectivity_report_file(self, task: Optional[int] = None) -> Path:
+        """Return the stationarity report for one RWI task."""
+        if self.reflectivity is None or "solver" not in self.reflectivity:
+            raise ValueError("this job has no reflectivity solver")
+        return _task_path(Path(self.reflectivity["solver"]["report"]), task)
+
     def extension_solution_file(self, task: Optional[int] = None) -> Path:
         """Return the solved-taps stem or one task's ``fs-extension-vector-1``."""
 
@@ -2096,30 +2335,47 @@ class FWIOperatorJob(_ImagingJobBase):
     # -- postprocess ----------------------------------------------------------
 
     def requires_postprocess(self) -> bool:
-        """Return whether the covector parts are smoothed after the tasks."""
+        """Return whether covectors are smoothed, or a regularization applied, after the tasks."""
 
-        return self.smoothing is not None
+        return self.smoothing is not None or self.regularization is not None
 
     def postprocess_file(self, part: Optional[int] = None) -> Path:
-        """Return the aggregate or one task-local covector path."""
+        """Return the aggregate or one task-local covector path.
 
+        A regularization postprocess publishes its result report; its task
+        parts are the (first) covector parts it follows.
+        """
+
+        if self.regularization is not None:
+            if part is None:
+                return Path(self.regularization["result"])
+            return self.covector_file(
+                part, output=None if self.covectors is None else 0
+            )
         return self.covector_file(part)
 
     def postprocess_fetch_files(self) -> List[Path]:
         """Return both the exact aggregate covector and the smoothed result."""
 
+        if self.regularization is not None:
+            return [
+                *map(Path, self.regularization["outputs"]),
+                Path(self.regularization["result"]),
+            ]
         return [self.covector_file(raw=True), self.covector_file()]
 
     def postprocess_output_exists(self) -> bool:
         """Return whether the smoothed covector exists locally."""
 
+        if self.regularization is not None:
+            return all(path.is_file() for path in self.postprocess_fetch_files())
         return self.covector_file().is_file()
 
     def postprocess_part_outputs_exist(self) -> bool:
         """Return whether every task covector part exists locally."""
 
         return all(
-            self.covector_file(part).is_file() for part in range(1, self.n_tasks + 1)
+            self.postprocess_file(part).is_file() for part in range(1, self.n_tasks + 1)
         )
 
     def is_run_current(self) -> bool:
@@ -2157,6 +2413,10 @@ class FWIOperatorJob(_ImagingJobBase):
             payload["Image"] = copy.deepcopy(imaging)
 
         op: Dict[str, Any] = {"action": self.action}
+        if self.background is not None:
+            op["background"] = _job_path(self.background, ctx, False)
+        if self.background_layout is not None:
+            op["background_layout"] = self.background_layout
         if self.action in _STATE_ACTIONS | _RECEIVER_ACTIONS:
             if self.action in _STATE_ACTIONS:
                 op["state"] = _job_path(self.state, ctx, False)
@@ -2212,6 +2472,10 @@ class FWIOperatorJob(_ImagingJobBase):
                 op["direction"] = _job_path(self.direction, ctx, False)
             if self.covector is not None:
                 op["covector"] = _job_path(self.covector, ctx, False)
+            if self.directions is not None:
+                op["directions"] = [_job_path(p, ctx, False) for p in self.directions]
+            if self.covectors is not None:
+                op["covectors"] = [_job_path(p, ctx, False) for p in self.covectors]
             if self.objective_vector is not None:
                 op["objective_vector"] = _job_path(self.objective_vector, ctx, False)
         if self.objective is not None:
@@ -2223,6 +2487,10 @@ class FWIOperatorJob(_ImagingJobBase):
             op["receiver_diagonal"]["output"] = _job_path(
                 self.receiver_diagonal["output"], ctx, False
             )
+            if "blocks" in self.receiver_diagonal:
+                blocks = dict(self.receiver_diagonal["blocks"])
+                blocks["output"] = _job_path(blocks["output"], ctx, False)
+                op["receiver_diagonal"]["blocks"] = blocks
         if self.model_gradient:
             op["model_gradient"] = True
         if not self.cache_receiver_state:
@@ -2233,6 +2501,11 @@ class FWIOperatorJob(_ImagingJobBase):
             op["extension"] = self._extension_to_fs(ctx)
         if self.reflectivity is not None:
             op["reflectivity"] = copy.deepcopy(self.reflectivity)
+            if "solver" in op["reflectivity"]:
+                for key in ("solution", "report"):
+                    op["reflectivity"]["solver"][key] = _job_path(
+                        self.reflectivity["solver"][key], ctx, False
+                    )
         if self.reduced_normal is not None:
             op["reduced_normal"] = dict(self.reduced_normal)
         payload["fwi_operator"] = op
@@ -2252,6 +2525,13 @@ class FWIOperatorJob(_ImagingJobBase):
                 sensitivities["Smoothing"] = self.smoothing.to_control_fs()
             if self.weights is not None:
                 sensitivities["weights"] = list(self.weights)
+            if self.regularization is not None:
+                request = dict(self.regularization)
+                for key in ("context", "result"):
+                    request[key] = _job_path(request[key], ctx, False)
+                for key in ("inputs", "outputs"):
+                    request[key] = [_job_path(p, ctx, False) for p in request[key]]
+                sensitivities["Regularization"] = request
             sensitivities["quadrature"] = self.sensitivity_quadrature
             payload["control_sensitivities"] = sensitivities
         return payload
@@ -2277,6 +2557,8 @@ class FWIOperatorJob(_ImagingJobBase):
         inputs: Dict[str, Any] = _kernel_window_fingerprint(
             self.kernel_derivative, self.project_path
         )
+        if self.background is not None and self.action != "linearize":
+            inputs["background"] = self._resolved_input_fingerprint(self.background)
         if self.receiver_state is not None and self.action != "receiver_linearize":
             inputs["receiver_state"] = self._resolved_input_fingerprint(
                 self.receiver_state
@@ -2287,6 +2569,18 @@ class FWIOperatorJob(_ImagingJobBase):
             )
         if self.direction is not None:
             inputs["direction"] = self._resolved_input_fingerprint(self.direction)
+        if self.directions is not None:
+            inputs["directions"] = [
+                self._resolved_input_fingerprint(path) for path in self.directions
+            ]
+        if self.regularization is not None:
+            inputs["regularization"] = [
+                self._path_content_fingerprint(path)
+                for path in (
+                    self.regularization["context"],
+                    *self.regularization["inputs"],
+                )
+            ]
         if self.objective_vector is not None and self.action != "jvp":
             inputs["objective_vector"] = self._task_input_fingerprints(
                 self.objective_vector
@@ -2397,6 +2691,10 @@ class FWIOperatorJob(_ImagingJobBase):
                 offsets = field.get("offsets")
                 if offsets and offsets.get("artifact") is not None:
                     offsets["artifact"] = resolve(offsets["artifact"])
+        reflectivity = copy.deepcopy(op.get("reflectivity"))
+        if reflectivity is not None and "solver" in reflectivity:
+            for key in ("solution", "report"):
+                reflectivity["solver"][key] = resolve(reflectivity["solver"][key])
         job = cls(
             data["name"],
             simulation,
@@ -2408,6 +2706,12 @@ class FWIOperatorJob(_ImagingJobBase):
             source_derivative=op.get("source_derivative"),
             field_retention=op.get("field_retention"),
             field_reuse=op.get("field_reuse"),
+            background=(
+                op.get("background")
+                if op.get("action") == "linearize"
+                else resolve(op.get("background"))
+            ),
+            background_layout=op.get("background_layout"),
             active=controls.get("active") if "controls" in op else None,
             state=resolve(op.get("state")),
             covector=resolve(
@@ -2415,6 +2719,21 @@ class FWIOperatorJob(_ImagingJobBase):
             ),
             direction=resolve(
                 op.get("model_direction") if action == "wri" else op.get("direction")
+            ),
+            directions=(
+                None
+                if op.get("directions") is None
+                else _paths(op["directions"], resolve)
+            ),
+            covectors=(
+                None
+                if op.get("covectors") is None
+                else _paths(op["covectors"], resolve)
+            ),
+            regularization=(
+                _resolve_regularization(sensitivities["Regularization"], resolve)
+                if action == "normal" and "Regularization" in sensitivities
+                else None
             ),
             objective_vector=resolve(op.get("objective_vector")),
             objective=resolve(op.get("objective")),
@@ -2432,7 +2751,7 @@ class FWIOperatorJob(_ImagingJobBase):
             wri=op.get("wri"),
             receiver_diagonal=op.get("receiver_diagonal"),
             extension=extension,
-            reflectivity=op.get("reflectivity"),
+            reflectivity=reflectivity,
             reduced_normal=op.get("reduced_normal"),
             misfit=imaging.get("misfit"),
             kernel_derivative=_map_kernel_window(
@@ -2459,19 +2778,23 @@ class FWIOperatorJob(_ImagingJobBase):
 
 @register_class
 class ControlGradientJob(_ImagingJobBase):
-    """Native control sensitivities: ``rtm`` VJP or ``born`` JVP.
+    """Native control sensitivities: ``rtm`` VJP, ``born`` JVP or spectral ``lsrtm_gradient``.
 
     Args:
         name: Job name.
         simulation: Simulation owning the parameterized material controls.
         f_list: One frequency per task.
-        kind: ``"rtm"`` or ``"born"``.
+        kind: ``"rtm"``, ``"born"`` or ``"lsrtm_gradient"``.
         observed: Observed data path (all receiver groups) or
-            ``group -> path`` mapping. Required for ``rtm``.
-        gradient: Aggregate control-gradient output (``rtm``).
-        direction: Native control direction input (``born``).
+            ``group -> path`` mapping. Required for ``rtm`` and
+            ``lsrtm_gradient``.
+        gradient: Aggregate control-gradient output (``rtm``,
+            ``lsrtm_gradient``).
+        direction: Native control direction input (``born``,
+            ``lsrtm_gradient``).
         objective_file: Scalar objective output
-            (``control_sensitivities.objective``; ``rtm`` only).
+            (``control_sensitivities.objective``; ``rtm`` and
+            ``lsrtm_gradient``, where it is the linearized objective).
         sensitivity_quadrature: Defaults to ``"auto"`` for tensor-node RTM sensitivities,
             including receiver-probe diagonals. Explicit ``"material_intersections"``
             selects approximate continuous RTM pullbacks.
@@ -2485,9 +2808,13 @@ class ControlGradientJob(_ImagingJobBase):
         weights: Optional per-frequency postprocess weights.
         smoothing: Optional :class:`SmoothingConfig` Riesz map.
         raw_gradient: Optional exact aggregate output before smoothing.
-        kernel_derivative: Optional spectral kernel derivative (``rtm`` only).
+        kernel_derivative: Optional spectral kernel derivative. ``rtm`` takes
+            ``derivative``, ``window`` or ``jet`` residuals;
             ``export_lower_orders=True`` with a derivative residual also exports
             every lower-order objective and gradient from the shared forward jet.
+            ``born`` (Born traces of every nonzero series order) and
+            ``lsrtm_gradient`` (required there: the exact gradient of the
+            linearized series objective) take ``derivative`` or ``window``.
         receiver_diagonal: Shared receiver probes for spectral derivatives.
             Defaults to min(16, encoded source count); ``probes`` and ``seed``
             are configurable. Each exported order gets a matching GN diagonal.
@@ -2572,7 +2899,16 @@ class ControlGradientJob(_ImagingJobBase):
         self.smoothing = control_smoothing(smoothing)
         self.raw_gradient = _output_path(raw_gradient, result_dir)
         self.kernel_derivative = _map_kernel_window(
-            _kernel_derivative(kernel_derivative, residuals=_KERNEL_RESIDUALS_CONTROL),
+            _kernel_derivative(
+                kernel_derivative,
+                # One Born trace set and one LSRTM residual represent one summed
+                # trace; per-order jet objectives are an RTM gradient only.
+                residuals=(
+                    _KERNEL_RESIDUALS_CONTROL
+                    if kind == "rtm"
+                    else _KERNEL_RESIDUALS_FWI
+                ),
+            ),
             lambda path: _input_path(path, simulation),
         )
         self.receiver_diagonal = (
@@ -2586,6 +2922,10 @@ class ControlGradientJob(_ImagingJobBase):
             )
             if Path(self.receiver_diagonal["output"]).suffix != ".h5":
                 raise ValueError("curvature diagonal output must have .h5 extension")
+            if "blocks" in self.receiver_diagonal:
+                raise ValueError(
+                    "receiver blocks require an FWIOperatorJob material linearize"
+                )
         self._validate()
 
     def _validate(self) -> None:
@@ -2607,6 +2947,8 @@ class ControlGradientJob(_ImagingJobBase):
                 raise ValueError(
                     "receiver_diagonal requires frozen Gram and unwindowed sensitivities"
                 )
+        if kind != "rtm" and self.kernel_derivative is not None:
+            self._validate_spectral_born()
         if kind == "born":
             if self.direction is None:
                 raise ValueError("born control sensitivities require a direction")
@@ -2617,12 +2959,29 @@ class ControlGradientJob(_ImagingJobBase):
                 "weights": self.weights,
                 "smoothing": self.smoothing,
                 "raw_gradient": self.raw_gradient,
-                "kernel_derivative": self.kernel_derivative,
             }
             present = [key for key, value in forbidden.items() if value is not None]
             if present:
                 raise ValueError(
                     f"born control sensitivities do not take {', '.join(present)}"
+                )
+        elif kind == "lsrtm_gradient":
+            if self.kernel_derivative is None:
+                raise ValueError(
+                    "lsrtm_gradient control sensitivities require kernel_derivative; "
+                    "use FWIOperatorJob linearize and normal for an ordinary waveform"
+                )
+            if self.direction is None:
+                raise ValueError(
+                    "lsrtm_gradient control sensitivities require a direction"
+                )
+            if not self.observed:
+                raise ValueError(
+                    "lsrtm_gradient control sensitivities require observed data"
+                )
+            if self.gradient is None:
+                raise ValueError(
+                    "lsrtm_gradient control sensitivities require a gradient output"
                 )
         else:
             if self.direction is not None:
@@ -2648,6 +3007,37 @@ class ControlGradientJob(_ImagingJobBase):
                 raise ValueError(
                     "total Gram derivatives do not support phase_derivative or spectral_derivative comparisons"
                 )
+
+    def _validate_spectral_born(self) -> None:
+        """Accept what the native spectral Born / LSRTM hierarchy supports."""
+        kernel = self.kernel_derivative or {}
+        if kernel.get("export_lower_orders"):
+            raise ValueError("export_lower_orders requires an rtm control gradient")
+        if self.gram_derivative != "frozen":
+            raise ValueError(f"spectral {self.kind} requires frozen Gram derivatives")
+        order = kernel.get("order", len(kernel.get("window") or [0, 0]) - 1)
+        if kernel.get("source_derivative") == "total" and order > 1:
+            raise ValueError(
+                "total-source spectral Born jets currently support order one"
+            )
+        if {"phase_derivative", "spectral_derivative"}.intersection(
+            _misfit_comparison_kinds(
+                _misfit_to_fs(self.misfit, None, project_relative=False)
+            )
+        ):
+            raise ValueError(f"spectral {self.kind} requires waveform comparisons")
+
+    def _spectral_planes(self) -> List[int]:
+        """Return the trace orders the spectral Born series weights."""
+        kernel = self.kernel_derivative or {}
+        if kernel.get("residual") == "window" and isinstance(
+            kernel.get("window"), list
+        ):
+            return [k for k, w in enumerate(kernel["window"]) if w != 0.0]
+        order = kernel.get("order", 1)
+        if kernel.get("residual") == "window":
+            return list(range(order + 1))
+        return [order]
 
     # -- output paths ---------------------------------------------------------
 
@@ -2741,6 +3131,30 @@ class ControlGradientJob(_ImagingJobBase):
         """Describe receiver traces; Born jobs write incremental groups only."""
 
         baseline = super().trace_outputs
+        if self.kind != "rtm" and self.kernel_derivative is not None:
+            # Spectral Born planes are stored per order beside the base series.
+            axis = "s" if self.kernel_derivative.get("axis") == "laplace" else "f"
+
+            def suffix(k: int) -> str:
+                return "" if k == 0 else f"_d{'' if k == 1 else k}{axis}"
+
+            planes = self._spectral_planes()
+            orders = [("_inc", k) for k in planes]
+            if self.kind == "lsrtm_gradient":
+                orders = [("", k) for k in sorted({0, *planes})] + orders
+            return replace(
+                baseline,
+                groups=[
+                    f"{group}{kind}{suffix(k)}"
+                    for kind, k in orders
+                    for group in baseline.groups
+                ],
+                components=[
+                    f"{component.partition(':')[0]}{kind}{suffix(k)}:{component.partition(':')[2]}"
+                    for kind, k in orders
+                    for component in baseline.components
+                ],
+            )
         if self.kind == "born":
             return _incremental_trace_outputs(baseline, keep_baseline=False)
         if self.kernel_derivative and self.kernel_derivative.get("export_lower_orders"):
@@ -2869,13 +3283,13 @@ class ControlGradientJob(_ImagingJobBase):
 
         payload = super().to_fs(ctx, project_relative=project_relative)
         sensitivities: Dict[str, Any] = {}
-        if self.kind == "born":
+        if self.kind in ("born", "lsrtm_gradient"):
             sensitivities["direction"] = _job_path(self.direction, ctx, False)
-        else:
+        if self.kind != "born":
             sensitivities["gradient"] = _job_path(self.gradient, ctx, False)
         if self.gram_derivative != "frozen":
             sensitivities["gram_derivative"] = self.gram_derivative
-        if self.kind == "rtm" and self._objective_file is not None:
+        if self.kind != "born" and self._objective_file is not None:
             sensitivities["objective"] = _job_path(self._objective_file, ctx, False)
         if self.active is not None:
             sensitivities["active"] = list(self.active)
@@ -2911,6 +3325,12 @@ class ControlGradientJob(_ImagingJobBase):
                     lambda path: _job_path(path, ctx, project_relative),
                 )
                 payload["Image"] = copy.deepcopy(imaging)
+        elif self.kernel_derivative is not None:
+            # Material-control Born planes need no comparison block.
+            payload["kernel_derivative"] = _map_kernel_window(
+                self.kernel_derivative,
+                lambda path: _job_path(path, ctx, project_relative),
+            )
         return payload
 
     def _input_fingerprint_payload(self) -> Dict[str, Any]:
@@ -3093,7 +3513,11 @@ class ImageKernelJob(_ImagingJobBase):
         born_traces_only: Stop a Born workflow after incremental traces.
         workflow: ``"rtm"``, ``"born"`` or ``"lsrtm_gradient"``.
         save_path: Image output directory (default ``<results>/imaging``).
-        kernel_derivative: Optional spectral kernel derivative (``rtm`` only).
+        kernel_derivative: Optional spectral kernel derivative (``rtm`` only,
+            any residual including ``base``). Spectral Born traces and LSRTM
+            gradients follow native material controls: use
+            :class:`ControlGradientJob` with ``kind="born"`` or
+            ``kind="lsrtm_gradient"``.
         outputs: Optional output requests.
         **extra: Additional ``Imaging`` fields passed through verbatim.
     """
@@ -3190,8 +3614,14 @@ class ImageKernelJob(_ImagingJobBase):
             if save_path is not None
             else self._result_path / "imaging"
         )
+        if kernel_derivative is not None and workflow != "rtm":
+            raise ValueError(
+                "Cartesian image kernels take kernel_derivative only with workflow = rtm; "
+                "spectral born and lsrtm_gradient follow native material controls "
+                "(ControlGradientJob kind='born' or 'lsrtm_gradient')"
+            )
         self.kernel_derivative = _map_kernel_window(
-            _kernel_derivative(kernel_derivative, residuals=_KERNEL_RESIDUALS_CONTROL),
+            _kernel_derivative(kernel_derivative, residuals=_KERNEL_RESIDUALS_IMAGE),
             lambda path: _input_path(path, simulation),
         )
         self.extra = dict(extra)
@@ -3218,8 +3648,6 @@ class ImageKernelJob(_ImagingJobBase):
                 raise ValueError(
                     f"{workflow} requires direction or zero_direction=True"
                 )
-            if self.kernel_derivative is not None:
-                raise ValueError("kernel_derivative requires workflow = rtm")
         if workflow == "lsrtm_gradient":
             if self.born_traces_only:
                 raise ValueError("lsrtm_gradient cannot be trace-only")
@@ -3956,12 +4384,32 @@ class MeshAdaptationJob(SmoothJob):
         return job
 
 
+# Content fingerprints of stage-invariant regularization inputs, hashed once when
+# staged: resolved path -> (file status when hashed, fingerprint). A changed
+# status (rewrite, replacement) falls back to hashing the file again.
+_STAGED_INPUTS: Dict[str, Tuple[Tuple[int, ...], Dict[str, Any]]] = {}
+
+
+def _file_status(path: Path) -> Tuple[int, ...]:
+    status = path.stat()
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
 @register_class
 class RegularizationJob(SmoothJob):
     """Evaluate Sauce's native model regularizer or solve its constrained prox.
 
     ``input_vector`` contains full model coefficients, including fixed values.
     A prepared context freezes native weights and amplitude scales for a stage.
+    Stage-invariant ``metric``/``lower``/``upper`` files written once with
+    :meth:`stage_input` are referenced in place by every job of the stage and
+    hashed only when staged.
     """
 
     def __init__(
@@ -3970,6 +4418,7 @@ class RegularizationJob(SmoothJob):
         *,
         smoothing: Union[SmoothingConfig, Mapping[str, Any]],
         input_vector: Union[str, Path, ControlVectorFile],
+        fractional_scales: Optional[Mapping[str, float]] = None,
         operation: str = "value",
         context: Optional[Union[str, Path]] = None,
         metric: Optional[Union[str, Path, ControlVectorFile]] = None,
@@ -4005,6 +4454,7 @@ class RegularizationJob(SmoothJob):
         if operation != "prepare" and context is None:
             raise ValueError("regularization requires a prepared context")
         self.operation = operation
+        self.fractional_scales = _fractional_scales(fractional_scales)
         self.context: Path = (
             self._result_path / "regularization_context.json"
             if context is None
@@ -4033,20 +4483,66 @@ class RegularizationJob(SmoothJob):
                 path = _output_path(f"regularization_{label}.h5", self._result_path)
                 assert path is not None
                 if isinstance(vector, ControlVectorFile):
-                    ControlVectorFile(
-                        {
-                            unqualified_block_name(k): v
-                            for k, v in vector.blocks.items()
-                        },
-                        native=True,
-                        control_spaces={
-                            unqualified_block_name(k): v
-                            for k, v in vector.control_spaces.items()
-                        },
-                    ).write(path)
+                    self._native_input(vector).write(path)
                 else:
                     path = Path(vector)
                 self.regularization_inputs[label] = path
+
+    @staticmethod
+    def _native_input(vector: ControlVectorFile) -> ControlVectorFile:
+        """Return ``vector`` in Sauce's native ``/controls/<id>`` layout."""
+
+        return ControlVectorFile(
+            {unqualified_block_name(k): v for k, v in vector.blocks.items()},
+            native=True,
+            control_spaces={
+                unqualified_block_name(k): v for k, v in vector.control_spaces.items()
+            },
+        )
+
+    @classmethod
+    def stage_input(cls, vector: ControlVectorFile, path: Union[str, Path]) -> Path:
+        """Publish a stage-invariant ``metric``/``lower``/``upper`` file once.
+
+        The native file is written atomically and hashed once; jobs passing
+        ``path`` reuse that fingerprint while the file's status is unchanged
+        instead of rehashing the file per job. Remote sites receive a stable
+        path that their transfer skips when the copy is current.
+        """
+
+        path = Path(path)
+        with atomic_output_path(path) as temporary:
+            cls._native_input(vector).write(temporary)
+        _STAGED_INPUTS[str(path.resolve())] = (
+            _file_status(path),
+            cls._path_content_fingerprint(path),
+        )
+        return path
+
+    @staticmethod
+    def _is_staged(path: Union[str, Path]) -> bool:
+        """Return whether ``path`` still holds what :meth:`stage_input` wrote there."""
+
+        recorded = _STAGED_INPUTS.get(str(Path(path).resolve()))
+        try:
+            return recorded is not None and _file_status(Path(path)) == recorded[0]
+        except OSError:
+            return False
+
+    @classmethod
+    def _input_fingerprint(cls, path: Path) -> Dict[str, Any]:
+        """Return a staged input's recorded fingerprint, else hash the file."""
+
+        key = str(Path(path).resolve())
+        recorded = _STAGED_INPUTS.get(key)
+        if recorded is not None:
+            try:
+                if _file_status(Path(path)) == recorded[0]:
+                    return dict(recorded[1])
+            except OSError:
+                pass
+            _STAGED_INPUTS.pop(key, None)
+        return cls._path_content_fingerprint(path)
 
     def to_fs(
         self, ctx: Optional[ExportContext] = None, *, project_relative: bool = False
@@ -4067,6 +4563,8 @@ class RegularizationJob(SmoothJob):
             {k: _job_path(v, ctx, False) for k, v in self.regularization_inputs.items()}
         )
         controls["Regularization"] = request
+        if self.fractional_scales:
+            request["fractional_scales"] = dict(self.fractional_scales)
         return payload
 
     def postprocess_fetch_files(self) -> List[Path]:
@@ -4083,7 +4581,7 @@ class RegularizationJob(SmoothJob):
         paths = dict(self.regularization_inputs)
         if self.operation != "prepare":
             paths["context"] = self.context
-        payload.update({k: self._path_content_fingerprint(v) for k, v in paths.items()})
+        payload.update({k: self._input_fingerprint(v) for k, v in paths.items()})
         return payload
 
     @classmethod
@@ -4098,6 +4596,7 @@ class RegularizationJob(SmoothJob):
         )
         controls = data["control_sensitivities"]
         request = dict(controls["Regularization"])
+        fractional_scales = request.pop("fractional_scales", None)
 
         def resolve(value: Union[str, Path]) -> Path:
             path = _resolve_saved_job_path(
@@ -4126,6 +4625,7 @@ class RegularizationJob(SmoothJob):
         job = cls(
             source,
             smoothing=request,
+            fractional_scales=fractional_scales,
             input_vector=resolve(controls["input"]),
             gradient=resolve(controls["gradient"]),
             name=data["name"],

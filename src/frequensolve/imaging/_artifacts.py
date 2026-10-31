@@ -122,6 +122,28 @@ def _is_qualified(name: str) -> bool:
     return name.startswith(_QUALIFIED_PREFIXES)
 
 
+def _fractional_scales(value: Optional[Mapping[str, float]]) -> Dict[str, float]:
+    """Validate fixed positive native control scales and normalize block names."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "fractional_scales must map material block names to reference scales"
+        )
+    result = {}
+    for name, scale in value.items():
+        name = unqualified_block_name(name)
+        if name in result:
+            raise ValueError(f"duplicate fractional scale for {name!r}")
+        if isinstance(scale, (bool, np.bool_)):
+            raise ValueError("fractional reference scales must be finite and positive")
+        scale = float(scale)
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError("fractional reference scales must be finite and positive")
+        result[name] = scale
+    return result
+
+
 # ---------------------------------------------------------------------------
 # HDF5 helpers
 # ---------------------------------------------------------------------------
@@ -912,8 +934,14 @@ class ControlRegistryManifest:
             pairing=str(data.get("pairing", "real_euclidean")),
             descriptor_rank=int(data.get("descriptor_rank", 0)),
             n_ranks=int(data.get("n_ranks", 1)),
+            # Current Sauce writes no rank descriptors (its fingerprint is
+            # partition-independent); earlier builds list every rank's
+            # fingerprint, some also a per-rank descriptor file.
             rank_descriptors=tuple(
-                {"file": str(item["file"]), "fingerprint": str(item["fingerprint"])}
+                {
+                    "fingerprint": str(item["fingerprint"]),
+                    **({"file": str(item["file"])} if "file" in item else {}),
+                }
                 for item in data.get("rank_descriptors", ())
             ),
             raw=dict(data),
@@ -1211,7 +1239,12 @@ def _require_schema(data: Mapping[str, Any], expected: str) -> None:
 
 @dataclass(frozen=True)
 class ObjectiveTermReport:
-    """One objective term of an ``fs-objective-report-1`` report."""
+    """One objective term of an ``fs-objective-report-1`` report.
+
+    ``source_projection`` holds the per-RHS source unknowns Sauce projected out
+    of the term at the saved baseline (``kind`` ``"delay"`` or ``"scalar"``);
+    it is empty when the term projects no source.
+    """
 
     id: str
     raw_sum: float
@@ -1222,6 +1255,30 @@ class ObjectiveTermReport:
     active_samples: int
     scale: Tuple[float, ...]
     robust: Dict[str, Any] = field(default_factory=dict)
+    source_projection: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def source_delay(self) -> Optional[Tuple[float, ...]]:
+        """Fitted per-RHS source delays in seconds, or ``None``."""
+
+        if self.source_projection.get("kind") != "delay":
+            return None
+        return tuple(float(v) for v in self.source_projection["delay_s"])
+
+    @property
+    def source_scalar(self) -> Optional[Tuple[complex, ...]]:
+        """Fitted per-RHS complex source factors, or ``None``."""
+
+        if self.source_projection.get("kind") != "scalar":
+            return None
+        return tuple(
+            complex(float(re), float(im))
+            for re, im in zip(
+                self.source_projection["real"],
+                self.source_projection["imag"],
+                strict=True,
+            )
+        )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ObjectiveTermReport":
@@ -1237,6 +1294,7 @@ class ObjectiveTermReport:
             active_samples=int(data["active_samples"]),
             scale=tuple(float(v) for v in data["scale"]),
             robust=dict(data.get("robust") or {}),
+            source_projection=dict(data.get("source_projection") or {}),
         )
 
 

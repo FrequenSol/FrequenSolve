@@ -97,18 +97,121 @@ Typed Fields and Material Expressions
 
 Physics namespaces expose symbolic quantities as attributes:
 ``fs.physics.acoustic()``, ``fs.physics.elastic()``,
-``fs.physics.poroelastic()``, and ``fs.physics.electromagnetic()``.
+``fs.physics.coupled()``, ``fs.physics.poroelastic()``, and
+``fs.physics.electromagnetic()``.
 Fields and materials carry units and tensor shape; values resolve against the
 simulation at receiver locations. Select components with ``velocity.z``,
 ``strain.xx``, or ``strain["x", "z"]``. Use ``.to("MPa")`` for output units.
 
 .. code-block:: python
 
+   acoustic = fs.physics.acoustic()
    elastic = fs.physics.elastic()
    momentum = elastic.materials.rho * elastic.fields.velocity
    strain = elastic.materials.compliance @ elastic.fields.stress
    acq.add_receiver_group("momentum", momentum, coords=coords, domain="solid")
    acq.add_receiver_group("strain_xx", strain.xx, coords=coords, domain="solid")
+
+Typed quantities can also be added to a reusable receiver device:
+
+.. code-block:: python
+
+   device = fs.ReceiverNode(name="pv")
+   device.add_component("pressure", acoustic.fields.pressure)
+   device.add_component("velocity", acoustic.fields.velocity)
+   acq.add_receiver_group("pv", device, coords=coords, domain="water")
+
+   derived = fs.ReceiverNode(name="derived")
+   derived.add_component("momentum", momentum)
+   derived.add_component("strain_xz", strain.xz)
+   acq.add_receiver_group("derived", derived, coords=coords, domain="solid")
+
+Device vector and tensor components expand to names such as ``velocity.x``,
+``velocity.z``, and ``strain.xz``. Scalars keep their authored name. Typed vectors
+also accept constant numeric ``direction`` vectors for a single projected
+measurement. String field names remain supported. A group resolves a copy of
+its device, so the authored expressions remain available when reusing the device.
+
+Acoustic and elastic fields request physics-qualified plans, such as
+``acoustic:pressure`` and ``elastic:velocity_all``. A support-aware Sauce backend
+averages each channel over only the mapped elements where its physics is active,
+using the same weights for adjoint injection and receiver derivatives. Valid zero
+values still count; eligibility comes from the plan's physics mask.
+Normalization applies to the resulting channel's support, rather than separately
+to each child of an expression. Arithmetic combining acoustic-qualified and
+elastic-qualified fields is rejected by the SDK. Record those fields as separate
+components. Likewise, generic fields with different support should be recorded
+separately before combining their sampled values.
+
+.. code-block:: python
+
+   device = fs.ReceiverNode(name="obn_device")
+   device.add_component("pressure", acoustic.fields.pressure)
+   device.add_component("velocity", elastic.fields.velocity)
+   acq.add_receiver_group("OBN", device, coords=interface_coords)
+
+Omit the group domain here so both interface sides remain mapped. A group domain
+restricts all components: ``domain="solid"`` excludes fluid elements, so acoustic
+pressure is zero there. A channel with no compatible mapped element remains zero.
+Older backends average masked zeros into interface measurements and dilute them.
+
+For generic fields that route to the active physics, use ``fs.physics.coupled()``:
+
+.. code-block:: python
+
+   coupled = fs.physics.coupled()
+   device = fs.ReceiverNode(name="pv")
+   device.add_component("pressure", coupled.fields.pressure)
+   device.add_component("velocity", coupled.fields.velocity)
+   acq.add_receiver_group("pv", device, coords=coords)
+
+Generic pressure is fluid pressure or solid negative mean normal stress. Generic
+velocity and stress use the active acoustic/elastic plans; generic strain and
+displacement retain the backend's elastic-only definitions. Generic interface
+fields average their supported values from both sides. Common scalar properties,
+such as ``coupled.materials.rho`` and ``coupled.materials.Sp``, can scale fields;
+material-dependent sampling still requires an unambiguous material layer.
+Shared scalar properties are local references regardless of namespace:
+``elastic.materials.rho * acoustic.fields.velocity`` can sample density and
+velocity in an acoustic layer. The factory name does not select a material side.
+Material references address active authored properties; they do not implicitly
+convert between material parameterizations. For pressure slowness in a model
+authored with ``Vp``, use ``1 / acoustic.materials.vp.on(domain="water")``.
+Use ``acoustic.materials.Sp.on(domain="water")`` when ``Sp`` is authored directly.
+At a fluid--solid interface, select the material side independently of field
+support with ``.on(domain=...)``:
+
+.. code-block:: python
+
+   rho_water = acoustic.materials.rho.on(domain="water")
+   rho_solid = elastic.materials.rho.on(domain="solid")
+   compliance = elastic.materials.compliance.on(domain="solid")
+   device.add_component("fluid_momentum", rho_water * acoustic.fields.velocity)
+   device.add_component("strain_xz", (compliance @ elastic.fields.stress).xz)
+   acq.add_receiver_group("derived", device, coords=interface_coords)
+
+The selector accepts a material subdomain name or positive mesh block ID. It
+samples that material at the receiver coordinates without changing the field's
+support. The selected domain must contain the receiver point; missing sides raise
+an error. No material averaging or extrapolation is implied. A group domain
+restricts field sampling, while explicit material selectors bind independently.
+Omit the group domain when measuring fields from both sides in one device.
+Each material reference retains its selector through arithmetic. Calling
+``.on()`` on a compound material expression replaces every reference's selector.
+Unselected material references require an unambiguous mapped material layer.
+Constitutive tensors require an elastic selected material and retain their
+Mandel representation.
+
+``.on()`` chooses the material side; receiver responses still sample the current
+model. Wavefield sampling, wavefield adjoints and frequency derivatives are
+supported. Full model derivatives that request the direct material tangent of a
+selected receiver response are currently unsupported and raise an error. Existing
+unselected response material derivatives remain available. For model inversion,
+retain measured pressure/velocity channels and use selected materials in fixed
+objective weights instead. Material dependencies are written only when requested
+in ``materials=``.
+In 2.5D, generic full velocity and stress lack a common acoustic/elastic shape;
+select ``coupled.fields.velocity.x`` or ``.z``, or use physics-qualified fields.
 
 A full vector or symmetric tensor records all its independent components;
 a selected entry records one. For multiple quantities in one group, pass a
@@ -238,6 +341,24 @@ quantities with explicit units.
    )
    das.add_component(name="eps_tt", field="strain", direction=[1.0, 0.0])
 
+For measured channel locations with nonuniform spacing, use
+``coordinate_mode="gauge_centers"`` and supply those locations as the receiver
+group's coordinates in cable order. The native backend reconstructs the plain
+cable through the centers, extends endpoint tangents by half a gauge, and
+averages axial strain around each center. This mode requires at least two
+centers and omits ``channel_spacing`` and helical parameters. A field of
+``"elastic:strain"`` without an explicit direction follows the cable tangent.
+
+.. code-block:: python
+
+   das = fs.ReceiverFiber(
+       gauge_length=23.93 * u.m,
+       points_per_gauge=129,
+       coordinate_mode="gauge_centers",
+       components=[fs.ReceiverComponent(name="strain", field="elastic:strain")],
+   )
+   acquisition.add_receiver_group(name="das", device=das, coords=centers, domain=2)
+
 Survey Sources
 --------------
 
@@ -313,6 +434,14 @@ automatically.
 Source Amplitudes
 ~~~~~~~~~~~~~~~~~
 
+.. important::
+
+   Acoustic/coupled ``scalar`` now means ``pressure_monopole``: its physical
+   strength is in m³/s², with a default of 1 m³/s². To retain the former
+   moment-source loading and N·m amplitude, use ``kind="isotropic_moment"``
+   (or the legacy ``monopole`` spelling). Elastic ``scalar`` remains a moment
+   source. Check source kind and units when migrating acoustic simulations.
+
 ``amplitude`` follows the Sauce ``fs-acquisition-2`` source-basis contract.
 Without a physical strength, a source uses its kind's default strength:
 
@@ -320,7 +449,9 @@ Without a physical strength, a source uses its kind's default strength:
 - Opt-in acoustic ``volume_injection``: volume injection rate, 1 m³/s in every
   dimension. Planar 2D distributes this rate over a fixed 1 m out-of-plane thickness;
   the internal line-source rate is Q / 1 m, independent of coordinate units.
-- Seismic ``scalar``, ``monopole``, ``gradient``, ``dipole`` and ``tensor``: 1e9 N·m.
+- Acoustic/coupled ``scalar`` and ``pressure_monopole``: 1 m³/s².
+- Elastic ``scalar``, explicit ``isotropic_moment``, legacy ``monopole``,
+  ``gradient``, ``dipole`` and ``tensor``: 1e9 N·m.
 
 The default scales the direction or mechanism, so a force direction of length 2
 gives 2e6 N. A plain number is a dimensionless multiplier. It scales explicit
@@ -348,7 +479,8 @@ or explicit ``value``/``units`` mapping is an exact physical source strength:
    )
 
 Vector amplitudes have force dimensions, conventionally ``N``. Explicit acoustic
-``volume_injection`` amplitudes are volume rates; seismic scalar/monopole moments
+``volume_injection`` amplitudes are volume rates; acoustic/coupled ``scalar``
+amplitudes use ``m^3/s^2``. Explicit ``isotropic_moment`` and legacy ``monopole``
 retain ``N*m``. If a direction already contains physical units, use a dimensionless
 top-level amplitude; Sauce rejects simultaneous physical units on both the
 direction and amplitude. Physical strength belongs to ``source_geometry``;
@@ -367,9 +499,8 @@ typed source. These helpers define ideal measurements; they do not swap survey
 geometry, copy source signatures or instrument transfer functions, or run a
 reciprocal simulation. ``response`` remains unused.
 
-Volumetric injection is explicitly opt-in. Existing ``scalar`` and ``monopole``
-inputs retain their original units, default strengths, density scaling, and
-loading behavior. The pressure reciprocal helper requires ``volume_injection``;
+Volumetric injection is explicitly opt-in. Explicit ``isotropic_moment`` and
+legacy ``monopole`` retain their moment-source units and loading behavior. The pressure reciprocal helper requires ``volume_injection``;
 it does not reinterpret legacy sources. The new kind requires an updated Sauce
 build and is supported for ``physics="acoustic"`` only.
 For volume injection, transient acoustic pressure loads the analytic time
@@ -435,3 +566,68 @@ currently does not consume them. Older JSON containing ``eval_samples`` or
 ``trace_samples`` is rejected with a migration error; remove those tables and
 express receiver geometry and sampling through supported receiver-group APIs.
 Large supported trace catalogs continue to be packed into HDF5 automatically.
+
+Acoustic pressure-wavelet sources
+---------------------------------
+
+For a wavelet applied directly to the acoustic pressure equation, use
+``acq.add_sources(kind="pressure_monopole", coords=coords)`` or
+``SourceGeometry.pressure_monopole(coords)``. Physical amplitudes use
+``m^3/s^2`` and default to 1. The wavelet is not differentiated in transient
+Galerkin. A Ricker produces a Ricker-shaped direct pressure arrival in a
+homogeneous 3D medium, including an on-axis axisymmetric source; planar 2D
+propagation and heterogeneous media may alter the received shape.
+
+Explicit ``volume_injection`` remains a volume-rate history in ``m^3/s``.
+Acoustic/coupled ``scalar`` now aliases ``pressure_monopole`` in both
+transient and frequency jobs. Use ``isotropic_moment`` (or legacy ``monopole``)
+for the former moment convention in ``N*m``; elastic-only scalar is unchanged.
+The new kind requires a backend supporting ``pressure_monopole``; older
+backends reject it rather than silently reinterpret the source.
+
+Compact spatial sources
+-----------------------
+
+Cartesian acoustic/elastic ``TransientJob`` uses compact Gaussian point loads by
+default. Sauce chooses a physical width from the local material sizing speed and
+``time.f_max`` (or the larger of the mesh and source bandwidth). The default
+homogeneous-Gaussian transfer is 0.98 at that frequency: approximately
+``sigma = 0.032 * c_min / f_max``. It reports the resolved width and clipping.
+This preserves total strength and leaves the time wavelet unchanged. Explicit
+supports take precedence; ``TransientJob(..., point_source="dirac")`` opts out.
+Frequency-domain and axisymmetric defaults remain unchanged. Bandwidth-based
+smoothing does not replace adequate mesh resolution.
+
+``GaussianSupport`` attaches a finite spatial profile to one physical source.
+Its width has physical units and remains unchanged when the mesh is refined::
+
+    source = fs.PointSource(
+        "shot", coordinates=[0, 0] * fs.ureg.m,
+        kind="vector", direction=[0, 1], amplitude=1e6 * fs.ureg.N,
+        support=fs.GaussianSupport(sigma=2 * fs.ureg.m),
+    )
+    geometry = fs.SourceGeometry.inline(kind="vector", sources=[source], domain=2)
+    simulation.acquisition.set_sources(geometry)
+
+``SourceGeometry.points(..., support=fs.GaussianSupport(...))`` applies the same
+profile to every source without combining their identities. Time functions and
+source encoding are authored normally. The installed Sauce solver must support
+the spatial-support contract; older solvers must not be used with this option.
+
+Sauce samples a radial Gaussian with a smooth taper to zero at one sigma.
+It subdivides intersecting elements into boxes at most half a sigma wide, uses
+a modest positive quadrature rule, and normalizes the retained
+integral across ranks. ``boundary="truncate_renormalize"`` is the default;
+``boundary="reject"`` rejects clipped volume supports. Other materials are
+excluded by the geometry's ``domain`` selection, and PML is always excluded.
+Clipping preserves total force but shifts its centroid; the solver reports the
+retained mass and centroid displacement. Empty overlap is an error.
+
+For elastic surface traction, set ``surface="<mesh surface name>"`` on the
+support. This integrates along an exterior free/Neumann surface rather than
+through its adjacent volume; it requires ``truncate_renormalize``. Set an explicit
+``tolerance`` to opt into adaptive quadrature; ``boundary="reject"`` also uses
+adaptive quadrature, defaulting to ``1e-4``. Cartesian acoustic and elastic forward
+simulations include GSLS acoustic isotropic moments with sample-local materials
+and checkpoint/restart. Source-control/inversion workflows remain unsupported.
+No state smoothing is applied.

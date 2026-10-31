@@ -3,10 +3,12 @@ SSH manager for SLURM/HPC sites that uses a master socket to
 avoid re-authenticating each time a connection is made.
 """
 
+import os
 import shlex
 import subprocess
+import tempfile
 import time
-from typing import Any, Protocol, cast
+from typing import Any, Callable, Protocol, cast
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.util.setup_logger import init_logger
@@ -24,6 +26,7 @@ except ModuleNotFoundError as exc:
 __all__ = [
     "SSHProxy",
     "SSHClientClass",
+    "SSHTransportError",
     "SSH_COMMAND_TIMEOUT_SECONDS",
     "SSH_CONNECT_TIMEOUT_SECONDS",
     "control_socket_ssh_options",
@@ -33,8 +36,30 @@ SSH_CONNECT_TIMEOUT_SECONDS = 15
 SSH_COMMAND_TIMEOUT_SECONDS = 120
 SSH_SERVER_ALIVE_INTERVAL_SECONDS = 15
 SSH_SERVER_ALIVE_COUNT_MAX = 2
+# SFTP data transfers sample their transferred size this often; one remote
+# size probe may take this long before it counts as no progress.
+_TRANSFER_POLL_SECONDS = 5.0
+_TRANSFER_PROBE_SECONDS = 30.0
 
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
+
+# OpenSSH ``sftp`` exits 255 when its SSH connection fails; these diagnostics
+# also mean the connection, not the requested file operation, failed.
+_SFTP_CONNECTION_FAILURES = (
+    "Connection closed",
+    "Connection reset",
+    "Connection timed out",
+    "Broken pipe",
+    "mux_client",
+    "Control socket connect",
+)
+
+
+class SSHTransportError(RuntimeError):
+    """The SSH connection failed (status 255), not the remote command.
+
+    A retry over a live connection may succeed.
+    """
 
 
 class _CommandResult(Protocol):
@@ -177,6 +202,23 @@ class SSHProxy:
         master, slave = pty.openpty()
 
         cmd = [*self._login_ssh_command()[:-1], "-q", self._login_ssh_command()[-1]]
+        if self.compute_host is not None:
+            cmd.insert(-1, "-tt")
+            cmd.append(
+                shlex.join(
+                    [
+                        "ssh",
+                        "-tt",
+                        "-o",
+                        "StrictHostKeyChecking=yes",
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
+                        f"{self.username}@{self.compute_host}",
+                    ]
+                )
+            )
 
         process = subprocess.Popen(
             cmd,
@@ -188,16 +230,6 @@ class SSHProxy:
 
         os.close(slave)
         master_file = os.fdopen(master, "rb+", buffering=0)
-
-        if self.compute_host is not None:
-            master_file.write(
-                (
-                    "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes "
-                    f"{shlex.quote(str(self.compute_host))}\n"
-                ).encode()
-            )
-            master_file.flush()
-            time.sleep(1)
 
         master_file.flush()
         process.stdin = process.stdout = master_file
@@ -295,15 +327,9 @@ class SSHProxy:
         """Execute a command on a compute node via the login node."""
         if self.compute_host is None:
             raise RuntimeError("Compute host is not configured")
-        proxy_command = shlex.join(
-            [
-                *self._login_ssh_command()[:-1],
-                "-W",
-                "%h:%p",
-                self._login_ssh_command()[-1],
-            ]
-        )
-        cmd = [
+        # Match invoke_shell: use the cluster login node's compute-host trust
+        # and credentials, rather than requiring compute keys on the laptop.
+        compute_command = [
             "ssh",
             "-o",
             "StrictHostKeyChecking=yes",
@@ -315,11 +341,10 @@ class SSHProxy:
             f"ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECONDS}",
             "-o",
             f"ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}",
-            "-o",
-            f"ProxyCommand={proxy_command}",
             f"{self.username}@{self.compute_host}",
             command,
         ]
+        cmd = [*self._login_ssh_command(), shlex.join(compute_command)]
         return self._run_ssh(cmd, target=self.compute_host, timeout=timeout)
 
     def _run_ssh(
@@ -365,7 +390,9 @@ class SSHProxy:
             result.returncode,
         )
         if result.returncode == 255:
-            raise RuntimeError(f"SSH connection to {target} failed with status 255")
+            raise SSHTransportError(
+                f"SSH connection to {target} failed with status 255"
+            )
         return result
 
     def close(self) -> None:
@@ -382,15 +409,77 @@ class SSHProxy:
 
         return None  # No transport for proxy
 
-    def open_sftp(self) -> "_OpenSSHControlSFTP":
-        """Open an SFTP adapter that reuses this verified control socket."""
+    def open_sftp(self, *, stall_timeout: float | None = None) -> "_OpenSSHControlSFTP":
+        """Open an SFTP adapter that reuses this verified control socket.
+
+        Args:
+            stall_timeout: Seconds a data transfer may make no progress before
+                it is killed. Defaults to this proxy's command timeout.
+        """
 
         return _OpenSSHControlSFTP(
             control_path=self.control_path,
             username=self.username,
             host=self.host,
             command_timeout=self.command_timeout,
+            stall_timeout=stall_timeout,
         )
+
+
+def _run_with_progress(
+    argv: list[str],
+    stdin_text: str,
+    progress: Callable[[], int | None],
+    *,
+    idle_timeout: float,
+    poll_interval: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> tuple[int, str]:
+    """Run ``argv`` while ``progress()`` keeps changing; return its status and stderr.
+
+    ``progress`` reports the transferred size (``None`` while unknown). The
+    process is killed and :class:`TimeoutError` raised once the value has not
+    changed for ``idle_timeout`` seconds, so a stalled transfer fails however
+    large the file is while a slow one may run as long as it keeps moving.
+    """
+
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=errors,
+        )
+        try:
+            assert process.stdin is not None
+            try:
+                process.stdin.write(stdin_text.encode())
+                process.stdin.close()
+            except BrokenPipeError:
+                pass  # It exited early; its status and stderr explain why.
+            # Quick transfers finish before the first (possibly remote) probe.
+            last: int | None = None
+            changed = clock()
+            while True:
+                try:
+                    process.wait(timeout=poll_interval)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                current, now = progress(), clock()
+                if current != last:
+                    last, changed = current, now
+                elif now - changed >= idle_timeout:
+                    raise TimeoutError(
+                        f"SFTP transfer made no progress for {now - changed:.0f} "
+                        f"seconds (limit {idle_timeout:.0f})"
+                    )
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        errors.seek(0)
+        return process.returncode, errors.read().decode(errors="replace")
 
 
 class _OpenSSHControlSFTP:
@@ -403,11 +492,13 @@ class _OpenSSHControlSFTP:
         username: str,
         host: str,
         command_timeout: float,
+        stall_timeout: float | None = None,
     ) -> None:
         self.control_path = control_path
         self.username = username
         self.host = host
         self.command_timeout = command_timeout
+        self.stall_timeout = command_timeout if stall_timeout is None else stall_timeout
 
     @staticmethod
     def _quote_path(value: str) -> str:
@@ -416,23 +507,41 @@ class _OpenSSHControlSFTP:
             raise ValueError("SFTP path contains an invalid character")
         return shlex.quote(raw)
 
-    def _run_batch(self, command: str) -> None:
-        result = subprocess.run(
-            [
-                "sftp",
-                "-q",
-                "-b",
-                "-",
-                *control_socket_ssh_options(self.control_path),
-                f"{self.username}@{self.host}",
-            ],
-            input=f"{command}\n",
-            capture_output=True,
-            text=True,
-            timeout=self.command_timeout,
-        )
-        if result.returncode != 0:
-            detail = result.stderr.strip() or "SFTP operation failed"
+    def _run_batch(
+        self,
+        command: str,
+        *,
+        progress: Callable[[], int | None] | None = None,
+    ) -> None:
+        argv = [
+            "sftp",
+            "-q",
+            "-b",
+            "-",
+            *control_socket_ssh_options(self.control_path),
+            f"{self.username}@{self.host}",
+        ]
+        if progress is None:
+            result = subprocess.run(
+                argv,
+                input=f"{command}\n",
+                capture_output=True,
+                text=True,
+                timeout=self.command_timeout,
+            )
+            returncode, stderr = result.returncode, result.stderr
+        else:
+            # A data transfer takes as long as its size requires; it fails only
+            # when the transferred size stops changing for the stall timeout.
+            returncode, stderr = _run_with_progress(
+                argv,
+                f"{command}\n",
+                progress,
+                idle_timeout=self.stall_timeout,
+                poll_interval=min(_TRANSFER_POLL_SECONDS, self.stall_timeout / 4),
+            )
+        if returncode != 0:
+            detail = stderr.strip() or "SFTP operation failed"
             # Match OpenSSH's missing-file diagnostics to Paramiko's exception.
             if any(
                 (line.startswith('File "') and line.endswith('" not found.'))
@@ -443,9 +552,13 @@ class _OpenSSHControlSFTP:
                 for line in detail.splitlines()
             ):
                 raise FileNotFoundError(detail)
+            if returncode == 255 or any(
+                marker in detail for marker in _SFTP_CONNECTION_FAILURES
+            ):
+                raise ConnectionError(detail)
             raise OSError(detail)
 
-    def _run_ssh(self, command: str) -> str:
+    def _run_ssh(self, command: str, *, timeout: float | None = None) -> str:
         result = subprocess.run(
             [
                 "ssh",
@@ -455,11 +568,32 @@ class _OpenSSHControlSFTP:
             ],
             capture_output=True,
             text=True,
-            timeout=self.command_timeout,
+            timeout=self.command_timeout if timeout is None else timeout,
         )
         if result.returncode != 0:
             raise OSError("SFTP metadata operation failed")
         return result.stdout
+
+    def _remote_size(self, path: str) -> int | None:
+        """Return a remote file's size for upload progress, or ``None``."""
+
+        try:
+            output = self._run_ssh(
+                "stat -Lc %s -- " + self._quote_path(path),
+                timeout=min(self.command_timeout, _TRANSFER_PROBE_SECONDS),
+            )
+            return int(output.strip())
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+
+    @staticmethod
+    def _local_size(path: str) -> int | None:
+        """Return a local file's size for download progress, or ``None``."""
+
+        try:
+            return os.stat(path).st_size
+        except OSError:
+            return None
 
     def stat(self, path: str) -> Any:
         """Return the remote mode and size needed by the transfer manager."""
@@ -477,14 +611,16 @@ class _OpenSSHControlSFTP:
         """Upload one file through OpenSSH SFTP."""
 
         self._run_batch(
-            f"put {self._quote_path(local_path)} {self._quote_path(remote_path)}"
+            f"put {self._quote_path(local_path)} {self._quote_path(remote_path)}",
+            progress=lambda: self._remote_size(remote_path),
         )
 
     def get(self, remote_path: str, local_path: str) -> None:
         """Download one file through OpenSSH SFTP."""
 
         self._run_batch(
-            f"get {self._quote_path(remote_path)} {self._quote_path(local_path)}"
+            f"get {self._quote_path(remote_path)} {self._quote_path(local_path)}",
+            progress=lambda: self._local_size(local_path),
         )
 
     def chmod(self, path: str, mode: int) -> None:
