@@ -18,6 +18,7 @@ import tempfile
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import cast
 
 from .analysis import analyze_pressure, read_snapshot
 from .storage import canonical
@@ -126,13 +127,14 @@ def figure_svg(reports: list[dict], kind: str = "pressure") -> str:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
+    from mpl_toolkits.mplot3d import Axes3D
 
     with plt.rc_context(
         {"svg.fonttype": "none", "svg.hashsalt": TEMPLATE, "font.size": 10}
     ):
         if kind == "geometry":
             fig = plt.figure(figsize=(8, 4.5), layout="constrained")
-            ax = fig.add_subplot(111, projection="3d")
+            ax3d = cast(Axes3D, fig.add_subplot(111, projection="3d"))
             meta = reports[0]["metadata"]
             show_labels = (
                 sum(len(meta[name + "_ids"]) for name in ("source", "receiver")) <= 12
@@ -145,8 +147,10 @@ def figure_svg(reports: list[dict], kind: str = "pressure") -> str:
                 xyz = np.asarray(meta[name + "_coordinates"], dtype=float)
                 if xyz.shape[1] != 3:
                     raise ValueError("This study requires explicit 3D geometry")
-                ax.scatter(
-                    *xyz.T,
+                ax3d.scatter(
+                    xyz[:, 0],
+                    xyz[:, 1],
+                    xyz[:, 2],
                     marker=marker,
                     s=90 if name == "source" else 160,
                     label=name.title(),
@@ -166,21 +170,23 @@ def figure_svg(reports: list[dict], kind: str = "pressure") -> str:
                             f"{name[0].upper()}{label}"
                         )
             for point, labels in point_labels.items():
-                ax.text(*point, "  " + " / ".join(labels), fontsize=8)
+                ax3d.text(
+                    point[0], point[1], point[2], "  " + " / ".join(labels), fontsize=8
+                )
             if not show_labels:
-                ax.text2D(
+                ax3d.text2D(
                     0.02,
                     0.02,
                     "Point labels omitted for dense geometry; native IDs and coordinates remain in the structured report.",
-                    transform=ax.transAxes,
+                    transform=ax3d.transAxes,
                     fontsize=8,
                 )
             for axis in "xyz":
-                getattr(ax, f"set_{axis}label")(
+                getattr(ax3d, f"set_{axis}label")(
                     f"{axis.upper()} ({meta['coordinate_units']})"
                 )
-            ax.set_title("Source and receiver geometry · native coordinates")
-            ax.legend(loc="upper left")
+            ax3d.set_title("Source and receiver geometry · native coordinates")
+            ax3d.legend(loc="upper left")
         else:
             fields = [
                 ("real", "Real pressure"),

@@ -1399,6 +1399,9 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         if payload is not None and not getattr(
             result, "_cloud_saved_plan_inputs", False
         ):
+            result._cloud_authored_job_digest = result._frozen_staged_provenance[
+                "AWSSite"
+            ]["job"]["digest"]
             # Managed Slurm verifies the uploaded descriptor, then privately
             # scopes its output paths to the accepted run before invoking the
             # solver. Match those exact bytes, never a fingerprint supplied by
@@ -1482,6 +1485,26 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
             or details.get("outputIdentity") != expected
         ):
             raise RuntimeError("Cloud result location does not match the requested run")
+        strict_retry = details.get("strictRetryFingerprint")
+        if strict_retry is not None:
+            if not isinstance(strict_retry, str) or not re.fullmatch(
+                r"[a-f0-9]{64}", strict_retry
+            ):
+                raise RuntimeError("Cloud returned an invalid strict-retry identity")
+            authored_digest = getattr(result, "_cloud_authored_job_digest", None)
+            if authored_digest is not None:
+                # Strict-retry sites preserve the uploaded producer descriptor
+                # even on a fresh run. Transport alone scopes its outputs. Use
+                # our frozen staged digest, never a hash from remote artifacts.
+                result._frozen_staged_provenance["AWSSite"]["job"] = {
+                    "digest": authored_digest
+                }
+                result._frozen_artifact_fingerprints = (
+                    result.staged_artifact_fingerprints("AWSSite")
+                )
+                result._frozen_task_fingerprints = result.staged_task_fingerprints(
+                    "AWSSite"
+                )
         result._cloud_output_identity = expected
         return result
 
@@ -1718,6 +1741,9 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         run handles bind ``simulation_id`` to their own submission. Logs are
         staged before updating the local cache, with separate directories for
         each simulation so reruns cannot reuse an earlier run's cached logs.
+        If the task archive is absent, retrieve the retained planner diagnostic;
+        pass task/frequency to retrieve one task through the same authenticated
+        API. Bounded paging preserves text and refuses incomplete/oversized logs.
         """
         if task is not None and frequency is not None:
             raise ValueError("Pass either `task` or `frequency`, not both")
@@ -1768,12 +1794,15 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
                         name = f"task_{selected_task}.log"
                         self.get(remote + name, staged / name)
                 except FileNotFoundError:
-                    self._fetch_cloudwatch_logs(run_id, staged, task=selected_task)
+                    self._fetch_api_logs(run_id, staged, task=selected_task)
                 files = [
                     path
                     for path in staged.iterdir()
                     if path.is_file()
-                    and re.fullmatch(r"task_[1-9][0-9]*\.log", path.name)
+                    and (
+                        path.name == "planner.log"
+                        or re.fullmatch(r"task_[1-9][0-9]*\.log", path.name)
+                    )
                 ]
                 if not files:
                     raise FileNotFoundError(
@@ -1784,7 +1813,10 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
                 for path in files:
                     path.replace(log_dir / path.name)
                 if selected_task is None:
-                    for stale in log_dir.glob("task_*.log"):
+                    for stale in [
+                        *log_dir.glob("task_*.log"),
+                        *log_dir.glob("planner.log"),
+                    ]:
                         if stale.name not in names:
                             stale.unlink()
             selected = (
@@ -1793,7 +1825,12 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
                 else log_dir
             )
             if show:
-                self._show_logs(selected, job_name=item.name)
+                planner_only = selected_task is None and names == {"planner.log"}
+                self._show_logs(
+                    log_dir / "planner.log" if planner_only else selected,
+                    job_name=item.name,
+                    label="planner log" if planner_only else "log",
+                )
             result[item.name] = selected
         return result[jobs[0].name] if single else result
 
@@ -2358,63 +2395,80 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
             raise FileNotFoundError("No postprocess artifact was published")
         return fetched
 
-    def _fetch_cloudwatch_logs(
+    def _fetch_api_logs(
         self,
         simulation_id: str,
         log_dir: Path,
         *,
         task: Optional[int],
     ) -> None:
-        """Materialize Cloud task logs when the runtime has no S3 log prefix."""
-
-        if self.graphql_client is None or not simulation_id:
+        """Read retained planner logs, or one selected task, through Cloud's API."""
+        if self.graphql_client is None:
             raise FileNotFoundError(
-                "Cloud task logs are unavailable from storage or the Cloud API"
+                "Cloud logs are unavailable from storage or the Cloud API"
             )
-        rows = self.graphql_client.list_simulation_frequency_jobs(str(simulation_id))
-        indexed: dict[int, str] = {}
-        for row in rows:
-            frequency_index = row.get("frequencyIndex")
-            batch_job_id = row.get("batchJobId")
-            if not isinstance(frequency_index, int) or not isinstance(
-                batch_job_id, str
+        chunks: list[str] = []
+        cursor: Optional[str] = None
+        size = 0
+        for _ in range(16):
+            page = self.graphql_client.get_simulation_logs(
+                simulation_id,
+                frequency_index=task - 1 if task is not None else None,
+                before_byte=cursor,
+            )
+            if (
+                not isinstance(page, dict)
+                or type(page.get("available")) is not bool
+                or type(page.get("truncated")) is not bool
+                or not isinstance(page.get("logs"), list)
             ):
-                continue
-            task_number = frequency_index + 1
-            if task_number in indexed:
+                raise RuntimeError("Cloud returned an invalid simulation log page")
+            if not page["available"]:
+                if cursor is not None or page["logs"] or page["truncated"]:
+                    raise RuntimeError("Cloud log changed during retrieval")
+                raise FileNotFoundError(
+                    "No retained Cloud planner/task log is available for this run"
+                )
+            events = page["logs"]
+            if any(
+                not isinstance(event, dict)
+                or not isinstance(event.get("message"), str)
+                or not isinstance(event.get("timestamp"), str)
+                for event in events
+            ):
+                raise RuntimeError("Cloud returned invalid simulation log events")
+            text = "".join(event["message"] for event in events)
+            size += len(text.encode("utf-8"))
+            if size > 1024 * 1024:
                 raise RuntimeError(
-                    f"Cloud returned duplicate logs for task {task_number}"
+                    "Cloud log exceeds the SDK retrieval limit; use the product log panel"
                 )
-            indexed[task_number] = batch_job_id
-
-        requested_tasks = [task] if task is not None else sorted(indexed)
-        if not requested_tasks or any(
-            number not in indexed for number in requested_tasks
-        ):
-            raise FileNotFoundError("Cloud returned no Batch task logs for this run")
-
-        log_dir.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            dir=log_dir.parent,
-            prefix=f".{log_dir.name}-",
-        ) as staging_dir:
-            staged = Path(staging_dir)
-            for task_number in requested_tasks:
-                events = self.graphql_client.get_job_logs(indexed[task_number])
-                (staged / f"task_{task_number}.log").write_text(
-                    "".join(event["message"].rstrip("\n") + "\n" for event in events),
-                    encoding="utf-8",
-                )
-
-            log_dir.mkdir(parents=True, exist_ok=True)
-            staged_names = {path.name for path in staged.iterdir()}
-            for path in staged.iterdir():
-                path.replace(log_dir / path.name)
-            if task is None:
-                for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
-                    for stale in log_dir.glob(pattern):
-                        if stale.name not in staged_names:
-                            stale.unlink()
+            chunks.append(text)
+            next_cursor = page.get("nextToken")
+            if not page["truncated"]:
+                if next_cursor is not None:
+                    raise RuntimeError("Cloud returned an inconsistent log cursor")
+                break
+            if (
+                not text
+                or not isinstance(next_cursor, str)
+                or not re.fullmatch(r"[1-9][0-9]{0,15}", next_cursor)
+                or int(next_cursor) > 2**53 - 1
+                or (cursor is not None and int(next_cursor) >= int(cursor))
+            ):
+                raise RuntimeError("Cloud returned an invalid or repeated log cursor")
+            cursor = next_cursor
+        else:
+            raise RuntimeError(
+                "Cloud log exceeds the SDK page limit; use the product log panel"
+            )
+        text = "".join(reversed(chunks))
+        if not text:
+            raise FileNotFoundError(
+                "The retained Cloud planner/task log is currently empty"
+            )
+        name = f"task_{task}.log" if task is not None else "planner.log"
+        (log_dir / name).write_text(text, encoding="utf-8")
 
     def get_job_status_from_api(self, job_id: str) -> Dict[str, Any]:
         """Return cloud job status through the authenticated GraphQL client.

@@ -11,7 +11,7 @@ import io
 import math
 import threading
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 from mcp.types import ImageContent, TextContent
@@ -344,6 +344,7 @@ def figure_png(
     import numpy as np
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
+    from mpl_toolkits.mplot3d import Axes3D
 
     with _PLOT_LOCK:
         fig = Figure(
@@ -354,13 +355,15 @@ def figure_png(
         if model:
             from itertools import combinations, product
 
-            ax = fig.add_subplot(111, projection="3d")
+            ax3d = cast(Axes3D, fig.add_subplot(111, projection="3d"))
             corners = np.array(list(product(*zip(model["low"], model["high"]))))
             for a, b in combinations(corners, 2):
                 if np.count_nonzero(a != b) == 1:
-                    ax.plot(*np.array([a, b]).T, color="#94aba9", linewidth=0.9)
-            ax.scatter(
-                *model["receivers"].T,
+                    ax3d.plot(*np.array([a, b]).T, color="#94aba9", linewidth=0.9)
+            ax3d.scatter(
+                model["receivers"][:, 0],
+                model["receivers"][:, 1],
+                model["receivers"][:, 2],
                 marker="o",
                 facecolors="none",
                 edgecolors="#18776c",
@@ -368,33 +371,42 @@ def figure_png(
                 linewidths=2,
                 label="Pressure receivers",
             )
-            ax.scatter(
-                *model["sources"].T, marker="*", color="#ad6414", s=100, label="Sources"
+            ax3d.scatter(
+                model["sources"][:, 0],
+                model["sources"][:, 1],
+                model["sources"][:, 2],
+                marker="*",
+                color="#ad6414",
+                s=100,
+                label="Sources",
             )
             point_labels = geometry_labels(model)
             for item in point_labels:
-                ax.text(*item["point"], "  " + item["label"], fontsize=9)
+                point = item["point"]
+                ax3d.text(
+                    point[0], point[1], point[2], "  " + item["label"], fontsize=9
+                )
             if not point_labels:
-                ax.text2D(
+                ax3d.text2D(
                     0.02,
                     0.02,
                     "Point labels are listed in the coordinate table",
-                    transform=ax.transAxes,
+                    transform=ax3d.transAxes,
                     fontsize=8,
                 )
             for axis, low, high in zip("xyz", model["low"], model["high"]):
-                getattr(ax, f"set_{axis}lim")(low, high)
-                getattr(ax, f"set_{axis}label")(
+                getattr(ax3d, f"set_{axis}lim")(low, high)
+                getattr(ax3d, f"set_{axis}label")(
                     f"{axis.upper()} ({model['units']})", labelpad=8
                 )
-            ax.set_box_aspect(model["high"] - model["low"])
-            ax.set_title(
+            ax3d.set_box_aspect(model["high"] - model["low"])
+            ax3d.set_title(
                 "The acoustic model · specified geometry",
                 fontsize=14,
                 loc="left",
                 pad=20,
             )
-            ax.legend(loc="upper left", frameon=False, fontsize=9)
+            ax3d.legend(loc="upper left", frameon=False, fontsize=9)
             fig.subplots_adjust(left=0.02, right=0.94, top=0.88, bottom=0.12)
         else:
             if not reports:

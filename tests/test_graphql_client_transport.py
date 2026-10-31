@@ -314,3 +314,39 @@ def test_retry_submission_argument_is_opt_in_for_older_backends(retry):
     client.submit_job("project/job.json", retry=retry)
     assert ("$retry: Boolean" in captured["document"]) == retry
     assert captured["variables"].get("retry") == (True if retry else None)
+
+
+def test_simulation_logs_use_owned_query_and_bounded_cursor(monkeypatch):
+    calls = []
+    page = {"available": True, "logs": [], "truncated": False, "nextToken": None}
+
+    def post(url, **kwargs):
+        calls.append(kwargs["json"])
+        return FakeResponse({"data": {"getJobLogs": page}})
+
+    monkeypatch.setattr(graphql_client.requests, "post", post)
+    client = _client()
+    assert (
+        client.get_simulation_logs(
+            "simulation-synthetic", frequency_index=2, before_byte="100"
+        )
+        == page
+    )
+    assert calls[0]["variables"] == {
+        "simulationId": "simulation-synthetic",
+        "frequencyIndex": 2,
+        "beforeByte": "100",
+    }
+    assert calls[0]["query"].lstrip().startswith("query ")
+    client.get_simulation_logs("simulation-synthetic")
+    assert calls[1]["variables"] == {"simulationId": "simulation-synthetic"}
+
+
+def test_simulation_logs_reject_missing_response(monkeypatch):
+    monkeypatch.setattr(
+        graphql_client.requests,
+        "post",
+        lambda *a, **kw: FakeResponse({"data": {"getJobLogs": None}}),
+    )
+    with pytest.raises(graphql_client.CloudAPIError, match="no valid"):
+        _client().get_simulation_logs("simulation-synthetic")

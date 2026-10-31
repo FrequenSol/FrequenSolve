@@ -12,6 +12,7 @@ from scripts.check_mypy_baseline import (
     _counter_from_rows,
     _diagnostic_rows,
     _load_baseline,
+    _run_mypy,
     _write_baseline,
     parse_diagnostics,
     run,
@@ -67,6 +68,51 @@ def test_mypy_parser_tolerates_known_unused_config_status_line(tmp_path):
 def test_mypy_parser_rejects_unknown_plain_text(tmp_path):
     with pytest.raises(ValueError, match="Unexpected non-JSON mypy output"):
         parse_diagnostics("mypy crashed unexpectedly", tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "error"),
+    [
+        (1, "", "No module named mypy", RuntimeError),
+        (1, "", "", RuntimeError),
+        (1, '{"severity": "note"}', "", RuntimeError),
+        (2, "", "mypy: error: invalid configuration", RuntimeError),
+        (1, "{incomplete", "", ValueError),
+        (1, "mypy crashed unexpectedly", "", ValueError),
+    ],
+)
+def test_mypy_runner_rejects_failed_or_invalid_checker_output(
+    monkeypatch, tmp_path, returncode, stdout, stderr, error
+):
+    monkeypatch.setattr(
+        "scripts.check_mypy_baseline.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], returncode, stdout, stderr
+        ),
+    )
+
+    with pytest.raises(error):
+        _run_mypy(tmp_path)
+
+
+@pytest.mark.parametrize("has_errors", [False, True])
+def test_mypy_runner_preserves_valid_clean_and_error_results(
+    monkeypatch, tmp_path, has_errors
+):
+    diagnostic = Diagnostic("src/frequensolve/model.py", "arg-type")
+    output = (
+        _mypy_line(tmp_path / diagnostic.file, diagnostic.code) if has_errors else ""
+    )
+    monkeypatch.setattr(
+        "scripts.check_mypy_baseline.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], int(has_errors), output, ""
+        ),
+    )
+
+    assert _run_mypy(tmp_path) == (
+        Counter({diagnostic: 1}) if has_errors else Counter()
+    )
 
 
 def test_baseline_rows_roundtrip_deterministically():

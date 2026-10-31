@@ -88,6 +88,32 @@ class GraphQLClient:
         self.api_url = api_url
         self.auth = auth
 
+    def get_simulation_logs(
+        self,
+        simulation_id: str,
+        *,
+        frequency_index: Optional[int] = None,
+        before_byte: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Read one tenant-authorized planner/task log page without transfer tickets."""
+        variables: Dict[str, Any] = {"simulationId": simulation_id}
+        if frequency_index is not None:
+            variables["frequencyIndex"] = frequency_index
+        if before_byte is not None:
+            variables["beforeByte"] = before_byte
+        result = self.execute(
+            """query SimulationLogs($simulationId: String!, $frequencyIndex: Int, $beforeByte: String) {
+              getJobLogs(simulationId: $simulationId, frequencyIndex: $frequencyIndex, beforeByte: $beforeByte) {
+                logs { timestamp message }
+                available truncated nextToken
+              }
+            }""",
+            variables,
+        ).get("getJobLogs")
+        if not isinstance(result, dict):
+            raise CloudAPIError("Cloud returned no valid simulation log response")
+        return result
+
     def _get_headers(self) -> Dict[str, str]:
         """Get headers with ID token for AppSync authentication.
 
@@ -524,6 +550,7 @@ class GraphQLClient:
                     id
                     status
                     outputIdentity
+                    strictRetryFingerprint
                     failureCode
                     failureMessage
                     creditSettlementMode
@@ -599,6 +626,7 @@ class GraphQLClient:
             "id": details.get("id"),
             "status": status,
             "outputIdentity": details.get("outputIdentity"),
+            "strictRetryFingerprint": details.get("strictRetryFingerprint"),
             "failureCode": details.get("failureCode"),
             "failureMessage": details.get("failureMessage"),
             **{
