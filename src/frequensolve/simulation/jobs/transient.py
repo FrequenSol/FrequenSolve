@@ -709,13 +709,16 @@ class TransientJob(BaseJob):
             if self.outputs.wavefields:
                 expected_roles.add("sampled_wavefield")
             actual_roles = {
-                a.role for a in result.artifacts if a.schema == "fs-time-step-1"
+                a.role
+                for a in result.artifacts
+                if a.schema in ("fs-time-step-1", "fs-time-steps-1")
             }
             if not expected_roles.issubset(actual_roles):
                 return False
             for handle in (self.traces, self.wavefields):
                 if any(
-                    a.schema == "fs-time-step-1" and a.role == handle.role
+                    a.schema in ("fs-time-step-1", "fs-time-steps-1")
+                    and a.role == handle.role
                     for a in result.artifacts
                 ):
                     data = handle.open(

@@ -160,7 +160,7 @@ def _text(h5, name, value):
     h5.create_dataset(name, data=value, dtype=h5py.string_dtype())
 
 
-def commit(job, *, sparse=False, first_step=0, task=None):
+def commit(job, *, sparse=False, first_step=0, task=None, block=None):
     root = job._result_path
     root.mkdir(parents=True, exist_ok=True)
     prefix = Path() if task is None else Path("modes") / f"mode_{task - 1:06d}"
@@ -197,26 +197,37 @@ def commit(job, *, sparse=False, first_step=0, task=None):
         )
     ]
     schedule = job.trace_schedule or job.output_schedule
-    for step in schedule.steps(job.time):
-        if step < first_step:
-            continue
-        name = (prefix / f"step_{step:012d}.h5").as_posix()
+    steps = [int(s) for s in schedule.steps(job.time) if s >= first_step]
+    # block=None writes fs-time-step-1 shards; block=n groups n samples per fs-time-steps-1 shard.
+    groups = (
+        [[s] for s in steps]
+        if block is None
+        else [steps[i : i + block] for i in range(0, len(steps), block)]
+    )
+    for group in groups:
+        held = block is not None
+        name = (
+            prefix / f"steps_{group[0]:012d}_{group[-1]:012d}.h5"
+            if held
+            else prefix / f"step_{group[0]:012d}.h5"
+        ).as_posix()
         p = root / name
         with h5py.File(p, "w") as h5:
             _text(h5, "sample_axis", "time")
             _text(h5, "trace_metadata_file", meta_name)
             h5["task_id"] = task or 1
-            h5["time_step"] = step
-            h5["time"] = job.time.start + step * job.time.dt
-            data = np.zeros((2, 2) if sparse else (1, 1, 2, 2))
-            data[..., 0] = step * (task or 1)
-            h5["pressure"] = data
+            times = [job.time.start + s * job.time.dt for s in group]
+            h5["time_step"] = np.asarray(group, dtype=np.int64) if held else group[0]
+            h5["time"] = np.asarray(times) if held else times[0]
+            data = np.zeros((len(group),) + ((2, 2) if sparse else (1, 1, 2, 2)))
+            data[..., 0] = np.reshape(group, (-1,) + (1,) * (data.ndim - 2)) * (task or 1)
+            h5["pressure"] = data if held else data[0]
         records.append(
             dict(
-                id=f"traces/{step}",
+                id=f"traces/{group[0]}" + (f"_{group[-1]}" if held else ""),
                 role="simulated_traces",
                 representation="hdf5_shard",
-                schema="fs-time-step-1",
+                schema="fs-time-steps-1" if held else "fs-time-step-1",
                 path=name,
                 retention="durable",
                 bytes=p.stat().st_size,
@@ -243,14 +254,15 @@ def commit(job, *, sparse=False, first_step=0, task=None):
     return payload
 
 
+@pytest.mark.parametrize("block", [None, 1, 3])
 @pytest.mark.parametrize("sparse", [False, True])
-def test_native_reader_and_lifecycle(tmp_path, sparse):
+def test_native_reader_and_lifecycle(tmp_path, sparse, block):
     job = job_at(
         tmp_path,
         outputs=fs.TraceOutput(),
         output_schedule=fs.TimeOutput(times=[0.2, 0.7]),
     )
-    commit(job, sparse=sparse)
+    commit(job, sparse=sparse, block=block)
     data = job.traces.open()
     assert data.groups == ("pressure",)
     array = data.read("pressure", steps=[2, 7])
@@ -270,6 +282,28 @@ def test_native_reader_and_lifecycle(tmp_path, sparse):
     assert job.plan_tasks(force=True)["pending_indices"] == [0]
     assert job.plan_tasks(force=True, apply=True)["removed_stale_outputs"]
     assert not job.results_exist()
+
+
+def test_reader_combines_block_shards_in_step_order(tmp_path):
+    job = job_at(
+        tmp_path, outputs=fs.TraceOutput(), output_schedule=fs.TimeOutput(stride=1)
+    )
+    commit(job, block=4)
+    data = job.traces.open()
+    np.testing.assert_array_equal(data.steps, np.arange(0, job.time.steps + 1))
+    array = data.read("pressure", steps=[9, 2, 5, 3])
+    np.testing.assert_array_equal(array.step, [9, 2, 5, 3])
+    np.testing.assert_array_equal(array.values[:, 0, 0, 0], [9, 2, 5, 3])
+    assert job.results_exist()
+
+
+def test_time_output_shard_samples_roundtrip():
+    held = fs.TimeOutput(stride=2, shard_samples=32)
+    assert held.to_fs()["shard_samples"] == 32
+    assert fs.TimeOutput.from_fs(held.to_fs()) == held
+    assert "shard_samples" not in fs.TimeOutput(stride=2).to_fs()
+    with pytest.raises(ValueError):
+        fs.TimeOutput(shard_samples=0)
 
 
 @pytest.mark.parametrize(

@@ -25,8 +25,16 @@ def _scalar(h5, key):
     return value.item()
 
 
+# Per-sample shards (fs-time-step-1) and held block shards (fs-time-steps-1),
+# whose payloads carry a leading sample axis matching the time_step vector.
+_TIME_SCHEMAS = ("fs-time-step-1", "fs-time-steps-1")
+
+
 class TransientDataset:
     """Committed native time shards, read one requested group at a time.
+
+    Shards hold one sample (``step_<step>.h5``) or a block of consecutive
+    scheduled samples (``steps_<first>_<last>.h5``); both read identically.
 
     ``read(group, steps=[...])`` returns an xarray DataArray with physical
     ``time`` and integer ``step`` coordinates. Dense data use source/component/
@@ -46,8 +54,9 @@ class TransientDataset:
         }
         families = {}
         for artifact in self.result.artifacts:
-            if artifact.role != role or artifact.schema != "fs-time-step-1":
+            if artifact.role != role or artifact.schema not in _TIME_SCHEMAS:
                 continue
+            block = artifact.schema == "fs-time-steps-1"
             if (
                 not artifact.path.is_file()
                 or artifact.path.stat().st_size != artifact.bytes
@@ -66,27 +75,48 @@ class TransientDataset:
                     raise ValueError("Expected a physical-time shard")
                 if job.n_modes is not None and _scalar(h5, "task_id") != task:
                     raise ValueError("Time shard belongs to a different angular task")
-                step, time = _scalar(h5, "time_step"), float(_scalar(h5, "time"))
-                if not isinstance(step, int) or step < 0 or step > job.time.steps:
-                    raise ValueError("Invalid completed time step")
-                expected = job.time.start + step * job.time.dt
-                if not np.isfinite(time) or abs(time - expected) > 64 * np.finfo(
-                    float
-                ).eps * max(1, abs(expected)):
-                    raise ValueError("Time shard does not match the integration grid")
+                if block:
+                    steps = np.asarray(h5["time_step"][()]).reshape(-1)
+                    times = np.asarray(h5["time"][()], dtype=float).reshape(-1)
+                    if (
+                        steps.size == 0
+                        or steps.size != times.size
+                        or not np.issubdtype(steps.dtype, np.integer)
+                        or np.any(np.diff(steps) <= 0)
+                    ):
+                        raise ValueError("Invalid time block step table")
+                    samples = [int(v) for v in steps]
+                    name = f"steps_{samples[0]:012d}_{samples[-1]:012d}.h5"
+                else:
+                    step, time = _scalar(h5, "time_step"), float(_scalar(h5, "time"))
+                    if not isinstance(step, int):
+                        raise ValueError("Invalid completed time step")
+                    samples, times = [step], np.array([time])
+                    name = f"step_{step:012d}.h5"
+                for step, time in zip(samples, times):
+                    if step < 0 or step > job.time.steps:
+                        raise ValueError("Invalid completed time step")
+                    expected = job.time.start + step * job.time.dt
+                    if not np.isfinite(time) or abs(time - expected) > 64 * np.finfo(
+                        float
+                    ).eps * max(1, abs(expected)):
+                        raise ValueError(
+                            "Time shard does not match the integration grid"
+                        )
                 reference = _strings(h5["trace_metadata_file"][()])
                 if reference != [meta.relative_path]:
                     raise ValueError(
                         "Time shard metadata reference differs from its committed dependency"
                     )
-                if artifact.path.name != f"step_{step:012d}.h5":
+                if artifact.path.name != name:
                     raise ValueError(
-                        "Time shard filename does not match its completed step"
+                        "Time shard filename does not match its completed steps"
                     )
             rows = families.setdefault(meta.id, {"metadata": meta, "steps": {}})
-            if step in rows["steps"]:
-                raise ValueError("Duplicate output for a completed time step")
-            rows["steps"][step] = artifact.path
+            for index, step in enumerate(samples):
+                if step in rows["steps"]:
+                    raise ValueError("Duplicate output for a completed time step")
+                rows["steps"][step] = (artifact.path, index if block else None)
         schedule = job.output_schedule
         if role == "simulated_traces" and job.trace_schedule is not None:
             schedule = job.trace_schedule
@@ -154,19 +184,31 @@ class TransientDataset:
             if dims not in (["source", "component", "receiver"], ["trace"]):
                 raise ValueError(f"Unsupported transient payload dimensions: {dims}")
             shape = None
+            # Read each shard once, then take the requested samples in order.
+            wanted = {}
             for step in selected:
-                with h5py.File(family["steps"][int(step)], "r") as h5:
-                    data = np.asarray(h5[path][()])
-                    if data.ndim != len(dims) + 1 or data.shape[-1] != 2:
-                        raise ValueError(
-                            "Invalid transient complex-pair storage layout"
-                        )
-                    if shape is not None and data.shape != shape:
-                        raise ValueError("Transient group shape changed between steps")
-                    shape = data.shape
-                    if not np.isfinite(data).all() or np.any(data[..., 1] != 0):
-                        raise ValueError("Native time output must be finite and real")
-                    arrays.append(data[..., 0])
+                file, index = family["steps"][int(step)]
+                wanted.setdefault(file, []).append(index)
+            loaded = {}
+            for file, indices in wanted.items():
+                with h5py.File(file, "r") as h5:
+                    if indices[0] is None:
+                        loaded[file] = {None: np.asarray(h5[path][()])}
+                    else:
+                        rows = sorted(set(indices))
+                        block = np.asarray(h5[path][rows])
+                        loaded[file] = dict(zip(rows, block))
+            for step in selected:
+                file, index = family["steps"][int(step)]
+                data = loaded[file][index]
+                if data.ndim != len(dims) + 1 or data.shape[-1] != 2:
+                    raise ValueError("Invalid transient complex-pair storage layout")
+                if shape is not None and data.shape != shape:
+                    raise ValueError("Transient group shape changed between steps")
+                shape = data.shape
+                if not np.isfinite(data).all() or np.any(data[..., 1] != 0):
+                    raise ValueError("Native time output must be finite and real")
+                arrays.append(data[..., 0])
             coords = TraceStore._trace_coordinates(
                 meta, meta[path], group, dims, shape[:-1]
             )

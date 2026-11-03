@@ -761,12 +761,16 @@ class TimeOutput:
     is every step. Times/intervals must align with the integration grid. The
     final step is always written; ``write_initial`` additionally selects step
     zero. Use it for spatial output or an independent receiver trace schedule.
+    ``shard_samples`` sets how many receiver trace samples the solver holds in
+    memory per shard file (solver default 64; 1 writes one file per sample);
+    it does not change which steps are sampled and is ignored by wavefields.
     """
 
     stride: int | None = None
     interval: float | None = None
     times: tuple[float, ...] | None = None
     write_initial: bool = True
+    shard_samples: int | None = None
 
     def __post_init__(self) -> None:
         if sum(v is not None for v in (self.stride, self.interval, self.times)) > 1:
@@ -777,6 +781,8 @@ class TimeOutput:
             raise TypeError("write_initial must be boolean")
         if self.stride is not None:
             _count(self.stride, "output.stride", 1)
+        if self.shard_samples is not None:
+            _count(self.shard_samples, "output.shard_samples", 1)
         if self.interval is not None:
             interval = _scalar_in_units(self.interval, "s", "output.interval")
             if interval <= 0:
@@ -841,12 +847,16 @@ class TimeOutput:
             payload["interval"] = float(self.interval)
         else:
             payload["stride"] = int(self.stride or 1)
+        if self.shard_samples is not None:
+            payload["shard_samples"] = int(self.shard_samples)
         return payload
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> TimeOutput:
         return cls(
             **_fields(
-                data, {"stride", "interval", "times", "write_initial"}, "Time.output"
+                data,
+                {"stride", "interval", "times", "write_initial", "shard_samples"},
+                "Time.output",
             )
         )
