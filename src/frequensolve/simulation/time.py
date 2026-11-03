@@ -764,6 +764,9 @@ class TimeOutput:
     ``shard_samples`` sets how many receiver trace samples the solver holds in
     memory per shard file (solver default 64; 1 writes one file per sample);
     it does not change which steps are sampled and is ignored by wavefields.
+    ``rate_operator=False`` makes the solver evaluate rate-only averaged
+    receivers (e.g. DAS strain_rate) element by element instead of through
+    their probed, device-gathered operator (solver default True).
     """
 
     stride: int | None = None
@@ -771,6 +774,7 @@ class TimeOutput:
     times: tuple[float, ...] | None = None
     write_initial: bool = True
     shard_samples: int | None = None
+    rate_operator: bool | None = None
 
     def __post_init__(self) -> None:
         if sum(v is not None for v in (self.stride, self.interval, self.times)) > 1:
@@ -783,6 +787,8 @@ class TimeOutput:
             _count(self.stride, "output.stride", 1)
         if self.shard_samples is not None:
             _count(self.shard_samples, "output.shard_samples", 1)
+        if self.rate_operator is not None and not isinstance(self.rate_operator, bool):
+            raise TypeError("rate_operator must be boolean")
         if self.interval is not None:
             interval = _scalar_in_units(self.interval, "s", "output.interval")
             if interval <= 0:
@@ -849,6 +855,8 @@ class TimeOutput:
             payload["stride"] = int(self.stride or 1)
         if self.shard_samples is not None:
             payload["shard_samples"] = int(self.shard_samples)
+        if self.rate_operator is not None:
+            payload["rate_operator"] = self.rate_operator
         return payload
 
     @classmethod
@@ -856,7 +864,14 @@ class TimeOutput:
         return cls(
             **_fields(
                 data,
-                {"stride", "interval", "times", "write_initial", "shard_samples"},
+                {
+                    "stride",
+                    "interval",
+                    "times",
+                    "write_initial",
+                    "shard_samples",
+                    "rate_operator",
+                },
                 "Time.output",
             )
         )

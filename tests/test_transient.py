@@ -304,6 +304,9 @@ def test_time_output_shard_samples_roundtrip():
     assert "shard_samples" not in fs.TimeOutput(stride=2).to_fs()
     with pytest.raises(ValueError):
         fs.TimeOutput(shard_samples=0)
+    host = fs.TimeOutput(stride=1, rate_operator=False)
+    assert host.to_fs()["rate_operator"] is False
+    assert fs.TimeOutput.from_fs(host.to_fs()) == host
 
 
 @pytest.mark.parametrize(
