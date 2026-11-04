@@ -751,10 +751,11 @@ class Backend:
         """Upload operator inputs written on this machine to a remote site.
 
         Project sync carries only simulations, and remote jobs see their own
-        results; client-written directions and objective vectors live under
-        the project's ``imaging`` tree and must be uploaded explicitly.  Paths
-        are mapped under the remote project root exactly as the job payload
-        rewrites them.
+        results; client-written directions and objective vectors (under the
+        problem workdir) must be uploaded explicitly.  Paths are mapped
+        exactly as the job payload rewrites them: under the remote project
+        root, or, for inputs outside every project root, below the job's
+        ``inputs/external`` directory (see ``remote_input_files``).
         """
 
         # Local sites read inputs in place; only remote sites expose a work_dir.

@@ -8,6 +8,7 @@ the staged payloads on local, cloud, or HPC execution sites.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import (
@@ -45,6 +46,11 @@ _PROJECT_FILE_REFERENCE_KEYS = frozenset(
 )
 
 _STAGED_PROVENANCE_SCHEMA = "fs-staged-provenance-1"
+
+# Operation inputs that live outside every project root are staged with the
+# job, below ``<job_dir>/inputs/external`` on the site, mirroring their local
+# absolute path so task siblings and manifest-relative files keep their layout.
+_EXTERNAL_INPUTS = ("inputs", "external")
 
 # Saved objective states and vectors: Sauce writes them with their payloads
 # (caches, vector data) into a job result directory.
@@ -248,6 +254,11 @@ class JobRemoteMixin:
     def save_for_remote(self, site: str, remote_project: Union[Path, str]):
         """Stage a remote job JSON without replacing the local definition.
 
+        Project-rooted paths are mapped onto ``remote_project``; operation
+        inputs outside every project root name their copies below the job's
+        ``inputs/external`` directory, which :meth:`remote_input_files`
+        uploads.
+
         Args:
             site: Site name used to choose the local staging directory.
             remote_project: Project root visible on the remote site.
@@ -275,12 +286,39 @@ class JobRemoteMixin:
             target=remote_layout,
             source_projects=source_projects,
         )
+        external_root = self._external_input_root(remote_layout)
+        external = list(
+            self._external_input_locations(
+                payload,
+                source_roots=source_projects,
+                external_root=external_root,
+            )
+        )
+        if external:
+            # Classify against the roots remote_input_files maps uploads with
+            # (a superset; the simulation skeleton is read only in this case).
+            staging_roots = self._remote_source_projects(
+                local_layout, *self._staging_payloads(local_layout, payload)
+            )
+            external = list(
+                self._external_input_locations(
+                    payload,
+                    source_roots=staging_roots,
+                    external_root=external_root,
+                )
+            )
+        # Staged external inputs are placed after the project-root check: their
+        # mirrored remote path may legitimately contain local path text.
+        for location, _value in external:
+            self._set_payload_value(data, location, "")
         self._assert_remote_payload_has_no_local_roots(
             data,
             source_projects=source_projects,
             target_project=remote_layout.project,
             payload_name="job JSON",
         )
+        for location, value in external:
+            self._set_payload_value(data, location, value)
 
         stage_dir = self._result_path / "_fs_run" / "remote" / site
         staged_file = stage_dir / Path(local_file).name
@@ -550,6 +588,13 @@ class JobRemoteMixin:
         manifest nor its cache or data file is uploaded again, so the
         producer's remote copies stay byte-identical and self-consistent.
 
+        Operation inputs (directions, objective vectors, control states,
+        linearization states, regularization inputs) outside every project
+        root are staged with the job below ``<job_dir>/inputs/external`` on
+        the site, together with their task-suffixed siblings and the files
+        their manifests reference; :meth:`save_for_remote` points the remote
+        job JSON at those copies.
+
         Args:
             remote_project: Project root visible on the remote site.
 
@@ -562,7 +607,10 @@ class JobRemoteMixin:
         files = []
         seen = set()
         local_layout = self._saved_layout()
-        payloads = []
+        external_root = self._external_input_root(
+            local_layout.with_project(remote_project)
+        )
+        operations: set = set()
 
         def add_pair(pair: Optional[tuple]) -> None:
             if pair is None:
@@ -576,15 +624,12 @@ class JobRemoteMixin:
 
         mesh = getattr(self.simulation, "mesh", None)
         mesh_file = getattr(mesh, "file", None)
-        if mesh_file is not None:
-            payloads.append(mesh_file)
-
+        job_payload = None
         if local_layout.job_file.exists():
             with open(local_layout.job_file, "r") as f:
-                payloads.append(json.load(f))
-        if local_layout.simulation_file.exists():
-            payloads.append(_simulation_skeleton(local_layout.simulation_file))
-
+                job_payload = json.load(f)
+            operations = set(self._iter_operation_references(job_payload))
+        payloads = self._staging_payloads(local_layout, job_payload)
         source_projects = self._remote_source_projects(local_layout, *payloads)
 
         if mesh_file is not None:
@@ -601,7 +646,10 @@ class JobRemoteMixin:
         residency: Dict[Path, Any] = {}
 
         def add_reference(
-            file_ref: Union[str, Path], *, parent: Optional[Path] = None
+            file_ref: Union[str, Path],
+            *,
+            parent: Optional[Path] = None,
+            external: bool = False,
         ) -> None:
             path = Path(file_ref)
             if parent is not None and not path.is_absolute():
@@ -611,6 +659,7 @@ class JobRemoteMixin:
                 source_project=local_layout.project,
                 remote_project=remote_project,
                 source_projects=source_projects,
+                external_root=external_root if external else None,
             )
             if pair is None:
                 return
@@ -618,6 +667,9 @@ class JobRemoteMixin:
             if local in visited:
                 return
             visited.add(local)
+            # Only an externally staged file keeps its relative layout in the
+            # mirror; files a project manifest names are staged as before.
+            external = external and remote.is_relative_to(external_root)
             payload = (
                 json.loads(local.read_text())
                 if local.suffix.lower() == ".json"
@@ -631,7 +683,7 @@ class JobRemoteMixin:
                 return
             add_pair(pair)
             for sidecar in self._rsf_sidecar_references(pair):
-                add_reference(sidecar)
+                add_reference(sidecar, external=external)
             if not isinstance(payload, Mapping):
                 return
             schema = payload.get("schema", "")
@@ -642,14 +694,14 @@ class JobRemoteMixin:
             ):
                 return
             for ref in self._iter_file_references(payload):
-                add_reference(ref, parent=local.parent)
+                add_reference(ref, parent=local.parent, external=external)
             # Shards are files too; generic file traversal includes them.
             if schema in _OBJECTIVE_VECTORS:
                 from frequensolve.imaging.data import DataVector, canonical_json_sha256
 
                 validated = DataVector.read_objective_manifest(local)
                 for ref in self._iter_file_references(validated):
-                    add_reference(ref, parent=local.parent)
+                    add_reference(ref, parent=local.parent, external=external)
 
                 def staged_reference(reference: str) -> str:
                     if schema != "fs-objective-vector-3":
@@ -660,6 +712,7 @@ class JobRemoteMixin:
                         source_project=local_layout.project,
                         remote_project=remote_project,
                         source_projects=source_projects,
+                        external_root=external_root if external else None,
                     )
                     if mapped is None:
                         raise ValueError(
@@ -698,6 +751,7 @@ class JobRemoteMixin:
                 continue
             for file_ref in self._iter_file_references(payload):
                 path = Path(file_ref)
+                external = file_ref in operations
                 # Solver input stems resolve the active task sibling before the exact path.
                 for task in range(1, int(self.n_tasks) + 1):
                     sibling = path.with_name(f"{path.stem}_{task}{path.suffix}")
@@ -706,9 +760,116 @@ class JobRemoteMixin:
                         source_project=local_layout.project,
                         remote_project=remote_project,
                         source_projects=source_projects,
+                        external_root=external_root if external else None,
                     )
-                    add_reference(sibling if probe is not None else path)
+                    add_reference(
+                        sibling if probe is not None else path, external=external
+                    )
         return files
+
+    def _staging_payloads(
+        self, local_layout: JobLayout, job_payload: Optional[Mapping[str, Any]]
+    ) -> List[Any]:
+        """Return the mesh file, job payload and simulation skeleton to stage."""
+
+        payloads: List[Any] = []
+        simulation = getattr(self, "simulation", None)
+        mesh_file = getattr(getattr(simulation, "mesh", None), "file", None)
+        if mesh_file is not None:
+            payloads.append(mesh_file)
+        if job_payload is not None:
+            payloads.append(job_payload)
+        if local_layout.simulation_file.exists():
+            payloads.append(_simulation_skeleton(local_layout.simulation_file))
+        return payloads
+
+    @staticmethod
+    def _external_input_root(layout: "JobLayout") -> Path:
+        """Return the site directory holding a job's staged external inputs."""
+
+        return layout.job_dir.joinpath(*_EXTERNAL_INPUTS)
+
+    @staticmethod
+    def _external_input_target(
+        path: Union[str, Path],
+        *,
+        source_roots: Iterable[Path],
+        external_root: Path,
+    ) -> Optional[Path]:
+        """Return the staged site path of an input outside every project root.
+
+        ``None`` when ``path`` is relative or lies (literally or resolved)
+        below one of ``source_roots``: those inputs keep their project layout.
+        The staged copy mirrors the normalized local absolute path below
+        ``external_root``, so task siblings (``<stem>_<task><ext>``) and the
+        files a manifest names relative to itself map consistently.
+        """
+
+        path = Path(path)
+        if not path.is_absolute():
+            return None
+        normalized = Path(os.path.normpath(path))
+        candidates = [normalized]
+        try:
+            candidates.append(normalized.resolve())
+        except OSError:
+            pass
+        for root in JobRemoteMixin._unique_paths(source_roots):
+            if any(candidate.is_relative_to(root) for candidate in candidates):
+                return None
+        return Path(external_root).joinpath(*normalized.parts[1:])
+
+    def _external_input_locations(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        source_roots: Iterable[Path],
+        external_root: Path,
+    ) -> Iterable[Tuple[Tuple[Any, ...], str]]:
+        """Yield ``(location, staged value)`` for each external operation input.
+
+        Only the values :meth:`_iter_operation_references` names are moved,
+        and only when the file (or one of its task siblings) exists here; an
+        absent absolute path may name a file that already lives on the site.
+        """
+
+        references = set(self._iter_operation_references(payload))
+        if not references:
+            return
+        roots = self._unique_paths(source_roots)
+        tasks = int(getattr(self, "n_tasks", 1) or 1)
+
+        def visit(value: Any, location: Tuple[Any, ...]):
+            if isinstance(value, Mapping):
+                for key, item in value.items():
+                    yield from visit(item, (*location, key))
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    yield from visit(item, (*location, index))
+            elif isinstance(value, str):
+                reference = self._strip_file_locator(value)
+                if reference not in references:
+                    return
+                target = self._external_input_target(
+                    reference, source_roots=roots, external_root=external_root
+                )
+                if target is None:
+                    return
+                path = Path(reference)
+                siblings = (
+                    path.with_name(f"{path.stem}_{task}{path.suffix}")
+                    for task in range(1, tasks + 1)
+                )
+                if path.exists() or any(sibling.exists() for sibling in siblings):
+                    yield location, str(target) + value[len(reference) :]
+
+        yield from visit(payload, ())
+
+    @staticmethod
+    def _set_payload_value(data: Any, location: Tuple[Any, ...], value: Any) -> None:
+        for key in location[:-1]:
+            data = data[key]
+        data[location[-1]] = value
 
     @staticmethod
     def _relative_artifact_reference(reference: str, manifest: Path) -> str:
@@ -938,52 +1099,7 @@ class JobRemoteMixin:
     @staticmethod
     def _iter_file_references(value: Any) -> Iterable[str]:
         if isinstance(value, Mapping):
-            for section, input_keys in (
-                ("control_sensitivities", ("direction", "current", "input")),
-                ("Image", ("direction",)),
-            ):
-                config = value.get(section)
-                if isinstance(config, Mapping):
-                    for key in input_keys:
-                        path = config.get(key)
-                        if isinstance(path, (str, Path)):
-                            yield JobRemoteMixin._strip_file_locator(path)
-            operator = value.get("fwi_operator")
-            if isinstance(operator, Mapping):
-                keys = ["model_direction"]
-                if operator.get("action") != "linearize" and not (
-                    operator.get("action") == "solve" and "reflectivity" in operator
-                ):
-                    keys.append("state")
-                    keys.append("background")
-                if operator.get("action") in {"jvp", "normal", "solve", "wri"}:
-                    keys.append("direction")
-                if operator.get("action") == "vjp":
-                    keys.append("objective_vector")
-                for key in keys:
-                    path = operator.get(key)
-                    if isinstance(path, (str, Path)):
-                        yield JobRemoteMixin._strip_file_locator(path)
-                if operator.get("action") == "normal":
-                    for path in operator.get("directions") or ():
-                        if isinstance(path, (str, Path)):
-                            yield JobRemoteMixin._strip_file_locator(path)
-                for section, key in (("controls", "state"), ("extension", "direction")):
-                    path = operator.get(section, {}).get(key)
-                    if isinstance(path, (str, Path)):
-                        yield JobRemoteMixin._strip_file_locator(path)
-            regularization = value.get("Regularization")
-            if isinstance(regularization, Mapping):
-                keys = ["metric", "lower", "upper"]
-                if regularization.get("operation") != "prepare":
-                    keys.append("context")
-                for key in keys:
-                    path = regularization.get(key)
-                    if isinstance(path, (str, Path)):
-                        yield JobRemoteMixin._strip_file_locator(path)
-                for path in regularization.get("inputs") or ():
-                    if isinstance(path, (str, Path)):
-                        yield JobRemoteMixin._strip_file_locator(path)
+            yield from JobRemoteMixin._operation_references_here(value)
             derivatives = value.get("observed_derivatives")
             if isinstance(derivatives, Mapping):
                 df = derivatives.get("df")
@@ -998,6 +1114,75 @@ class JobRemoteMixin:
         elif isinstance(value, list):
             for item in value:
                 yield from JobRemoteMixin._iter_file_references(item)
+
+    @staticmethod
+    def _iter_operation_references(value: Any) -> Iterable[str]:
+        """Yield the operator and regularization inputs a payload names.
+
+        These are the per-call files (directions, objective vectors, control
+        states, linearization states and backgrounds, regularization inputs)
+        that :meth:`remote_input_files` stages with the job when they lie
+        outside the project; data and geometry references are not included.
+        """
+
+        if isinstance(value, Mapping):
+            yield from JobRemoteMixin._operation_references_here(value)
+            for item in value.values():
+                yield from JobRemoteMixin._iter_operation_references(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from JobRemoteMixin._iter_operation_references(item)
+
+    @staticmethod
+    def _operation_references_here(value: Mapping[str, Any]) -> Iterable[str]:
+        """Yield operation inputs of the sections held directly by ``value``."""
+
+        for section, input_keys in (
+            ("control_sensitivities", ("direction", "current", "input")),
+            ("Image", ("direction",)),
+        ):
+            config = value.get(section)
+            if isinstance(config, Mapping):
+                for key in input_keys:
+                    path = config.get(key)
+                    if isinstance(path, (str, Path)):
+                        yield JobRemoteMixin._strip_file_locator(path)
+        operator = value.get("fwi_operator")
+        if isinstance(operator, Mapping):
+            keys = ["model_direction"]
+            if operator.get("action") != "linearize" and not (
+                operator.get("action") == "solve" and "reflectivity" in operator
+            ):
+                keys.append("state")
+                keys.append("background")
+            if operator.get("action") in {"jvp", "normal", "solve", "wri"}:
+                keys.append("direction")
+            if operator.get("action") == "vjp":
+                keys.append("objective_vector")
+            for key in keys:
+                path = operator.get(key)
+                if isinstance(path, (str, Path)):
+                    yield JobRemoteMixin._strip_file_locator(path)
+            if operator.get("action") == "normal":
+                for path in operator.get("directions") or ():
+                    if isinstance(path, (str, Path)):
+                        yield JobRemoteMixin._strip_file_locator(path)
+            for section, key in (("controls", "state"), ("extension", "direction")):
+                path = operator.get(section, {}).get(key)
+                if isinstance(path, (str, Path)):
+                    yield JobRemoteMixin._strip_file_locator(path)
+        regularization = value.get("Regularization")
+        if isinstance(regularization, Mapping):
+            keys = ["metric", "lower", "upper"]
+            if regularization.get("operation") != "prepare":
+                keys.append("context")
+            for key in keys:
+                path = regularization.get(key)
+                if isinstance(path, (str, Path)):
+                    yield JobRemoteMixin._strip_file_locator(path)
+            for path in regularization.get("inputs") or ():
+                if isinstance(path, (str, Path)):
+                    yield JobRemoteMixin._strip_file_locator(path)
 
     @staticmethod
     def _strip_file_locator(value: Union[str, Path]) -> str:
@@ -1029,6 +1214,7 @@ class JobRemoteMixin:
         source_project: Path,
         remote_project: Path,
         source_projects: Iterable[Path] = (),
+        external_root: Optional[Path] = None,
     ) -> Optional[tuple]:
         path = Path(value)
         source_roots = self._unique_paths([source_project, *source_projects])
@@ -1041,7 +1227,15 @@ class JobRemoteMixin:
                 except ValueError:
                     continue
             if relative is None:
-                return None
+                if external_root is None:
+                    return None
+                target = self._external_input_target(
+                    path, source_roots=source_roots, external_root=external_root
+                )
+                local = Path(os.path.normpath(path))
+                if target is None or not local.exists():
+                    return None
+                return local, target
             local_candidates = [root / relative for root in source_roots]
             if path not in local_candidates:
                 local_candidates.append(path)

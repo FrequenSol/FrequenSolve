@@ -689,7 +689,9 @@ class ImagingProblem:
         smoothing: Optional native regularization configuration inherited by FWI/LSRTM.
             Problem derivatives remain derivatives of the data objective.
         workdir: Directory for staged inputs and cache bookkeeping; defaults
-            to ``<project>/imaging/<name>``.
+            to ``<project>/imaging/<name>``.  On remote sites operator inputs
+            written outside the project are uploaded with each job (below
+            its ``inputs/external`` directory), so any local path works.
         name: Problem name, used for job prefixes and the default workdir.
         min_support: ``fwi_operator.controls.min_support`` relative support
             threshold (Sauce default ``1e-2``).
