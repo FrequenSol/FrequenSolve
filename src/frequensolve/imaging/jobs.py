@@ -1930,13 +1930,9 @@ class FWIOperatorJob(_ImagingJobBase):
             raise ValueError("normal needs one covector output per direction")
         if len(set(self.covectors)) != len(self.covectors):
             raise ValueError("normal covector outputs must be distinct")
-        if (
-            self.source_controls is not None
-            or self.reflectivity is not None
-            or self.kernel_derivative is not None
-        ):
+        if self.source_controls is not None or self.reflectivity is not None:
             raise ValueError(
-                "several normal directions require material-only ordinary or phase normals"
+                "several normal directions require material-only ordinary, phase or spectral-kernel normals"
             )
 
     def _validate_receiver(self) -> None:
