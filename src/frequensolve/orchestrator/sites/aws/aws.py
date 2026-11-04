@@ -42,6 +42,7 @@ from frequensolve.orchestrator.sites.base import (
     _result_relative_paths,
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
+from frequensolve.orchestrator.sites.remote_catalog import validate_remote_task_catalog
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
@@ -960,57 +961,9 @@ class AWSSite(BaseSite):
     def _validate_remote_catalog(self, job, catalog, tasks) -> None:
         """Require exact task partitions and current staged provenance."""
 
-        fingerprints = getattr(
-            job, "staged_task_fingerprints", job.staged_artifact_fingerprints
-        )(self.__class__.__name__)
-        if fingerprints is None:
-            raise RuntimeError(
-                "Remote staged provenance is missing; restage the job before fetching"
-            )
-        for task in tasks:
-            if getattr(job, "n_modes", None) is not None:
-                result = (
-                    catalog.results.get(task)
-                    if not isinstance(catalog, TaskIndex)
-                    else None
-                )
-                current = bool(
-                    result is not None
-                    and result.successful
-                    and result.partition.task == task
-                    and result.partition.task_count == job.n_tasks
-                    and result.partition.azimuthal_mode == task - 1
-                    and all(
-                        result.fingerprints.get(k) == v for k, v in fingerprints.items()
-                    )
-                )
-                if not current:
-                    raise RuntimeError(
-                        f"Remote angular task {task} does not match the current staged job"
-                    )
-                continue
-            frequency = complex(job.f_list[task - 1])
-            if isinstance(catalog, TaskIndex):
-                current = catalog.is_task_current(
-                    task,
-                    frequency=frequency,
-                    fingerprints=fingerprints,
-                )
-            else:
-                result = catalog.results.get(task)
-                current = bool(
-                    result is not None
-                    and result.successful
-                    and result.partition.frequency == frequency
-                    and all(
-                        result.fingerprints.get(key) == value
-                        for key, value in fingerprints.items()
-                    )
-                )
-            if not current:
-                raise RuntimeError(
-                    f"Remote task {task} does not match the current staged job"
-                )
+        validate_remote_task_catalog(
+            job, catalog, tasks, site_name=self.__class__.__name__
+        )
 
     def _validate_remote_operation(self, job, result: OperationResult) -> None:
         """Require a successful operation from the current staged generation."""

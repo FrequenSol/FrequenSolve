@@ -126,6 +126,7 @@ from frequensolve.orchestrator.sites.hpc.transfer import (
     _remote_command_failed,
 )
 from frequensolve.orchestrator.sites.partition import TaskPartition, task_partitions
+from frequensolve.orchestrator.sites.remote_catalog import validate_remote_task_catalog
 from frequensolve.orchestrator.utils.credential_store import CredentialStore
 from frequensolve.orchestrator.utils.credentials import Credentials
 from frequensolve.orchestrator.utils.environment import (
@@ -2477,14 +2478,18 @@ class SlurmSite(BaseSite):
                 )
                 try:
                     catalog = TaskIndex.read(stage)
-                    self._validate_remote_catalog(job, catalog, tasks)
+                    self._validate_remote_catalog(
+                        job, catalog, tasks, remote_root=remote_root
+                    )
                     use_index = True
                 except (ArtifactContractError, OSError, RuntimeError):
                     self._transfer.get_files(
                         remote_root, stage, result_paths, missing_ok=True
                     )
                     catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
-                    self._validate_remote_catalog(job, catalog, tasks)
+                    self._validate_remote_catalog(
+                        job, catalog, tasks, remote_root=remote_root
+                    )
 
             if operation_paths:
                 self._transfer.get_files(
@@ -2553,61 +2558,22 @@ class SlurmSite(BaseSite):
             },
         )
 
-    def _validate_remote_catalog(self, job, catalog, tasks) -> None:
-        """Require exact task partitions and current staged provenance."""
+    def _validate_remote_catalog(
+        self, job, catalog, tasks, *, remote_root: Optional[Path] = None
+    ) -> None:
+        """Require exact task partitions and current staged provenance.
 
-        expected_fingerprints = getattr(
-            job, "staged_task_fingerprints", job.staged_artifact_fingerprints
-        )(self.__class__.__name__)
-        if expected_fingerprints is None:
-            raise RuntimeError(
-                "Remote staged provenance is missing; restage the job before fetching"
-            )
-        for task in tasks:
-            if getattr(job, "n_modes", None) is not None:
-                result = (
-                    catalog.results.get(task)
-                    if not isinstance(catalog, TaskIndex)
-                    else None
-                )
-                current = bool(
-                    result is not None
-                    and result.successful
-                    and result.partition.task == task
-                    and result.partition.task_count == job.n_tasks
-                    and result.partition.azimuthal_mode == task - 1
-                    and all(
-                        result.fingerprints.get(k) == v
-                        for k, v in expected_fingerprints.items()
-                    )
-                )
-                if not current:
-                    raise RuntimeError(
-                        f"Remote angular task {task} does not match the current staged job"
-                    )
-                continue
-            expected_frequency = complex(job.f_list[task - 1])
-            if isinstance(catalog, TaskIndex):
-                current = catalog.is_task_current(
-                    task,
-                    frequency=expected_frequency,
-                    fingerprints=expected_fingerprints,
-                )
-            else:
-                result = catalog.results.get(task)
-                current = bool(
-                    result is not None
-                    and result.successful
-                    and result.partition.frequency == expected_frequency
-                    and all(
-                        result.fingerprints.get(key) == value
-                        for key, value in expected_fingerprints.items()
-                    )
-                )
-            if not current:
-                raise RuntimeError(
-                    f"Remote task {task} does not match the current staged job"
-                )
+        Raises a ``RemoteTaskError`` subclass naming why a task is not current:
+        missing, another staged generation, another partition, or failed.
+        """
+
+        validate_remote_task_catalog(
+            job,
+            catalog,
+            tasks,
+            site_name=self.__class__.__name__,
+            remote_root=remote_root,
+        )
 
     def _validate_remote_operation(self, job, result: OperationResult) -> None:
         """Require a successful operation from the current staged generation."""
