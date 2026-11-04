@@ -62,6 +62,7 @@ from frequensolve.imaging._artifacts import (
 )
 from frequensolve.model.implicit_geometry import ImplicitSurfaceControl, RBFSurface
 from frequensolve.model.parameterization import (
+    CONTROL_EXTRAPOLATIONS,
     CONTROL_TRANSFORMS,
     BSplineControl,
     HatControl,
@@ -165,6 +166,16 @@ def _validate_transform(transform: str) -> str:
         raise ValueError(
             f"transform must be one of {', '.join(CONTROL_TRANSFORMS)}; "
             f"got {transform!r}"
+        )
+    return text
+
+
+def _validate_extrapolate(policy: str) -> str:
+    text = str(policy).strip().lower()
+    if text not in CONTROL_EXTRAPOLATIONS:
+        raise ValueError(
+            f"extrapolate must be one of {', '.join(CONTROL_EXTRAPOLATIONS)}; "
+            f"got {policy!r}"
         )
     return text
 
@@ -1273,6 +1284,10 @@ class DepthProfile(_BlockSpec):
             approximately.
         degree: B-spline degree; ``None`` selects the compact ``hat`` map.
         id: Block id (``model.<id>``); defaults to the space key.
+        extrapolate: Behaviour outside the profile's node span: ``"zero"``
+            (default) leaves the reference property there; ``"hold"``
+            continues the first and last values outward, so explicit
+            ``nodes`` covering part of the subdomain still update all of it.
     """
 
     prop: str
@@ -1285,6 +1300,7 @@ class DepthProfile(_BlockSpec):
     limits: Any = None
     degree: Optional[int] = None
     id: Optional[str] = None
+    extrapolate: str = "zero"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "prop", str(self.prop).strip())
@@ -1335,6 +1351,7 @@ class DepthProfile(_BlockSpec):
             object.__setattr__(self, "degree", degree)
         if self.id is not None:
             object.__setattr__(self, "id", _hdf5_safe_id(self.id, "block id"))
+        object.__setattr__(self, "extrapolate", _validate_extrapolate(self.extrapolate))
 
     @classmethod
     def bspline(cls, prop: str, subdomain: str, *, degree: int = 3, **kwargs: Any):
@@ -1390,6 +1407,7 @@ class DepthProfile(_BlockSpec):
                     coefficients=np.zeros(nodes.size),
                     coordinate_system=datum.system,
                     units=units,
+                    extrapolate=self.extrapolate,
                 )
             else:
                 degree = self.degree
@@ -1403,6 +1421,7 @@ class DepthProfile(_BlockSpec):
                     coefficients=np.zeros(knots.size - degree - 1),
                     coordinate_system=datum.system,
                     units=units,
+                    extrapolate=self.extrapolate,
                 )
             return control, datum, extent
         if ctx is None:
@@ -1435,6 +1454,7 @@ class DepthProfile(_BlockSpec):
                 coefficients=np.zeros(count),
                 coordinate_system=datum.system,
                 units=units,
+                extrapolate=self.extrapolate,
             )
         else:
             control = BSplineControl(
@@ -1444,6 +1464,7 @@ class DepthProfile(_BlockSpec):
                 coefficients=np.zeros(count),
                 coordinate_system=datum.system,
                 units=units,
+                extrapolate=self.extrapolate,
             )
         return control, datum, extent
 
@@ -1512,6 +1533,12 @@ class GridParameters(_BlockSpec):
             (see :class:`DepthProfile`).
         id: Block id prefix; blocks are ``model.<id>`` for one property and
             ``model.<id>_<prop>`` for several.
+        extrapolate: Behaviour outside the lattice span along every axis:
+            ``"zero"`` (default) leaves the reference property there;
+            ``"hold"`` continues the boundary rows and columns outward, so an
+            explicit ``grid`` over part of the subdomain (a few columns over
+            a receiver stretch, say) still reaches the domain edges without
+            extra nodes.
     """
 
     props: Any
@@ -1522,6 +1549,7 @@ class GridParameters(_BlockSpec):
     transform: str = "identity"
     limits: Any = None
     id: Optional[str] = None
+    extrapolate: str = "zero"
 
     def __post_init__(self) -> None:
         props = self.props
@@ -1567,6 +1595,7 @@ class GridParameters(_BlockSpec):
         object.__setattr__(self, "limits", _validate_limits(self.limits))
         if self.id is not None:
             object.__setattr__(self, "id", _hdf5_safe_id(self.id, "block id"))
+        object.__setattr__(self, "extrapolate", _validate_extrapolate(self.extrapolate))
 
     def default_key(self) -> str:
         if self.id:
@@ -1593,6 +1622,7 @@ class GridParameters(_BlockSpec):
                 coefficients=np.zeros(int(np.prod(grid.n))),
                 coordinate_system=grid.system or "global",
                 units=unit_expression(grid.units) if grid.units else None,
+                extrapolate=self.extrapolate,
             )
         if ctx is None:
             raise UnresolvedControlError(
@@ -1634,6 +1664,7 @@ class GridParameters(_BlockSpec):
             coefficients=np.zeros(int(np.prod(shape))),
             coordinate_system="global",
             units=units,
+            extrapolate=self.extrapolate,
         )
 
     def resolve(self, key: str, ctx: Optional[_BindContext]) -> List[ResolvedBlock]:
@@ -3089,6 +3120,7 @@ class _LatticeRepresentation:
                     origin=float(control.origin[k]),
                     coefficients=np.zeros(control.shape[k]),
                     coordinate_system=control.coordinate_system,
+                    extrapolate=control.extrapolate,
                 )
             )
             for k, axis in enumerate(control.axes)

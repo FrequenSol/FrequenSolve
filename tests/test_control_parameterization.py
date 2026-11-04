@@ -7,6 +7,8 @@ from frequensolve.model.parameterization import (
     BSplineControl,
     HatControl,
     ParameterizedProperty,
+    TensorHatControl,
+    control_from_fs,
 )
 from frequensolve.model.property import Property
 
@@ -29,6 +31,55 @@ def test_hat_control_is_an_ordered_uniform_grid_without_point_ids():
         "spacing": 0.25,
         "coefficients": [0.0, 0.2, -0.1],
     }
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda **kw: HatControl(axis="z", spacing=1.0, coefficients=[0.0, 1.0], **kw),
+        lambda **kw: BSplineControl(
+            axis="z",
+            degree=1,
+            knots=[0.0, 0.0, 1.0, 1.0],
+            coefficients=[0.0, 1.0],
+            **kw,
+        ),
+        lambda **kw: TensorHatControl(
+            axes=["x", "z"],
+            shape=[2, 2],
+            origin=[0.0, 0.0],
+            spacing=[1.0, 1.0],
+            coefficients=np.zeros(4),
+            **kw,
+        ),
+    ],
+    ids=["hat", "bspline", "tensor_hat"],
+)
+def test_controls_round_trip_the_extrapolate_policy(factory):
+    default = factory()
+    assert default.extrapolate == "zero"
+    assert "extrapolate" not in default.to_fs()
+    assert control_from_fs(default.to_fs()).extrapolate == "zero"
+
+    held = factory(extrapolate="HOLD")
+    assert held.extrapolate == "hold"
+    payload = held.to_fs()
+    assert payload["extrapolate"] == "hold"
+    restored = control_from_fs(payload)
+    assert restored.extrapolate == "hold"
+    assert restored.to_fs() == payload
+    assert held.with_coefficients(np.ones(held.size)).extrapolate == "hold"
+    _material_validator(f"#/$defs/{_SCHEMA_DEF[payload['kind']]}").validate(payload)
+
+    with pytest.raises(ValueError, match="extrapolate must be one of"):
+        factory(extrapolate="linear")
+
+
+_SCHEMA_DEF = {
+    "hat": "hatControlMap",
+    "bspline": "bsplineControlMap",
+    "tensor_hat": "tensorHatControlMap",
+}
 
 
 def test_property_control_coefficients_reject_complex_values():
@@ -57,6 +108,55 @@ def test_bspline_control_validates_coefficient_count():
             knots=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             coefficients=[0.0, 0.0],
         )
+
+
+def test_held_controls_extend_their_edge_values_when_applied():
+    from frequensolve.model.representation import EvaluationContext
+
+    reference = Property.from_value(10.0)
+    hat = ParameterizedProperty(
+        id="held_hat",
+        reference=reference,
+        control=HatControl(
+            axis="z",
+            origin=1.0,
+            spacing=1.0,
+            coefficients=[1.0, 2.0, 0.5],
+            extrapolate="hold",
+        ),
+    )
+    zero = ParameterizedProperty(
+        id="zero_hat",
+        reference=reference,
+        control=HatControl(
+            axis="z", origin=1.0, spacing=1.0, coefficients=[1.0, 2.0, 0.5]
+        ),
+    )
+    context = EvaluationContext({"z": [-5.0, 1.0, 1.5, 3.0, 9.0]})
+    np.testing.assert_allclose(
+        hat.apply_control(10.0, context), [11.0, 11.0, 11.5, 10.5, 10.5]
+    )
+    np.testing.assert_allclose(
+        zero.apply_control(10.0, context), [10.0, 11.0, 11.5, 10.5, 10.0]
+    )
+
+    lattice = ParameterizedProperty(
+        id="held_lattice",
+        reference=reference,
+        control=TensorHatControl(
+            axes=["x", "z"],
+            shape=[2, 2],
+            origin=[2.0, 0.0],
+            spacing=[1.0, 1.0],
+            coefficients=np.array([[1.0, 3.0], [2.0, 4.0]]),
+            extrapolate="hold",
+        ),
+    )
+    context = EvaluationContext({"x": [0.0, 2.5, 7.0, 0.0], "z": [0.5, 0.5, 1.0, -3.0]})
+    # Left of the lattice the x = 2 column holds (1 -> 3 along z), right of it the x = 3 column.
+    np.testing.assert_allclose(
+        lattice.apply_control(10.0, context), [12.0, 12.5, 14.0, 11.0]
+    )
 
 
 def test_parameterized_property_round_trips_as_a_property_provider():
@@ -191,8 +291,6 @@ from frequensolve.model.parameterization import (  # noqa: E402
     CONTROL_TRANSFORMS,
     MeshControl,
     MeshPropertySpace,
-    TensorHatControl,
-    control_from_fs,
 )
 from frequensolve.units import Q_  # noqa: E402
 

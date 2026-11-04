@@ -233,6 +233,8 @@ class ControlRepresentation(FieldRepresentation):
             self.knots = np.array(control.knots, copy=True)
         self.axis = control.axis
         self.coordinate_system = control.coordinate_system
+        #: ``hold`` clamps coordinates into the knot span like the solver does.
+        self.hold = getattr(control, "extrapolate", "zero") == "hold"
 
     @property
     def size(self) -> int:
@@ -259,10 +261,20 @@ class ControlRepresentation(FieldRepresentation):
                 f"degree-{self.degree} controls do not have classical "
                 f"derivative order {derivative_order}"
             )
-        coordinates = context.coordinate(self.axis, self.coordinate_system)
+        coordinates = np.asarray(context.coordinate(self.axis, self.coordinate_system))
         lower = self.knots[self.degree]
         upper = self.knots[self.size]
-        active = (coordinates >= lower) & (coordinates <= upper)
+        inside = (coordinates >= lower) & (coordinates <= upper)
+        if self.hold:
+            # Edge-held extrapolation: evaluate the nearest end of the span, and
+            # as the clamped coordinate map is constant there, its derivatives
+            # vanish outside the span.
+            active = np.isfinite(coordinates)
+            if derivative_order > 0:
+                active &= inside
+            coordinates = np.clip(coordinates, lower, upper)
+        else:
+            active = inside
         if not np.any(active):
             return csr_matrix((context.size, self.size), dtype=np.float64)
         rows = np.flatnonzero(active)

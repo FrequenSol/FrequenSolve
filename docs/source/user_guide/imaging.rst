@@ -238,16 +238,19 @@ plain numbers in the model's units or Pint quantities.
    * - Block
      - Sauce block(s)
      - Notes
-   * - :class:`~frequensolve.imaging.DepthProfile` ``(prop, subdomain, datum="top", spacing | count | nodes, transform, limits)``
+   * - :class:`~frequensolve.imaging.DepthProfile` ``(prop, subdomain, datum="top", spacing | count | nodes, transform, limits, extrapolate)``
        and ``DepthProfile.bspline(..., degree=3)``
      - ``model.<id>`` (hat or B-spline map)
      - Vertical 1-D profile; ``datum`` says where depth is measured from
        (below). Hat nodes end at the subdomain boundaries, B-spline knots
-       are open-uniform over the same span.
-   * - :class:`~frequensolve.imaging.GridParameters` ``(props, subdomain=None, spacing | shape | grid, transform, limits)``
+       are open-uniform over the same span. Outside explicit ``nodes`` the
+       update is zero unless ``extrapolate="hold"`` continues the end values.
+   * - :class:`~frequensolve.imaging.GridParameters` ``(props, subdomain=None, spacing | shape | grid, transform, limits, extrapolate)``
      - one ``model.<id>`` per property (tensor-hat lattice)
      - Lattice over the subdomain's bounding box, or the whole model; nodes
-       without support are frozen (see below).
+       without support are frozen (see below). An explicit ``grid`` over part
+       of the subdomain updates only its span unless ``extrapolate="hold"``
+       continues the boundary rows and columns to the domain edges.
    * - :class:`~frequensolve.imaging.MeshParameters` ``(prop, subdomain, frequency, epw)``
      - ``model.<id>`` (mesh-native nodal controls)
      - Sauce sizes and prunes the property space; the coefficient count is

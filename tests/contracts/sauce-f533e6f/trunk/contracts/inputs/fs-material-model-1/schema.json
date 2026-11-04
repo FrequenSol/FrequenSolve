@@ -588,6 +588,15 @@
           "minLength": 1,
           "description": "Optional units for knots; defaults to the model coordinate units."
         },
+        "extrapolate": {
+          "type": "string",
+          "enum": [
+            "zero",
+            "hold"
+          ],
+          "default": "zero",
+          "description": "Behaviour outside the knot span: zero leaves the reference property (no update, no sensitivity); hold clamps the evaluation coordinate into the span so the end value, JVP and VJP hold outside it with zero spatial gradient."
+        },
         "degree": {
           "type": "integer",
           "minimum": 0,
@@ -636,6 +645,15 @@
           "type": "string",
           "minLength": 1,
           "description": "Optional units for origin and spacing; defaults to the model coordinate units."
+        },
+        "extrapolate": {
+          "type": "string",
+          "enum": [
+            "zero",
+            "hold"
+          ],
+          "default": "zero",
+          "description": "Behaviour outside the knot span: zero leaves the reference property (no update, no sensitivity); hold clamps the evaluation coordinate into the span so the end value, JVP and VJP hold outside it with zero spatial gradient."
         },
         "origin": {
           "type": "number",
@@ -2221,7 +2239,7 @@
     },
     "tensorHatControlMap": {
       "type": "object",
-      "description": "Tensor product of two or three uniform nodal hat axes, independent of the simulation mesh. The first listed axis varies fastest in the flat coefficient array. Updates vanish outside the closed grid support; zero boundary coefficients give a continuous localized update. Native variational smoothing is unsupported.",
+      "description": "Tensor product of two or three uniform nodal hat axes, independent of the simulation mesh. The first listed axis varies fastest in the flat coefficient array. Updates vanish outside the closed grid support unless extrapolate is hold, which continues the edge values outward; zero boundary coefficients give a continuous localized update. Native variational smoothing is unsupported.",
       "required": [
         "kind",
         "axes",
@@ -2241,6 +2259,15 @@
         "units": {
           "type": "string",
           "description": "Units shared by all axes; defaults to model coordinate units."
+        },
+        "extrapolate": {
+          "type": "string",
+          "enum": [
+            "zero",
+            "hold"
+          ],
+          "default": "zero",
+          "description": "Behaviour outside the lattice span (every axis): zero leaves the reference property (no update, no sensitivity); hold clamps the evaluation coordinate into the span so the end value, JVP and VJP hold outside it with zero spatial gradient."
         },
         "axes": {
           "type": "array",

@@ -8,6 +8,7 @@ import xarray as xr
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
+from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging import controls as im
 from frequensolve.imaging._artifacts import (
     ControlRegistryManifest,
@@ -275,6 +276,55 @@ def test_profile_count_and_nodes_and_pint_spacing(simulation):
     control = quantity.block("vp").control
     assert control.units == "km"
     assert control.spacing <= 0.5
+
+
+def test_held_blocks_pass_the_policy_to_their_controls_and_lattice_sampling(simulation):
+    profile = im.ControlSpace(
+        vp=im.DepthProfile(
+            "vp",
+            "sediment",
+            datum="global",
+            nodes=[200.0, 400.0, 600.0],
+            extrapolate="hold",
+        ),
+        rho=im.DepthProfile.bspline(
+            "rho", "sediment", datum="global", count=4, extrapolate="hold"
+        ),
+    ).bind(simulation)
+    assert profile.block("vp").control.extrapolate == "hold"
+    assert profile.block("rho").control.extrapolate == "hold"
+    assert profile.block("vp").control.to_fs()["extrapolate"] == "hold"
+    assert im.DepthProfile("vp", "sediment", count=3).extrapolate == "zero"
+    with pytest.raises(ValueError, match="extrapolate must be one of"):
+        im.DepthProfile("vp", "sediment", count=3, extrapolate="linear")
+    with pytest.raises(ValueError, match="extrapolate must be one of"):
+        im.GridParameters("vp", shape=[3, 3], extrapolate="mirror")
+
+    # A two-column lattice over x in [900, 1300] m with hold continues its edge columns outward.
+    lattice = im.ControlSpace(
+        vp=im.GridParameters(
+            "vp",
+            "sediment",
+            grid=CartesianGrid(
+                n=[2, 3], x0=[900.0, 200.0], x1=[1300.0, 1500.0], dims=["x", "z"]
+            ),
+            extrapolate="hold",
+        )
+    ).bind(simulation)
+    control = lattice.block("vp").control
+    assert control.extrapolate == "hold"
+    assert control.to_fs()["extrapolate"] == "hold"
+    operator = im._LatticeRepresentation(control).sampling_operator(
+        {"x": np.array([0.0, 900.0, 1300.0, 4000.0]), "z": np.array([850.0] * 4)}
+    )
+    dense = operator.toarray()
+    np.testing.assert_allclose(dense.sum(axis=1), np.ones(4))
+    np.testing.assert_allclose(dense[0], dense[1])
+    np.testing.assert_allclose(dense[3], dense[2])
+    zero = im._LatticeRepresentation(
+        TensorHatControl.from_fs({**control.to_fs(), "extrapolate": "zero"})
+    ).sampling_operator({"x": np.array([0.0, 4000.0]), "z": np.array([850.0, 850.0])})
+    assert zero.nnz == 0
 
 
 def test_bspline_profile_uses_open_uniform_knots(simulation):

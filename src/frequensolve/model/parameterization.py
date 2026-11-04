@@ -15,6 +15,7 @@ from frequensolve.util.mixins import ExportContext
 
 __all__ = [
     "BSplineControl",
+    "CONTROL_EXTRAPOLATIONS",
     "CONTROL_TRANSFORMS",
     "HatControl",
     "MeshControl",
@@ -29,6 +30,21 @@ __all__ = [
 #: ``inverse`` evaluates ``1 / (1/r + c)`` and ``logit`` evaluates
 #: ``sigmoid(logit(r) + c)`` for a dimensionless reference in ``(0, 1)``.
 CONTROL_TRANSFORMS: Tuple[str, ...] = ("identity", "log", "inverse", "logit")
+
+#: Behaviour of a hat, B-spline or tensor-hat control outside its knot span.
+#: ``zero`` leaves the reference property untouched there (no update, no
+#: sensitivity); ``hold`` clamps the evaluation coordinate into the span, so
+#: the end value, JVP and VJP hold outside it with zero spatial gradient.
+CONTROL_EXTRAPOLATIONS: Tuple[str, ...] = ("zero", "hold")
+
+
+def _validate_extrapolate(value: Any) -> str:
+    policy = str(value).strip().lower()
+    if policy not in CONTROL_EXTRAPOLATIONS:
+        raise ValueError(
+            f"control extrapolate must be one of {CONTROL_EXTRAPOLATIONS}, got {value!r}"
+        )
+    return policy
 
 
 def _coefficient_vector(values: ArrayLike, *, minimum: int) -> np.ndarray:
@@ -49,7 +65,13 @@ def _coefficient_vector(values: ArrayLike, *, minimum: int) -> np.ndarray:
 
 @dataclass
 class HatControl:
-    """Uniform one-dimensional nodal grid with piecewise-linear hat functions."""
+    """Uniform one-dimensional nodal grid with piecewise-linear hat functions.
+
+    ``extrapolate`` says what happens outside the first and last node:
+    ``"zero"`` (default) leaves the reference property there, ``"hold"``
+    continues the first or last coefficient outward (see
+    :data:`CONTROL_EXTRAPOLATIONS`).
+    """
 
     axis: str
     spacing: float
@@ -57,12 +79,14 @@ class HatControl:
     origin: float = 0.0
     coordinate_system: str = "global"
     units: Optional[str] = None
+    extrapolate: str = "zero"
     kind: str = field(default="hat", init=False)
 
     def __post_init__(self) -> None:
         self.axis = str(self.axis).strip()
         self.coordinate_system = str(self.coordinate_system).strip()
         self.units = None if self.units is None else str(self.units).strip()
+        self.extrapolate = _validate_extrapolate(self.extrapolate)
         self.origin = float(self.origin)
         self.spacing = float(self.spacing)
         self.coefficients = _coefficient_vector(self.coefficients, minimum=2)
@@ -107,6 +131,8 @@ class HatControl:
         }
         if self.units is not None:
             payload["units"] = self.units
+        if self.extrapolate != "zero":
+            payload["extrapolate"] = self.extrapolate
         return payload
 
     @classmethod
@@ -120,12 +146,18 @@ class HatControl:
             origin=data.get("origin", 0.0),
             coordinate_system=data.get("coordinate_system", "global"),
             units=data.get("units"),
+            extrapolate=data.get("extrapolate", "zero"),
         )
 
 
 @dataclass
 class BSplineControl:
-    """Arbitrary-degree one-dimensional B-spline property control."""
+    """Arbitrary-degree one-dimensional B-spline property control.
+
+    ``extrapolate`` says what happens outside the active knot interval:
+    ``"zero"`` (default) leaves the reference property there, ``"hold"``
+    continues the end values outward (see :data:`CONTROL_EXTRAPOLATIONS`).
+    """
 
     axis: str
     knots: ArrayLike
@@ -133,12 +165,14 @@ class BSplineControl:
     degree: int = 3
     coordinate_system: str = "global"
     units: Optional[str] = None
+    extrapolate: str = "zero"
     kind: str = field(default="bspline", init=False)
 
     def __post_init__(self) -> None:
         self.axis = str(self.axis).strip()
         self.coordinate_system = str(self.coordinate_system).strip()
         self.units = None if self.units is None else str(self.units).strip()
+        self.extrapolate = _validate_extrapolate(self.extrapolate)
         self.degree = int(self.degree)
         self.knots = np.asarray(self.knots, dtype=np.float64)
         if self.knots.ndim != 1 or self.knots.size < 2:
@@ -209,6 +243,8 @@ class BSplineControl:
         }
         if self.units is not None:
             payload["units"] = self.units
+        if self.extrapolate != "zero":
+            payload["extrapolate"] = self.extrapolate
         return payload
 
     @classmethod
@@ -222,6 +258,7 @@ class BSplineControl:
             degree=data.get("degree", 3),
             coordinate_system=data.get("coordinate_system", "global"),
             units=data.get("units"),
+            extrapolate=data.get("extrapolate", "zero"),
         )
 
 
@@ -251,7 +288,10 @@ class TensorHatControl:
     array is flattened with the same first-axis-fastest convention.
 
     Updates vanish outside the closed lattice box, so zero boundary
-    coefficients give a continuous localized perturbation.
+    coefficients give a continuous localized perturbation; with
+    ``extrapolate="hold"`` the lattice instead continues its boundary rows and
+    columns outward (each axis coordinate is clamped into the lattice span), so
+    a sparse lattice over part of a domain reaches the domain edges.
 
     Args:
         axes: Distinct axis names in coefficient storage order.
@@ -263,6 +303,8 @@ class TensorHatControl:
         coordinate_system: Coordinate system the axes belong to.
         units: Optional length units shared by all axes; defaults to the
             model coordinate units.
+        extrapolate: ``"zero"`` (default) or ``"hold"`` outside the lattice
+            span, applied along every axis (see :data:`CONTROL_EXTRAPOLATIONS`).
     """
 
     axes: Sequence[str]
@@ -272,6 +314,7 @@ class TensorHatControl:
     coefficients: ArrayLike
     coordinate_system: str = "global"
     units: Optional[str] = None
+    extrapolate: str = "zero"
     kind: str = field(default="tensor_hat", init=False)
 
     def __post_init__(self) -> None:
@@ -280,6 +323,7 @@ class TensorHatControl:
         self.axes = tuple(str(axis).strip() for axis in self.axes)
         self.coordinate_system = str(self.coordinate_system).strip()
         self.units = None if self.units is None else str(self.units).strip()
+        self.extrapolate = _validate_extrapolate(self.extrapolate)
         ndim = len(self.axes)
         if ndim not in (2, 3):
             raise ValueError("tensor hat control requires two or three axes")
@@ -385,6 +429,8 @@ class TensorHatControl:
         }
         if self.units is not None:
             payload["units"] = self.units
+        if self.extrapolate != "zero":
+            payload["extrapolate"] = self.extrapolate
         return payload
 
     @classmethod
@@ -399,6 +445,7 @@ class TensorHatControl:
             coefficients=data["coefficients"],
             coordinate_system=data.get("coordinate_system", "global"),
             units=data.get("units"),
+            extrapolate=data.get("extrapolate", "zero"),
         )
 
 
@@ -701,7 +748,8 @@ class ParameterizedProperty(Property):
         """Compose sampled reference values with controls in their own frame.
 
         ``context`` is an EvaluationContext with coordinates in the control's
-        declared length units. Updates vanish outside the control support.
+        declared length units. Updates vanish outside the control support
+        unless the control holds its edge values (``extrapolate="hold"``).
         Mesh controls require solver materialization and fail explicitly here.
         """
         from scipy.interpolate import RegularGridInterpolator
@@ -720,6 +768,10 @@ class ParameterizedProperty(Property):
                     for axis in self.control.axes
                 ]
             )
+            if self.control.extrapolate == "hold":
+                # The solver clamps every axis coordinate into the lattice span.
+                for k, nodes in enumerate(self.control.axis_coordinates):
+                    points[:, k] = np.clip(points[:, k], nodes[0], nodes[-1])
             update = RegularGridInterpolator(
                 self.control.axis_coordinates,
                 self.control.grid,
