@@ -457,6 +457,19 @@ def test_receiver_projection_rejects_invalid_configuration(factory):
                 "spectral_derivative": "total",
             },
         ),
+        (
+            Preprocess.slow_velocity_pass(
+                900.0 * u.m / u.s, 1300.0 * u.m / u.s, spectral_derivative="frozen"
+            ),
+            "slow_velocity_pass",
+            "trace_pair",
+            {
+                "stop_velocity": {"value": 900.0, "units": "m/s"},
+                "pass_velocity": {"value": 1300.0, "units": "m/s"},
+                "spacing_tolerance": 1e-3,
+                "spectral_derivative": "frozen",
+            },
+        ),
     ],
 )
 def test_preprocess_builders_emit_sauce_hook_objects(
@@ -496,6 +509,11 @@ def test_preprocess_builders_emit_sauce_hook_objects(
         (lambda: Preprocess.scholte_notch(), ValueError),
         (lambda: Preprocess.scholte_notch(900.0, wavenumber=0.8), ValueError),
         (lambda: Preprocess.slow_velocity_mute(1800.0, 1200.0), ValueError),
+        (lambda: Preprocess.slow_velocity_pass(1300.0, 900.0), ValueError),
+        (
+            lambda: Preprocess.slow_velocity_pass(900.0, 1300.0, spacing_tolerance=1.0),
+            ValueError,
+        ),
         (
             lambda: Preprocess.slow_velocity_mute(1200.0, 1800.0, mode="invalid"),
             ValueError,

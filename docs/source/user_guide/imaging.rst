@@ -1064,9 +1064,9 @@ kind. Objective weights (``offset_power``, ``offset_taper``,
 act on the residual; data transforms (``trace_normalize``,
 ``amplitude_clip``) act on the observed data; ``source_scalar_fit`` and
 ``source_spectrum_correction`` calibrate the source; ``receiver_ar1_whiten``,
-``scholte_notch`` and ``slow_velocity_mute`` are fixed linear receiver
-operators applied to observed, simulated and Born traces alike, with their
-exact conjugate transpose used by the VJP.
+``scholte_notch``, ``slow_velocity_mute`` and ``slow_velocity_pass`` are fixed
+linear receiver operators applied to observed, simulated and Born traces alike,
+with their exact conjugate transpose used by the VJP.
 
 .. code-block:: python
 
@@ -1080,8 +1080,14 @@ exact conjugate transpose used by the VJP.
 :math:`|k| = 2\pi f / v` (a measured angular ``wavenumber`` may replace the
 phase velocity); ``slow_velocity_mute`` rejects apparent velocities below its
 stop/pass transition, and ``mode="keep_slow"`` applies the complementary fan.
-Both filters need a complete, regularly sampled dense cable and use the
-authored receiver order as the along-cable FFT axis.
+``slow_velocity_pass`` is that complement as its own hook: with one stop/pass
+band a mute and a pass sum to the identity, so
+``im.Preprocess.slow_velocity_pass(900 * u.m / u.s, 1300 * u.m / u.s)`` keeps a
+slow Scholte train and removes the faster P arrivals from observed and
+simulated traces alike. The filters need a complete, regularly sampled dense
+cable (point receivers, node-averaged channels or DAS gauge channels, located
+at their gauge centers) and use the authored receiver order as the along-cable
+FFT axis.
 
 A :class:`~frequensolve.imaging.DataVector` is a complex vector over the
 :class:`~frequensolve.imaging.DataSpace` of the acquisition, ordered by

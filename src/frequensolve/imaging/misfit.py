@@ -1496,6 +1496,45 @@ class Preprocess:
             },
         )
 
+    @classmethod
+    def slow_velocity_pass(
+        cls,
+        stop_velocity: Any,
+        pass_velocity: Any,
+        *,
+        spacing_tolerance: float = 1.0e-3,
+        spectral_derivative: Literal["total", "frozen"] = "total",
+        name: Optional[str] = None,
+    ) -> "Preprocess":
+        """Keep the slow events along a dense cable: the exact complement of :meth:`slow_velocity_mute`.
+
+        Apparent velocities at or below ``stop_velocity`` are kept, those at or above ``pass_velocity`` are removed,
+        with the same raised-cosine taper between them, so a mute and a pass with one band sum to the identity. The
+        same linear operator is applied to observed and simulated traces (``trace_pair``), for example to keep a
+        Scholte train on a seabed DAS cable while removing the P arrivals from both.
+        """
+
+        stop = _positive_physical_scalar(stop_velocity, "stop_velocity")
+        passed = _positive_physical_scalar(pass_velocity, "pass_velocity")
+        stop_value, stop_units = _physical_magnitude(stop)
+        pass_value, pass_units = _physical_magnitude(passed)
+        if stop_units == pass_units and pass_value <= stop_value:
+            raise ValueError("pass_velocity must exceed stop_velocity")
+        tolerance = _finite_fraction(spacing_tolerance, "spacing_tolerance")
+        if tolerance >= 1.0:
+            raise ValueError("spacing_tolerance must be less than one")
+        return cls(
+            kind="slow_velocity_pass",
+            stage="trace_pair",
+            name=name,
+            params={
+                "stop_velocity": stop,
+                "pass_velocity": passed,
+                "spacing_tolerance": tolerance,
+                "spectral_derivative": _spectral_derivative(spectral_derivative),
+            },
+        )
+
     # -- serialization -------------------------------------------------------
 
     def to_fs(
