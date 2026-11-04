@@ -29,6 +29,9 @@ class _PointSpectrum:
     Signals must be dimensionless multipliers of the authored source strength.
     ``spectral_derivative='total'`` exports the exact evaluator's dq/df;
     ``'frozen'`` explicitly requests zero derivative in Sauce.
+    ``derivative_order`` above one also exports the raw derivatives q_d2f..
+    through that order (total only), which Sauce needs for total-source spectral
+    planes above first order, such as a windowed phase objective.
     """
 
     point_axis = "source"
@@ -41,6 +44,7 @@ class _PointSpectrum:
         laplace: ArrayLike = (0.0,),
         spectral_derivative: str = "total",
         batch_bytes: int = 64 * 1024**2,
+        derivative_order: int = 1,
     ) -> None:
         frequencies = _axis(frequencies, "frequencies", nonnegative=True)
         damping = _axis(laplace, "laplace")
@@ -65,6 +69,16 @@ class _PointSpectrum:
             raise ValueError("spectral_derivative must be 'total' or 'frozen'")
         if not isinstance(batch_bytes, int) or batch_bytes <= 0:
             raise ValueError("batch_bytes must be a positive integer")
+        if (
+            isinstance(derivative_order, bool)
+            or not isinstance(derivative_order, (int, np.integer))
+            or not 1 <= derivative_order <= 4
+        ):
+            raise ValueError("derivative_order must be an integer from 1 through 4")
+        if derivative_order > 1 and spectral_derivative != "total":
+            raise ValueError(
+                "higher spectral derivatives require spectral_derivative='total'"
+            )
         values: Iterable[TransferFunction]
         if isinstance(signals, Mapping):
             signals = dict(signals)
@@ -88,6 +102,7 @@ class _PointSpectrum:
         self.frequencies, self.laplace = frequencies, damping
         self.spectral_derivative = spectral_derivative
         self.batch_bytes = batch_bytes
+        self.derivative_order = int(derivative_order)
 
     def __deepcopy__(self, memo: dict[int, Any]) -> _PointSpectrum:
         # Built-in responses and coordinate arrays are immutable.
@@ -102,6 +117,7 @@ class _PointSpectrum:
             laplace=self.laplace,
             spectral_derivative=self.spectral_derivative,
             batch_bytes=self.batch_bytes,
+            derivative_order=self.derivative_order,
         )
 
     def _signals(self, source_count: int) -> list[TransferFunction]:
@@ -143,6 +159,7 @@ class _PointSpectrum:
         dims = (len(self.frequencies), source_count, 2)
         shape = (len(self.laplace), *dims) if has_damping else dims
         names = ["q"] + (["q_f"] if self.spectral_derivative == "total" else [])
+        names += [f"q_d{k}f" for k in range(2, self.derivative_order + 1)]
         data_hashes = {name: hashlib.sha256() for name in names}
         metadata = dict(
             schema="fs-acquisition-spectrum-1",
@@ -152,6 +169,8 @@ class _PointSpectrum:
             transform="exp(-2*pi*i*(f+i*laplace)*t)",
             application=f"physical_{self.point_axis}_before_encoding",
         )
+        if self.derivative_order > 1:
+            metadata["derivative_order"] = self.derivative_order
         digest.update(json.dumps(metadata, sort_keys=True).encode())
         for axis in (
             self.frequencies,
@@ -201,16 +220,27 @@ class _PointSpectrum:
                 for damping_index, damping in enumerate(self.laplace):
                     for first in range(0, len(self.frequencies), width):
                         last = min(first + width, len(self.frequencies))
-                        for name in names:
+                        jets = {}
+                        if self.derivative_order > 1:
+                            for key, (signal, _) in groups.items():
+                                jets[key] = signal.frequency_jet(
+                                    self.frequencies[first:last],
+                                    laplace=damping,
+                                    order=self.derivative_order,
+                                )
+                        for order, name in enumerate(names):
                             values = np.empty(
                                 (last - first, source_count), dtype=np.complex64
                             )
-                            for signal, columns in groups.values():
-                                samples = signal.at_frequencies(
-                                    self.frequencies[first:last],
-                                    laplace=damping,
-                                    derivative=name == "q_f",
-                                )
+                            for key, (signal, columns) in groups.items():
+                                if order > 1:
+                                    samples = jets[key][order]
+                                else:
+                                    samples = signal.at_frequencies(
+                                        self.frequencies[first:last],
+                                        laplace=damping,
+                                        derivative=name == "q_f",
+                                    )
                                 if np.shape(samples) != (last - first,):
                                     raise ValueError(
                                         "Response evaluator returned the wrong shape"
@@ -252,6 +282,8 @@ class _PointSpectrum:
             result["laplace_damping_dataset"] = "laplace"
         if self.spectral_derivative == "total":
             result["frequency_derivative_dataset"] = "q_f"
+        if self.derivative_order > 1:
+            result["higher_frequency_derivative_datasets"] = names[2:]
         return result
 
 

@@ -2396,7 +2396,52 @@ class ImagingProblem:
             for term in misfit.objective_terms([group.name for group in shared.groups])
         }
         if self.kernel_derivative is not None:
-            if comparisons - {"waveform"}:
+            kernel = self.kernel_derivative
+            phase = {"phase_derivative", "spectral_derivative"}
+            if comparisons & phase:
+                # Windowed traveltime: the phase comparison of (S, dS/df), S the windowed series.
+                window = kernel.get("window")
+                degree = (
+                    len(window) - 1
+                    if isinstance(window, list)
+                    else kernel.get("order", 1)
+                )
+                if comparisons - phase:
+                    errors.append(
+                        "a windowed phase kernel needs phase comparisons in every objective term"
+                    )
+                if kernel.get("axis", "fourier") != "fourier":
+                    errors.append("windowed phase comparisons require the fourier axis")
+                if isinstance(window, Mapping):
+                    errors.append("receiver windows do not support phase comparisons")
+                if degree > 3:
+                    errors.append(
+                        "windowed phase comparisons support window degree three at most"
+                    )
+                # A total source is mixed into the frozen planes from its derivatives through the hierarchy order.
+                signature = getattr(
+                    self.simulation.acquisition, "source_signature", None
+                )
+                exported = 1
+                if isinstance(
+                    signature, Mapping
+                ):  # materialized table of a loaded simulation
+                    exported += len(
+                        signature.get("higher_frequency_derivative_datasets", ())
+                    )
+                elif signature is not None:
+                    exported = signature.derivative_order
+                if (
+                    kernel.get("source_derivative", "frozen") == "total"
+                    and degree > 0
+                    and signature is not None
+                    and exported < degree + 1
+                ):
+                    errors.append(
+                        f"a total-source windowed phase of degree {degree} needs "
+                        f"SourceSignature(derivative_order={degree + 1})"
+                    )
+            elif comparisons - {"waveform"}:
                 errors.append("kernel_derivative requires waveform comparisons")
             if "source" in kinds or has_reflectivity or extension is not None:
                 errors.append(

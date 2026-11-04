@@ -704,6 +704,34 @@ Galerkin and the shared receiver-probe diagonal are not supported here.
 Separate independently weighted order terms still use separate problem views;
 the existing joint ``u``/``u_f`` comparison remains available as above.
 
+A ``phase_derivative`` comparison combined with a Fourier ``window`` (or
+``derivative``) selection is the windowed instantaneous traveltime: Sauce
+compares the traveltime of the windowed trace ``p(t) x(t)`` (times the Laplace
+damping) instead of ``x(t)``, in one hierarchy one order above the window
+degree (at most three)::
+
+   signature = fs.SourceSignature(wavelet, frequencies=f, laplace=[-0.05],
+                                  derivative_order=2)
+   problem = im.ImagingProblem(
+       simulation, controls=space, observed=observed,
+       misfit=im.Misfit(comparison=im.Comparison.phase_derivative(
+           source_derivative="total", array=im.SyntheticArray.gaussian(sigma=fs.Q_(20, "m")))),
+       kernel_derivative={"residual": "window", "window": [0.0, 1.0],
+                          "source_derivative": "total"},
+   )
+
+``window=[0, 1]`` weights by ``t exp(-2*pi*sigma*t)``, which peaks at
+``1/(2*pi*sigma)`` seconds, so later arrivals dominate the attribute. Every
+objective term must be a phase comparison with the same source policy; floors,
+synthetic arrays and robust losses act on the windowed pair. A total source
+above first order needs point-force sources and a signature exported with
+``derivative_order`` at least the window degree plus one; Sauce then mixes the
+total-source planes exactly from frozen ones. Receivers must be frequency
+and material independent (a DAS gauge built from constant-weight velocity
+differences, i.e. strain rate). One gradient costs ``2*(degree+2)`` solves.
+Exact higher derivatives come from ``TransferFunction.frequency_jet``, which
+``SampledWavelet``, ``GainDelay`` and products implement through any order.
+
 Nonlinear spectral attributes can compose those saved derivative-data
 states through ``SpectralJetLinearization``::
 

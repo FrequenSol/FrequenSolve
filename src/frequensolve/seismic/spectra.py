@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from math import comb
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,12 @@ def _coordinates(
     return f, f + 1j * laplace
 
 
+def _jet_order(order: int) -> int:
+    if isinstance(order, bool) or not isinstance(order, (int, np.integer)) or order < 0:
+        raise ValueError("derivative order must be a nonnegative integer")
+    return int(order)
+
+
 def _finite(values: np.ndarray) -> np.ndarray:
     if not np.all(np.isfinite(values)):
         raise ValueError("Spectral evaluation overflowed or produced nonfinite values")
@@ -77,6 +84,25 @@ class TransferFunction:
         self, frequencies: ArrayLike, *, laplace: float = 0.0, derivative: bool = False
     ) -> np.ndarray:
         raise NotImplementedError
+
+    def frequency_jet(
+        self, frequencies: ArrayLike, *, laplace: float = 0.0, order: int = 1
+    ) -> np.ndarray:
+        """Return raw derivatives d^k H/df^k in physical Hz, one row per k = 0..order.
+
+        Responses with an exact evaluator override this for orders above one.
+        """
+        order = _jet_order(order)
+        if order > 1:
+            raise NotImplementedError(
+                f"{type(self).__name__} provides frequency derivatives through first order only"
+            )
+        rows = [self.at_frequencies(frequencies, laplace=laplace)]
+        if order:
+            rows.append(
+                self.at_frequencies(frequencies, laplace=laplace, derivative=True)
+            )
+        return np.array(rows)
 
     def __mul__(self, other: object) -> TransferFunction:
         if not isinstance(other, TransferFunction):
@@ -121,6 +147,17 @@ class GainDelay(TransferFunction):
                 value *= -2j * np.pi * self.delay
         return _finite(value)
 
+    def frequency_jet(
+        self, frequencies: ArrayLike, *, laplace: float = 0.0, order: int = 1
+    ) -> np.ndarray:
+        order = _jet_order(order)
+        value = self.at_frequencies(frequencies, laplace=laplace)
+        return _finite(
+            np.array(
+                [value * (-2j * np.pi * self.delay) ** k for k in range(order + 1)]
+            )
+        )
+
 
 @dataclass(frozen=True)
 class _ProductResponse(TransferFunction):
@@ -154,6 +191,22 @@ class _ProductResponse(TransferFunction):
         else:
             value = left * right
         return _finite(value)
+
+    def frequency_jet(
+        self, frequencies: ArrayLike, *, laplace: float = 0.0, order: int = 1
+    ) -> np.ndarray:
+        order = _jet_order(order)
+        left = self.left.frequency_jet(frequencies, laplace=laplace, order=order)
+        right = self.right.frequency_jet(frequencies, laplace=laplace, order=order)
+        # Leibniz rule for the product of two analytic responses.
+        return _finite(
+            np.array(
+                [
+                    sum(comb(k, j) * left[j] * right[k - j] for j in range(k + 1))
+                    for k in range(order + 1)
+                ]
+            )
+        )
 
 
 @dataclass(frozen=True, init=False)
@@ -290,6 +343,34 @@ class SampledWavelet(TransferFunction):
                     values[first:last] = np.einsum(
                         "t,tf->f", work, kernel, optimize=False
                     )
+        if self.normalization == "integral":
+            values *= self.dt
+        return _finite(values)
+
+    def frequency_jet(
+        self,
+        frequencies: ArrayLike,
+        *,
+        laplace: float = 0.0,
+        order: int = 1,
+        batch_bytes: int = 64 * 1024**2,
+    ) -> np.ndarray:
+        """Exact raw derivatives: the time moments sum x[n] (-2 pi i t[n])^k exp(-2 pi i z t[n])."""
+        order = _jet_order(order)
+        f, z = _coordinates(frequencies, laplace)
+        if np.any(f > 0.5 / self.dt):
+            raise ValueError("Requested frequency exceeds recording Nyquist")
+        time = self.times
+        work = np.array(
+            [self.samples * (-2j * np.pi * time) ** k for k in range(order + 1)]
+        )
+        values = np.empty((order + 1, len(f)), dtype=np.complex128)
+        width = max(1, batch_bytes // max(1, len(time) * 32))
+        for first in range(0, len(f), width):
+            last = min(first + width, len(f))
+            with np.errstate(over="ignore", invalid="ignore"):
+                kernel = np.exp(-2j * np.pi * time[:, None] * z[None, first:last])
+                values[:, first:last] = work @ kernel
         if self.normalization == "integral":
             values *= self.dt
         return _finite(values)

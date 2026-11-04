@@ -140,7 +140,8 @@ def test_spectral_window_stage_identity_and_control_layout(tmp_path, fake):
     assert stage.kernel_derivative == window
     _, spectral = _problem(tmp_path, fake, kernel_derivative=window)
     assert spectral.with_controls(_space()).kernel_derivative == window
-    with pytest.raises(ValueError, match="waveform comparisons"):
+    # A phase comparison selects the windowed traveltime, which needs one plane above the window degree.
+    with pytest.raises(ValueError, match="window degree three at most"):
         stage.with_misfit(Misfit(comparison="phase_derivative"))
     total = stage.restrict(kernel_derivative={**window, "source_derivative": "total"})
     assert (
@@ -1415,3 +1416,46 @@ def test_identity_sees_large_trace_weights_and_source_delay(tmp_path, fake):
     _, big_other = _problem(tmp_path, fake, misfit=other)
     assert big.identity()["misfit"] != big_other.identity()["misfit"]
     assert not isinstance(big.identity()["misfit"], str)
+
+
+def test_windowed_phase_selection_reaches_the_job(tmp_path, fake):
+    from frequensolve.imaging import Comparison
+
+    window = {"residual": "window", "window": [0.0, 1.0], "source_derivative": "frozen"}
+    misfit = Misfit(comparison=Comparison.phase_derivative(source_derivative="frozen"))
+    observed = ObservedData(
+        {"surface": tmp_path / "observed.h5"},
+        derivatives={"df": tmp_path / "observed.h5"},
+    )
+    _, problem = _problem(
+        tmp_path, fake, misfit=misfit, observed=observed, kernel_derivative=window
+    )
+    payload = problem._linearize_job(problem.space, None, gradient=True).to_fs()
+    assert payload["kernel_derivative"]["window"] == [0.0, 1.0]
+    terms = payload["Image"]["misfit"]["objective_terms"]
+    assert [t["comparison"]["kind"] for t in terms] == ["phase_derivative"]
+
+
+@pytest.mark.parametrize(
+    "selection, message",
+    [
+        ({"residual": "window", "window": [0, 1], "axis": "laplace"}, "fourier axis"),
+        ({"residual": "window", "window": [0, 0, 0, 0, 1]}, "degree three"),
+    ],
+)
+def test_invalid_windowed_phase_selection(tmp_path, fake, selection, message):
+    from frequensolve.imaging import Comparison
+
+    misfit = Misfit(comparison=Comparison.phase_derivative())
+    observed = ObservedData(
+        {"surface": tmp_path / "observed.h5"},
+        derivatives={"df": tmp_path / "observed.h5"},
+    )
+    with pytest.raises(ValueError, match=message):
+        _problem(
+            tmp_path,
+            fake,
+            misfit=misfit,
+            observed=observed,
+            kernel_derivative=selection,
+        )
