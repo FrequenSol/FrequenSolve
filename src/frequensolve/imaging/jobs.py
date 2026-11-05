@@ -362,6 +362,21 @@ def _misfit_to_fs(
     return dict(to_fs(**kwargs))
 
 
+def _misfit_object_kinds(misfit: Any) -> List[str]:
+    """Return the comparison kinds of a misfit mapping or object without exporting its data."""
+
+    if misfit is None or isinstance(misfit, Mapping):
+        return _misfit_comparison_kinds(misfit)
+    misfit = getattr(misfit, "misfit", misfit)  # ImagingProblem's payload adapter
+    terms = getattr(misfit, "explicit_terms", None)
+    comparisons = (
+        [term.comparison for term in terms]
+        if terms
+        else [getattr(misfit, "comparison", None)]
+    )
+    return [str(c.kind) for c in comparisons if c is not None]
+
+
 def _misfit_comparison_kinds(misfit: Optional[Mapping[str, Any]]) -> List[str]:
     """Return every comparison kind named by a serialized misfit."""
 
@@ -1638,13 +1653,18 @@ class FWIOperatorJob(_ImagingJobBase):
             spectral_order = self.kernel_derivative.get(
                 "order", len(window) - 1 if isinstance(window, list) else 1
             )
+            # A windowed phase mixes its total-source planes from frozen ones at
+            # any order; a waveform series loads only the first source derivative.
+            kinds = set(_misfit_object_kinds(self.misfit))
             if (
                 action in {"jvp", "normal"}
                 and self.kernel_derivative.get("source_derivative") == "total"
                 and spectral_order > 1
+                and not (kinds and kinds <= {"phase_derivative", "spectral_derivative"})
             ):
                 raise ValueError(
-                    "higher-order spectral JVP/normal actions require a frozen source spectrum"
+                    "higher-order spectral JVP/normal actions of a waveform series require "
+                    "a frozen source spectrum (a windowed phase mixes a total source at any order)"
                 )
         if self.receiver_diagonal is not None:
             if action != "linearize" or has_extension or self.reflectivity is not None:

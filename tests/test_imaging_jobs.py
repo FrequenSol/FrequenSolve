@@ -910,6 +910,41 @@ def test_fwi_kernel_derivative_emits_both_imaging_keys(tmp_path):
         )
 
 
+@pytest.mark.parametrize("action", ["jvp", "normal"])
+def test_fwi_total_source_higher_order_tangents_need_phase(tmp_path, action):
+    sim = _saved_simulation(tmp_path)
+    kernel = {
+        "axis": "fourier",
+        "residual": "window",
+        "window": [0.0, 0.0, 0.0, 1.0],
+        "source_derivative": "total",
+    }
+    outputs = (
+        {"objective_vector": "vector.json"}
+        if action == "jvp"
+        else {"covector": "normal.h5"}
+    )
+
+    def job(kind):
+        return FWIOperatorJob(
+            action,
+            sim,
+            [13.0],
+            action=action,
+            active=["vs"],
+            state="s.json",
+            direction="d.h5",
+            misfit={"comparison": {"kind": kind, "source_derivative": "total"}},
+            kernel_derivative=kernel,
+            **outputs,
+        )
+
+    # A windowed phase mixes its total-source planes from frozen ones at any order.
+    assert job("phase_derivative").kernel_derivative["source_derivative"] == "total"
+    with pytest.raises(ValueError, match="waveform series require a frozen source"):
+        job("waveform")
+
+
 def test_fwi_smoothing_binds_the_smooth_postprocess_to_covector_parts(tmp_path):
     sim = _saved_simulation(tmp_path)
     job = FWIOperatorJob(

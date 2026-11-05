@@ -1646,8 +1646,10 @@ already spectral, first use ``problem.restrict(kernel_derivative=None)`` to
 obtain a waveform parent; ``Stage(kernel_derivative=None)`` means inherit.
 Observations must contain the matching derivative orders. First-order total-source
 spectral Born and normal actions require the supported fixed-source acoustic DPG
-configuration and frozen Gram derivatives; higher-order Born actions require
-``source_derivative="frozen"``. Changing this selection changes the objective,
+configuration and frozen Gram derivatives; higher-order waveform-series Born
+actions require ``source_derivative="frozen"``. A windowed instantaneous
+traveltime mixes a total source exactly at any order, so its JVP and normal
+(the Gauss-Newton preconditioner) accept it. Changing this selection changes the objective,
 so each stage starts fresh optimizer history.
 
 Optimizer stopping tolerances
