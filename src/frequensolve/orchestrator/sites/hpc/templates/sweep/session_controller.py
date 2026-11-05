@@ -549,6 +549,10 @@ class SessionController:
                             f"task {task} does not fit its rank/memory limit; increase allocation or worker rank limit"
                         )
                     pending.append((task, ranks))
+                # Largest estimated task first, as the sweep scheduler queues them:
+                # the last task to start bounds the job, so a small frequency must
+                # not take the slot the largest one waits for.
+                pending.sort(key=lambda item: memory[item[0] - 1], reverse=True)
                 run["pending"] = pending
                 run["phase"] = "tasks"
                 return

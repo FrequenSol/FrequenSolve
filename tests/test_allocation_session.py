@@ -121,7 +121,7 @@ job = json.load(open(args[args.index('--job')+1]))
 step = next((s for s in ('init', 'init-no-size', 'mesh', 'smooth', 'pack') if '--'+s in args), None)
 if '--task' in args: step = int(args[args.index('--task')+1])
 if '--sizing' in args:
-    json.dump({{'schema':'fs-sizing-2','task':[{{'memory':job.get('memory','32 MB')}}]*job['tasks']}}, open(args[args.index('--sizing')+1],'w'))
+    json.dump({{'schema':'fs-sizing-2','task':[{{'memory':m}} for m in job.get('memories', [job.get('memory','32 MB')]*job['tasks'])]}}, open(args[args.index('--sizing')+1],'w'))
 row = dict(step=step, pid=os.getpid(), ranks=int(os.environ['FAKE_RANKS']), offset=int(os.environ['FAKE_OFFSET']), gpu=os.environ.get('FS_GPU_DEVICE'), job=args[args.index('--job')+1], event='start', at=time.time())
 with open(job['events'], 'a') as f: f.write(json.dumps(row)+'\\n')
 time.sleep(job.get('sleep', 0.03))
@@ -254,6 +254,18 @@ def test_one_allocation_runs_multiple_jobs_and_postprocessing(cluster):
     assert cluster.cancellations == []
     session.close()
     assert cluster.cancellations == []
+
+
+def test_session_launches_the_largest_estimated_task_first(cluster):
+    # Every task needs the whole allocation, so tasks start one at a time.
+    with cluster.site.session(workers=AdaptiveWorkers(min_ranks=4)) as session:
+        job = Job(cluster.root, "sized", tasks=3, memories=["64 MB", "32 MB", "128 MB"])
+        assert session.run(job, check=True).successful
+    starts = sorted(
+        (row for row in events(cluster) if row["event"] == "start"),
+        key=lambda row: row["at"],
+    )
+    assert [row["step"] for row in starts if isinstance(row["step"], int)] == [3, 1, 2]
 
 
 def test_parallel_jobs_share_rank_offsets(cluster):
