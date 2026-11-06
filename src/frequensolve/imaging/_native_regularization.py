@@ -116,7 +116,7 @@ class BoundNativeRegularization(BoundRegularization):
         known = {
             unqualified_block_name(n) for n in space.blocks if n.startswith("model.")
         }
-        unknown = set(specification.fractional_scales) - known
+        unknown = set(specification.fractional_scales or {}) - known
         if unknown:
             raise ValueError(
                 f"fractional scales refer to inactive material blocks: {sorted(unknown)}"
@@ -151,7 +151,7 @@ class BoundNativeRegularization(BoundRegularization):
     def checkpoint(self) -> dict[str, Any]:
         return {
             "config": self.regularization.smoothing.to_control_fs(),
-            "fractional_scales": dict(self.regularization.fractional_scales),
+            "fractional_scales": dict(self.regularization.fractional_scales or {}),
             "factor": self.factor,
             # Same digest as hashing tobytes(), without copying the vector.
             "reference": hashlib.sha256(

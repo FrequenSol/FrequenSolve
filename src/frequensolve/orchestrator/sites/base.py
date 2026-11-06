@@ -1284,7 +1284,9 @@ class BaseSite:
     def _require_solver_features(self, job: Any) -> None:
         """Reject saved job inputs that the configured solver would silently ignore."""
 
-        simulation = getattr(job, "simulation", None)
+        simulation = getattr(job, "effective_simulation", None)
+        if simulation is None:
+            simulation = getattr(job, "simulation", None)
         if simulation is None:
             return
         files = [getattr(simulation, "_file", None)]

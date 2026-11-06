@@ -14,7 +14,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from math import pi
-from typing import Any, Sequence
+from typing import Any, Protocol, Sequence
 
 import numpy as np
 
@@ -43,7 +43,7 @@ def _ratio(
     return q, dq
 
 
-def _reliability_array(values, count):
+def _reliability_array(values: Any, count: Any) -> Any:
     if values is None:
         return None
     values = np.asarray(values)
@@ -61,7 +61,7 @@ def _reliability_array(values, count):
     return frozen
 
 
-def _row_weights(values, count):
+def _row_weights(values: Any, count: Any) -> Any:
     if values is None:
         return np.ones(count)
     values = np.asarray(values)
@@ -77,7 +77,7 @@ def _row_weights(values, count):
     return np.array(values, dtype=float, copy=True)
 
 
-def _jet_inputs(predicted, observed, groups):
+def _jet_inputs(predicted: Any, observed: Any, groups: Any) -> Any:
     u, d = (
         np.array(predicted, complex, copy=True),
         np.array(observed, complex, copy=True),
@@ -203,7 +203,7 @@ class SpectralAttribute:
         row_weights: Any = None,
         reliability: Any = None,
         pool: ReceiverPool | None = None,
-    ) -> "AttributeLinearization | PooledTraveltimeLinearization":
+    ) -> "AttributeLinearization | PooledTraveltimeLinearization | WindowedTraveltimeLinearization":
         """Return the attribute residual, exact real JVP and real-Hermitian VJP.
 
         ``row_weights`` is a fixed, finite, nonnegative vector, one objective
@@ -375,7 +375,7 @@ class SpectralAttribute:
             residual, jacobian, predicted_value, target, weights, reliability
         )
 
-    def _loss_factors(self, error):
+    def _loss_factors(self, error: Any) -> Any:
         t = abs(error / self.loss_scale) ** 2
         if self.loss == "student_t":
             small = t < 1e-5
@@ -398,14 +398,14 @@ class SpectralAttribute:
 
     def reliability_weights(
         self,
-        predicted,
-        observed,
+        predicted: Any,
+        observed: Any,
         *,
-        groups=None,
-        pool=None,
-        floor_multiplier=1.0,
-        power=1.0,
-    ):
+        groups: Any = None,
+        pool: Any = None,
+        floor_multiplier: Any = 1.0,
+        power: Any = 1.0,
+    ) -> Any:
         """Freeze predicted-denominator reliability for an outer reweighting step.
 
         Reuse this returned array as ``reliability=`` for every trial model in
@@ -460,7 +460,9 @@ class SpectralAttribute:
             result *= (energy / (energy + floor2)) ** power
         return _reliability_array(result, len(result))
 
-    def _linearize_pool(self, u, d, groups, pool, row_weights, reliability):
+    def _linearize_pool(
+        self, u: Any, d: Any, groups: Any, pool: Any, row_weights: Any, reliability: Any
+    ) -> Any:
         # Pool sample products before division. Each sample is processed once;
         # the CSR map shares it among arrays, and its transpose sums duals.
         eps2 = pool.apply(_rms_floor(d[:, :1], groups, self.relative_floor) ** 2)
@@ -473,7 +475,7 @@ class SpectralAttribute:
             _rms_floor(d[:, :1], groups, confidence_floor) ** 2
         )
 
-        def values(x):
+        def values(x: Any) -> Any:
             products = np.column_stack(
                 (abs(x[:, 0]) ** 2, (x[:, 0].conj() * x[:, 1]).real)
             )
@@ -527,10 +529,10 @@ class WindowedTraveltimeLinearization:
     coefficients: np.ndarray
     shape: tuple
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: Any) -> Any:
         return getattr(self.inner, name)
 
-    def jvp(self, tangent):
+    def jvp(self, tangent: Any) -> Any:
         tangent = np.asarray(tangent)
         if tangent.shape != self.shape:
             raise ValueError("jet tangent shape differs")
@@ -542,7 +544,7 @@ class WindowedTraveltimeLinearization:
         )
         return self.inner.jvp(pair)
 
-    def vjp(self, dual):
+    def vjp(self, dual: Any) -> Any:
         pair = self.inner.vjp(dual)
         result = np.zeros(self.shape, dtype=complex)
         width = self.coefficients.shape[-1]
@@ -599,10 +601,10 @@ class PooledTraveltimeLinearization:
     _slope: np.ndarray
 
     @property
-    def value(self):
+    def value(self) -> Any:
         return float(np.vdot(self.residual, self.residual).real / 2)
 
-    def jvp(self, tangent):
+    def jvp(self, tangent: Any) -> Any:
         tangent = np.asarray(tangent)
         if tangent.shape != self._jets.shape:
             raise ValueError("jet tangent shape differs")
@@ -616,7 +618,7 @@ class PooledTraveltimeLinearization:
             self._slope * (delta[:, 1] - self._mean * delta[:, 0]) / self._denominator
         )[:, None]
 
-    def vjp(self, dual):
+    def vjp(self, dual: Any) -> Any:
         dual = np.asarray(dual)
         if dual.shape != self.residual.shape:
             raise ValueError("attribute dual shape differs")
@@ -644,7 +646,9 @@ class SpectralJetLinearization:
         first = self.planes[0]
         self.space = first.space
         self.frequencies = tuple(first.frequencies)
-        keys, groups, fingerprints = None, None, None
+        keys: list[Any] | None = None
+        groups: np.ndarray | None = None
+        fingerprints = None
         predicted, observed = [], []
         for order, lin in enumerate(self.planes):
             if (
@@ -719,8 +723,8 @@ class SpectralJetLinearization:
                 raise ValueError(
                     "spectral states have different physical model or acquisition fingerprints"
                 )
-            row_keys = [None] * lin.data_space.size
-            row_groups = [None] * lin.data_space.size
+            row_keys: list[Any] = [None] * lin.data_space.size
+            row_groups: list[Any] = [None] * lin.data_space.size
             for fi in range(len(self.frequencies)):
                 layouts = (
                     lin.data_space.term_layouts()
@@ -742,6 +746,7 @@ class SpectralJetLinearization:
             factor = (-2j * pi) ** (-order)
             predicted.append(lin.simulated().values * factor)
             observed.append(lin.observed().values * factor)
+        assert keys is not None and groups is not None
         self.keys, self.groups = keys, groups
         self.predicted, self.observed = (
             np.column_stack(predicted),
@@ -812,7 +817,7 @@ class SpectralJetLinearization:
             )
         return cls(planes)
 
-    def through_order(self, order: int):
+    def through_order(self, order: int) -> Any:
         """Reuse saved planes through an inclusive order, without any new solves."""
         if (
             isinstance(order, bool)
@@ -874,8 +879,14 @@ class SpectralJetLinearization:
         return result
 
     def receiver_pool(
-        self, coordinates, radius, *, taper="uniform", sigma=None, sample_weights=None
-    ):
+        self,
+        coordinates: Any,
+        radius: Any,
+        *,
+        taper: Any = "uniform",
+        sigma: Any = None,
+        sample_weights: Any = None,
+    ) -> Any:
         """Build reusable windows from output-receiver/channel coordinates.
 
         Pass a receiver-by-coordinate table for one term, or a mapping keyed by
@@ -936,7 +947,9 @@ class SpectralJetLinearization:
             sample_keys=self.keys,
         )
 
-    def synthetic_array(self, array, coordinates, *, sample_weights=None):
+    def synthetic_array(
+        self, array: Any, coordinates: Any, *, sample_weights: Any = None
+    ) -> Any:
         """Bind a SyntheticArray to output-channel coordinates in canonical order."""
         from frequensolve import Q_
 
@@ -952,7 +965,7 @@ class SpectralJetLinearization:
             sample_weights=sample_weights,
         )
 
-    def _validate_pool(self, pool):
+    def _validate_pool(self, pool: Any) -> Any:
         if (
             pool is not None
             and pool.sample_keys is not None
@@ -961,8 +974,13 @@ class SpectralJetLinearization:
             raise ValueError("pool sample keys differ from the spectral receiver rows")
 
     def reliability_weights(
-        self, definition, *, pool=None, floor_multiplier=1.0, power=1.0
-    ):
+        self,
+        definition: Any,
+        *,
+        pool: Any = None,
+        floor_multiplier: Any = 1.0,
+        power: Any = 1.0,
+    ) -> Any:
         """Prepare frozen reliability for reuse in this step's trial objectives."""
         self._validate_pool(pool)
         return definition.reliability_weights(
@@ -1041,16 +1059,29 @@ class SpectralJetLinearization:
         return result
 
 
+class AttributeMap(Protocol):
+    """Residual and transpose actions shared by local and pooled attributes."""
+
+    residual: np.ndarray
+
+    @property
+    def value(self) -> float: ...
+
+    def jvp(self, tangent: Any) -> np.ndarray: ...
+
+    def vjp(self, dual: Any) -> np.ndarray: ...
+
+
 @dataclass
 class BoundSpectralAttribute:
     jets: SpectralJetLinearization
-    data: AttributeLinearization | PooledTraveltimeLinearization
+    data: AttributeMap
     definition: SpectralAttribute | None = None
     pool: ReceiverPool | None = None
     reliability: Any = None
     row_weights: Any = None
 
-    def trial(self, jets):
+    def trial(self, jets: Any) -> Any:
         """Evaluate a candidate with this reference's fixed weights and arrays."""
         if jets.keys != self.jets.keys or not np.array_equal(
             jets.observed, self.jets.observed
@@ -1070,7 +1101,7 @@ class BoundSpectralAttribute:
     def gradient(self) -> Any:
         return self.jets.vjp(self.data.vjp(self.data.residual))
 
-    def gradient_tasks(self):
+    def gradient_tasks(self) -> Any:
         """Return per-frequency contributions; their sum is gradient()."""
         return self.jets.vjp(self.data.vjp(self.data.residual), per_task=True)
 

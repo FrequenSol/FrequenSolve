@@ -207,7 +207,7 @@ mesh plus :term:`mesh adaptivity` is the preferred starting point for most
 tutorials.
 
 Multigrid Cycles
----------------
+------------------
 
 Traversal and smoothing are independent solver settings:
 

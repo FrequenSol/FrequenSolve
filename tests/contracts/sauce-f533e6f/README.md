@@ -97,3 +97,13 @@ supports and convolution filters (with their `convolutionFilters` fragment
 definition), the `slow_velocity_pass` hook documentation and the phase-slope
 `source_delay` option. Other contracts and the examples retain their earlier
 provenance.
+
+## 2026-11-06 receiver-line wavenumber comparison refresh
+
+`inputs/fs-imaging-1` (contract and schema) are copied verbatim from Sauce
+`instantaneous-wavenumber-2026-11-06`
+`3da2c30502a11c541a69939b00f135c482521ccd`. They add the receiver-line
+`wavenumber` comparison, its `measure` and `max_spacing_m` options, and the
+matching observed-input requirements. Other contracts retain their existing
+provenance. Running this comparison requires a solver containing that feature;
+these snapshots validate SDK serialization without running a native solver.

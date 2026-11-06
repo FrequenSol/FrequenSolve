@@ -1,5 +1,7 @@
 """Fixed weighted sums of standard multi-frequency imaging objectives."""
 
+from typing import Any
+
 import numpy as np
 
 from .controls import ControlVector
@@ -15,7 +17,7 @@ class WeightedObjective:
     Native regularization is applied once by FWI, outside this data sum.
     """
 
-    def __init__(self, problems, weights):
+    def __init__(self, problems: Any, weights: Any) -> None:
         self.problems = tuple(problems)
         self.weights = tuple(float(w) for w in weights)
         if (
@@ -27,30 +29,32 @@ class WeightedObjective:
         ):
             raise ValueError("Expected matched objectives and nonnegative weights")
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: Any) -> Any:
         return getattr(self.problems[0], name)
 
     @property
-    def state(self):
+    def state(self) -> Any:
         return self.problems[0].state
 
     @state.setter
-    def state(self, value):
+    def state(self, value: Any) -> Any:
         for problem in self.problems:
             problem.state = value
 
-    def identity(self):
+    def identity(self) -> Any:
         return {
             "weighted_objectives": [p.identity() for p in self.problems],
             "weights": list(self.weights),
         }
 
-    def restrict(self, **kwargs):
+    def restrict(self, **kwargs: Any) -> Any:
         if any(k in kwargs for k in ("misfit", "loss", "kernel_derivative")):
             raise ValueError("Restrict objective components before composing them")
         return type(self)([p.restrict(**kwargs) for p in self.problems], self.weights)
 
-    def linearize(self, v=None, *, gradient=True, receiver_diagonal=None):
+    def linearize(
+        self, v: Any = None, *, gradient: Any = True, receiver_diagonal: Any = None
+    ) -> Any:
         point = self.vector() if v is None else v
         parts = [
             p.linearize(point, gradient=gradient, receiver_diagonal=receiver_diagonal)
@@ -58,15 +62,15 @@ class WeightedObjective:
         ]
         return _WeightedLinearization(self, parts)
 
-    def value(self, v=None):
+    def value(self, v: Any = None) -> Any:
         return self.linearize(v, gradient=False).value
 
-    def gradient(self, v=None):
+    def gradient(self, v: Any = None) -> Any:
         return self.linearize(v).gradient
 
 
 class _WeightedLinearization:
-    def __init__(self, problem, parts):
+    def __init__(self, problem: Any, parts: Any) -> None:
         self.problem, self.parts = problem, tuple(parts)
         first = parts[0]
         for part in parts[1:]:
@@ -92,7 +96,7 @@ class _WeightedLinearization:
         if self.gradient is not None:
             self.gradient._field_factory = self.field
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: Any) -> Any:
         if name in (
             "normal",
             "jacobian",
@@ -105,23 +109,23 @@ class _WeightedLinearization:
             )
         return getattr(self.parts[0], name)
 
-    def _sum(self, vectors):
+    def _sum(self, vectors: Any) -> Any:
         return ControlVector(
             sum(w * v.values for w, v in zip(self.problem.weights, vectors)), self.space
         )
 
     @property
-    def receiver_diagonal(self):
+    def receiver_diagonal(self) -> Any:
         return self._sum([p.receiver_diagonal for p in self.parts])
 
     @property
-    def jobs(self):
+    def jobs(self) -> Any:
         return tuple(j for p in self.parts for j in p.jobs)
 
-    def field(self, vector=None, **kwargs):
+    def field(self, vector: Any = None, **kwargs: Any) -> Any:
         return self.parts[0].field(
             self.gradient if vector is None else vector, **kwargs
         )
 
-    def trial(self, v, *, gradient=False):
+    def trial(self, v: Any, *, gradient: Any = False) -> Any:
         return self.problem.linearize(v, gradient=gradient)

@@ -140,7 +140,7 @@ def test_comparison_waveform_and_phase_derivative_round_trip():
         Comparison.from_fs({"kind": "phase_derivative", "derivative_axis": "laplace"})
 
 
-def test_comparison_wavenumber_round_trips_and_validates():
+def test_comparison_wavenumber_round_trips_and_validates(imaging_validator):
     from frequensolve.imaging.synthetic_array import SyntheticArray
 
     array = SyntheticArray.gaussian(sigma=u.Quantity(10.0, "m"))
@@ -161,6 +161,9 @@ def test_comparison_wavenumber_round_trips_and_validates():
     assert pooled.requires_derivatives == ("df",)
     for comparison in (plain, pooled):
         assert Comparison.from_fs(comparison.to_fs()) == comparison
+        imaging_validator.evolve(
+            schema=imaging_validator.schema["$defs"]["misfitComparison"]
+        ).validate(comparison.to_fs())
     term = ObjectiveTerm("das", comparison=pooled, id="das.moveout")
     assert ObjectiveTerm.from_fs(term.to_fs()) == term
     with pytest.raises(ValueError, match="receiver_line"):

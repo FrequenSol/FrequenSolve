@@ -54,7 +54,9 @@ def reduce_covector_sets(
         part = ControlVectorSetFile.read(path)
         if first is None:
             first = part
-            rows = {name: scale(task, name) * values for name, values in part.rows.items()}
+            rows = {
+                name: scale(task, name) * values for name, values in part.rows.items()
+            }
             support = {
                 name: part.support.get(name, np.ones(values.shape[1], dtype=bool))
                 for name, values in part.rows.items()
@@ -63,7 +65,9 @@ def reduce_covector_sets(
         if part.n_vectors != first.n_vectors or part.sizes != first.sizes:
             raise ValueError(f"{path} has a different layout than task 1")
         if part.control_spaces != first.control_spaces:
-            raise ValueError(f"{path} has different material basis identities than task 1")
+            raise ValueError(
+                f"{path} has different material basis identities than task 1"
+            )
         if part.control_identity != first.control_identity:
             raise ValueError(f"{path} has a different control identity than task 1")
         for name, values in part.rows.items():

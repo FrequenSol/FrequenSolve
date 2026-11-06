@@ -281,7 +281,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         target_units = unit_expression(units) if units is not None else None
         top, bottom = self.upper_surface(), self.lower_surface()
 
-        def limits(surface):
+        def limits(surface: SimpleSurface) -> Tuple[float, ...]:
             return tuple(
                 float(_convert_surface_value(float(z), surface, target_units))
                 for z in surface.extrema
@@ -497,7 +497,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         data.pop("_type", None)
         data.pop("schema", None)
         dimension = data.pop("dimension", None)
-        borehole_reduction = None
+        borehole_reduction: Optional[Literal["tube"]] = None
         if dimension == 3 and data.get("reduced_borehole") == {"reduction": "tube"}:
             data.pop("reduced_borehole")
             borehole_reduction = "tube"

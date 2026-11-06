@@ -21,7 +21,18 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import h5py
 import numpy as np
@@ -552,7 +563,7 @@ class ControlVectorFile:
                 ),
                 native=native,
                 control_spaces={
-                    str(n): _read_string(h5["control_spaces"], n)
+                    str(n): cast(str, _read_string(h5["control_spaces"], n))
                     for n in h5.get("control_spaces", {})
                 },
                 support=support,
@@ -742,7 +753,9 @@ class ControlVectorSetFile:
             count = int(np.asarray(h5["n_vectors"][()]).reshape(-1)[0])
             for name, values in rows.items():
                 if values.ndim != 2 or values.shape[0] != count:
-                    raise ValueError(f"{path}: /controls/{name} does not hold {count} rows")
+                    raise ValueError(
+                        f"{path}: /controls/{name} does not hold {count} rows"
+                    )
             flat = {name: values[0] for name, values in rows.items()}
             support, _, min_support = _read_support_datasets(h5, flat, path)
             return cls(
@@ -759,7 +772,7 @@ class ControlVectorSetFile:
                 support=support,
                 support_min_support=min_support,
                 control_spaces={
-                    str(n): _read_string(h5["control_spaces"], n)
+                    str(n): cast(str, _read_string(h5["control_spaces"], n))
                     for n in h5.get("control_spaces", {})
                 },
             )
@@ -1002,7 +1015,7 @@ class ControlStateFile:
             support, measure, min_support = _read_support_datasets(h5, blocks, path)
             scaling, units = _read_scaling_datasets(h5, blocks, path)
             identities = {
-                str(n): _read_string(h5["control_spaces"], n)
+                str(n): cast(str, _read_string(h5["control_spaces"], n))
                 for n in h5.get("control_spaces", {})
             }
         return cls(

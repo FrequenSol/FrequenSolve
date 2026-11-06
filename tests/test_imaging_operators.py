@@ -117,7 +117,9 @@ def test_jacobian_memoizes_per_input_and_rejects_foreign_vectors(setup):
     assert jvps[0].state == problem.linearize().job.state_file()
     assert jvps[0].direction is None and jvps[0].direction_set.name == "directions.h5"
     assert ControlVectorSetFile.read(jvps[0].direction_set).n_vectors == 1
-    assert not any(jvps[0].direction_set.with_name(f"directions_{t}.h5").exists() for t in (1, 2))
+    assert not any(
+        jvps[0].direction_set.with_name(f"directions_{t}.h5").exists() for t in (1, 2)
+    )
 
     other = problem.restrict(active=["vp"]).space.random(0)
     with pytest.raises(ValueError, match="different control space"):

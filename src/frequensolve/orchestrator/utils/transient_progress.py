@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime
+from typing import Any
 
 
-def read_local_progress(job):
+def read_local_progress(job: Any) -> Any:
     """Read fixed operation/task paths without scanning simulation output."""
     payloads = {}
     for task in range(1, job.n_tasks + 1):
@@ -19,7 +20,7 @@ def read_local_progress(job):
     return payloads
 
 
-def _parse_timestamp(value):
+def _parse_timestamp(value: Any) -> Any:
     """Accept Sauce's compact timezone offset on supported Python versions."""
     try:
         return datetime.fromisoformat(value)
@@ -27,7 +28,7 @@ def _parse_timestamp(value):
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z")
 
 
-def _completed_steps(payload, total, not_before):
+def _completed_steps(payload: Any, total: Any, not_before: Any) -> Any:
     if not isinstance(payload, dict):
         return None
     if payload.get("schema") != "fs-transient-progress-1":
@@ -52,7 +53,7 @@ def _completed_steps(payload, total, not_before):
     return completed
 
 
-def _estimated_completion(payload, completed, total):
+def _estimated_completion(payload: Any, completed: Any, total: Any) -> Any:
     """Estimate integration finish from this attempt's measured advances only."""
     initial = payload.get("initial_step")
     elapsed = payload.get("elapsed_seconds")
@@ -77,7 +78,7 @@ def _estimated_completion(payload, completed, total):
         return None
 
 
-def update_progress(run, status):
+def update_progress(run: Any, status: Any) -> Any:
     """Attach step counts to a transient status without changing its lifecycle."""
     job = run.job
     if getattr(job, "workflow", None) != "transient":
@@ -139,7 +140,7 @@ def update_progress(run, status):
         status.message = summary
 
 
-def progress_summary(payload):
+def progress_summary(payload: Any) -> Any:
     completed = payload["completed_steps"]
     total = payload["total_steps"]
     if completed is None:

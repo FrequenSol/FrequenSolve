@@ -12,7 +12,7 @@ def expand_simulation_override_paths(overrides: Mapping) -> dict:
     """Expand object-member paths into Sauce's nested override representation."""
     if not isinstance(overrides, Mapping):
         raise TypeError("simulation_overrides must be a mapping")
-    result = {}
+    result: dict[str, Any] = {}
     for path, value in overrides.items():
         if not isinstance(path, str):
             raise TypeError("simulation_overrides keys must be strings")
@@ -73,7 +73,9 @@ def simulation_reference_path(reference: Any, *, job_file: Path | None = None) -
     absolute, relative = reference.get("absolute_path"), reference.get("relative_path")
     if (absolute is None) == (relative is None):
         raise ValueError("Simulation File reference requires exactly one path")
-    path = Path(absolute if absolute is not None else relative)
+    selected = absolute if absolute is not None else relative
+    assert selected is not None
+    path = Path(selected)
     if relative is not None and job_file is not None:
         path = (job_file.parent / path).resolve()
     return path

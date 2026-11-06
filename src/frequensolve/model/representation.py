@@ -129,7 +129,7 @@ class FieldRepresentation(ABC):
 
     def evaluate(
         self,
-        coefficients: Sequence[float],
+        coefficients: Sequence[float] | np.ndarray,
         context: EvaluationContext,
         *,
         derivative_order: int = 0,
@@ -197,7 +197,7 @@ class FieldRepresentation(ABC):
     def transfer_to(
         self,
         target: "FieldRepresentation",
-        coefficients: Sequence[float],
+        coefficients: Sequence[float] | np.ndarray,
         context: EvaluationContext,
         *,
         weights: Optional[Any] = None,
@@ -211,7 +211,7 @@ class FieldRepresentation(ABC):
             samples, context, weights=weights, damping=damping, tolerance=tolerance
         )
 
-    def _vector(self, values: Sequence[float], name: str) -> np.ndarray:
+    def _vector(self, values: Sequence[float] | np.ndarray, name: str) -> np.ndarray:
         vector = np.asarray(values)
         if np.iscomplexobj(vector):
             raise ValueError(f"{name} must be real-valued")

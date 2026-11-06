@@ -477,9 +477,9 @@ class BaseJob(
         from frequensolve.simulation.solver import SolverConfig
         from frequensolve.units import UnitConfig
 
-        simulation = copy.copy(self.simulation)
+        simulation: Any = copy.copy(self.simulation)
         simulation.extra = dict(simulation.extra)
-        sections = {
+        sections: dict[str, tuple[str, Any]] = {
             "Model": ("model", ModelBase),
             "Mesh": ("mesh", MeshManager),
             "Solver": ("solver", SolverConfig),
@@ -853,13 +853,13 @@ class BaseJob(
         return self._file.parent / "logs"
 
     @property
-    def _result_path(self):
+    def _result_path(self) -> Any:
         """Path where solver results will be stored."""
         if self._file is None:
             return self._local_path / "results"
         return self._file.parent / "results"
 
-    def _remote_path(self, work_dir: Union[Path, str]):
+    def _remote_path(self, work_dir: Union[Path, str]) -> Any:
         """Get remote job path."""
         work_dir = Path(work_dir)
         return work_dir / "jobs" / self.simulation.name / self.name

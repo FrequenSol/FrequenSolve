@@ -1075,7 +1075,9 @@ class SlurmSite(BaseSite):
         tmp_dir = getattr(self.config, "tmp_dir", None)
         if tmp_dir is None or str(tmp_dir).strip() == "":
             return Path("/tmp")
-        return self._resolve_remote_dir(tmp_dir, name="tmp_dir")
+        resolved = self._resolve_remote_dir(tmp_dir, name="tmp_dir")
+        assert resolved is not None
+        return resolved
 
     @property
     def provisioned(self):
@@ -3777,7 +3779,7 @@ class SlurmSite(BaseSite):
                 "Solver executable not specified; configure solver in "
                 "site.toml or pass solver= explicitly."
             )
-        return executable
+        return str(executable)
 
     def _list_jobs(self):
         """List all queued jobs."""
@@ -3805,7 +3807,7 @@ class SlurmSite(BaseSite):
             f"Available job ids: {job_ids}"
         )
 
-    def _transfer_SLURM_job(self, script: str, job: BaseJob):
+    def _transfer_SLURM_job(self, script: str, job: BaseJob) -> Any:
         """Transfer a SLURM job to the remote site."""
         local_job, remote_job = job.save_for_remote(
             self.__class__.__name__, self.work_dir
@@ -3952,7 +3954,7 @@ class SlurmSite(BaseSite):
         postprocess_job: bool = False,
         n_job_tasks: Optional[int] = None,
         task_indices: Optional[List[int]] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> str:
         """Generate a SLURM sweep script.
 

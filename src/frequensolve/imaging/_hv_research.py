@@ -10,6 +10,7 @@ All sparse factorizations and solves use FP32 with residual refinement.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.polynomial.legendre import leggauss
@@ -29,7 +30,7 @@ class HVResult:
 class HVResearchSolver:
     """Q1 path and mixed velocity/curvature action, shared by all channels."""
 
-    def __init__(self, intervals=128, path_intervals=4):
+    def __init__(self, intervals: Any = 128, path_intervals: Any = 4) -> None:
         if intervals < 2 or path_intervals < 2:
             raise ValueError("HV research meshes require at least two intervals")
         self.nx, self.nt = intervals + 1, path_intervals + 1
@@ -55,20 +56,20 @@ class HVResearchSolver:
         )
         self.free_mixed = np.r_[self.free_velocity, self.free_velocity + self.size]
 
-    def assemble(self, local):
+    def assemble(self, local: Any) -> Any:
         local = np.broadcast_to(local, (len(self.nodes), 4, 4))
         return sparse.coo_matrix(
             (local.ravel(), (self.rows, self.columns)), shape=(self.size, self.size)
         ).tocsr()
 
-    def path_matrix(self, v):
+    def path_matrix(self, v: Any) -> Any:
         velocity = np.einsum("qa,ca->cq", self.shape, v[self.nodes])
         transport = self.dt[None] + velocity[:, :, None] * self.dx[None]
         return self.assemble(
             np.einsum("cqa,q,cqb->cab", transport, self.weight, transport)
         )
 
-    def velocity_system(self, f, kappa, lam, epsilon):
+    def velocity_system(self, f: Any, kappa: Any, lam: Any, epsilon: Any) -> Any:
         fx = np.einsum("qa,cak->cqk", self.dx, f[self.nodes])
         ft = np.einsum("qa,cak->cqk", self.dt, f[self.nodes])
         coeff = kappa + np.sum(fx**2, axis=2)
@@ -85,7 +86,7 @@ class HVResearchSolver:
         )
 
     @staticmethod
-    def solve_free(matrix, rhs, free):
+    def solve_free(matrix: Any, rhs: Any, free: Any) -> Any:
         result = np.zeros_like(rhs, dtype=float)
         if not len(free):
             return result
@@ -114,15 +115,15 @@ class HVResearchSolver:
 
     def solve(
         self,
-        predicted,
-        observed,
+        predicted: Any,
+        observed: Any,
         *,
-        kappa=0.05,
-        lam=0.01,
-        epsilon=0.001,
-        max_iterations=300,
-        tolerance=1e-4,
-    ):
+        kappa: Any = 0.05,
+        lam: Any = 0.01,
+        epsilon: Any = 0.001,
+        max_iterations: Any = 300,
+        tolerance: Any = 1e-4,
+    ) -> Any:
         p, d = np.asarray(predicted, float), np.asarray(observed, float)
         if p.ndim == 1:
             p, d = p[:, None], d[:, None]
@@ -146,10 +147,10 @@ class HVResearchSolver:
                 + q @ self.mass @ q
             )
             residual = max(
-                np.linalg.norm(reaction[self.free_path]),
-                np.linalg.norm((block @ np.r_[v, q] - rhs)[self.free_mixed]),
+                float(np.linalg.norm(reaction[self.free_path])),
+                float(np.linalg.norm((block @ np.r_[v, q] - rhs)[self.free_mixed])),
             )
-            residual /= max(1.0, np.linalg.norm(f), np.linalg.norm(rhs))
+            residual /= max(1.0, float(np.linalg.norm(f)), float(np.linalg.norm(rhs)))
             if energy > previous + 1e-5 * max(1.0, abs(previous)):
                 raise RuntimeError("HV alternating action increased")
             if (
@@ -172,7 +173,7 @@ class HVResearchSolver:
         )
 
 
-def endpoint_projection(count, intervals):
+def endpoint_projection(count: Any, intervals: Any) -> Any:
     """L2-project every receiver sample to Q1 endpoints, with exact transpose.
 
     Integrate products of piecewise linear sample and endpoint functions on
@@ -186,7 +187,7 @@ def endpoint_projection(count, intervals):
     x = (mid[:, None] + half[:, None] * q).ravel()
     weight = (half[:, None] * w).ravel()
 
-    def basis(grid):
+    def basis(grid: Any) -> Any:
         left = np.clip(np.searchsorted(grid, x) - 1, 0, len(grid) - 2)
         fraction = (x - grid[left]) / (grid[left + 1] - grid[left])
         return sparse.coo_matrix(

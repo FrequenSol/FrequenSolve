@@ -1220,7 +1220,9 @@ class ExtensionLinearization:
         identities = {manifest.control_identity for manifest in self.manifests}
         fingerprints = {manifest.fingerprint for manifest in self.manifests}
         self.control_identity: Optional[str] = (
-            identities.pop() if len(identities) == 1 and len(fingerprints) == 1 else None
+            identities.pop()
+            if len(identities) == 1 and len(fingerprints) == 1
+            else None
         )
         self.support_masks = {
             name: np.array(mask, dtype=bool) for name, mask in support_masks.items()
@@ -1525,7 +1527,7 @@ class ExtensionLinearization:
             taps.to_file(fingerprint=fp, baseline=baseline, role="tangent").write(path)
         return stem
 
-    def _direction_input(self, dv: ControlVector, directory: Path) -> Dict[str, Path]:
+    def _direction_input(self, dv: ControlVector, directory: Path) -> Dict[str, Any]:
         """Return the job input of a physical direction: one direction set every task reads, or per-task copies.
 
         Extensions hold sources fixed, so no mechanism block needs rescaling.

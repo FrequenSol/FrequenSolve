@@ -1,5 +1,7 @@
 """Opt-in Python composition of native receiver jets and synthetic attributes."""
 
+from typing import Any
+
 import numpy as np
 
 from .misfit import Misfit, Normalization, ObjectiveTerm
@@ -7,7 +9,7 @@ from .operators import ModelOperator
 from .spectral_attributes import SpectralAttribute, SpectralJetLinearization
 
 
-def receiver_coordinates(problem):
+def receiver_coordinates(problem: Any) -> Any:
     """Resolve point-channel coordinates without guessing expanded device geometry."""
     from frequensolve import Q_
     from frequensolve.seismic.receivers import ReceiverNode
@@ -35,7 +37,7 @@ def receiver_coordinates(problem):
     return result
 
 
-def selected(problem):
+def selected(problem: Any) -> Any:
     return any(
         t.comparison.reliability is not None
         for t in problem.misfit.objective_terms(
@@ -44,7 +46,7 @@ def selected(problem):
     )
 
 
-def _validate(problem, terms):
+def _validate(problem: Any, terms: Any) -> Any:
     if problem.patches is not None or problem.kernel_derivative is not None:
         raise ValueError(
             "synthetic comparisons cannot be combined with patches or kernel_derivative"
@@ -85,7 +87,7 @@ def _validate(problem, terms):
             )
 
 
-def _definition(term):
+def _definition(term: Any) -> Any:
     scale = term.normalization.value
     if isinstance(scale, dict):
         from frequensolve import Q_
@@ -103,7 +105,7 @@ def _definition(term):
 
 
 class _Jacobian(ModelOperator):
-    def __init__(self, linearization):
+    def __init__(self, linearization: Any) -> None:
         self.linearization = linearization
         super().__init__(
             linearization.space,
@@ -114,12 +116,12 @@ class _Jacobian(ModelOperator):
             ),
         )
 
-    def _matvec(self, x):
+    def _matvec(self, x: Any) -> Any:
         return np.concatenate(
             [np.sqrt(w) * b.jvp(x).ravel().real for w, b in self.linearization.parts]
         )
 
-    def _rmatvec(self, y):
+    def _rmatvec(self, y: Any) -> Any:
         result = self.linearization.space.zeros()
         start = 0
         for weight, bound in self.linearization.parts:
@@ -140,13 +142,15 @@ class SyntheticComparisonLinearization:
     ``field`` retains the native material basis and mass convention.
     """
 
-    def __init__(self, problem, parts, identities, *, gradient):
+    def __init__(
+        self, problem: Any, parts: Any, identities: Any, *, gradient: Any
+    ) -> None:
         self.problem, self.parts, self.identities = problem, parts, identities
         first = parts[0][1].jets.planes[0]
         self.space, self.state, self.point = first.space, first.state, first.point
         self.frequencies = problem.frequencies
         self.value = sum(weight * bound.value for weight, bound in parts)
-        self.report = {}
+        self.report: dict[str, Any] = {}
         for (weight, bound), (_, term_id) in zip(parts, identities):
             self.report[term_id] = self.report.get(term_id, 0.0) + weight * bound.value
         self.gradient = None
@@ -159,32 +163,34 @@ class SyntheticComparisonLinearization:
         self.jacobian = _Jacobian(self)
         self.normal = self.jacobian.H @ self.jacobian
 
-    def objective_residual(self):
+    def objective_residual(self) -> Any:
         return np.concatenate(
             [np.sqrt(w) * b.data.residual.ravel().real for w, b in self.parts]
         )
 
     @property
-    def jobs(self):
+    def jobs(self) -> Any:
         return tuple(lin.job for _, b in self.parts for lin in b.jets.planes)
 
     @property
-    def regularization_job(self):
+    def regularization_job(self) -> Any:
         return self.parts[0][1].jets.planes[0].regularization_job
 
-    def field(self, vector=None, **kwargs):
+    def field(self, vector: Any = None, **kwargs: Any) -> Any:
         return (
             self.parts[0][1]
             .jets.planes[0]
             .field(self.gradient if vector is None else vector, **kwargs)
         )
 
-    def trial(self, v, *, gradient=False):
+    def trial(self, v: Any, *, gradient: Any = False) -> Any:
         """Evaluate candidate values/gradients without refreshing reliability."""
         return linearize(self.problem, v, gradient=gradient, reference=self)
 
 
-def linearize(problem, v=None, *, gradient=True, reference=None):
+def linearize(
+    problem: Any, v: Any = None, *, gradient: Any = True, reference: Any = None
+) -> Any:
     terms = problem.misfit.objective_terms([g.name for g in problem.observed_groups])
     _validate(problem, terms)
     if reference is not None and reference.problem is not problem:
@@ -195,7 +201,8 @@ def linearize(problem, v=None, *, gradient=True, reference=None):
         if problem.weights is None
         else np.asarray(problem.weights)
     )
-    parts, identities = [], []
+    parts: list[Any] = []
+    identities: list[Any] = []
     for frequency, weight in zip(frequencies, weights):
         for term in terms:
             raw = problem.with_misfit(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Integral
+from typing import Any
 
 import h5py
 import numpy as np
@@ -11,14 +12,14 @@ import numpy as np
 __all__ = ["TransientDataset"]
 
 
-def _strings(value):
+def _strings(value: Any) -> Any:
     return [
         v.decode().strip() if isinstance(v, bytes) else str(v).strip()
         for v in np.asarray(value).reshape(-1)
     ]
 
 
-def _scalar(h5, key):
+def _scalar(h5: Any, key: Any) -> Any:
     value = np.asarray(h5[key][()])
     if value.size != 1:
         raise ValueError(f"Expected scalar {key}")
@@ -42,17 +43,19 @@ class TransientDataset:
     This reader never reconstructs signals from frequencies or globs payloads.
     """
 
-    def __init__(self, job, role, *, result_path=None, task=1):
+    def __init__(
+        self, job: Any, role: Any, *, result_path: Any = None, task: Any = 1
+    ) -> None:
         self.job = job
         self.role = role
         self.result = job.operation_result(result_path=result_path, task=task)
-        self._groups = {}
+        self._groups: dict[str, Any] = {}
         metadata = {
             a.id: a
             for a in self.result.artifacts
             if a.representation == "hdf5_metadata"
         }
-        families = {}
+        families: dict[str, Any] = {}
         for artifact in self.result.artifacts:
             if artifact.role != role or artifact.schema not in _TIME_SCHEMAS:
                 continue
@@ -152,11 +155,11 @@ class TransientDataset:
         self.times = job.time.start + self.steps * job.time.dt
 
     @property
-    def groups(self):
+    def groups(self) -> Any:
         """Available receiver or wavefield group names."""
         return tuple(self._groups)
 
-    def read(self, group, *, steps=None):
+    def read(self, group: Any, *, steps: Any = None) -> Any:
         """Read one group and optional completed steps as a physical xarray."""
         import xarray as xr
 
@@ -185,7 +188,7 @@ class TransientDataset:
                 raise ValueError(f"Unsupported transient payload dimensions: {dims}")
             shape = None
             # Read each shard once, then take the requested samples in order.
-            wanted = {}
+            wanted: dict[Any, list[Any]] = {}
             for step in selected:
                 file, index = family["steps"][int(step)]
                 wanted.setdefault(file, []).append(index)
@@ -209,8 +212,9 @@ class TransientDataset:
                 if not np.isfinite(data).all() or np.any(data[..., 1] != 0):
                     raise ValueError("Native time output must be finite and real")
                 arrays.append(data[..., 0])
-            coords = TraceStore._trace_coordinates(
-                meta, meta[path], group, dims, shape[:-1]
+            assert shape is not None
+            coords: dict[str, Any] = dict(
+                TraceStore._trace_coordinates(meta, meta[path], group, dims, shape[:-1])
             )
             coords.update(
                 time=self.job.time.start + selected * self.job.time.dt,
@@ -247,7 +251,14 @@ class TransientDataset:
             output.attrs.update(sample_axis="time", time_units="s")
             return output
 
-    def time_domain(self, group, component=None, source=None, *, steps=None):
+    def time_domain(
+        self,
+        group: Any,
+        component: Any = None,
+        source: Any = None,
+        *,
+        steps: Any = None,
+    ) -> Any:
         """Read native time samples, optionally selecting dense labels."""
         data = self.read(group, steps=steps)
         selectors = {
@@ -260,10 +271,10 @@ class TransientDataset:
 
 @dataclass(frozen=True)
 class TransientOutputHandle:
-    job: object
+    job: Any
     role: str
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from frequensolve.simulation.jobs.artifacts import (
             TraceOutputHandle,
             WavefieldOutputHandle,
@@ -276,7 +287,9 @@ class TransientOutputHandle:
         )
         return handle(self.job)(*args, **kwargs)
 
-    def open(self, upscale=1, project_path=None, *, mode=None):
+    def open(
+        self, upscale: Any = 1, project_path: Any = None, *, mode: Any = None
+    ) -> Any:
         """Open committed native samples without a frequency-domain pack step."""
         if upscale != 1:
             raise ValueError("Transient output uses native samples; upscale must be 1")
@@ -304,7 +317,7 @@ class TransientOutputHandle:
 class ModalTransientDataset:
     """One angular task family, reconstructed directly from committed real time samples."""
 
-    def __init__(self, job, role, *, result_path=None):
+    def __init__(self, job: Any, role: Any, *, result_path: Any = None) -> None:
         self.job, self.role = job, role
         self.datasets = {
             m: TransientDataset(job, role, result_path=result_path, task=m + 1)
@@ -320,7 +333,7 @@ class ModalTransientDataset:
                 )
         self.groups, self.steps, self.times = first.groups, first.steps, first.times
 
-    def read_modes(self, group, *, steps=None):
+    def read_modes(self, group: Any, *, steps: Any = None) -> Any:
         """Read signed pressure coefficients with an explicit leading mode coordinate."""
         import xarray as xr
 
@@ -331,7 +344,7 @@ class ModalTransientDataset:
             join="exact",
         )
 
-    def _read(self, group, steps):
+    def _read(self, group: Any, steps: Any) -> Any:
         values = {m: d.read(group, steps=steps) for m, d in self.datasets.items()}
         first = values[0]
         for value in values.values():
@@ -341,15 +354,21 @@ class ModalTransientDataset:
                 )
         return values
 
-    def read(self, group, *, steps=None, delta_theta=0.0):
+    def read(self, group: Any, *, steps: Any = None, delta_theta: Any = 0.0) -> Any:
         """Reconstruct pressure at receiver-minus-source angle(s), in radians."""
         from frequensolve.seismic.azimuthal import reconstruct_azimuthal_pressure
 
         return reconstruct_azimuthal_pressure(self._read(group, steps), delta_theta)
 
     def time_domain(
-        self, group, component=None, source=None, *, steps=None, delta_theta=0.0
-    ):
+        self,
+        group: Any,
+        component: Any = None,
+        source: Any = None,
+        *,
+        steps: Any = None,
+        delta_theta: Any = 0.0,
+    ) -> Any:
         data = self.read(group, steps=steps, delta_theta=delta_theta)
         return data.sel(
             **{

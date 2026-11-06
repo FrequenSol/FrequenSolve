@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import h5py
@@ -10,7 +11,7 @@ import numpy as np
 from .trace_store import TraceStore
 
 
-def _filter_survey(target, groups):
+def _filter_survey(target: Any, groups: Any) -> Any:
     """Keep the selected receiver groups and matching rows of the survey catalog."""
     base = "survey/receiver_groups"
     if base not in target:
@@ -45,7 +46,7 @@ def _filter_survey(target, groups):
             del target[base + "/" + name]
 
 
-def export_packed(entries, destination, *, groups=None):
+def export_packed(entries: Any, destination: Any, *, groups: Any = None) -> Any:
     """Copy an exact trace selection into a single native indexed HDF5 file.
 
     Source segments are immutable. Survey layouts must match, and dataset
@@ -135,20 +136,20 @@ def export_packed(entries, destination, *, groups=None):
                         index["datasets/dataset_number"][()] == old_number
                     )
                     source_paths = index["datasets/source_path"].asstr()[()]
-                    rows = [
+                    selected_rows = [
                         row
                         for row in rows
                         if "/" + source_paths[row].strip("/") in wanted_paths
                     ]
-                    if not len(rows):
+                    if not len(selected_rows):
                         raise ValueError("Packed selection has no trace datasets")
                     if {
-                        "/" + source_paths[row].strip("/") for row in rows
+                        "/" + source_paths[row].strip("/") for row in selected_rows
                     } != wanted_paths:
                         raise ValueError(
                             "Packed selection is missing a requested group"
                         )
-                    for row in rows:
+                    for row in selected_rows:
                         old_path = index["datasets/packed_path"].asstr()[row]
                         original = index["datasets/source_path"].asstr()[row]
                         parent = old_path.rsplit("/", 1)[0]

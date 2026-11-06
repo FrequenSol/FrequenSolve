@@ -157,11 +157,13 @@ class HVLinearization:
         self.point = state.vector(self.space)
         self.value = float(value)
         self.gradient = gradient
-        self.curvature_job = None
-        self._normal = None
-        self._receiver_normal = None
+        self.curvature_job: ControlGradientJob | None = None
+        self._normal: Any = None
+        self._receiver_normal: Any = None
 
-    def field(self, vector=None, *, input_role="dual", local_solver=None):
+    def field(
+        self, vector: Any = None, *, input_role: Any = "dual", local_solver: Any = None
+    ) -> Any:
         """Sample a model or gradient on the retained native control basis."""
         from .problem import Linearization
 
@@ -170,7 +172,7 @@ class HVLinearization:
         )
 
     @property
-    def normal(self):
+    def normal(self) -> Any:
         """Reduced HV Gauss–Newton curvature, prepared lazily and reused."""
         from .operators import Normal
 
@@ -178,7 +180,7 @@ class HVLinearization:
             self._normal = Normal(self)
         return self._normal
 
-    def apply_normal(self, direction):
+    def apply_normal(self, direction: Any) -> Any:
         """Pull the coupled HV receiver curvature through the wave Jacobian."""
         from ._hv_curvature import HVReceiverNormal
 
@@ -189,7 +191,7 @@ class HVLinearization:
             self._receiver_normal = HVReceiverNormal(self)
         return self._receiver_normal.apply(direction)
 
-    def apply_normal_batch(self, directions, *, regularization=None):
+    def apply_normal_batch(self, directions: Any, *, regularization: Any = None) -> Any:
         """Reuse auxiliary factors for successive material directions."""
         if regularization is not None:
             raise NotImplementedError("HV normal does not fuse model regularization")
@@ -253,7 +255,7 @@ class HVProblem:
         return getattr(self._problem, name)
 
     @property
-    def _shared(self):
+    def _shared(self) -> Any:
         return self._problem._shared
 
     @property
@@ -374,7 +376,7 @@ class HVProblem:
     def gradient(self, v: Any = None) -> ControlVector:
         return self.linearize(v).gradient
 
-    def normal(self, v: Any = None):
+    def normal(self, v: Any = None) -> Any:
         """Return HV curvature rather than the underlying waveform normal."""
         return self.linearize(v, curvature=True).normal
 

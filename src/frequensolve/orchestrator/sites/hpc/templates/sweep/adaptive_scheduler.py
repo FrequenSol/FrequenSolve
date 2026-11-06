@@ -77,7 +77,7 @@ def write_gpu_place_script(directory: Union[str, Path]) -> str:
 
 def _slurm_counts(value: str, nodes: int) -> list[int]:
     """Expand Slurm's per-node counts, e.g. ``8(x3),4``; never guess a layout."""
-    counts = []
+    counts: list[int] = []
     for item in value.split(","):
         match = re.fullmatch(r"\s*(\d+)(?:\(x(\d+)\))?\s*", item)
         if match is None:

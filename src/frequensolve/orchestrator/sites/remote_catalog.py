@@ -76,7 +76,7 @@ def validate_remote_task_catalog(
     indexed = isinstance(catalog, TaskIndex)
     for task in tasks:
         if angular:
-            if indexed:
+            if isinstance(catalog, TaskIndex):
                 raise RemoteTaskError(
                     task,
                     f"Remote angular task {task} cannot be validated from the "
@@ -108,7 +108,7 @@ def validate_remote_task_catalog(
             continue
         frequency = complex(job.f_list[task - 1])
         record: Optional[TaskRecord]
-        if indexed:
+        if isinstance(catalog, TaskIndex):
             if catalog.is_task_current(
                 task, frequency=frequency, fingerprints=expected
             ):
@@ -140,6 +140,7 @@ def _frequency_mismatch(
 
     if record is None:
         return None
+    found: Optional[complex]
     if isinstance(record, TaskIndexEntry):
         found = record.frequency
     else:
@@ -147,6 +148,7 @@ def _frequency_mismatch(
     if found == frequency:
         return None
     if found is None:
+        assert isinstance(record, TaskResult)
         return f"reports azimuthal mode {record.partition.azimuthal_mode} instead"
     return f"reports frequency {_frequency_label(found)} instead"
 
@@ -214,7 +216,7 @@ def _refusal(
         f"Remote {label} ran for the current staged job and failed: "
         f"{_status(record)}."
     ]
-    if indexed:
+    if isinstance(record, TaskIndexEntry):
         if record.iterations is not None or record.residual is not None:
             lines.append(
                 f"Task index summary: {_value(record.iterations)} iterations, "

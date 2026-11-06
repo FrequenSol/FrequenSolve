@@ -104,7 +104,7 @@ def _validate_simulation_identity(simulation: Any, report: ValidationReport) -> 
 
 
 def _validate_formulation(
-    simulation: Any, report: ValidationReport, *, workflow=None
+    simulation: Any, report: ValidationReport, *, workflow: Optional[str] = None
 ) -> None:
     discretization = getattr(simulation, "discretization", None)
     settings = getattr(discretization, "extra", {}) or {}

@@ -7,7 +7,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
 from frequensolve.simulation.artifact_contract import (
@@ -83,7 +83,7 @@ class TracePackSegment:
     schema: str
     generation: str
     bytes: int
-    artifact: ArtifactRecord
+    artifact: Optional[ArtifactRecord]
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ class TracePackEntry:
 class TracePackManifest:
     """Validated trace family and its explicit segment index."""
 
-    artifact: ArtifactRecord
+    artifact: Optional[ArtifactRecord]
     generation: str
     family_id: str
     family_kind: str
@@ -179,7 +179,14 @@ class TracePackManifest:
         )
 
     @classmethod
-    def from_tasks(cls, catalog, frequencies, *, family_id="traces", fingerprints=None):
+    def from_tasks(
+        cls,
+        catalog: Any,
+        frequencies: Any,
+        *,
+        family_id: Any = "traces",
+        fingerprints: Any = None,
+    ) -> Any:
         """Resolve packed datasets from authoritative per-task artifact records."""
         segments = {}
         entries = []

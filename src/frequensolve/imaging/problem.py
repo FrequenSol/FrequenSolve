@@ -484,6 +484,7 @@ class _Shared:
     def backend(self) -> Backend:
         if self._backend is None:
             self.site  # Resolve a lazily configured site before binding the backend.
+            assert self._site is not None
             self._backend = Backend(
                 self._site,
                 self.workdir,
@@ -1168,7 +1169,7 @@ class ImagingProblem:
         return self.restrict(misfit=misfit, loss=loss)
 
     def freeze_reliability(
-        self, v: Any = None, *, relative_floor=None, window=None
+        self, v: Any = None, *, relative_floor: Any = None, window: Any = None
     ) -> "ImagingProblem":
         """Return a native receiver view with predicted confidence frozen.
 
@@ -1835,7 +1836,7 @@ class ImagingProblem:
         key = self._fingerprint(state)
         cached = shared.linearizations.get(key)
 
-        def has_products(candidate):
+        def has_products(candidate: Any) -> Any:
             if candidate is None:
                 return False
             if background and candidate.job.background is None:
@@ -1856,7 +1857,11 @@ class ImagingProblem:
                     return False
             return True
 
-        if has_products(cached) and (cached.gradient is not None or not gradient):
+        if (
+            cached is not None
+            and has_products(cached)
+            and (cached.gradient is not None or not gradient)
+        ):
             shared.cache.get(key)
             self._adopt_masks(cached.support_masks)
             if self.space.equivalent(cached.space):
@@ -1874,8 +1879,10 @@ class ImagingProblem:
                 state = shared.state
                 key = self._fingerprint(state)
                 cached = shared.linearizations.get(key)
-                if has_products(cached) and (
-                    cached.gradient is not None or not gradient
+                if (
+                    cached is not None
+                    and has_products(cached)
+                    and (cached.gradient is not None or not gradient)
                 ):
                     shared.cache.get(key)
                     self._adopt_masks(cached.support_masks)
@@ -2518,7 +2525,9 @@ class ImagingProblem:
         if self._patch_runtime is not None:
             self._patch_runtime.cache.clear()
 
-    def rwi(self, *, reflectivity=None, execution="sdk", **solver):
+    def rwi(
+        self, *, reflectivity: Any = None, execution: Any = "sdk", **solver: Any
+    ) -> Any:
         """Return a shared-frequency acoustic or elastic RWI view with reduced GN curvature.
 
         Select inner blocks with ``reflectivity``; other contrasts stay frozen.
@@ -3103,7 +3112,13 @@ class Linearization:
         self._reuse_background = True
         self._counter = itertools.count(1)
 
-    def field(self, vector=None, *, input_role="dual", local_solver=None):
+    def field(
+        self: Any,
+        vector: Any = None,
+        *,
+        input_role: Any = "dual",
+        local_solver: Any = None,
+    ) -> Any:
         """View a mesh-control gradient as a field using Sauce's lumped mass.
 
         Defaults to this linearization's gradient. Use input_role='primal' for
@@ -3158,7 +3173,7 @@ class Linearization:
         return diagonal
 
     @property
-    def receiver_blocks(self):
+    def receiver_blocks(self) -> Any:
         """Frequency-weighted native-unit local curvature from shared receiver probes."""
         from .receiver_blocks import ReceiverBlocks
 
@@ -3586,7 +3601,7 @@ class Linearization:
             key = "regularization:" + fingerprint(**regularization.checkpoint())
         fold = key is not None and self._folds_regularization(regularization)
         if not cache:
-            results = []
+            results: list[ControlVector] = []
             operator = None
             if regularization is not None and not fold:
                 operator = regularization.hessian_operator(self.point)
@@ -3616,17 +3631,17 @@ class Linearization:
         pending = list(unknown.items())
         chunk = max(1, int(self.max_normal_directions))
         for first in range(0, len(pending), chunk):
-            part = pending[first : first + chunk]
+            pending_part = pending[first : first + chunk]
             if fold:
                 assert key is not None and regularization is not None
                 products, images = self._normal_job(
-                    [v for _, v in part], regularization
+                    [v for _, v in pending_part], regularization
                 )
-                for (digest, _), image in zip(part, images):
+                for (digest, _), image in zip(pending_part, images):
                     self._ops[(key, digest)] = image
             else:
-                products = self._normal_products([v for _, v in part])
-            for (digest, _), product in zip(part, products):
+                products = self._normal_products([v for _, v in pending_part])
+            for (digest, _), product in zip(pending_part, products):
                 self._ops[("normal", digest)] = product
         results = [self._ops[("normal", d)] for d in digests]
         if key is None or regularization is None:

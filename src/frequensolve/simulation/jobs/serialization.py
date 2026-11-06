@@ -11,7 +11,18 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 import blake3
 import numpy as np
@@ -63,6 +74,16 @@ class JobSerializationMixin:
 
     if TYPE_CHECKING:
 
+        @property
+        def job_file(self) -> Path: ...
+
+        simulation: BaseSimulation
+
+        def validate_outputs(self) -> None: ...
+
+        frequency_independent: ClassVar[bool]
+        _simulation_overrides_payload: Callable[[], dict[str, Any]]
+
         def export_context(self) -> ExportContext: ...
 
     @classmethod
@@ -91,6 +112,8 @@ class JobSerializationMixin:
 
         if not isinstance(path, (str, Path)) and hasattr(path, "job_file"):
             path = path.job_file
+        if not isinstance(path, (str, Path)):
+            raise TypeError("Expected a job path or an object with job_file")
         path = cls._job_file_from_path(path)
         try:
             with open(path, "r") as f:
@@ -401,11 +424,11 @@ class JobSerializationMixin:
             sim.relocate(project)
         return sim
 
-    def _restore_simulation_overrides(self, data) -> None:
+    def _restore_simulation_overrides(self, data: Any) -> None:
         """Keep imported job overrides separate from the loaded base simulation."""
         self.simulation_overrides = reference_overrides(data.get("simulation"))
 
-    def _simulation_reference(self, *, project_relative=False):
+    def _simulation_reference(self, *, project_relative: Any = False) -> Any:
         """Keep the legacy filename for unmodified jobs, otherwise emit a File reference."""
         overrides = self._simulation_overrides_payload()
         if not overrides:
@@ -414,7 +437,7 @@ class JobSerializationMixin:
         key = "absolute_path"
         if project_relative:
             key = "relative_path"
-            path = Path(os.path.relpath(path, self.job_file.parent))
+            path = Path(os.path.relpath(str(path), str(self.job_file.parent)))
         return {"type": "File", key: str(path), "overrides": overrides}
 
     @staticmethod
@@ -712,7 +735,9 @@ class JobSerializationMixin:
             name="output_request",
             schema=_OUTPUT_REQUEST_FINGERPRINT_SCHEMA,
         )
-        self._output_request_fingerprint_cache = dict(output_request)
+        self._output_request_fingerprint_cache = dict(
+            cast(Mapping[str, str], output_request)
+        )
         inputs = value.get("external_inputs")
         if inputs is None:
             return

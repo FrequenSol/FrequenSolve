@@ -185,6 +185,7 @@ def test_modal_restart_selects_and_checks_each_checkpoint(tmp_path):
     import h5py
 
     job = modal_job(tmp_path)
+    job.time = fs.TimeIntegration(0, 1, 0.1, method=fs.Newmark())
     job.restart = str(tmp_path / "restart")
     for task in range(1, 4):
         path = tmp_path / "restart" / "modes" / f"mode_{task-1:06d}"

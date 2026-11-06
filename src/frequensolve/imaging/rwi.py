@@ -97,11 +97,11 @@ class RWILinearization:
     _settings: dict = field(default_factory=dict, repr=False)
 
     @property
-    def space(self):
+    def space(self) -> Any:
         return self.point.space
 
     @property
-    def report(self):
+    def report(self) -> Any:
         return {
             "value": self.value,
             "reflectivity": self.reports,
@@ -109,22 +109,24 @@ class RWILinearization:
         }
 
     @property
-    def normal(self):
+    def normal(self) -> Any:
         return Normal(self)
 
     @property
-    def regularization_job(self):
+    def regularization_job(self) -> Any:
         return self.job
 
     @property
-    def support(self):
+    def support(self) -> Any:
         return self.space.support
 
-    def apply_normal(self, direction, *, regularization=None):
+    def apply_normal(self, direction: Any, *, regularization: Any = None) -> Any:
         """Apply the shared reduced GN operator, optionally adding outer curvature."""
         return self.apply_normal_batch([direction], regularization=regularization)[0]
 
-    def apply_normal_batch(self, directions, *, cache=True, regularization=None):
+    def apply_normal_batch(
+        self, directions: Any, *, cache: Any = True, regularization: Any = None
+    ) -> Any:
         """Apply reduced GN to each direction with independent shared response solves.
 
         The reflectivity penalty participates in elimination. An explicit outer
@@ -194,7 +196,14 @@ class RWIProblem:
     frozen in the prediction. Outer active controls must be material blocks.
     """
 
-    def __init__(self, problem, *, reflectivity=None, execution="sdk", **solver):
+    def __init__(
+        self,
+        problem: Any,
+        *,
+        reflectivity: Any = None,
+        execution: Any = "sdk",
+        **solver: Any,
+    ) -> None:
         names = [
             b.name
             for b in problem.full_space.resolved_blocks
@@ -224,15 +233,15 @@ class RWIProblem:
         self.solver = _solver_options(solver)
         if "frequency_weights" in solver:
             raise ValueError("set frequency weights on the ImagingProblem")
-        self._fits = {}
+        self._fits: dict[str, Any] = {}
         self._warm = None
         self._inner_space = None
-        self._joint_problem = None
+        self._joint_problem: Any = None
         errors = self.capabilities()["errors"]
         if errors:
             raise ValueError("RWI is unsupported: " + "; ".join(errors))
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: Any) -> Any:
         # Do not accidentally expose ordinary-FWI actions as reduced RWI actions.
         if name in {
             "name",
@@ -260,14 +269,14 @@ class RWIProblem:
         raise AttributeError(name)
 
     @property
-    def state(self):
+    def state(self) -> Any:
         return self._problem.state
 
     @state.setter
-    def state(self, value):
+    def state(self, value: Any) -> Any:
         self._problem.state = value
 
-    def identity(self):
+    def identity(self) -> Any:
         return {
             **self._problem.identity(),
             "rwi": self.solver,
@@ -275,7 +284,7 @@ class RWIProblem:
             "inner_controls": self._reflectivity,
         }
 
-    def capabilities(self):
+    def capabilities(self) -> Any:
         base = self._problem.capabilities()
         errors = list(base["errors"])
         if self.weights is not None and not any(w > 0 for w in self.weights):
@@ -304,7 +313,7 @@ class RWIProblem:
             errors.append("patches and kernel derivatives are not supported")
         return {**base, "errors": errors, "ok": not errors}
 
-    def restrict(self, *args, **kwargs):
+    def restrict(self, *args: Any, **kwargs: Any) -> Any:
         return RWIProblem(
             self._problem.restrict(*args, **kwargs),
             reflectivity=self._reflectivity,
@@ -312,22 +321,22 @@ class RWIProblem:
             **self.solver,
         )
 
-    def with_controls(self, *args, **kwargs):
+    def with_controls(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("RWI stages currently retain one control basis")
 
-    def with_misfit(self, misfit=None, *, loss=None):
+    def with_misfit(self, misfit: Any = None, *, loss: Any = None) -> Any:
         return self.restrict(misfit=misfit, loss=loss)
 
-    def jacobian(self, v=None):
+    def jacobian(self, v: Any = None) -> Any:
         raise NotImplementedError(
             "RWI exposes a reduced gradient, not a reduced data Jacobian"
         )
 
-    def state_from(self, vector):
+    def state_from(self, vector: Any) -> Any:
         # FWI's accepted state must include its fitted reflectivity.
         return self.linearize(vector).state
 
-    def linearize(self, v=None, *, gradient=True):
+    def linearize(self, v: Any = None, *, gradient: Any = True) -> Any:
         problem = self._problem
         problem._ensure_registry()
         state = problem._state_at(v)
@@ -343,6 +352,7 @@ class RWIProblem:
             result = self._fit_shared(state, key)
             # Support discovery can freeze selected inner coefficients. Their
             # values remain part of the fitted objective's cache identity.
+            assert self._inner_space is not None
             key_state = result.state.with_update(self._inner_space.zeros())
             key = fingerprint(**self.identity(), state=key_state.values)
             result.fingerprint = key
@@ -414,6 +424,7 @@ class RWIProblem:
                     "RWI frequency tasks returned different reflectivities"
                 )
             fit = part
+        assert fit is not None
         fitted = state.with_update(fit.vector(inner))
         value = (
             sum(w * r["data_objective"] for w, r in zip(weights, reports))
@@ -431,13 +442,14 @@ class RWIProblem:
             self,
             _settings=dict(self.solver),
         )
+        assert fitted is not None
         self._warm = fitted.vector(inner)
         self._fits[key] = result
         if len(self._fits) > 8:
             del self._fits[next(iter(self._fits))]
         return result
 
-    def _joint_linearize(self, state):
+    def _joint_linearize(self, state: Any) -> Any:
         # Re-enable the selected inner blocks while retaining every frozen field
         # in the complete state and native reflectivity declaration.
         if self._joint_problem is None:
@@ -449,7 +461,7 @@ class RWIProblem:
             self._joint_problem = joint
         return self._joint_problem._linearize_state(state, gradient=True)
 
-    def _system(self, joint, *, solver=None):
+    def _system(self, joint: Any, *, solver: Any = None) -> Any:
         solver = self.solver if solver is None else solver
         outer = np.concatenate(
             [
@@ -465,7 +477,7 @@ class RWIProblem:
         )
 
         # Krylov products are one-use; do not retain O(ncontrol * niteration) arrays.
-        def action(direction):
+        def action(direction: Any) -> Any:
             return joint.apply_normal_batch([direction], cache=False)[0].values
 
         return _ReflectivitySystem(
@@ -477,7 +489,7 @@ class RWIProblem:
             solver=solver,
         )
 
-    def _fit_shared(self, state, key):
+    def _fit_shared(self, state: Any, key: Any) -> Any:
         started = perf_counter()
         initial = self._joint_linearize(state)
         self._problem._adopt_masks(initial.support_masks)
@@ -543,15 +555,15 @@ class RWIProblem:
             report_path.write_text(json.dumps(report, indent=2))
         return result
 
-    def value(self, v=None):
+    def value(self, v: Any = None) -> Any:
         return self.linearize(v).value
 
-    def gradient(self, v=None):
+    def gradient(self, v: Any = None) -> Any:
         return self.linearize(v).gradient
 
-    def normal(self, v=None):
+    def normal(self, v: Any = None) -> Any:
         return self.linearize(v).normal
 
-    def clear_cache(self):
+    def clear_cache(self) -> Any:
         self._fits.clear()
         self._warm = None

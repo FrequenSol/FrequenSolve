@@ -4,6 +4,7 @@ import copy
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -13,8 +14,14 @@ from .misfit import Preprocess
 
 
 def point_weights(
-    keys, simulated, floor, *, pool=None, relative_floor=None, attribute_pool=None
-):
+    keys: Any,
+    simulated: Any,
+    floor: Any,
+    *,
+    pool: Any = None,
+    relative_floor: Any = None,
+    attribute_pool: Any = None,
+) -> Any:
     """Return source/component/receiver weights from native cache coordinates."""
     keys = np.asarray(keys, dtype=np.int64) - 1
     values = np.asarray(simulated, dtype=np.float64)
@@ -68,7 +75,9 @@ def point_weights(
     return dense
 
 
-def freeze(problem, v=None, *, relative_floor=None, window=None):
+def freeze(
+    problem: Any, v: Any = None, *, relative_floor: Any = None, window: Any = None
+) -> Any:
     if relative_floor is not None and (
         not np.isfinite(relative_floor) or relative_floor <= 0
     ):
@@ -105,7 +114,7 @@ def freeze(problem, v=None, *, relative_floor=None, window=None):
             if terms[i].comparison.array is not None
         }
     reference = raw.linearize(v, gradient=False)
-    weights = {i: [] for i in selected}
+    weights: dict[int, list[Any]] = {i: [] for i in selected}
     for task, frequency in enumerate(reference.frequencies, 1):
         manifest = reference.job.state_file(task)
         # The native manifest owns the cache filename (do not guess a job path).

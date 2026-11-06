@@ -6,7 +6,19 @@ import copy
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Type,
+    Union,
+    cast,
+)
 
 import numpy as np
 import xarray as xr
@@ -24,6 +36,9 @@ from frequensolve.util.mixins import (
     fs_serialize,
     merge_extra,
 )
+
+if TYPE_CHECKING:
+    from frequensolve.physics import ReceiverExpression
 
 __all__ = [
     "AxisAlignedPlane",
@@ -246,7 +261,7 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
     """
 
     name: str = ""
-    path: Union[str, Path] = None
+    path: Optional[Union[str, Path]] = None
     extra: Dict = field(default_factory=dict)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -974,7 +989,7 @@ class VtkOutput(Output):
                     "control_gradient exports its covector; do not specify physical fields or properties"
                 )
 
-        payload = {
+        payload: dict[str, Any] = {
             "_type": "ParaviewOutput",
             "name": self.name,
             "path": self.path,
@@ -1279,7 +1294,7 @@ class WavefieldOutput(Output):
 
     name: str = "wavefield"
     path: Union[str, Path] = "wavefields"
-    fields: Optional[List[str]] = None
+    fields: Optional[List[Union[str, ReceiverExpression]]] = None
     properties: Optional[List[str]] = None
     device: Optional[ReceiverDevice] = None
     grid: Optional[Dict[str, Any]] = None
@@ -1357,7 +1372,7 @@ class WavefieldOutput(Output):
         fields = self.fields if self.fields is not None else ["primary"]
         return [
             ReceiverComponent(name=str(field), field=str(field))
-            for field in canonical_fields(fields)
+            for field in canonical_fields(cast(Iterable[str], fields))
         ]
 
     def component_payloads(self, ctx=None) -> List[Dict[str, Any]]:
@@ -1398,7 +1413,7 @@ class WavefieldOutput(Output):
             payload["device"] = self.device.to_fs(ctx)
         else:
             fields = (
-                canonical_fields(self.fields)
+                canonical_fields(cast(Iterable[str], self.fields))
                 if self.fields is not None
                 else ["primary"]
             )

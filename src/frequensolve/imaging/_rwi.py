@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from frequensolve.inversion._krylov import _preconditioned_cg, _real_vector
@@ -14,7 +16,16 @@ from frequensolve.inversion._krylov import _preconditioned_cg, _real_vector
 class _ReflectivitySystem:
     """Slice one pinned joint normal; add the shared coefficient penalty once."""
 
-    def __init__(self, normal, size, outer, inner, *, damping, solver):
+    def __init__(
+        self,
+        normal: Any,
+        size: Any,
+        outer: Any,
+        inner: Any,
+        *,
+        damping: Any,
+        solver: Any,
+    ) -> None:
         self.normal = normal
         self.size = size
         self.outer = np.asarray(outer, dtype=int)
@@ -35,7 +46,7 @@ class _ReflectivitySystem:
         self.solver = dict(solver)
         self.actions = 0
 
-    def product(self, indices, values):
+    def product(self, indices: Any, values: Any) -> Any:
         """Embed a block direction and return all blocks of the shared product."""
         direction = np.zeros(self.size)
         direction[indices] = _real_vector(values, size=len(indices), name="direction")
@@ -47,11 +58,11 @@ class _ReflectivitySystem:
         self.actions += 1
         return result
 
-    def inner_normal(self, values):
+    def inner_normal(self, values: Any) -> Any:
         """Apply the summed reflectivity normal and one penalty action."""
         return self.product(self.inner, values)[self.inner] + self.damping * values
 
-    def solve(self, rhs, *, reference_norm=None):
+    def solve(self, rhs: Any, *, reference_norm: Any = None) -> Any:
         """Require the true shared response residual to meet the requested tolerance."""
         initial = self.actions
         threshold = self.solver["absolute_tolerance"]
@@ -85,7 +96,7 @@ class _ReflectivitySystem:
             )
         return solution, report
 
-    def fit_step(self, gradient, reflectivity):
+    def fit_step(self, gradient: Any, reflectivity: Any) -> Any:
         """Return the affine inner update from an arbitrary warm start."""
         gradient = _real_vector(
             gradient, size=len(self.inner), name="reflectivity gradient"
@@ -107,7 +118,7 @@ class _ReflectivitySystem:
         report["normal_actions"] = self.actions - initial
         return solution, report
 
-    def reduced_normal(self, direction):
+    def reduced_normal(self, direction: Any) -> Any:
         """Apply A - C.T (B + damping I)^-1 C using the summed joint blocks."""
         initial = self.actions
         direct = self.product(self.outer, direction)

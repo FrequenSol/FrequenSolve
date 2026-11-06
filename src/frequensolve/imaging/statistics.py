@@ -179,6 +179,7 @@ def mesh_descriptor(space: ControlSpace, block: Any) -> dict:
         )
         if expected != block.basis_identity:
             raise ValueError("Property mesh differs from the statistical control basis")
+        roots: Any
         if group["schema"][()].decode().rstrip(" \0") == "fs-property-space-3":
             from ._property_records import PackedPropertyReader
 

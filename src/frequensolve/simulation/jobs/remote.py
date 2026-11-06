@@ -861,7 +861,7 @@ class JobRemoteMixin:
         roots = self._unique_paths(source_roots)
         tasks = int(getattr(self, "n_tasks", 1) or 1)
 
-        def visit(value: Any, location: Tuple[Any, ...]):
+        def visit(value: Any, location: Tuple[Any, ...]) -> Any:
             if isinstance(value, Mapping):
                 for key, item in value.items():
                     yield from visit(item, (*location, key))
@@ -1107,6 +1107,8 @@ class JobRemoteMixin:
         data["project_path"] = str(target.project)
         reference = data.get("simulation")
         if isinstance(reference, Mapping):
+            reference = dict(reference)
+            data["simulation"] = reference
             reference.pop("relative_path", None)
             reference["absolute_path"] = str(target.simulation_file)
         else:

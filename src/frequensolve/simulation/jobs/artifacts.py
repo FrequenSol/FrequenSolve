@@ -178,7 +178,7 @@ class TraceManifest:
     result_path: Path
     output_path: Path
     project_path: Optional[Path] = None
-    laplace: Dict[int, float] = field(default_factory=dict)
+    laplace: Dict[Union[int, str], float] = field(default_factory=dict)
     components: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
     wavefields: Dict[str, Any] = field(default_factory=dict)
@@ -217,8 +217,10 @@ class TraceManifest:
             if project_path is not None
             else source_project
         )
+        artifacts: list[ArtifactRecord]
         receiver_output = output is None
         output = job.trace_outputs if receiver_output else output
+        assert output is not None
         result_path = cls._map_project_path(
             job._result_path, source_project, local_project
         )
@@ -275,7 +277,11 @@ class TraceManifest:
             entries = pack.entries_for(output.frequencies)
             segments = pack.selected_segments(entries)
             files = [segment.path for segment in segments]
-            artifacts = [pack.artifact, *(segment.artifact for segment in segments)]
+            artifacts = [
+                a
+                for a in [pack.artifact, *(segment.artifact for segment in segments)]
+                if a is not None
+            ]
         elif receiver_output:
             files, artifacts = cls._receiver_trace_artifacts(
                 result_path,
@@ -356,6 +362,7 @@ class TraceManifest:
             selected = {}
             duplicates = []
             for source_index, manifest in enumerate(manifests):
+                assert manifest.pack is not None
                 for entry in manifest.pack.entries:
                     if entry.task not in manifest.frequencies:
                         continue
@@ -374,6 +381,7 @@ class TraceManifest:
             for task, key in enumerate(sorted(selected), 1):
                 source_index, entry = selected[key]
                 product = manifests[source_index].pack
+                assert product is not None and manifests[0].pack is not None
                 if product.family_id != manifests[0].pack.family_id:
                     raise ValueError("Cannot combine different packed trace families")
                 segment = next(s for s in product.segments if s.id == entry.segment_id)
@@ -381,6 +389,7 @@ class TraceManifest:
                 segments[segment_id] = replace(segment, id=segment_id)
                 merged_entries.append(replace(entry, task=task, segment_id=segment_id))
             first = manifests[0]
+            assert first.pack is not None
             pack = replace(
                 first.pack,
                 segments=tuple(segments.values()),
@@ -435,7 +444,7 @@ class TraceManifest:
             index: float(freq[0]) for index, freq in enumerate(sorted(entries), start=1)
         }
         files = [entries[freq][0] for freq in sorted(entries)]
-        laplace = {
+        merged_laplace = {
             index: float(entries[freq][1])
             for index, freq in enumerate(sorted(entries), start=1)
         }
@@ -462,7 +471,7 @@ class TraceManifest:
             result_path=first.result_path,
             output_path=first.output_path,
             project_path=first.project_path,
-            laplace=laplace,
+            laplace=merged_laplace,
             components=first.components,
             sources=first.sources,
             wavefields=copy.deepcopy(first.wavefields),
@@ -1264,7 +1273,7 @@ class JobArtifactMixin:
             ``TraceOutputSpec`` containing output path, job frequencies,
             receiver groups, components, and source ids.
         """
-        sim = self.simulation
+        sim = self.effective_simulation
         groups = []
         components = []
         sources = []
@@ -1364,6 +1373,7 @@ class JobArtifactMixin:
     def _wavefield_metadata(self) -> dict:
         """Build shared metadata for legacy and trace wavefield views."""
         wave_out = {}
+        simulation = self.effective_simulation
         self.outputs.ensure_unique_names()
         for out in self.outputs.wavefields:
             if out.grid is None:
@@ -1376,7 +1386,7 @@ class JobArtifactMixin:
                 if out.sources is not None
                 else [
                     str(source_id)
-                    for source_id in self.simulation.acquisition.source_field_ids()
+                    for source_id in simulation.acquisition.source_field_ids()
                 ]
             )
             for variant_name, derivative_order in _spectral_derivative_variants(

@@ -515,7 +515,9 @@ def test_extension_jobs_validate_against_the_pinned_schema(tmp_path, fake, frequ
             assert solver["report"].endswith("inner_solve.json")
             if job.reduced_normal is not None:
                 # One direction set (a single row) serves every task; its covector stays per task.
-                assert "direction_set" in op and "direction" not in op and "covector" in op
+                assert (
+                    "direction_set" in op and "direction" not in op and "covector" in op
+                )
                 assert op["reduced_normal"] == {}
             elif job.model_gradient:
                 assert op["model_gradient"] is True and "covector" in op

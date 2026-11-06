@@ -269,16 +269,18 @@ class AWI:
             )
         return value, gu, guf
 
-    def _outer_loss(self, squared_spread):
+    def _outer_loss(self, squared_spread: Any) -> Any:
         """Loss of RMS lag in seconds and multiplier of its quadratic gradient."""
         q = np.maximum(squared_spread, 0)
         loss = self.loss
         if loss.kind == "student_t":
+            assert loss.nu is not None and loss.c2 is not None
             scale = loss.nu * loss.c2
             return 0.5 * (loss.nu + 1) * np.log1p(q / scale), (loss.nu + 1) / (
                 scale + q
             )
         if loss.kind == "huber":
+            assert loss.delta is not None
             radius = np.sqrt(q)
             return (
                 np.where(
@@ -289,6 +291,7 @@ class AWI:
                 np.minimum(1, loss.delta / np.maximum(radius, np.finfo(float).tiny)),
             )
         if loss.kind == "tukey":
+            assert loss.delta is not None
             t = np.maximum(1 - q / loss.delta**2, 0)
             return loss.delta**2 / 6 * (1 - t**3), t**2
         return 0.5 * q, np.ones_like(q)
@@ -366,7 +369,7 @@ class AWI:
             raise ValueError("AWI finite-filter evaluation overflowed")
         return value, dual
 
-    def _pooled_filter(self, u, d, weights, pool):
+    def _pooled_filter(self, u: Any, d: Any, weights: Any, pool: Any) -> Any:
         """Fit shared filters to pooled powers/cross-products and scatter exact duals."""
         tau = np.asarray(self.filter_lags)
         basis = np.exp(-2j * np.pi * np.asarray(self.frequencies)[:, None] * tau)
@@ -461,7 +464,9 @@ class AWILinearization:
         self.gradient: ControlVector | None = None
         self.vjp_job: FWIOperatorJob | None = None
 
-    def field(self, vector=None, *, input_role="dual", local_solver=None):
+    def field(
+        self, vector: Any = None, *, input_role: Any = "dual", local_solver: Any = None
+    ) -> Any:
         """Sample a model or gradient on the retained native control basis."""
         from .problem import Linearization
 
@@ -470,7 +475,7 @@ class AWILinearization:
         )
 
     @property
-    def regularization_job(self):
+    def regularization_job(self) -> Any:
         """Use the covector-producing job for native regularization and mass maps."""
         if self.vjp_job is None:
             raise ValueError("AWI regularization requires a gradient linearization")
@@ -631,7 +636,7 @@ class AWIProblem:
         return self._problem.space
 
     @property
-    def _shared(self):
+    def _shared(self) -> Any:
         return self._problem._shared
 
     @property
@@ -700,7 +705,7 @@ class AWIProblem:
             "initial AWI stages keep one shared material-control basis"
         )
 
-    def _bind_array(self, collection):
+    def _bind_array(self, collection: Any) -> Any:
         """Bind physical output coordinates without mixing shots, components or groups."""
         if self.synthetic_array is None:
             return None
@@ -715,7 +720,7 @@ class AWIProblem:
         if set(tables) != set(names):
             raise ValueError("AWI coordinates must cover each receiver group")
         points, groups, keys = [], [], []
-        group_ids = {}
+        group_ids: dict[Any, int] = {}
         for name in names:
             if not hasattr(tables[name], "to"):
                 raise TypeError("AWI output-receiver coordinates require length units")

@@ -209,7 +209,9 @@ class BoundaryCondition(ExtraFieldsMixin):
                         else {}
                     ),
                 }
-                if any(c == "pml" or c.startswith("pml:") for c in self.conditions)
+                if any(
+                    c == "pml" or c.startswith("pml:") for c in (self.conditions or ())
+                )
                 else {}
             ),
         }

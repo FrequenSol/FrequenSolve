@@ -161,7 +161,7 @@ class _PointSpectrum:
         names = ["q"] + (["q_f"] if self.spectral_derivative == "total" else [])
         names += [f"q_d{k}f" for k in range(2, self.derivative_order + 1)]
         data_hashes = {name: hashlib.sha256() for name in names}
-        metadata = dict(
+        metadata: dict[str, Any] = dict(
             schema="fs-acquisition-spectrum-1",
             point_axis=self.point_axis,
             spectral_derivative=self.spectral_derivative,
@@ -270,7 +270,7 @@ class _PointSpectrum:
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
-        result = dict(
+        result: dict[str, Any] = dict(
             file=str(ctx.relative_to_project(path)),
             dataset="q",
             frequencies_dataset="frequency",

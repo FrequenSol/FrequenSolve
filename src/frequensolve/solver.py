@@ -59,7 +59,7 @@ CONTROL_EXTRAPOLATE_HOLD = "physics.control_map.extrapolate_hold"
 #: Catalog operation of a backend that accepts several directions in one
 #: ``kernel_derivative`` ``normal`` job; older builds reject such a job.
 KERNEL_DERIVATIVE_NORMAL_DIRECTIONS = "imaging.normal.kernel_derivative_directions"
-_CONTROL_MAP_KINDS = (None, "hat", "bspline", "tensor_hat")
+_CONTROL_MAP_KINDS = (None, "hat", "bspline", "tensor_hat", "tensor_bspline")
 
 CompatibilityPolicy = Literal["warn", "strict", "off"]
 CompatibilityStatus = Literal["compatible", "untested", "unknown", "off"]
@@ -827,7 +827,7 @@ def query_remote_solver_capabilities(
 def held_control_maps(payload: Any, location: str = "") -> List[str]:
     """Return the JSON locations of control maps that use ``extrapolate: "hold"``.
 
-    Hat, B-spline (the default kind) and tensor-hat maps are recognized
+    Hat, B-spline (the default kind), tensor-hat and tensor-B-spline maps are recognized
     wherever they appear: material ``parameterized`` controls, independent
     reflectivity maps and implicit-surface controls.
     """

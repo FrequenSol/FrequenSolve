@@ -455,7 +455,7 @@ class Comparison:
         relative_amplitude_floor: float = 0.01,
         array: Any = None,
         measure: Literal["wavenumber", "slowness"] = "wavenumber",
-        max_spacing=None,
+        max_spacing: Any = None,
     ) -> "Comparison":
         """Return the instantaneous-wavenumber comparison along the receiver line.
 
@@ -501,7 +501,14 @@ class Comparison:
         """Whether this comparison uses an array or predicted reliability."""
         return self.array is not None or self.reliability is not None
 
-    def bind(self, jets, *, coordinates=None, definition=None, row_weights=None):
+    def bind(
+        self,
+        jets: Any,
+        *,
+        coordinates: Any = None,
+        definition: Any = None,
+        row_weights: Any = None,
+    ) -> Any:
         """Bind to shared spectral jets, freezing predicted reliability once.
 
         ``definition`` optionally supplies advanced SpectralAttribute loss and
@@ -2196,6 +2203,8 @@ class Misfit:
             if any(t.comparison.uses_synthetic_attributes for t in self._terms):
                 return f"Misfit.terms({self._terms!r})"
             return f"Misfit.terms({', '.join(term.id for term in self._terms)})"
+        assert self.comparison is not None and self.loss is not None
+        assert self.normalization is not None
         if self.comparison.uses_synthetic_attributes:
             return (
                 f"Misfit(loss={self.loss!r}, comparison={self.comparison!r}, "

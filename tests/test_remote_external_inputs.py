@@ -30,7 +30,9 @@ pytestmark = pytest.mark.unit
 FREQUENCIES = [4.0, 6.0]
 
 
-def _problem(tmp_path, *, project=None, workdir=None, source=False, control_identity=False):
+def _problem(
+    tmp_path, *, project=None, workdir=None, source=False, control_identity=False
+):
     # Per-task direction copies (older solvers) exercise the task-sibling staging; direction sets are one file.
     fake = FakeImagingSite(seed=7, control_identity=control_identity)
     controls = {"vp": DepthProfile("vp", "sediment", count=4)}
@@ -121,9 +123,11 @@ def test_direction_set_outside_project_is_staged_as_one_file(tmp_path):
     assert remote.is_relative_to(remote_project) and remote.is_file()
     assert remote.name == Path(local).name
     # One file serves every task: nothing task-suffixed is staged beside it.
-    assert [Path(source).name for source, _ in pairs if Path(source).parent == Path(local).parent] == [
-        Path(local).name
-    ]
+    assert [
+        Path(source).name
+        for source, _ in pairs
+        if Path(source).parent == Path(local).parent
+    ] == [Path(local).name]
 
 
 def test_vjp_objective_vector_manifest_outside_project_keeps_its_files(tmp_path):

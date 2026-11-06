@@ -736,8 +736,10 @@ class Project:
         layout = JobLayout.from_payload(layout_payload, job_file=input_file)
         target_layout = layout.with_project(target_project)
         if isinstance(payload["simulation"], Mapping):
-            payload["simulation"].pop("relative_path", None)
-            payload["simulation"]["absolute_path"] = str(target_layout.simulation_file)
+            reference = dict(payload["simulation"])
+            reference.pop("relative_path", None)
+            reference["absolute_path"] = str(target_layout.simulation_file)
+            payload["simulation"] = reference
         else:
             payload["simulation"] = cls._project_relative_or_absolute(
                 target_layout.simulation_file,

@@ -1266,6 +1266,7 @@ def minimize_inexact_newton(
                 steepest_descent_fallbacks,
             )
 
+    assert options.max_iterations is not None
     return InexactNewtonResult(
         False,
         0,
@@ -1832,6 +1833,7 @@ def minimize_lbfgs(
                 steepest_descent_fallbacks,
             )
 
+    assert options.max_iterations is not None
     return InexactNewtonResult(
         False,
         0,
@@ -2125,4 +2127,5 @@ def minimize_proximal_gradient(
             elif curvature > 0:
                 growth = min(growth, 1.0 / curvature)
             tau = max(tau, growth)
+    assert options.max_iterations is not None
     return finish(False, 1, "maximum iterations reached", options.max_iterations)

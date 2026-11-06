@@ -144,15 +144,26 @@
           "enum": [
             "waveform",
             "phase_derivative",
-            "spectral_derivative"
+            "spectral_derivative",
+            "wavenumber"
           ],
           "default": "waveform",
-          "description": "Attribute compared before the radial objective is applied."
+          "description": "Attribute compared before the radial objective is applied. wavenumber compares the instantaneous wavenumber along the receiver line: consecutive output channels a, b = a+1 at distance h pair into conjg(S_a) S_b and |S_a + S_b|^2/4, each channel pools N = sum W Im(conjg(S_a) S_b), D = eps^2 + sum W |S_a + S_b|^2/4 and H = sum W h, and k = (2/H) atan(N/(2 D)) in rad/m (exact for a plane wave up to spatial Nyquist; a wave travelling towards increasing channel index gives -omega/c). It needs the same observed inputs as phase_derivative and dense output-channel rows (fwi_operator)."
         },
         "derivative_axis": {
-          "const": "frequency",
+          "enum": ["frequency", "receiver_line"],
           "default": "frequency",
-          "description": "Physical-frequency derivative axis; derivatives are with respect to Hz at fixed Laplace damping."
+          "description": "Physical-frequency derivative axis; derivatives are with respect to Hz at fixed Laplace damping. receiver_line (the default for, and only axis of, wavenumber) differentiates along the ordered output channels."
+        },
+        "measure": {
+          "enum": ["wavenumber", "slowness"],
+          "default": "wavenumber",
+          "description": "wavenumber only: compare k in rad/m, or the slowness k/(2 pi f) in s/m."
+        },
+        "max_spacing_m": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "wavenumber only: consecutive channels farther apart than this many metres form no pair, splitting the line. Defaults to 2.5 times the median consecutive spacing."
         },
         "source_derivative": {
           "enum": [
@@ -170,7 +181,7 @@
         },
         "array": {
           "type": "object",
-          "description": "Pool receiver energy and cross-products before forming instantaneous traveltime; dense point receiver groups only.",
+          "description": "Pool receiver energy and cross-products before forming instantaneous traveltime (or, for wavenumber, pair cross-products weighted by the distance from each channel to the pair midpoints); dense point receiver groups only.",
           "required": [
             "kind",
             "length_m"
@@ -219,6 +230,15 @@
         {
           "if": {"properties": {"source_delay": {"const": "fit"}}, "required": ["source_delay"]},
           "then": {"properties": {"kind": {"const": "phase_derivative"}}, "required": ["kind"]}
+        },
+        {
+          "if": {"anyOf": [{"required": ["measure"]}, {"required": ["max_spacing_m"]}]},
+          "then": {"properties": {"kind": {"const": "wavenumber"}}, "required": ["kind"]}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "wavenumber"}}, "required": ["kind"]},
+          "then": {"properties": {"derivative_axis": {"const": "receiver_line"}}},
+          "else": {"properties": {"derivative_axis": {"const": "frequency"}}}
         }
       ],
       "additionalProperties": false
@@ -753,7 +773,7 @@
               "comparison": {
                 "required": ["kind"],
                 "properties": {
-                  "kind": {"enum": ["phase_derivative", "spectral_derivative"]}
+                  "kind": {"enum": ["phase_derivative", "spectral_derivative", "wavenumber"]}
                 }
               }
             },

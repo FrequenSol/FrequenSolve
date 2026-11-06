@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -28,7 +29,14 @@ class NativeControlField:
     operations. Large CSR maps are read and applied in bounded row packets.
     """
 
-    def __init__(self, linearization, vector, *, input_role="dual", local_solver=None):
+    def __init__(
+        self,
+        linearization: Any,
+        vector: Any,
+        *,
+        input_role: Any = "dual",
+        local_solver: Any = None,
+    ) -> None:
         self.linearization, self.vector, self.input_role = (
             linearization,
             vector,
@@ -36,7 +44,7 @@ class NativeControlField:
         )
         self.local_solver = local_solver
 
-    def _coefficients(self, key):
+    def _coefficients(self, key: Any) -> Any:
         from .statistics import mesh_descriptor
 
         vector = self.vector
@@ -64,13 +72,13 @@ class NativeControlField:
             values /= cache[key]
         return block, descriptor, values
 
-    def _cache(self):
+    def _cache(self) -> Any:
         owner = self.linearization.problem._shared
         if not hasattr(owner, "_field_export_cache"):
             owner._field_export_cache = {}
         return owner._field_export_cache
 
-    def _sampling_map(self, block, descriptor, grid):
+    def _sampling_map(self, block: Any, descriptor: Any, grid: Any) -> Any:
         from frequensolve.orchestrator.sites.local.site import LocalSite
 
         signature = (
@@ -182,7 +190,9 @@ class NativeControlField:
         cache[key] = output
         return output
 
-    def to_grid(self, grid, key, *, frozen=np.nan, context=None):
+    def to_grid(
+        self, grid: Any, key: Any, *, frozen: Any = np.nan, context: Any = None
+    ) -> Any:
         if context is not None:
             raise ValueError(
                 "Native field sampling uses the simulation geometry, not a Python EvaluationContext"
@@ -235,7 +245,14 @@ class NativeControlField:
             field.coords[dim].attrs["units"] = grid.units or "m"
         return field
 
-    def to_mesh(self, mesh=None, key=None, *, material=None, units="m"):
+    def to_mesh(
+        self,
+        mesh: Any = None,
+        key: Any = None,
+        *,
+        material: Any = None,
+        units: Any = "m",
+    ) -> Any:
         from .property_mesh import PropertyMesh
 
         if key is None:
@@ -263,7 +280,7 @@ class NativeControlField:
         primal = self.vector.space.from_sauce_vector(full)
         return primal.to_mesh(mesh, key, material=material, units=units)
 
-    def to_property(self, grid, key, *, frozen=np.nan):
+    def to_property(self, grid: Any, key: Any, *, frozen: Any = np.nan) -> Any:
         from frequensolve.model.property import Property
 
         return Property(self.to_grid(grid, key, frozen=frozen))

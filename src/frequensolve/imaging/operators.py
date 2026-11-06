@@ -15,7 +15,7 @@ the Hermitian pairing, no factor 2), matching Sauce's ``vjp``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol, Sequence, Union
 
 import numpy as np
 from scipy.sparse import issparse
@@ -384,6 +384,15 @@ class Jacobian(ModelOperator):
         )
 
 
+class _NormalSource(Protocol):
+    @property
+    def space(self) -> ControlSpace: ...
+
+    def apply_normal(self, direction: Any) -> ControlVector: ...
+
+    def apply_normal_batch(self, directions: Any) -> Sequence[ControlVector]: ...
+
+
 class Normal(ModelOperator):
     """Frozen Gauss-Newton normal operator ``Re(J^H W J)`` (Sauce ``normal``).
 
@@ -391,7 +400,7 @@ class Normal(ModelOperator):
     itself.
     """
 
-    def __init__(self, linearization: "Linearization") -> None:
+    def __init__(self, linearization: _NormalSource) -> None:
         self.linearization = linearization
         super().__init__(linearization.space, linearization.space, dtype=np.float64)
 

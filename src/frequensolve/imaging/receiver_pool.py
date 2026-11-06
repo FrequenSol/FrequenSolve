@@ -4,6 +4,8 @@
 
 """Opt-in sparse sharing of sampled receiver values between local arrays."""
 
+from typing import Any
+
 import numpy as np
 from scipy.sparse import csr_matrix, issparse
 from scipy.spatial import cKDTree
@@ -18,7 +20,9 @@ class ReceiverPool:
     per input. No PDE sampling or receiver-device behavior is changed.
     """
 
-    def __init__(self, weights, *, centers=None, sample_keys=None):
+    def __init__(
+        self, weights: Any, *, centers: Any = None, sample_keys: Any = None
+    ) -> None:
         raw = weights.data if issparse(weights) else weights
         if np.iscomplexobj(raw):
             raise ValueError("pool weights must be real")
@@ -60,23 +64,23 @@ class ReceiverPool:
             raise ValueError("pool sample keys must identify every input row")
 
     @property
-    def sample_count(self):
+    def sample_count(self) -> Any:
         return self._matrix.shape[1]
 
     @property
-    def output_count(self):
+    def output_count(self) -> Any:
         return self._matrix.shape[0]
 
     @property
-    def nnz(self):
+    def nnz(self) -> Any:
         """Number of sample-to-output contributions, not a dense matrix size."""
         return self._matrix.nnz
 
     @property
-    def centers(self):
+    def centers(self) -> Any:
         return self._centers.copy()
 
-    def validate_groups(self, groups):
+    def validate_groups(self, groups: Any) -> Any:
         """Reject windows crossing a term, shot, component or caller partition."""
         groups = np.asarray(groups)
         if groups.shape != (self.sample_count,):
@@ -87,14 +91,14 @@ class ReceiverPool:
                 "receiver pools must not mix groups (terms, shots or components)"
             )
 
-    def apply(self, values):
+    def apply(self, values: Any) -> Any:
         """Accumulate shared samples into output arrays."""
         values = np.asarray(values)
         if values.ndim not in (1, 2) or values.shape[0] != self.sample_count:
             raise ValueError("pool input shape differs from sample count")
         return self._matrix @ values
 
-    def scatter(self, values):
+    def scatter(self, values: Any) -> Any:
         """Sum all overlapping array loads back into their original samples."""
         values = np.asarray(values)
         if values.ndim not in (1, 2) or values.shape[0] != self.output_count:
@@ -104,15 +108,15 @@ class ReceiverPool:
     @classmethod
     def from_coordinates(
         cls,
-        coordinates,
-        radius,
+        coordinates: Any,
+        radius: Any,
         *,
-        groups=None,
-        taper="uniform",
-        sigma=None,
-        sample_weights=None,
-        sample_keys=None,
-    ):
+        groups: Any = None,
+        taper: Any = "uniform",
+        sigma: Any = None,
+        sample_weights: Any = None,
+        sample_keys: Any = None,
+    ) -> Any:
         """Build physical-radius windows once, independently within each group.
 
         Coordinates are ``(sample, dimension)`` or 1D distance along a cable.

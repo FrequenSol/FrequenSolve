@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Any, Iterator
 
 import h5py
 import numpy as np
@@ -15,7 +15,7 @@ RECORD_MAGIC = 1179865682
 BATCH_WORDS = 1024 * 1024
 
 
-def encode_record(integers, ids, reals) -> np.ndarray:
+def encode_record(integers: Any, ids: Any, reals: Any) -> np.ndarray:
     """Encode typed sections without numeric conversion of floating-point values."""
     integers = np.asarray(integers, dtype="<i4").reshape(-1)
     ids = np.asarray(ids, dtype="<i8").reshape(-1)
@@ -32,7 +32,7 @@ def encode_record(integers, ids, reals) -> np.ndarray:
     )
 
 
-def decode_record(words) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def decode_record(words: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return NumPy views after checking the version, lengths, and odd padding."""
     words = np.asarray(words)
     if words.ndim != 1 or words.dtype.kind != "i" or words.dtype.itemsize != 8:
@@ -102,7 +102,7 @@ class PackedPropertyReader:
             raise ValueError("Invalid packed property root geometry")
 
     def roots(
-        self, slots=None, *, reference=False, visualization=False
+        self, slots: Any = None, *, reference: Any = False, visualization: Any = False
     ) -> Iterator[dict]:
         """Read unique selected slots in contiguous batches, retaining array views."""
         if slots is None:

@@ -20,7 +20,6 @@ from frequensolve.imaging import (
 )
 from frequensolve.imaging._artifacts import (
     ControlStateFile,
-    ControlVectorFile,
     ControlVectorSetFile,
 )
 from frequensolve.model.parameterization import ParameterizedProperty

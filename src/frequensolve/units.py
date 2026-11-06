@@ -143,7 +143,7 @@ def _scalar_in_units(value: Any, units: str, name: str) -> float:
     if (
         isinstance(value, (bool, np.bool_))
         or not isinstance(value, Real)
-        or not np.isfinite(value)
+        or not np.isfinite(float(value))
     ):
         raise ValueError(f"{name} must be a finite real scalar in {units}")
     return float(value)

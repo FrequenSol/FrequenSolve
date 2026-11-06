@@ -1380,7 +1380,7 @@ class LocalSite(BaseSite):
             raw=raw,
         )
 
-    def _read_transient_progress(self, run: RunHandle):
+    def _read_transient_progress(self, run: RunHandle) -> Dict[int, Any]:
         from frequensolve.orchestrator.utils.transient_progress import (
             read_local_progress,
         )

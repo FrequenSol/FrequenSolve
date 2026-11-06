@@ -499,7 +499,9 @@ class FakeImagingSite(BaseSite):
         self.jobs: List[Any] = []
         self.removed: List[Tuple[str, Tuple[str, ...]]] = []
         self.linearizations: Dict[str, FakeLinearization] = {}
-        self.direction_set_rows: Dict[str, int] = {}  # job name -> rows of its direction set
+        self.direction_set_rows: Dict[str, int] = (
+            {}
+        )  # job name -> rows of its direction set
 
     def support_mask(self, name: str, size: int, frequency: Any = None) -> np.ndarray:
         """Return the configured support mask of ``name`` (all true by default).
@@ -868,7 +870,11 @@ class FakeImagingSite(BaseSite):
                     self._write_extension_manifest(
                         _task_path(job.extension_manifest_file(), task),
                         ext,
-                        self.control_identity(lin) if self.emits_control_identity else None,
+                        (
+                            self.control_identity(lin)
+                            if self.emits_control_identity
+                            else None
+                        ),
                     )
                 if job.extension.get("covector") is not None:
                     rows = lin.rows(frequency)
@@ -1183,14 +1189,19 @@ class FakeImagingSite(BaseSite):
                     c * np.real(J.conj().T @ r[rows]),
                     frequency=frequency,
                 )
-            elif job.direction_set is not None:  # one direction set, a covector set per task
+            elif (
+                job.direction_set is not None
+            ):  # one direction set, a covector set per task
                 rows = [
                     c * np.real(J.conj().T @ (J @ (c * dv)))
                     for dv in self._direction_rows(job, lin, frequency)
                 ]
                 parts = [ControlVectorFile.from_packed(row, lin.sizes) for row in rows]
                 ControlVectorSetFile(
-                    {name: np.stack([part.blocks[name] for part in parts]) for name in lin.sizes},
+                    {
+                        name: np.stack([part.blocks[name] for part in parts])
+                        for name in lin.sizes
+                    },
                     control_identity=self.control_identity(lin),
                     state_fingerprint=lin.state_fingerprint,
                     control_registry_fingerprint=lin.control_registry_fingerprint,

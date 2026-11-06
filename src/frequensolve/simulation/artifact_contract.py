@@ -492,6 +492,9 @@ class TaskPartition:
     def to_fs(self) -> Dict[str, Any]:
         """Serialize the exact task partition."""
 
+        frequency = self.frequency
+        if self.azimuthal_mode is None and frequency is None:
+            raise ArtifactContractError("Frequency partition requires a frequency")
         result: Dict[str, Any] = {
             "task": self.task,
             **(
@@ -499,8 +502,8 @@ class TaskPartition:
                 if self.azimuthal_mode is not None
                 else {
                     "frequency": {
-                        "real": float(self.frequency.real),
-                        "imag": float(self.frequency.imag),
+                        "real": float(frequency.real) if frequency is not None else 0.0,
+                        "imag": float(frequency.imag) if frequency is not None else 0.0,
                     }
                 }
             ),

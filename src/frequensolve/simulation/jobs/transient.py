@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 from numbers import Integral
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping, cast
 
 import h5py
 import numpy as np
@@ -69,13 +69,13 @@ class TransientJob(BaseJob):
 
     def __init__(
         self,
-        name,
-        simulation,
+        name: Any,
+        simulation: Any,
         *,
         time: TimeIntegration,
         source: TimeFunction,
         point_source: str = "auto",
-        outputs=None,
+        outputs: Any = None,
         n_modes: int | None = None,
         output_schedule: TimeOutput | None = None,
         trace_schedule: TimeOutput | None = None,
@@ -84,7 +84,7 @@ class TransientJob(BaseJob):
         checkpoint: CheckpointSchedule | None = None,
         restart: str | Path | None = None,
         simulation_overrides: Mapping | None = None,
-    ):
+    ) -> None:
         if not isinstance(time, TimeIntegration):
             raise TypeError("time must be TimeIntegration")
         if not isinstance(source, TimeFunction):
@@ -101,6 +101,7 @@ class TransientJob(BaseJob):
         if point_source not in {"auto", "dirac"}:
             raise ValueError("point_source must be auto or dirac")
         self.point_source = point_source
+        self._imported_point_source: dict[str, Any]
         self.output_schedule = output_schedule or TimeOutput(
             stride=output_stride,
             write_initial=True if write_initial is None else write_initial,
@@ -121,7 +122,7 @@ class TransientJob(BaseJob):
             [],
             JobOutputs(outputs),
             simulation_overrides=(
-                {} if simulation_overrides is None else simulation_overrides
+                {} if simulation_overrides is None else dict(simulation_overrides)
             ),
         )
         self.validate_outputs()
@@ -131,8 +132,8 @@ class TransientJob(BaseJob):
         from frequensolve.simulation.overrides import merge_simulation_overrides
 
         explicit = super()._simulation_overrides_payload()
-        simulation = self._simulation_with_overrides(explicit)
-        defaults = {}
+        simulation: Any = self._simulation_with_overrides(explicit)
+        defaults: dict[str, Any] = {}
         if "method" not in simulation.discretization.to_fs():
             defaults["Discretization"] = {"method": "Galerkin"}
         # Sauce infers the required P/S parts from output and receiver fields.
@@ -162,14 +163,14 @@ class TransientJob(BaseJob):
         return merge_simulation_overrides(defaults, explicit)
 
     @property
-    def n_tasks(self):
+    def n_tasks(self) -> Any:
         return 1 if self.n_modes is None else self.n_modes
 
-    def mode_for_task(self, task):
+    def mode_for_task(self, task: Any) -> Any:
         if (
             isinstance(task, bool)
             or not isinstance(task, Integral)
-            or not 1 <= task <= self.n_tasks
+            or not 1 <= int(task) <= self.n_tasks
         ):
             raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
         return (
@@ -178,7 +179,7 @@ class TransientJob(BaseJob):
             else (self.effective_simulation.azimuthal_mode or 0)
         )
 
-    def task_manifest_file(self, task=1, *, result_path=None):
+    def task_manifest_file(self, task: Any = 1, *, result_path: Any = None) -> Any:
         self.mode_for_task(task)
         root = self._result_path if result_path is None else result_path
         return (
@@ -187,7 +188,7 @@ class TransientJob(BaseJob):
             else operation_result_path(root, "transient")
         )
 
-    def task_fingerprint_payload(self, task):
+    def task_fingerprint_payload(self, task: Any) -> Any:
         payload = super().task_fingerprint_payload(task)
         if self.n_modes is not None:
             payload["azimuthal_mode"] = self.mode_for_task(task)
@@ -211,7 +212,7 @@ class TransientJob(BaseJob):
 
     def _point_source_payload(self) -> dict:
         """Resolve bandwidth here; Sauce samples physical speed on the mapped source."""
-        sim = self.effective_simulation
+        sim: Any = self.effective_simulation
         if (
             self.point_source == "dirac"
             or sim.axisymmetric
@@ -233,14 +234,16 @@ class TransientJob(BaseJob):
             )
             source = self.source
             if source.kind == "ricker":
-                frequency = max(frequency, 3 * source.frequency)
+                frequency = max(frequency, 3 * cast(float, source.frequency))
             elif source.kind == "sine":
-                frequency = max(frequency, source.frequency)
+                frequency = max(frequency, cast(float, source.frequency))
             elif source.kind == "gaussian":
                 frequency = max(
-                    frequency, np.sqrt(2 * np.log(1000)) / (2 * np.pi * source.width)
+                    frequency,
+                    np.sqrt(2 * np.log(1000)) / (2 * np.pi * cast(float, source.width)),
                 )
             elif source.kind == "sampled":
+                assert source.wavelet is not None
                 samples = np.asarray(source.wavelet.samples)
                 spectrum = np.abs(np.fft.rfft(samples, n=max(256, 4 * len(samples))))
                 frequencies = np.fft.rfftfreq(
@@ -255,7 +258,7 @@ class TransientJob(BaseJob):
             )
         return {"type": "gaussian", "f_max": frequency, "amplitude_ratio": 0.98}
 
-    def to_fs(self, ctx=None, *, project_relative=False) -> dict:
+    def to_fs(self, ctx: Any = None, *, project_relative: Any = False) -> dict:
         payload = super().to_fs(ctx, project_relative=project_relative)
         payload["Time"] = self._time_payload()
         if selection := self.time.selection_payload():
@@ -263,7 +266,7 @@ class TransientJob(BaseJob):
         return payload
 
     @classmethod
-    def from_fs(cls, data, base_path=None, project_path=None):
+    def from_fs(cls, data: Any, base_path: Any = None, project_path: Any = None) -> Any:
         if data.get("workflow") != "transient" or any(
             k in data
             for k in ("f_list", "k_list", "k_weights", "k_units", "time_reconstruction")
@@ -359,7 +362,7 @@ class TransientJob(BaseJob):
                     "because trace_schedule sets the receiver trace cadence; set "
                     "them on trace_schedule"
                 )
-        sim = self.effective_simulation
+        sim: Any = self.effective_simulation
         sim._validate_azimuthal_mode()
         if self.n_modes is not None:
             if (
@@ -466,7 +469,7 @@ class TransientJob(BaseJob):
             )
 
             validate_transient_acquisition(
-                acquisition, dt=self.time.dt, project_path=sim.project_path
+                acquisition, dt=cast(float, self.time.dt), project_path=sim.project_path
             )
             if (
                 acquisition.source_signature is not None
@@ -559,7 +562,7 @@ class TransientJob(BaseJob):
         path = Path(self.restart).expanduser()
         return path if path.is_absolute() else self._result_path / path
 
-    def restart_step(self, task=1) -> int:
+    def restart_step(self, task: Any = 1) -> int:
         """Validate the rank-zero time-integration header and return its completed step."""
         path = self._restart_path()
         if path is None:
@@ -580,32 +583,33 @@ class TransientJob(BaseJob):
             or scheme.shape != (6,)
             or layout[0] != 2
             or layout[1] != 0
-            or layout[2] != {"newmark": 2, "gauss": 3, "radau": 4}[self.time.scheme]
+            or layout[2]
+            != {"newmark": 2, "gauss": 3, "radau": 4}[cast(str, self.time.scheme)]
         ):
             raise ValueError("Invalid time-integration restart manifest")
         expected_theta = self.time.theta_0
         if not np.isclose(
-            theta_0, expected_theta, rtol=64 * np.finfo(float).eps, atol=0
+            theta_0, expected_theta, rtol=float(64 * np.finfo(float).eps), atol=0
         ):
             raise ValueError("Restart theta_0 differs from this job")
         step = int(layout[3])
         expected = [
-            self.time.start + step * self.time.dt,
+            self.time.start + step * cast(float, self.time.dt),
             self.time.start,
             self.time.end,
-            self.time.dt,
+            cast(float, self.time.dt),
             self.time.method.beta if isinstance(self.time.method, Newmark) else 0,
             self.time.method.gamma if isinstance(self.time.method, Newmark) else 0,
         ]
         if not 0 <= step <= self.time.steps or not np.allclose(
-            scheme, expected, rtol=64 * np.finfo(float).eps, atol=0
+            scheme, expected, rtol=float(64 * np.finfo(float).eps), atol=0
         ):
             raise ValueError(
                 "Restart interval, step or integration method differs from this job"
             )
         return step
 
-    def _external_input_fingerprint(self):
+    def _external_input_fingerprint(self) -> Any:
         try:
             return self._refresh_external_input_fingerprint(require_inputs=True)
         except FileNotFoundError:
@@ -642,14 +646,14 @@ class TransientJob(BaseJob):
         self, path: str | Path, *, name: str | None = None
     ) -> TransientJob:
         """Return a job resuming this interval from an existing checkpoint copy."""
-        path = Path(_path(path, "restart")).expanduser()
-        if not path.is_absolute():
-            path = self._result_path / path
-        if not path.is_dir():
-            raise FileNotFoundError(path)
+        restart_path = Path(_path(path, "restart")).expanduser()
+        if not restart_path.is_absolute():
+            restart_path = self._result_path / restart_path
+        if not restart_path.is_dir():
+            raise FileNotFoundError(restart_path)
         job = copy.copy(self)
         job.outputs = copy.deepcopy(self.outputs)
-        job.restart = str(path.resolve())
+        job.restart = str(restart_path.resolve())
         if name is not None:
             job.name = name
             job._file = None
@@ -664,7 +668,9 @@ class TransientJob(BaseJob):
         return self.task_manifest_file(1)
 
     @staticmethod
-    def _payload_for_layout(payload, *, source, target, source_projects=()):
+    def _payload_for_layout(
+        payload: Any, *, source: Any, target: Any, source_projects: Any = ()
+    ) -> Any:
         data = BaseJob._payload_for_layout(
             payload, source=source, target=target, source_projects=source_projects
         )
@@ -674,7 +680,7 @@ class TransientJob(BaseJob):
             )
         return data
 
-    def remote_input_files(self, remote_project):
+    def remote_input_files(self, remote_project: Any) -> Any:
         files = super().remote_input_files(remote_project)
         restart = self._restart_path()
         if restart is not None:
@@ -692,7 +698,7 @@ class TransientJob(BaseJob):
             )
         return files
 
-    def operation_result(self, *, result_path=None, task=1):
+    def operation_result(self, *, result_path: Any = None, task: Any = 1) -> Any:
         """Read a committed result and require the current saved input digests."""
         saved_inputs = (
             json.loads(self.job_file.read_text())
@@ -703,6 +709,7 @@ class TransientJob(BaseJob):
             raise ValueError("Restart inputs changed since the job was saved")
         root = self._result_path if result_path is None else result_path
         mode = self.mode_for_task(task)
+        result: Any
         if self.n_modes is None:
             result = load_operation_result(root, "transient")
         else:
@@ -734,13 +741,13 @@ class TransientJob(BaseJob):
         return result
 
     @property
-    def traces(self):
+    def traces(self) -> Any:
         from frequensolve.seismic.transient import TransientOutputHandle
 
         return TransientOutputHandle(self, "simulated_traces")
 
     @property
-    def wavefields(self):
+    def wavefields(self) -> Any:
         from frequensolve.seismic.transient import TransientOutputHandle
 
         return TransientOutputHandle(self, "sampled_wavefield")
@@ -750,7 +757,7 @@ class TransientJob(BaseJob):
             self._task_results_exist(task) for task in range(1, self.n_tasks + 1)
         )
 
-    def _task_results_exist(self, task) -> bool:
+    def _task_results_exist(self, task: Any) -> bool:
         try:
             result = self.operation_result(task=task)
             for artifact in result.artifacts:
@@ -769,8 +776,8 @@ class TransientJob(BaseJob):
             expected_roles = set()
             if (
                 self.outputs.traces is not None
-                and self.effective_simulation.acquisition is not None
-                and self.effective_simulation.acquisition.receiver_groups
+                and getattr(self.effective_simulation, "acquisition", None) is not None
+                and getattr(self.effective_simulation, "acquisition").receiver_groups
             ):
                 expected_roles.add("simulated_traces")
             if self.outputs.wavefields:
@@ -803,7 +810,9 @@ class TransientJob(BaseJob):
         except (OSError, ValueError, KeyError, TypeError):
             return False
 
-    def is_task_current(self, task, *, state=None, manifest=None) -> bool:
+    def is_task_current(
+        self, task: Any, *, state: Any = None, manifest: Any = None
+    ) -> bool:
         state = self.run_state() if state is None else state
         if self.n_modes is not None:
             return 1 <= task <= self.n_tasks and self._task_results_exist(task)
@@ -814,27 +823,27 @@ class TransientJob(BaseJob):
             and self.results_exist()
         )
 
-    def current_tasks(self):
+    def current_tasks(self) -> Any:
         return [
             task for task in range(1, self.n_tasks + 1) if self.is_task_current(task)
         ]
 
-    def is_run_current(self):
+    def is_run_current(self) -> Any:
         return len(self.current_tasks()) == self.n_tasks
 
-    def task_policy_fingerprint(self, task, policy=None):
+    def task_policy_fingerprint(self, task: Any, policy: Any = None) -> Any:
         return self.task_fingerprint(task)
 
     def plan_tasks(
         self,
         *,
-        skip_policy=None,
-        reuse=False,
-        force=False,
-        apply=False,
-        residual=None,
-        ignore_solver_options=None,
-    ):
+        skip_policy: Any = None,
+        reuse: Any = False,
+        force: Any = False,
+        apply: Any = False,
+        residual: Any = None,
+        ignore_solver_options: Any = None,
+    ) -> Any:
         policy = SkipPolicy.from_value(
             skip_policy,
             residual=residual,
@@ -874,10 +883,10 @@ class TransientJob(BaseJob):
             removed_stale_outputs=removed,
         )
 
-    def task_run_plan(self, **kwargs):
+    def task_run_plan(self, **kwargs: Any) -> Any:
         return self.plan_tasks(apply=True, **kwargs)
 
-    def write_run_state(self, status="completed", **extra):
+    def write_run_state(self, status: Any = "completed", **extra: Any) -> Any:
         if self.n_modes is not None:
             return self._write_modal_run_state(status, **extra)
         complete = status in {"completed", "skipped"} and self.results_exist()
@@ -923,7 +932,7 @@ class TransientJob(BaseJob):
         self._write_json_file(self.run_state_file, payload)
         return self.run_state_file
 
-    def _write_modal_run_state(self, status, **extra):
+    def _write_modal_run_state(self, status: Any, **extra: Any) -> Any:
         previous = {
             r.get("task", r.get("task_id", -1) + 1): r for r in extra.pop("tasks", [])
         }
@@ -949,7 +958,7 @@ class TransientJob(BaseJob):
                 }
             )
         count = sum(t["complete"] for t in tasks)
-        failed = sum(t["status"] == "failed" for t in tasks)
+        failed_count = sum(t["status"] == "failed" for t in tasks)
         if status in {"completed", "skipped"} and count != self.n_tasks:
             status = "failed"
         payload = {
@@ -964,15 +973,15 @@ class TransientJob(BaseJob):
                 "total": self.n_tasks,
                 "complete": count,
                 "succeeded": count,
-                "failed": failed,
-                "not_run": self.n_tasks - count - failed,
+                "failed": failed_count,
+                "not_run": self.n_tasks - count - failed_count,
             },
         }
         self._write_json_file(self.run_state_file, payload)
         return self.run_state_file
 
     @property
-    def results(self):
+    def results(self) -> Any:
         return (
             {
                 task - 1: self.operation_result(task=task)
@@ -982,7 +991,7 @@ class TransientJob(BaseJob):
             else self.operation_result()
         )
 
-    def frequency_status(self):
+    def frequency_status(self) -> Any:
         """Report trajectories through the common task-status API."""
         if self.n_modes is not None:
             run = self.run_state()
@@ -1044,7 +1053,9 @@ _FIELD_NAME_KEYS = frozenset(
 )
 
 
-def _validate_fields(value, *, projection=None, azimuthal_mode=None):
+def _validate_fields(
+    value: Any, *, projection: Any = None, azimuthal_mode: Any = None
+) -> Any:
     """Reject harmonic-only receiver operations, including nested expressions."""
     if isinstance(value, Mapping):
         if value.get("_type") == "ReceiverNode":
@@ -1119,7 +1130,9 @@ def _validate_fields(value, *, projection=None, azimuthal_mode=None):
             )
 
 
-def _validate_paraview(output, *, projection=None, azimuthal_mode=None):
+def _validate_paraview(
+    output: Any, *, projection: Any = None, azimuthal_mode: Any = None
+) -> Any:
     """Validate native time snapshots of fields, material properties and mesh info."""
     if output.get("writer", {}).get("format", "vtu") not in {"vtu", "xdmf", "xmf"}:
         raise ValueError("Transient ParaView output supports VTU and XDMF only")
@@ -1151,7 +1164,7 @@ def _validate_paraview(output, *, projection=None, azimuthal_mode=None):
         )
 
 
-def _transient_attenuation_model(model) -> str | None:
+def _transient_attenuation_model(model: Any) -> str | None:
     """Return the transient attenuation model, rejecting frequency-domain laws."""
     if model is None:
         return None
@@ -1172,7 +1185,7 @@ def _transient_attenuation_model(model) -> str | None:
     return normalized
 
 
-def _transient_projection(simulation):
+def _transient_projection(simulation: Any) -> Any:
     """Validate the native elastic Helmholtz configuration used by time outputs."""
     config = simulation.extra.get("helmholtz_projection", {})
     if not isinstance(config, Mapping):

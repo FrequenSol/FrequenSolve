@@ -6,6 +6,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import h5py
@@ -23,7 +24,15 @@ class HVReceiverCurvature:
     and solves use FP32, with residual refinement to relative tolerance 1e-4.
     """
 
-    def __init__(self, matrix, trace, free, *, scale=1.0, weight=1.0):
+    receiver_ids: np.ndarray
+    source_id: int
+    predicted: np.ndarray
+    observed: np.ndarray
+    scale: float
+
+    def __init__(
+        self, matrix: Any, trace: Any, free: Any, *, scale: Any = 1.0, weight: Any = 1.0
+    ) -> None:
         self.matrix = matrix.tocsr().astype(np.float64)
         self.trace = trace.tocsr().astype(np.float64)
         self.free = np.asarray(free, dtype=np.int64).reshape(-1)
@@ -55,7 +64,7 @@ class HVReceiverCurvature:
         self.factor = splu(self.interior.astype(np.float32)) if len(self.free) else None
 
     @classmethod
-    def read(cls, path: Path):
+    def read(cls, path: Path) -> Any:
         """Read one shot's real or imaginary native auxiliary linearization."""
         with h5py.File(path) as handle:
             schema = handle["schema"][()]
@@ -69,7 +78,7 @@ class HVReceiverCurvature:
             size = int(np.asarray(handle["size"]).item())
             receivers = np.asarray(handle["receiver_id"], dtype=np.int64).reshape(-1)
 
-            def sparse(name, shape):
+            def sparse(name: Any, shape: Any) -> Any:
                 group = handle[name]
                 return coo_matrix(
                     (
@@ -96,7 +105,7 @@ class HVReceiverCurvature:
             result.scale = float(np.asarray(handle["amplitude_scale"]).item())
         return result
 
-    def apply(self, values):
+    def apply(self, values: Any) -> Any:
         """Apply Bᵀ(K − K[:, I] K[I, I]⁻¹ K[I, :])B to real samples."""
         values = np.asarray(values, dtype=np.float64).reshape(-1)
         if values.shape != (self.trace.shape[1],) or not np.isfinite(values).all():
@@ -121,7 +130,7 @@ class HVReceiverCurvature:
         ).reshape(-1)
 
 
-def _tangent_values(path, collection):
+def _tangent_values(path: Any, collection: Any) -> Any:
     """Read verified physical tangent rows in each receiver state's order."""
     from ._receiver import _member
 
@@ -164,7 +173,7 @@ def _tangent_values(path, collection):
 class HVReceiverNormal:
     """Native wave JVP → reduced HV receiver metric → native wave VJP."""
 
-    def __init__(self, linearization):
+    def __init__(self, linearization: Any) -> None:
         from ._backend import fingerprint
         from ._receiver import ReceiverCollection
         from .jobs import FWIOperatorJob
@@ -248,7 +257,7 @@ class HVReceiverNormal:
             self.metrics.append(current)
         self.applications = 0
 
-    def apply(self, direction):
+    def apply(self, direction: Any) -> Any:
         from ._artifacts import ControlVectorFile
         from .controls import ControlVector, _check_artifact_basis
         from .jobs import FWIOperatorJob
@@ -265,7 +274,7 @@ class HVReceiverNormal:
         self.applications += 1
         prefix = self.directory / f"normal_{self.applications:04d}"
 
-        def input_path(path):
+        def input_path(path: Any) -> Any:
             # Single-task packaging requires a concrete input, whereas a band
             # resolves its per-task members from the common stem.
             return (

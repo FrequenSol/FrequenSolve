@@ -10,7 +10,7 @@ import math
 from dataclasses import dataclass, field
 from numbers import Integral, Real
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, cast
 
 import numpy as np
 
@@ -181,7 +181,7 @@ class TimeIntegration:
     selector and resolves to order=3; explicit ``scheme="gauss"`` or ``Gauss()``
     selects fourth-order Gauss. Order 2 selects average-acceleration Newmark.
     Phase-based selection bounds temporal phase error, not amplitude damping.
-    Either selector can be omitted; both omitted select Newmark. Legacy
+    Either selector can be omitted; both omitted select Radau. Legacy
     ``TimeIntegration(start, end, dt, Newmark(...))`` calls remain supported.
 
     Specify exactly one of ``dt``, ``period_error`` or ``window_error``.
@@ -230,16 +230,16 @@ class TimeIntegration:
             # Non-average-acceleration Newmark remains available via method.
             order = (
                 (2 if method.gamma == 0.5 else 1)
-                if scheme == "newmark"
+                if isinstance(method, Newmark)
                 else method.order
             )
         else:
             defaults = {2: "newmark", 3: "radau", 4: "radau"}
             orders = {"newmark": 2, "radau": 3, "gauss": 4}
             scheme = (
-                self.scheme
+                cast(str, self.scheme)
                 if self.scheme is not None
-                else defaults.get(self.order or 3)
+                else defaults.get(self.order or 3, "")
             )
             if not isinstance(scheme, str) or scheme not in orders:
                 raise ValueError(
@@ -327,7 +327,7 @@ class TimeIntegration:
         if isinstance(method, Gauss) and not 0 <= self.theta_0 < math.pi:
             raise ValueError("Phase fitting requires f_0 * dt < 0.5 (below Nyquist)")
 
-    def replace(self, **changes) -> TimeIntegration:
+    def replace(self, **changes: Any) -> TimeIntegration:
         """Return a validated configuration with selected inputs changed.
 
         Unlike ``dataclasses.replace``, this handles resolved scheme selectors
@@ -335,7 +335,7 @@ class TimeIntegration:
         setting an error target clears ``dt`` and the other target. A fitted
         Gauss method retains its physical fitting frequency when dt changes.
         """
-        values = dict(
+        values: dict[str, Any] = dict(
             start=self.start,
             end=self.end,
             dt=self.dt,
@@ -357,7 +357,7 @@ class TimeIntegration:
         values.update(changes)
         return type(self)(**values)
 
-    def with_dt(self, dt) -> TimeIntegration:
+    def with_dt(self, dt: Any) -> TimeIntegration:
         """Return this interval and scheme with an explicit timestep in seconds or units."""
         return self.replace(dt=dt)
 
@@ -365,7 +365,7 @@ class TimeIntegration:
     def theta_0(self) -> float:
         """Resolved fitting angle in radians per step (derived from Hz and seconds)."""
         return (
-            2 * math.pi * self.method.f_0 * self.dt
+            2 * math.pi * self.method.f_0 * cast(float, self.dt)
             if isinstance(self.method, Gauss)
             else 0.0
         )
@@ -378,11 +378,11 @@ class TimeIntegration:
     @property
     def steps(self) -> int:
         """Number of advances, excluding the initial state."""
-        return round((self.end - self.start) / self.dt)
+        return round((self.end - self.start) / cast(float, self.dt))
 
     @property
     def times(self) -> np.ndarray:
-        return self.start + np.arange(self.steps + 1) * self.dt
+        return self.start + np.arange(self.steps + 1) * cast(float, self.dt)
 
     @property
     def estimated_period_error(self) -> float | None:
@@ -391,9 +391,13 @@ class TimeIntegration:
             isinstance(self.method, Newmark) and self.method != Newmark()
         ):
             return None
-        x = 2 * math.pi * self.f_max * self.dt
+        x = 2 * math.pi * self.f_max * cast(float, self.dt)
         b = self.b if isinstance(self.method, Gauss) else 1 / 12
-        return _period_lag(x, self.scheme, b) if x <= math.pi else None
+        return (
+            _period_lag(x, cast(str, self.scheme), cast(float, b))
+            if x <= math.pi
+            else None
+        )
 
     @property
     def estimated_window_error(self) -> float | None:
@@ -402,7 +406,7 @@ class TimeIntegration:
         return (
             None
             if error is None
-            else error * 2 * math.pi * self.f_max * (self.end - self.start)
+            else error * 2 * math.pi * cast(float, self.f_max) * (self.end - self.start)
         )
 
     def selection_payload(self) -> dict:
@@ -418,9 +422,9 @@ class TimeIntegration:
             "schema": "fs-time-domain-1",
             "start": float(self.start),
             "end": float(self.end),
-            "time_step": float(self.dt),
+            "time_step": float(cast(float, self.dt)),
             "method": {"newmark": "newmark", "gauss": "gauss4", "radau": "radau3"}[
-                self.scheme
+                cast(str, self.scheme)
             ],
         }
         if isinstance(self.method, Newmark):
@@ -447,6 +451,7 @@ class TimeIntegration:
             raise ValueError("Collocation methods do not accept newmark coefficients")
         if name != "gauss4" and "gauss" in data:
             raise ValueError("Only Gauss accepts gauss coefficients")
+        method: Newmark | Gauss | Radau
         if name == "newmark":
             method = Newmark.from_fs(data.get("newmark", {}))
         elif name == "radau3":
@@ -472,7 +477,7 @@ class TimeIntegration:
         )
         if not math.isclose(
             _number(data["time_step"], "time_step"),
-            time.dt,
+            cast(float, time.dt),
             rel_tol=64 * np.finfo(float).eps,
             abs_tol=0,
         ):
@@ -551,7 +556,7 @@ class TimeFunction:
         elif self.wavelet is not None:
             raise ValueError(f"wavelet is not used by {self.kind}")
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> Any:
         if not isinstance(other, TimeFunction):
             return NotImplemented
         return self.to_fs() == other.to_fs()
@@ -615,17 +620,17 @@ class TimeFunction:
                 )
             value = (t >= 0).astype(float)
         elif self.kind == "sine":
-            rate = 2 * np.pi * self.frequency
+            rate = 2 * np.pi * cast(float, self.frequency)
             value = rate**derivative * np.sin(rate * t + derivative * np.pi / 2)
         elif self.kind == "gaussian":
-            q = t / self.width
+            q = t / cast(float, self.width)
             value = np.exp(-0.5 * q**2)
             if derivative == 1:
-                value = -q / self.width * value
+                value = -q / cast(float, self.width) * value
             elif derivative == 2:
-                value = (q**2 - 1) / self.width**2 * value
+                value = (q**2 - 1) / cast(float, self.width) ** 2 * value
         else:
-            rate = (np.pi * self.frequency) ** 2
+            rate = (np.pi * cast(float, self.frequency)) ** 2
             q = rate * t**2
             value = np.exp(-q)
             if derivative == 0:
@@ -682,7 +687,7 @@ class TimeFunction:
         """Reject an initial load inconsistent with the backend's zero state."""
         value = self.evaluate(time, derivative=derivative)
         rate = (
-            2 * np.pi * self.frequency
+            2 * np.pi * cast(float, self.frequency)
             if self.frequency is not None
             else (1 / self.width if self.width is not None else 1)
         )
@@ -803,11 +808,11 @@ class TimeOutput:
                 raise ValueError("output.times must be nonempty, unique and increasing")
             object.__setattr__(self, "times", times)
 
-    def _cadence(self, time: TimeIntegration):
+    def _cadence(self, time: TimeIntegration) -> Any:
         """Validate alignment without allocating the complete output grid."""
 
         def aligned(value: float) -> int:
-            n = value / time.dt
+            n = value / cast(float, time.dt)
             if not math.isfinite(n) or abs(n) > 999_999_999_999:
                 raise ValueError("Output step exceeds the supported range")
             if abs(n - round(n)) > 64 * np.finfo(float).eps * max(1, abs(n)):
@@ -816,6 +821,7 @@ class TimeOutput:
                 )
             return round(n)
 
+        steps: np.ndarray | range
         if self.times is not None:
             steps = np.asarray(
                 [aligned(t - time.start) for t in self.times], dtype=np.int64
@@ -849,7 +855,7 @@ class TimeOutput:
         ).astype(np.int64)
 
     def to_fs(self) -> dict:
-        payload = {"write_initial": self.write_initial}
+        payload: dict[str, Any] = {"write_initial": self.write_initial}
         if self.times is not None:
             payload["times"] = list(self.times)
         elif self.interval is not None:

@@ -69,7 +69,7 @@ def block_digest(values: Any, dtype: Any = np.float64) -> str:
         start, stop = index * BLOCK_ROWS, min((index + 1) * BLOCK_ROWS, rows)
         if columns and start == 0 and stop == rows:
             # A leaf spanning every row is the whole array in memory order.
-            digest.update(memoryview(table).cast("B"))
+            digest.update(table.data.cast("B"))
         else:
             for segment in table[:, start:stop]:
                 digest.update(segment)

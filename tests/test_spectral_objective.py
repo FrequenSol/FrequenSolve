@@ -106,3 +106,30 @@ def test_waveform_derivatives_remain_informative_at_base_spectral_zero():
     )
     assert lin.value == pytest.approx(0.5)
     np.testing.assert_array_equal(lin.confidence, np.ones(2))
+
+
+@pytest.mark.parametrize(
+    "kind,window", [("waveform_jet", (1.0,)), ("phase_slope", (1.0, 0.2))]
+)
+def test_feature_scaling_composes_with_attribute_actions(kind, window):
+    from frequensolve.imaging.spectral_objective import _ScaledAttribute
+
+    rng = np.random.default_rng(12)
+    predicted = rng.normal(size=(5, 3)) + 1j * rng.normal(size=(5, 3))
+    observed = rng.normal(size=(5, 3)) + 1j * rng.normal(size=(5, 3))
+    definition = SpectralAttribute(
+        kind,
+        window=window,
+        order_scales=[1.0, 1.0, 1.0] if kind == "waveform_jet" else None,
+    )
+    raw = definition.linearize(predicted, observed)
+    scale = np.linspace(0.5, 1.5, raw.residual.shape[1])
+    weighted = _ScaledAttribute(raw, scale)
+    tangent = rng.normal(size=predicted.shape) + 1j * rng.normal(size=predicted.shape)
+    dual = rng.normal(size=raw.residual.shape) + 1j * rng.normal(
+        size=raw.residual.shape
+    )
+    np.testing.assert_allclose(weighted.jvp(tangent), raw.jvp(tangent) * scale)
+    np.testing.assert_allclose(weighted.vjp(dual), raw.vjp(dual * scale))
+    np.testing.assert_allclose(weighted.residual, raw.residual * scale)
+    assert weighted.value == pytest.approx(0.5 * np.sum(abs(raw.residual * scale) ** 2))

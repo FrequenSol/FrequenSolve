@@ -1014,13 +1014,12 @@ def test_held_control_maps_are_found_wherever_a_job_names_them():
     ]
 
 
-def test_held_controls_require_a_solver_that_lists_hold(tmp_path):
+@pytest.mark.parametrize("kind", ["tensor_hat", "tensor_bspline"])
+def test_held_controls_require_a_solver_that_lists_hold(tmp_path, kind):
     plain = tmp_path / "plain.json"
     plain.write_text(json.dumps({"control": {"kind": "hat"}}))
     held = tmp_path / "held.json"
-    held.write_text(
-        json.dumps({"control": {"kind": "tensor_hat", "extrapolate": "hold"}})
-    )
+    held.write_text(json.dumps({"control": {"kind": kind, "extrapolate": "hold"}}))
     queries = []
 
     def catalog(*operations):
@@ -1075,6 +1074,26 @@ def test_local_prepare_rejects_held_controls_without_solver_support(tmp_path):
     # Solver checks turned off do not query the solver.
     site.solver_policy = "off"
     assert site.prepare_job(job, validate=False) is job
+
+
+def test_solver_feature_check_selects_the_jobs_overridden_backend(tmp_path):
+    job = _HeldControlJob(tmp_path / "job")
+    job.effective_simulation = SimpleNamespace(
+        _file=job.simulation._file,
+        dimension=3,
+        solver=SimpleNamespace(precision="double"),
+    )
+    site = _bare_local_site()
+    queries = []
+
+    def capabilities(**selection):
+        queries.append(selection)
+        return solver.SolverCapabilities("fs3d", frozenset())
+
+    site.solver_capabilities = capabilities
+    with pytest.raises(SolverFeatureError, match="does not list"):
+        site.prepare_job(job, validate=False)
+    assert queries == [{"dimension": 3, "precision": "double"}]
 
 
 def test_slurm_capabilities_query_the_login_node_once_per_backend(tmp_path):

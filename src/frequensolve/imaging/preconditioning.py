@@ -95,6 +95,10 @@ class ReceiverBlockDiagonal(Preconditioner):
 
 
 class _BoundReceiverBlocks(BoundPreconditioner):
+    preconditioner: ReceiverBlockDiagonal
+    _inverse: np.ndarray | None
+    _indices: np.ndarray | None
+
     def __init__(self, config: ReceiverBlockDiagonal, space: ControlSpace) -> None:
         super().__init__(config, space)
         self._inverse = self._indices = None
@@ -225,7 +229,7 @@ def _normal_images(
     from ._native_regularization import BoundNativeRegularization
     from .regularization import _BoundSum
 
-    def terms(term):
+    def terms(term: Any) -> Any:
         if isinstance(term, _BoundSum):
             for child in term.terms:
                 yield from terms(child)
@@ -238,7 +242,7 @@ def _normal_images(
     )
     if native is not None:
         remaining.remove(native)
-    options = dict(regularization=native)
+    options: dict[str, Any] = dict(regularization=native)
     if "cache" in inspect.signature(linearization.apply_normal_batch).parameters:
         options["cache"] = False
     products = linearization.apply_normal_batch(rows, **options)
@@ -251,6 +255,8 @@ def _normal_images(
 
 
 class _BoundCoarseCorrection(BoundPreconditioner):
+    preconditioner: CoarseCorrection
+
     def __init__(self, config: CoarseCorrection, space: ControlSpace) -> None:
         super().__init__(config, space)
         self.local = config.local.bind(space)

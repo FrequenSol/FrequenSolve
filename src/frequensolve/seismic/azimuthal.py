@@ -2,13 +2,14 @@
 
 from collections.abc import Mapping
 from numbers import Integral
+from typing import Any
 
 import numpy as np
 
 __all__ = ["reconstruct_azimuthal_pressure"]
 
 
-def reconstruct_azimuthal_pressure(modes: Mapping, delta_theta=0.0):
+def reconstruct_azimuthal_pressure(modes: Mapping, delta_theta: Any = 0.0) -> Any:
     """Sum equally forced modes as P0 + 2 sum(Pm cos(m*delta_theta)).
 
     ``modes`` maps every integer order 0..M to an equally shaped real array,

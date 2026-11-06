@@ -219,7 +219,7 @@ class SolverConfig(ExtraFieldsMixin):
             JSON-compatible solver configuration.
         """
 
-        payload = {
+        payload: Dict[str, Any] = {
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
             "precision": self.precision,
@@ -235,7 +235,7 @@ class SolverConfig(ExtraFieldsMixin):
 
     def _multigrid_fields(self) -> Dict[str, Any]:
         """Validate and serialize cycle controls, leaving automatic defaults unset."""
-        payload = {}
+        payload: Dict[str, Any] = {}
         for name in ("pre_smooth", "post_smooth"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
@@ -252,7 +252,11 @@ class SolverConfig(ExtraFieldsMixin):
                 payload["cycle"] = (
                     cycle.upper() if cycle.lower() in {"v", "w"} else "log"
                 )
-        elif isinstance(cycle, Integral) and not isinstance(cycle, bool) and cycle > 0:
+        elif (
+            isinstance(cycle, Integral)
+            and not isinstance(cycle, bool)
+            and int(cycle) > 0
+        ):
             payload["cycle"] = int(cycle)
         elif isinstance(cycle, Mapping):
             schedule = copy.deepcopy(dict(cycle))

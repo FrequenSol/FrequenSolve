@@ -36,6 +36,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import (
     Any,
+    Callable,
     Dict,
     Iterator,
     List,
@@ -4082,7 +4083,7 @@ class ControlVector:
             )
         self._values = array
         self.space = space
-        self._field_factory = None
+        self._field_factory: Optional[Callable[..., Any]] = None
 
     # -- ndarray protocol -----------------------------------------------------
 

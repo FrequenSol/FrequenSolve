@@ -1,7 +1,7 @@
 """Local cross-parameter curvature retained from shared receiver probes."""
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 import h5py
 import numpy as np
@@ -9,7 +9,7 @@ import numpy as np
 from .controls import ControlSpace, ControlVector
 
 
-def block_probe_request(request, space):
+def block_probe_request(request: Any, space: Any) -> Any:
     """Resolve public control aliases before sending the native probe request."""
     if not isinstance(request, Mapping):
         raise TypeError("receiver_blocks must be a mapping")
@@ -52,7 +52,7 @@ class ReceiverBlocks:
     space: ControlSpace
 
     @classmethod
-    def from_linearization(cls, linearization):
+    def from_linearization(cls, linearization: Any) -> Any:
         """Read and validate every frequency part, then add weighted matrices."""
         request = (linearization.job.receiver_diagonal or {}).get("blocks")
         if request is None:
@@ -104,7 +104,7 @@ class ReceiverBlocks:
         return cls(names, total, identities, linearization.space)
 
     @property
-    def correlations(self):
+    def correlations(self) -> Any:
         """Return dimensionless coupling; unilluminated entries are zero."""
         d = np.sqrt(np.maximum(np.diagonal(self.matrices, axis1=1, axis2=2), 0))
         denominator = d[:, :, None] * d[:, None, :]
@@ -115,7 +115,7 @@ class ReceiverBlocks:
             where=denominator > 0,
         )
 
-    def solve(self, covector, *, damping=0.01, scales=None):
+    def solve(self, covector: Any, *, damping: Any = 0.01, scales: Any = None) -> Any:
         """Apply a damped local inverse and return an update in native units.
 
         ``scales`` maps control names to positive physical perturbation scales
@@ -180,6 +180,6 @@ class ReceiverBlocks:
         return ControlVector(result, self.space)
 
 
-def _text(dataset):
+def _text(dataset: Any) -> Any:
     value = dataset[()]
     return (value.decode() if isinstance(value, bytes) else str(value)).strip()

@@ -96,7 +96,7 @@ def _preconditioned_cg(
     checked_norm = None
     replacements = 0
 
-    def true_residual():
+    def true_residual() -> Any:
         residual = b - _real_vector(matvec(x), size=b.size, name="operator product")
         norm = float(np.linalg.norm(residual))
         if not math.isfinite(norm):

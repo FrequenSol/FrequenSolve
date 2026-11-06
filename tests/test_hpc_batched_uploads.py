@@ -264,7 +264,9 @@ def test_put_files_groups_by_remote_directory(rsync, tmp_path):
     }
     targets = {call.argv[-1]: call.listed for call in rsync.calls}
     assert targets == {
-        f"user@{HOST}:{WORK}/imaging/fwi/abc123/ops/0001/": [str(local) for local in ops],
+        f"user@{HOST}:{WORK}/imaging/fwi/abc123/ops/0001/": [
+            str(local) for local in ops
+        ],
         f"user@{HOST}:{WORK}/simulations/sim/": [str(staged)],
         f"user@{HOST}:{external_remote.parent}/": [str(external)],
         # Stored under another name: a single-file rsync to the exact path.

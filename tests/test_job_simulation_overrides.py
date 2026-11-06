@@ -112,6 +112,48 @@ def test_recursive_merge_replaces_arrays_and_null_without_mutation():
         merge_simulation_overrides({}, [])
 
 
+def test_acquisition_overrides_describe_receiver_and_wavefield_outputs(tmp_path):
+    sim = simulation_at(tmp_path)
+    sim.acquisition.add_sources(kind="pressure_monopole", coords=[[0, 0]])
+    sim.acquisition.add_receiver_group(
+        "original",
+        fs.ReceiverNode(components=[fs.ReceiverComponent(name="p", field="pressure")]),
+        [[0, 0]],
+    )
+    acquisition = fs.Acquisition()
+    acquisition.add_sources(kind="pressure_monopole", coords=[[0, 0], [1, 0]])
+    acquisition.add_receiver_group(
+        "overridden",
+        fs.ReceiverNode(components=[fs.ReceiverComponent(name="vz", field="vz")]),
+        [[0, 0]],
+    )
+    grid = fs.CartesianGrid(dims=["x", "z"], x0=[0, 0], x1=[1, 1], n=[2, 2])
+    job = fs.FrequencyDomainJob(
+        "f",
+        sim,
+        [8],
+        outputs=[
+            fs.TraceOutput(),
+            fs.WavefieldOutput(name="field", grid=grid, fields=["pressure"]),
+            fs.WavefieldOutput(
+                name="selected", grid=grid, fields=["pressure"], sources=[2]
+            ),
+        ],
+        simulation_overrides={"Acquisition": acquisition.to_fs()},
+    )
+    job.save()
+    for current in (job, fs.BaseJob.load(job.job_file)):
+        assert current.trace_outputs.groups == ["overridden"]
+        assert current.trace_outputs.components == ["overridden:vz"]
+        assert current.trace_outputs.sources == ["1", "2"]
+        assert current.wavefield_outputs["field"]["sources"] == ["1", "2"]
+        assert current.wavefield_outputs["selected"]["sources"] == ["2"]
+        assert current.wavefield_trace_outputs.sources == ["1", "2"]
+        assert [g.name for g in current.simulation.acquisition.receiver_groups] == [
+            "original"
+        ]
+
+
 def test_remote_staging_preserves_overrides_and_maps_their_paths(tmp_path):
     sim = simulation_at(tmp_path)
     data = sim.project_path / "input.bin"

@@ -5,6 +5,7 @@
 """Experimental amplitude-insensitive HV composed with native spectral jets."""
 
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import numpy as np
 
@@ -44,7 +45,7 @@ class HVAttribute:
     epsilon: float = 0.001
     loss_scale: float = 0.03223448807274354
 
-    def __post_init__(self):
+    def __post_init__(self) -> Any:
         if self.kind not in {
             "traveltime",
             "compressed_traveltime",
@@ -76,7 +77,7 @@ class HVAttribute:
 class AttributeFeatures:
     """Fixed observed stabilization with an exact real-linear jet pullback."""
 
-    def __init__(self, predicted, observed, pool, config):
+    def __init__(self, predicted: Any, observed: Any, pool: Any, config: Any) -> None:
         self.u, self.pool, self.config = predicted, pool, config
         self.epsilon = config.relative_floor * max(
             np.sqrt(np.mean(abs(observed[:, 0]) ** 2)), 1e-100
@@ -102,7 +103,7 @@ class AttributeFeatures:
             self.predicted = np.arcsinh(self.predicted - center)
             self.observed = np.arcsinh(self.observed - center)
 
-    def _forward(self, jet):
+    def _forward(self, jet: Any) -> Any:
         u, m = jet[:, 0], jet[:, 1]
         if self.config.kind == "projective_jet":
             v = m / self.config.time_scale
@@ -124,7 +125,7 @@ class AttributeFeatures:
         time = self.pool.apply((u.conj() * m).real) / den
         return (time / self.config.time_scale)[:, None], (den, time)
 
-    def vjp(self, dual):
+    def vjp(self, dual: Any) -> Any:
         dual = np.asarray(dual) * self.compression_slope
         result = np.zeros_like(self.u)
         u, m = self.u[:, 0], self.u[:, 1]
@@ -161,7 +162,7 @@ class HVAttributeProblem:
     Restriction retains the objective; use first-order optimization only.
     """
 
-    def __init__(self, problem, config, *, coordinates):
+    def __init__(self, problem: Any, config: Any, *, coordinates: Any) -> None:
         if len(problem.frequencies) != 1:
             raise ValueError("HV attribute research currently requires one frequency")
         if problem.simulation.acquisition.source_encoding is not None:
@@ -187,34 +188,34 @@ class HVAttributeProblem:
         )
         self.solver = HVResearchSolver(config.intervals, config.path_intervals)
         self.projection = endpoint_projection(len(x), config.intervals)
-        self._latest = None
+        self._latest: Any = None
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: Any) -> Any:
         if name.startswith("_"):
             raise AttributeError(name)
         return getattr(self.raw, name)
 
     @property
-    def state(self):
+    def state(self) -> Any:
         return self.raw.state
 
     @state.setter
-    def state(self, value):
+    def state(self, value: Any) -> Any:
         self.raw.state = value
 
-    def identity(self):
+    def identity(self) -> Any:
         return {
             **self.raw.identity(),
             "hv_attribute": asdict(self.config),
             "coordinates_m": np.asarray(self.coordinates.to("m").magnitude).tolist(),
         }
 
-    def restrict(self, **kwargs):
+    def restrict(self, **kwargs: Any) -> Any:
         return type(self)(
             self.raw.restrict(**kwargs), self.config, coordinates=self.coordinates
         )
 
-    def linearize(self, v=None, *, gradient=True):
+    def linearize(self, v: Any = None, *, gradient: Any = True) -> Any:
         point = self.raw.vector(None if v is None else self.raw.state_from(v))
         if self._latest is not None and np.array_equal(
             point.values, self._latest.point.values
@@ -228,24 +229,24 @@ class HVAttributeProblem:
             self._latest.ensure_gradient()
         return self._latest
 
-    def value(self, v=None):
+    def value(self, v: Any = None) -> Any:
         return self.linearize(v, gradient=False).value
 
-    def gradient(self, v=None):
+    def gradient(self, v: Any = None) -> Any:
         return self.linearize(v).gradient
 
 
 class AttributeLinearization:
-    def __init__(self, problem, jets):
+    def __init__(self, problem: Any, jets: Any) -> None:
         self.problem, self.jets = problem, jets
         first = jets.planes[0]
         self.space, self.state, self.point = first.space, first.state, first.point
         self.job, self.frequencies = first.job, first.frequencies
-        self.gradient = None
+        self.gradient: Any = None
         self.dual = np.zeros_like(jets.predicted)
         self.value, self.report = 0.0, []
         groups = np.unique(jets.groups)
-        self.endpoints = []
+        self.endpoints: Any = []
         for group in groups:
             rows = np.flatnonzero(jets.groups == group)
             rows = rows[np.argsort([jets.keys[i][2] for i in rows])]
@@ -308,19 +309,19 @@ class AttributeLinearization:
             )
         self.endpoints = np.asarray(self.endpoints)
 
-    def ensure_gradient(self):
+    def ensure_gradient(self) -> Any:
         if self.gradient is None:
             self.gradient = self.jets.vjp(self.dual)
             self.gradient._field_factory = self.field
 
     @property
-    def regularization_job(self):
+    def regularization_job(self) -> Any:
         return self.problem.raw.linearize(self.point).regularization_job
 
-    def field(self, vector=None, **kwargs):
+    def field(self, vector: Any = None, **kwargs: Any) -> Any:
         return self.jets.planes[0].field(
             self.gradient if vector is None else vector, **kwargs
         )
 
-    def trial(self, v, *, gradient=False):
+    def trial(self, v: Any, *, gradient: Any = False) -> Any:
         return self.problem.linearize(v, gradient=gradient)

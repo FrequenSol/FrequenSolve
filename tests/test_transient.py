@@ -347,7 +347,7 @@ def test_reader_rejects_a_step_held_by_a_block_and_a_single_shard(tmp_path):
 def test_restarted_block_shards_cover_the_schedule_from_the_checkpoint(tmp_path):
     import shutil
 
-    job = job_at(tmp_path, outputs=fs.TraceOutput())
+    job = job_at(tmp_path, time_method=fs.Newmark(), outputs=fs.TraceOutput())
     path = tmp_path / "checkpoint"
     path.mkdir()
     with h5py.File(path / "newmark_manifest_R00000.h5", "w") as h5:

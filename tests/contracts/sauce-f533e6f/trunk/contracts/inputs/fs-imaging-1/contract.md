@@ -86,7 +86,21 @@ plus imaging evaluation cases.
   `phase_derivative`, it retains amplitude information and has no amplitude-floor
   quotient. Its optional `observed_rms` normalization uses the observed derivative energy.
   Separate waveform and spectral objective terms may use independent scales and weights.
-- Both derivative comparisons require an observed physical-frequency derivative
+- `wavenumber` compares the instantaneous wavenumber along the receiver line,
+  in rad/m (`measure: slowness` divides by `2*pi*f` for s/m). Consecutive
+  output channels `a, b = a+1` at distance `h` pair into `conjg(v_a) v_b` and
+  `|v_a + v_b|^2/4`; each channel pools `N = sum W Im(conjg(v_a) v_b)`,
+  `D = epsilon^2 + sum W |v_a + v_b|^2/4` and `H = sum W h` over its adjacent
+  pairs (or an `array`'s weights by distance to the pair midpoints) and
+  compares `k = (2/H) atan(N/(2 D))`. This is `Im(v^H d_s v)/(v^H v)` in the
+  continuum and exact for a plane wave up to spatial Nyquist; a wave travelling
+  towards increasing channel index gives `-omega/c`. `derivative_axis` is
+  `receiver_line`. Pairs farther apart than `max_spacing_m` (default 2.5 times
+  the median spacing) are not formed. It takes the phase comparisons' observed
+  inputs and windowed pair, ignores the df trace, and needs dense output-channel
+  rows (`fwi_operator`); confidence floors, reliability and `source_delay` are
+  phase-only.
+- The derivative comparisons require an observed physical-frequency derivative
   for every receiver group. An explicit `observed_derivatives/df` dataset takes
   precedence. It must identify its base dataset and declare
   `derivative_axis=df`, `frequency_unit=Hz`, derivative units compatible with

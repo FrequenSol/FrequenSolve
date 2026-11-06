@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from importlib.resources import as_file, files
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
@@ -122,7 +122,7 @@ class AdaptiveWorkers:
     max_ranks_per_task: Optional[int] = None
     mem_cushion: float = 1.5
 
-    def __post_init__(self):
+    def __post_init__(self) -> Any:
         positive_count(self.min_ranks, "min_ranks")
         if self.max_ranks_per_task is not None:
             positive_count(self.max_ranks_per_task, "max_ranks_per_task")
@@ -132,11 +132,12 @@ class AdaptiveWorkers:
             raise ValueError("mem_cushion must be finite and >= 1")
 
 
-def _duration(value, name):
+def _duration(value: Any, name: Any) -> Any:
     """Seconds from a number or a duration such as ``"90s"``, ``"30m"``,
     ``"1h30m"`` or Slurm's ``[D-]HH:MM:SS``."""
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise TypeError(f"{name} must be seconds or a duration such as '30m'")
+    seconds: float | None
     if isinstance(value, str):
         text = value.strip().lower()
         match = _DURATION.fullmatch(text)
@@ -146,7 +147,8 @@ def _duration(value, name):
                 for unit, scale in (("h", 3600.0), ("m", 60.0), ("s", 1.0))
             )
         else:
-            seconds = slurm_time_seconds(text)
+            parsed_seconds = slurm_time_seconds(text)
+            seconds = float(parsed_seconds) if parsed_seconds is not None else None
             if seconds is None:
                 raise ValueError(
                     f"{name} must be seconds or a duration such as '30m', '2h' "
@@ -159,14 +161,14 @@ def _duration(value, name):
     return seconds
 
 
-def _describe(seconds):
+def _describe(seconds: Any) -> Any:
     for unit, size in (("h", 3600.0), ("min", 60.0)):
         if seconds >= size:
             return f"{seconds / size:.3g} {unit}"
     return f"{seconds:.3g} s"
 
 
-def reuse_key(reuse):
+def reuse_key(reuse: Any) -> Any:
     """Return ``(key, label)`` for a ``reuse`` scope: a string or a project.
 
     A project's key combines its name with a digest of its resolved path, so
@@ -187,7 +189,7 @@ def reuse_key(reuse):
     raise TypeError("reuse must be None, a string or a Project")
 
 
-def _creator():
+def _creator() -> Any:
     """Who started a session, shown in listings; never used to grant reuse."""
     try:
         user = getpass.getuser()
@@ -201,11 +203,11 @@ def _creator():
     }
 
 
-def _revoked(lease):
+def _revoked(lease: Any) -> Any:
     return bool(lease.get("revoked")) or float(lease.get("expires_at", 1) or 0) <= 0
 
 
-def _gone_here(lease):
+def _gone_here(lease: Any) -> Any:
     """Whether a lease names a process on this host that has exited."""
     pid = lease.get("pid")
     if (
@@ -225,7 +227,7 @@ def _gone_here(lease):
     return False
 
 
-def _live_leases(leases, status):
+def _live_leases(leases: Any, status: Any) -> Any:
     """Return the ids of the clients whose leases are live.
 
     Revoked leases, and leases of exited processes on this host, are not.
@@ -249,7 +251,7 @@ def _live_leases(leases, status):
     }
 
 
-def _command_timeout(site):
+def _command_timeout(site: Any) -> Any:
     return getattr(
         getattr(site, "run_config", None),
         "session_command_timeout",
@@ -257,7 +259,7 @@ def _command_timeout(site):
     )
 
 
-def _session_dirs(site, allocation_ids, timeout):
+def _session_dirs(site: Any, allocation_ids: Any, timeout: Any) -> Any:
     """Map live allocation ids to the ids of the sessions that recorded them."""
     if not allocation_ids:
         return {}
@@ -286,7 +288,7 @@ def _session_dirs(site, allocation_ids, timeout):
     return {job: session for job, session in found.items() if session is not None}
 
 
-def _read_leases(site, root, timeout):
+def _read_leases(site: Any, root: Any, timeout: Any) -> Any:
     """Return ``{client id: lease}`` for the client leases of a session."""
     leases = root / "leases"
     output = site._run_session_command(
@@ -345,7 +347,7 @@ class SessionInfo:
     status: Optional[dict] = field(default=None, repr=False, compare=False)
 
 
-def list_sessions(site, reuse=None):
+def list_sessions(site: Any, reuse: Any = None) -> Any:
     """List the user's queued and running sessions on ``site``.
 
     Only Slurm jobs of the current user named like session allocations, and
@@ -355,7 +357,7 @@ def list_sessions(site, reuse=None):
     return _list_sessions(site, reuse_key(reuse)[0])
 
 
-def _list_sessions(site, key):
+def _list_sessions(site: Any, key: Any) -> Any:
     jobs = site._session_allocations()
     sessions = []
     for allocation_id, session_id in sorted(
@@ -406,7 +408,9 @@ def _list_sessions(site, key):
     return sessions
 
 
-def release_sessions(site, reuse=None, *, include_attached=False):
+def release_sessions(
+    site: Any, reuse: Any = None, *, include_attached: Any = False
+) -> Any:
     """End the user's idle sessions on ``site``; return the released ones.
 
     ``reuse`` limits this to sessions started with that reuse scope; ``None``
@@ -481,21 +485,21 @@ class AllocationSession(BaseSite):
 
     def __init__(
         self,
-        site,
+        site: Any,
         *,
-        workers=None,
-        lease_timeout=300.0,
-        startup_timeout=1800.0,
-        cleanup_timeout=None,
-        heartbeat_timeout="auto",
-        session_command_timeout="auto",
-        session_id=None,
-        reuse=None,
-        linger=0,
-        share=False,
-        min_time_left=DEFAULT_MIN_TIME_LEFT,
-        **resources,
-    ):
+        workers: Any = None,
+        lease_timeout: Any = 300.0,
+        startup_timeout: Any = 1800.0,
+        cleanup_timeout: Any = None,
+        heartbeat_timeout: Any = "auto",
+        session_command_timeout: Any = "auto",
+        session_id: Any = None,
+        reuse: Any = None,
+        linger: Any = 0,
+        share: Any = False,
+        min_time_left: Any = DEFAULT_MIN_TIME_LEFT,
+        **resources: Any,
+    ) -> None:
         self.base_site = site
         self.session_id = self._id(session_id or uuid4().hex)
         self._new_session_id = self.session_id
@@ -537,11 +541,11 @@ class AllocationSession(BaseSite):
             session_command_timeout, "session_command_timeout"
         )
         self.resources = resources
-        self.generation = None
-        self.allocation_id = None
-        self._config = None
-        self._handles = {}
-        self._jobs = {}
+        self.generation: str | None = None
+        self.allocation_id: str | None = None
+        self._config: Any = None
+        self._handles: dict[str, RunHandle] = {}
+        self._jobs: dict[str, Any] = {}
         self._closed = False
         self._ready = False
         self._client_id = uuid4().hex
@@ -552,25 +556,25 @@ class AllocationSession(BaseSite):
         self._lease_lock = threading.Lock()
         self._lease_sequence = 0
         self._lease_revoked = False
-        self._lease_thread = None
+        self._lease_thread: threading.Thread | None = None
         self._state_lock = threading.Lock()
-        self._slurm_checked_at = None
+        self._slurm_checked_at: float | None = None
         self._slurm_state = "unknown"
-        self._controller_state = None
-        self._heartbeat_token = None
-        self._heartbeat_seen_at = None
+        self._controller_state: Any = None
+        self._heartbeat_token: Any = None
+        self._heartbeat_seen_at: float | None = None
         self._stale_observations = 0
-        self._stale_observed_at = None
-        self._last_close_status = None
+        self._stale_observed_at: float | None = None
+        self._last_close_status: Any = None
         self.verbose = getattr(site, "verbose", False)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: Any) -> Any:
         # Transfers, fetches, cache cleanup and configuration keep the base
         # site's paths and credentials. Execution methods are overridden here.
         return getattr(self.base_site, name)
 
     @staticmethod
-    def _id(value):
+    def _id(value: Any) -> Any:
         value = str(value)
         if len(value) != 32 or any(c not in "0123456789abcdef" for c in value):
             raise ValueError(
@@ -579,13 +583,13 @@ class AllocationSession(BaseSite):
         return value
 
     @staticmethod
-    def _seconds(value, name):
+    def _seconds(value: Any, name: Any) -> Any:
         value = float(value)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and greater than zero")
         return value
 
-    def _heartbeat_window(self, value):
+    def _heartbeat_window(self, value: Any) -> Any:
         if isinstance(value, str):
             if value != "auto":
                 raise ValueError("heartbeat_timeout must be seconds, None or 'auto'")
@@ -598,7 +602,7 @@ class AllocationSession(BaseSite):
             return self._seconds(configured, "scheduler_heartbeat_timeout")
         return None if value is None else self._seconds(value, "heartbeat_timeout")
 
-    def _warn_if_short_window(self):
+    def _warn_if_short_window(self) -> Any:
         window = self.heartbeat_timeout
         if window is not None and window < _SHORT_HEARTBEAT_WINDOW:
             logger.warning(
@@ -611,30 +615,30 @@ class AllocationSession(BaseSite):
                 _SHORT_HEARTBEAT_WINDOW,
             )
 
-    def _identity(self):
+    def _identity(self) -> Any:
         return f"session {self.session_id} (Slurm allocation {self.allocation_id})"
 
-    def _session_root(self, session_id):
+    def _session_root(self, session_id: Any) -> Any:
         return self.base_site.work_dir / ".fs_sessions" / session_id
 
     @property
-    def controller_log(self):
+    def controller_log(self) -> Any:
         """Remote path of the allocation controller's log (stdout and stderr)."""
         return self.root / "controller.log"
 
-    def _login(self, command, *, action, path):
+    def _login(self, command: Any, *, action: Any, path: Any) -> Any:
         return self.base_site._run_session_command(
             command, timeout=self.command_timeout, action=action, path=path
         )
 
-    def _read(self, path):
+    def _read(self, path: Any) -> Any:
         return self.base_site._read_remote_json(path)
 
-    def _text(self, text, destination):
+    def _text(self, text: Any, destination: Any) -> Any:
         with temporary_text_file(text, suffix=".json", prefix="fs-session-") as local:
             self.base_site.put(local, destination)
 
-    def _publish(self, path, payload, *, immutable=False):
+    def _publish(self, path: Any, payload: Any, *, immutable: Any = False) -> Any:
         text = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
         temporary = path.parent / f".{uuid4().hex}.partial"
         self._text(text, temporary)
@@ -661,7 +665,7 @@ class AllocationSession(BaseSite):
         if existing != payload:
             raise ValueError("request id already belongs to different work")
 
-    def _renew(self, *, revoke=False):
+    def _renew(self, *, revoke: Any = False) -> Any:
         # The controller times renewals with its own monotonic clock: any new
         # ``sequence`` counts, so client/controller clock skew is irrelevant.
         # ``expires_at`` is informational (and 0 revokes for older readers).
@@ -687,7 +691,7 @@ class AllocationSession(BaseSite):
             )
             self._lease_revoked = revoke
 
-    def _keep_alive(self):
+    def _keep_alive(self) -> Any:
         while not self._stop.wait(min(10.0, self.lease_timeout / 3)):
             try:
                 self._renew()
@@ -697,7 +701,7 @@ class AllocationSession(BaseSite):
                 logger.debug("Lease renewal for %s failed: %s", self._identity(), error)
                 continue
 
-    def _start_lease(self):
+    def _start_lease(self) -> Any:
         self._renew()
         self._lease_thread = threading.Thread(
             target=self._keep_alive,
@@ -706,7 +710,7 @@ class AllocationSession(BaseSite):
         )
         self._lease_thread.start()
 
-    def _end_lease(self, *, revoke):
+    def _end_lease(self, *, revoke: Any) -> Any:
         self._stop.set()
         if self._lease_thread is not None:
             self._lease_thread.join(timeout=1)
@@ -719,7 +723,7 @@ class AllocationSession(BaseSite):
                     "Could not revoke the lease of %s: %s", self._identity(), error
                 )
 
-    def start(self):
+    def start(self) -> Any:
         """Submit once, adopt a reusable session, or attach; renew the lease."""
         with self._lock:
             if self._closed:
@@ -749,7 +753,7 @@ class AllocationSession(BaseSite):
             self._submit_allocation(planned, plan)
             return self
 
-    def _load(self, config=None):
+    def _load(self, config: Any = None) -> Any:
         """Read an existing session's configuration and allocation id."""
         self._config = config or self._read(self.root / "config.json")
         metadata = self._read(self.root / "allocation.json")
@@ -764,7 +768,7 @@ class AllocationSession(BaseSite):
             mem_cushion=scheduler["mem_cushion"],
         )
 
-    def _plan(self):
+    def _plan(self) -> Any:
         """Resolve and validate a new allocation's configuration, locally."""
         site = self.base_site
         config, extra = site.run_config.resolved(site.config, **self.resources)
@@ -847,7 +851,7 @@ class AllocationSession(BaseSite):
         )
         return planned, plan
 
-    def _submit_allocation(self, planned, plan):
+    def _submit_allocation(self, planned: Any, plan: Any) -> Any:
         """Create the session directory and submit its batch job."""
         site = self.base_site
         self.generation = uuid4().hex
@@ -864,7 +868,7 @@ class AllocationSession(BaseSite):
         )
         self._text(json.dumps(self._config), self.root / "config.json")
         directory = files("frequensolve.orchestrator.sites.hpc").joinpath(
-            "templates", "sweep"
+            "templates/sweep"
         )
         for name in ("adaptive_scheduler.py", "session_controller.py"):
             with as_file(directory.joinpath(name)) as source:
@@ -911,7 +915,7 @@ class AllocationSession(BaseSite):
 
     # -- reuse ----------------------------------------------------------------
 
-    def _adopt(self, planned):
+    def _adopt(self, planned: Any) -> Any:
         """Take over a compatible session started with the same reuse scope."""
         site = self.base_site
         try:
@@ -948,7 +952,7 @@ class AllocationSession(BaseSite):
                 return True
         return False
 
-    def _unsuitable(self, info, planned):
+    def _unsuitable(self, info: Any, planned: Any) -> Any:
         """Return why a candidate session cannot take this work, or None."""
         if info.state not in {"pending", "starting", "ready"}:
             return f"its controller is {info.state}"
@@ -980,7 +984,7 @@ class AllocationSession(BaseSite):
                 )
         return None
 
-    def _attached(self, info, *, observe=True):
+    def _attached(self, info: Any, *, observe: Any = True) -> Any:
         """Return ``(live, seen)`` client ids of a candidate session's leases.
 
         With a running controller, liveness is as in :func:`_live_leases`.
@@ -1015,7 +1019,7 @@ class AllocationSession(BaseSite):
         }
         return live, seen | set(again)
 
-    def _claim(self, info, seen):
+    def _claim(self, info: Any, seen: Any) -> Any:
         """Adopt ``info``; back off if another client adopts it at once."""
         self.session_id = info.session_id
         self.root = self._session_root(info.session_id)
@@ -1067,7 +1071,7 @@ class AllocationSession(BaseSite):
         )
         return True
 
-    def _confirm_adoption(self):
+    def _confirm_adoption(self) -> Any:
         """Wait for a running controller to list this client; False if it ended."""
         deadline = time.monotonic() + _ADOPT_CONFIRM_TIMEOUT
         while True:
@@ -1083,7 +1087,7 @@ class AllocationSession(BaseSite):
                 return True
             time.sleep(0.5)
 
-    def _abandon(self):
+    def _abandon(self) -> Any:
         """Drop an unsuccessful claim, leaving the candidate session as it was."""
         self._end_lease(revoke=True)
         self._stop = threading.Event()
@@ -1093,7 +1097,7 @@ class AllocationSession(BaseSite):
         self.root = self._session_root(self.session_id)
         self._config = self.generation = self.allocation_id = None
 
-    def wait_ready(self, timeout=None):
+    def wait_ready(self, timeout: Any = None) -> Any:
         """Wait for controller readiness, not merely SLURM RUNNING status."""
         self.start()
         deadline = time.monotonic() + (
@@ -1111,7 +1115,7 @@ class AllocationSession(BaseSite):
             time.sleep(_POLL_INTERVAL)
         raise TimeoutError("timed out waiting for persistent allocation readiness")
 
-    def __enter__(self):
+    def __enter__(self) -> Any:
         try:
             return self.wait_ready()
         except BaseException as error:
@@ -1136,7 +1140,7 @@ class AllocationSession(BaseSite):
                 )
             raise
 
-    def __exit__(self, exc_type, exc, traceback):
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> Any:
         try:
             self.close(drain=exc_type is None)
         except Exception as error:
@@ -1164,7 +1168,7 @@ class AllocationSession(BaseSite):
                 )
         return False
 
-    def _observe_heartbeat(self, payload):
+    def _observe_heartbeat(self, payload: Any) -> Any:
         """Record one successful heartbeat read (caller holds ``_state_lock``)."""
         now = time.monotonic()
         token = (
@@ -1180,6 +1184,7 @@ class AllocationSession(BaseSite):
             return
         if (
             self.heartbeat_timeout is None
+            or self._heartbeat_seen_at is None
             or now - self._heartbeat_seen_at < self.heartbeat_timeout
         ):
             return
@@ -1190,7 +1195,7 @@ class AllocationSession(BaseSite):
             self._stale_observations += 1
             self._stale_observed_at = now
 
-    def status(self):
+    def status(self) -> Any:
         """Return allocation and controller state, including its heartbeat.
 
         The controller is reported lost (``state="failed"``,
@@ -1215,7 +1220,7 @@ class AllocationSession(BaseSite):
                 payload = self._controller_state
             stale = (
                 time.monotonic() - self._heartbeat_seen_at
-                if self._stale_observations >= 2
+                if self._stale_observations >= 2 and self._heartbeat_seen_at is not None
                 else None
             )
         if payload and payload.get("state") == "failed":
@@ -1248,7 +1253,7 @@ class AllocationSession(BaseSite):
             }
         return payload
 
-    def _require_ready(self):
+    def _require_ready(self) -> Any:
         if self._closed or not self._ready:
             raise RuntimeError(
                 "enter the allocation session or call wait_ready() before submitting"
@@ -1257,7 +1262,7 @@ class AllocationSession(BaseSite):
         if status.get("state") != "ready":
             raise RuntimeError(f"allocation session is unavailable: {status}")
 
-    def _command(self, kind, **payload):
+    def _command(self, kind: Any, **payload: Any) -> Any:
         command_id = uuid4().hex
         self._publish(
             self.root / "commands" / f"{command_id}.json",
@@ -1267,8 +1272,15 @@ class AllocationSession(BaseSite):
         return command_id
 
     def _submit_request(
-        self, request, job, *, request_id=None, fetch=False, check=False, task_plan=None
-    ):
+        self,
+        request: Any,
+        job: Any,
+        *,
+        request_id: Any = None,
+        fetch: Any = False,
+        check: Any = False,
+        task_plan: Any = None,
+    ) -> Any:
         progress_not_before = int(time.time())
         run_id = self._id(request_id or uuid4().hex)
         self._publish(
@@ -1290,7 +1302,15 @@ class AllocationSession(BaseSite):
         self._handles[run_id] = handle
         return handle
 
-    def _run_handle(self, job, run_id, *, fetch=False, check=False, task_plan=None):
+    def _run_handle(
+        self,
+        job: Any,
+        run_id: Any,
+        *,
+        fetch: Any = False,
+        check: Any = False,
+        task_plan: Any = None,
+    ) -> Any:
         return RunHandle(
             site=self,
             job=job,
@@ -1312,7 +1332,7 @@ class AllocationSession(BaseSite):
             ),
         )
 
-    def _resume(self, job, *, fresh, fetch, check):
+    def _resume(self, job: Any, *, fresh: Any, fetch: Any, check: Any) -> Any:
         """Return a handle to this job's run that an earlier client left running.
 
         The job's run record names the session run. ``fresh`` cancels that run
@@ -1344,8 +1364,15 @@ class AllocationSession(BaseSite):
         return handle
 
     def submit(
-        self, job, *, check=False, fetch=False, force=False, request_id=None, **options
-    ):
+        self,
+        job: Any,
+        *,
+        check: Any = False,
+        fetch: Any = False,
+        force: Any = False,
+        request_id: Any = None,
+        **options: Any,
+    ) -> Any:
         """Queue work in this allocation; return an independently cancellable run."""
         with self._lock:
             self._require_ready()
@@ -1484,7 +1511,7 @@ class AllocationSession(BaseSite):
             self._jobs[str(getattr(job, "job_file", job.name))] = run
             return run
 
-    def _poll(self, run):
+    def _poll(self, run: Any) -> Any:
         payload = self._read(self.root / "runs" / str(run.id) / "status.json")
         if (
             payload
@@ -1523,15 +1550,15 @@ class AllocationSession(BaseSite):
             raw=raw,
         )
 
-    def _finalize(self, run, status):
+    def _finalize(self, run: Any, status: Any) -> Any:
         self.base_site._finalize_run_record(run, status)
         return run._make_result(status)
 
-    def cancel_job(self, job_id):
+    def cancel_job(self, job_id: Any) -> Any:
         self._command("cancel", run_id=self._id(job_id))
         return True
 
-    def handle(self, job, job_id=None, *, mode="session"):
+    def handle(self, job: Any, job_id: Any = None, mode: Any = "session") -> Any:
         """Reattach a handle by its session run id, including after reconnect."""
         if job_id is None:
             record = job.latest_run(site=self.site_name)
@@ -1549,19 +1576,19 @@ class AllocationSession(BaseSite):
             _finalize_fn=self._finalize,
         )
 
-    def remove_result_files(self, job, relative_paths):
+    def remove_result_files(self, job: Any, relative_paths: Any) -> Any:
         return self.base_site.remove_result_files(job, relative_paths)
 
-    def fetch_logs(self, job, **options):
+    def fetch_logs(self, job: Any, **options: Any) -> Any:
         return self.base_site.fetch_logs(job, **options)
 
-    def fetch_wavefields(self, job, **options):
+    def fetch_wavefields(self, job: Any, **options: Any) -> Any:
         return self.base_site.fetch_wavefields(job, **options)
 
-    def remove_curvature_files(self, *args, **kwargs):
+    def remove_curvature_files(self, *args: Any, **kwargs: Any) -> Any:
         return self.base_site.remove_curvature_files(*args, **kwargs)
 
-    def run_curvature(self, request, **options):
+    def run_curvature(self, request: Any, **options: Any) -> Any:
         """Stage curvature inputs and schedule through the same resource ledger."""
         self._require_ready()
         mode = options.pop("mode", "auto")
@@ -1574,7 +1601,7 @@ class AllocationSession(BaseSite):
         runner.workdir = path.parent.parent
         runner.root = runner.remote_root(runner.workdir)
         directory = runner._remote(path.parent)
-        staged = {}
+        staged: dict[Path, Any] = {}
         for key in FILE_KEYS:
             if key != "output" and key in local:
                 runner._collect(
@@ -1614,7 +1641,7 @@ class AllocationSession(BaseSite):
         site.get(directory / "solver.log", path.parent / "solver.log")
         site.get(remote_output, Path(local["output"]).absolute())
 
-    def close(self, *, drain=True):
+    def close(self, *, drain: Any = True) -> Any:
         """Idempotent cleanup; borrowed sessions only detach.
 
         An owned session publishes ``close`` and waits for its controller.
@@ -1653,7 +1680,7 @@ class AllocationSession(BaseSite):
         finally:
             self._end_lease(revoke=not keep_lease)
 
-    def release(self, *, drain=True):
+    def release(self, *, drain: Any = True) -> Any:
         """End the allocation now, including work other clients submitted.
 
         Also works after :meth:`close`, for example on a lingering session
@@ -1675,7 +1702,7 @@ class AllocationSession(BaseSite):
         finally:
             self._end_lease(revoke=not keep_lease)
 
-    def _other_clients(self):
+    def _other_clients(self) -> Any:
         """Count other attached clients, as the controller or leases report."""
         try:
             status = self._read(self.root / "status.json")
@@ -1690,7 +1717,7 @@ class AllocationSession(BaseSite):
             status = None
         return len(_live_leases(leases, status) - {self._client_id})
 
-    def _detach(self, drain, others):
+    def _detach(self, drain: Any, others: Any) -> Any:
         """Leave the allocation to other clients or to its ``linger``."""
         unfinished = [
             handle
@@ -1735,7 +1762,7 @@ class AllocationSession(BaseSite):
             )
         self.base_site._emit(message, force=True)
 
-    def _await_own_runs(self, handles):
+    def _await_own_runs(self, handles: Any) -> Any:
         """Wait (up to ``cleanup_timeout``) for runs; return those still running."""
         started = time.monotonic()
         announced = False
@@ -1757,7 +1784,7 @@ class AllocationSession(BaseSite):
                 announced = True
             time.sleep(min(2.0, _POLL_INTERVAL + elapsed / 30))
 
-    def _release(self, drain, *, only_if_unshared=False):
+    def _release(self, drain: Any, *, only_if_unshared: Any = False) -> Any:
         """Close the owned allocation; return True when it is left running."""
         outcome, error = None, None
         try:
@@ -1822,7 +1849,7 @@ class AllocationSession(BaseSite):
         warnings.warn(message, RuntimeWarning, stacklevel=4)
         return True
 
-    def _await_close(self, drain, *, command_id=None):
+    def _await_close(self, drain: Any, *, command_id: Any = None) -> Any:
         """Wait for closure, deferral to another client, or a bounded failure."""
         cap = self.cleanup_timeout
         if cap is None and not drain:
@@ -1863,7 +1890,7 @@ class AllocationSession(BaseSite):
             # Long drains poll gently; each poll is a remote read.
             time.sleep(min(2.0, _POLL_INTERVAL + elapsed / 30))
 
-    def _allocation_ended(self):
+    def _allocation_ended(self) -> Any:
         """Wait briefly for Slurm to report the closed controller's job ended."""
         deadline = time.monotonic() + _EXIT_GRACE
         while True:
@@ -1877,7 +1904,7 @@ class AllocationSession(BaseSite):
                 return False
             time.sleep(0.5)
 
-    def _cancel_allocation(self, *, best_effort):
+    def _cancel_allocation(self, *, best_effort: Any) -> Any:
         """``scancel``; ``best_effort`` logs failures instead of raising."""
         try:
             self.base_site.cancel_job(self.allocation_id)

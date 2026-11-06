@@ -35,33 +35,37 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from adaptive_scheduler import (
-    AdaptiveScheduler,
-    _allocate_interval,
-    _free_interval,
-    _write_json_atomic,
-    step_failure_reason,
-    validate_sizing_checkpoint,
-    write_gpu_place_script,
-)
+if TYPE_CHECKING:
+    from frequensolve.orchestrator.sites.hpc.templates.sweep import adaptive_scheduler
+else:
+    import adaptive_scheduler
+
+AdaptiveScheduler = adaptive_scheduler.AdaptiveScheduler
+_allocate_interval = adaptive_scheduler._allocate_interval
+_free_interval = adaptive_scheduler._free_interval
+_write_json_atomic = adaptive_scheduler._write_json_atomic
+step_failure_reason = adaptive_scheduler.step_failure_reason
+validate_sizing_checkpoint = adaptive_scheduler.validate_sizing_checkpoint
+write_gpu_place_script = adaptive_scheduler.write_gpu_place_script
 
 TERMINAL = {"complete", "failed", "cancelled", "timeout"}
 PROCESSED = "processed"
 
 
 class SessionController:
-    def __init__(self, root, config):
+    def __init__(self, root: Any, config: Any) -> None:
         self.root = Path(root)
         self.config = config
         self.generation = config["generation"]
         self.total = int(config["total_ranks"])
         self.free = [(0, self.total)]
-        self.runs = {}
-        self.running = []
-        self.seen_commands = set()
+        self.runs: dict[str, Any] = {}
+        self.running: list[Any] = []
+        self.seen_commands: set[str] = set()
         self.closing = False
-        self.stop_reason = None
+        self.stop_reason: str | None = None
         self.started = time.monotonic()
         self.interval = float(config.get("poll_interval", 0.2))
         self.progress_at = time.monotonic()
@@ -75,23 +79,23 @@ class SessionController:
         self._heartbeat_stop = threading.Event()
         # Lease file -> (renewal token, local monotonic time it was first
         # seen, revoked, timeout).
-        self.leases = {}
-        self.lease_checked_at = None
+        self.leases: dict[str, Any] = {}
+        self.lease_checked_at: float | None = None
         # Live client ids (lease file stems) and the lease sequence last read
         # for every client, published in every heartbeat. A client whose
         # lease sequence differs has renewed since and is live too.
-        self.clients = []
-        self.lease_sequences = {}
-        self.lease_lingers = {}
+        self.clients: list[str] = []
+        self.lease_sequences: dict[str, Any] = {}
+        self.lease_lingers: dict[str, Any] = {}
         self.linger = max(0.0, float(config.get("linger") or 0.0))
         # Monotonic time since which no client is attached and nothing runs.
-        self.idle_since = None
+        self.idle_since: float | None = None
         for name in ("leases", "runs"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         for name in ("requests", "commands"):
             (self.root / name / PROCESSED).mkdir(parents=True, exist_ok=True)
 
-    def _status(self, run, state=None, reason=None):
+    def _status(self, run: Any, state: Any = None, reason: Any = None) -> Any:
         if state is not None:
             run["state"] = state
         if reason is not None:
@@ -128,7 +132,7 @@ class SessionController:
             _write_json_atomic(Path(run["logs"]) / "scheduler_status.json", payload)
         run["_published"] = content
 
-    def _controller_status(self, state=None):
+    def _controller_status(self, state: Any = None) -> Any:
         """Publish one heartbeat; ``sequence`` advances on every write."""
         with self._heartbeat_lock:
             if state is not None:
@@ -164,14 +168,14 @@ class SessionController:
                 },
             )
 
-    def _beat(self):
+    def _beat(self) -> Any:
         while not self._heartbeat_stop.wait(self.heartbeat_interval):
             try:
                 self._controller_status()
             except Exception as error:  # a slow or full filesystem is not fatal
                 print(f"Controller heartbeat write failed: {error}", flush=True)
 
-    def _archive(self, path):
+    def _archive(self, path: Any) -> Any:
         """Move a processed request/command out of the polled directory."""
         target = path.parent / PROCESSED / path.name
         try:
@@ -184,7 +188,7 @@ class SessionController:
         except OSError:
             pass  # retried on the next tick
 
-    def _admit(self, path):
+    def _admit(self, path: Any) -> Any:
         request = json.loads(path.read_text())
         run_id = path.stem
         if len(run_id) != 32 or any(c not in "0123456789abcdef" for c in run_id):
@@ -290,7 +294,7 @@ class SessionController:
         except (ValueError, TypeError, KeyError, SystemExit) as error:
             self._status(run, "failed", str(error))
 
-    def _receive(self):
+    def _receive(self) -> Any:
         for path in sorted((self.root / "requests").glob("*.json")):
             if path.stem not in self.runs:
                 try:
@@ -311,7 +315,7 @@ class SessionController:
             self._process_command(path)
             self._archive(path)
 
-    def _process_command(self, path):
+    def _process_command(self, path: Any) -> Any:
         try:
             command = json.loads(path.read_text())
             if command.get("generation") != self.generation:
@@ -342,7 +346,7 @@ class SessionController:
         except (ValueError, KeyError, OSError):
             return
 
-    def _prefix(self, ranks, offset):
+    def _prefix(self, ranks: Any, offset: Any) -> Any:
         prefix = self._launcher(ranks, offset)
         gpus = int(self.config.get("gpus_per_node", 0))
         if gpus > 0 and Path(prefix[0]).name == "ibrun":
@@ -357,7 +361,7 @@ class SessionController:
             ]
         return prefix
 
-    def _launcher(self, ranks, offset):
+    def _launcher(self, ranks: Any, offset: Any) -> Any:
         options = self.config["scheduler"]
         mpi = options["mpi"]
         name = Path(mpi).name
@@ -392,7 +396,7 @@ class SessionController:
             ]
         return args
 
-    def _launch(self, run, step, ranks):
+    def _launch(self, run: Any, step: Any, ranks: Any) -> Any:
         # Generic MPI launchers lack an offset/step isolation mechanism.
         reserve = (
             self.total
@@ -480,7 +484,7 @@ class SessionController:
         self._status(run, "running")
         return True
 
-    def _stop_process(self, entry):
+    def _stop_process(self, entry: Any) -> Any:
         process = entry["process"]
         if process.poll() is not None:
             return
@@ -503,7 +507,9 @@ class SessionController:
                 pass
             process.wait(timeout=2)
 
-    def _cancel(self, run, state="cancelled", reason="Cancelled by client"):
+    def _cancel(
+        self, run: Any, state: Any = "cancelled", reason: Any = "Cancelled by client"
+    ) -> Any:
         if run["state"] in TERMINAL:
             return
         for entry in list(self.running):
@@ -514,7 +520,7 @@ class SessionController:
                 self.running.remove(entry)
         self._status(run, state, reason)
 
-    def _finished(self, entry, code):
+    def _finished(self, entry: Any, code: Any) -> Any:
         run, step = entry["run"], entry["step"]
         run["rows"].append(
             {
@@ -584,7 +590,7 @@ class SessionController:
         elif step == "smooth":
             run["phase"] = "pack"
 
-    def tick(self):
+    def tick(self) -> Any:
         self._receive()
         for entry in list(self.running):
             if entry not in self.running:
@@ -656,11 +662,11 @@ class SessionController:
         if state != self.state:
             self._controller_status(state)  # publish transitions immediately
 
-    def _lease_alive(self):
+    def _lease_alive(self) -> Any:
         """Return whether any client renewed its lease within its timeout."""
         return bool(self._live_clients())
 
-    def _live_clients(self):
+    def _live_clients(self) -> Any:
         """Return the ids of clients that renewed their leases within timeout.
 
         A renewal is any change of the lease's ``sequence`` (or, for older
@@ -708,7 +714,7 @@ class SessionController:
             self.linger = max(lingers)
         return sorted(Path(name).stem for name in live)
 
-    def _check_clients(self):
+    def _check_clients(self) -> Any:
         """Track attached clients; end the session when none remain.
 
         Without a client, ``linger`` 0 keeps the original rule: outstanding
@@ -732,7 +738,7 @@ class SessionController:
         elif now - self.idle_since >= self.linger:
             self.stop_reason = f"no client attached for {self.linger:g} s (linger)"
 
-    def _lease_check_due(self):
+    def _lease_check_due(self) -> Any:
         # Leases renew every few seconds; listing them every tick only adds
         # metadata load on a shared filesystem.
         now = time.monotonic()
@@ -742,7 +748,7 @@ class SessionController:
         self.lease_checked_at = now
         return True
 
-    def run(self):
+    def run(self) -> Any:
         # A second controller cannot accidentally execute the same requests.
         with (self.root / "controller.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -806,7 +812,7 @@ class SessionController:
             self._controller_status("closed")
 
 
-def main():
+def main() -> Any:
     # Fatal signals (SIGSEGV, SIGABRT, SIGBUS, ...) dump every thread's Python
     # traceback to stderr, which Slurm writes to controller.log.
     faulthandler.enable(all_threads=True)
@@ -835,7 +841,7 @@ def main():
     # client's liveness window (slow shared filesystems stall for minutes).
     stall_seconds = float(config.get("heartbeat_timeout") or 300.0)
 
-    def diagnose_stall():
+    def diagnose_stall() -> Any:
         reported = False
         while True:
             time.sleep(5)
@@ -849,7 +855,7 @@ def main():
 
     threading.Thread(target=diagnose_stall, daemon=True).start()
 
-    def stop(signum, _frame):
+    def stop(signum: Any, _frame: Any) -> Any:
         controller.stop_reason = (
             "walltime" if signum == signal.SIGUSR1 else "allocation cancelled"
         )

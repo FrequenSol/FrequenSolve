@@ -2457,7 +2457,7 @@ class SourceEncoding(ExtraFieldsMixin):
             )
         return payload
 
-    def _to_fs_weights(self, ctx=None):
+    def _to_fs_weights(self, ctx: Any = None) -> Any:
         self.validate_dense_shape()
         store = getattr(ctx, "store", None) if ctx is not None else None
         if self.encoding_type == "FrequencyDense":

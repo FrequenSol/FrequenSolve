@@ -300,12 +300,12 @@ class SlurmTransferManager:
         remember: bool,
     ) -> List[PurePosixPath]:
         targets: Dict[PurePosixPath, Path] = {}
-        for local, remote in pairs:
+        for local, remote_input in pairs:
             local_path = Path(local)
             if not _wait_for_path(local_path):
                 logger.error("Local path %s does not exist", local_path)
                 raise FileNotFoundError(f"Local path {local_path} does not exist")
-            targets[_validated_remote_path(remote)] = local_path
+            targets[_validated_remote_path(remote_input)] = local_path
 
         directories = [
             (local, remote) for remote, local in targets.items() if local.is_dir()
@@ -337,7 +337,7 @@ class SlurmTransferManager:
                 if signature is not None:
                     self._record_staged(local, remote, signature)
         for local, remote in directories:
-            self.put(local, remote, compress=compress)
+            self.put(local, Path(remote), compress=compress)
 
         logger.debug(
             "Batched upload sent %d file(s) and %d directory(ies); %d already staged",

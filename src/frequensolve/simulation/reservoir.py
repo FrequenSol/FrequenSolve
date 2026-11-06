@@ -424,7 +424,7 @@ class InjectionStream:
             object.__setattr__(self, "composition", tuple(self.composition))
 
     def to_fs(self) -> dict:
-        payload = {"name": self.name, "phase": self.phase}
+        payload: dict[str, Any] = {"name": self.name, "phase": self.phase}
         if self.pressure is not None:
             payload["pressure"] = _emit(self.pressure)
         if self.composition is not None:
@@ -481,7 +481,7 @@ class SchedulePhase:
             raise ValueError("An injecting phase requires a stream")
 
     def to_fs(self) -> dict:
-        payload = {"name": self.name} if self.name is not None else {}
+        payload: dict[str, Any] = {"name": self.name} if self.name is not None else {}
         payload.update(duration=_emit(self.duration), rate=_emit(self.rate))
         if self.stream is not None:
             payload["stream"] = self.stream
@@ -597,7 +597,9 @@ class ReservoirModel:
         payload["temperature"] = _emit(self.temperature)
         if self.gravity is not None:
             payload["gravity"] = _emit(self.gravity)
-        subdomain = {"name": self.geology_name} if self.geology_name is not None else {}
+        subdomain: dict[str, Any] = (
+            {"name": self.geology_name} if self.geology_name is not None else {}
+        )
         subdomain.update(
             mesh_block_id=1,
             physics="reservoir:compositional",

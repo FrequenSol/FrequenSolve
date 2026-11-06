@@ -280,7 +280,7 @@ when the model is not unitless:
    model.add_fracture("frac", depth=500.0 * fs.ureg.m, gap=gap)
 
 Reduced Cased Borehole Fluid
----------------------------
+------------------------------
 
 For 3D coupled transient Galerkin jobs, set
 ``LayeredModel(..., borehole_reduction="tube")`` to replace the fluid volumes

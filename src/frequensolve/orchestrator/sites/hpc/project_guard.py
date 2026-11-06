@@ -9,6 +9,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 MARKER = ".frequensolve-project.json"
 SCHEMA = "frequensolve-remote-project-1"
@@ -23,7 +24,7 @@ def claim_project(root: Path, source: str) -> None:
     marker = root / MARKER
     expected = {"schema": SCHEMA, "source_project": source}
 
-    def verify():
+    def verify() -> Any:
         actual = json.loads(marker.read_text())
         if actual != expected:
             owner = (
@@ -86,7 +87,7 @@ def claim_project(root: Path, source: str) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
-def main():
+def main() -> Any:
     """Return a machine-readable claim result to the submitting client."""
     import sys
 

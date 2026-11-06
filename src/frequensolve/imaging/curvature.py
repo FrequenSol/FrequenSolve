@@ -743,7 +743,7 @@ class NativeCurvature:
         for key in ("method", "state", "coordinates"):
             if result.get(key) != metadata[key]:
                 raise ValueError(f"Sauce curvature result has mismatched {key}")
-        reported = dict(input_digests=staged)
+        reported: dict[str, Any] = dict(input_digests=staged)
         if factors is not None:
             reported["factors_digests"] = None
         if method in _FACTOR_METHODS or method == "coarse_factor":
