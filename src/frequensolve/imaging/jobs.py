@@ -1660,7 +1660,11 @@ class FWIOperatorJob(_ImagingJobBase):
                 action in {"jvp", "normal"}
                 and self.kernel_derivative.get("source_derivative") == "total"
                 and spectral_order > 1
-                and not (kinds and kinds <= {"phase_derivative", "spectral_derivative"})
+                and not (
+                    kinds
+                    and kinds
+                    <= {"phase_derivative", "spectral_derivative", "wavenumber"}
+                )
             ):
                 raise ValueError(
                     "higher-order spectral JVP/normal actions of a waveform series require "
@@ -3015,13 +3019,14 @@ class ControlGradientJob(_ImagingJobBase):
                 raise ValueError(
                     "total Gram derivatives do not support source_taper or spatial_window"
                 )
-            if {"phase_derivative", "spectral_derivative"}.intersection(
+            if {"phase_derivative", "spectral_derivative", "wavenumber"}.intersection(
                 _misfit_comparison_kinds(
                     _misfit_to_fs(self.misfit, None, project_relative=False)
                 )
             ):
                 raise ValueError(
-                    "total Gram derivatives do not support phase_derivative or spectral_derivative comparisons"
+                    "total Gram derivatives do not support phase_derivative, spectral_derivative "
+                    "or wavenumber comparisons"
                 )
 
     def _validate_spectral_born(self) -> None:
@@ -3036,7 +3041,7 @@ class ControlGradientJob(_ImagingJobBase):
             raise ValueError(
                 "total-source spectral Born jets currently support order one"
             )
-        if {"phase_derivative", "spectral_derivative"}.intersection(
+        if {"phase_derivative", "spectral_derivative", "wavenumber"}.intersection(
             _misfit_comparison_kinds(
                 _misfit_to_fs(self.misfit, None, project_relative=False)
             )

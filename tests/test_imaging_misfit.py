@@ -140,6 +140,43 @@ def test_comparison_waveform_and_phase_derivative_round_trip():
         Comparison.from_fs({"kind": "phase_derivative", "derivative_axis": "laplace"})
 
 
+def test_comparison_wavenumber_round_trips_and_validates():
+    from frequensolve.imaging.synthetic_array import SyntheticArray
+
+    array = SyntheticArray.gaussian(sigma=u.Quantity(10.0, "m"))
+    plain = Comparison.wavenumber(source_derivative="total")
+    pooled = Comparison.wavenumber(
+        array=array, measure="slowness", max_spacing=u.Quantity(25.0, "m")
+    )
+
+    assert plain.to_fs() == {
+        "kind": "wavenumber",
+        "derivative_axis": "receiver_line",
+        "source_derivative": "total",
+        "relative_amplitude_floor": 0.01,
+        "measure": "wavenumber",
+    }
+    assert pooled.to_fs()["array"] == array.to_dict()
+    assert pooled.to_fs()["max_spacing_m"] == 25.0
+    assert pooled.requires_derivatives == ("df",)
+    for comparison in (plain, pooled):
+        assert Comparison.from_fs(comparison.to_fs()) == comparison
+    term = ObjectiveTerm("das", comparison=pooled, id="das.moveout")
+    assert ObjectiveTerm.from_fs(term.to_fs()) == term
+    with pytest.raises(ValueError, match="receiver_line"):
+        Comparison.from_fs({"kind": "wavenumber", "derivative_axis": "frequency"})
+    with pytest.raises(ValueError, match="measure"):
+        Comparison.wavenumber(measure="velocity")
+    with pytest.raises(ValueError, match="require a wavenumber"):
+        Comparison(kind="phase_derivative", measure="slowness")
+    with pytest.raises(TypeError, match="length units"):
+        Comparison.wavenumber(max_spacing=25.0)
+    with pytest.raises(ValueError, match="requires phase_derivative"):
+        Comparison(kind="wavenumber", source_delay="fit")
+    with pytest.raises(ValueError, match="reliability"):
+        Comparison(kind="wavenumber", array=array, reliability="predicted")
+
+
 def test_comparison_source_delay_fit_serializes_and_round_trips():
     plain = Comparison.phase_derivative(source_derivative="total")
     fitted = Comparison.phase_derivative(source_derivative="total", source_delay="FIT")

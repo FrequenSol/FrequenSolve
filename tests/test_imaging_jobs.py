@@ -941,6 +941,7 @@ def test_fwi_total_source_higher_order_tangents_need_phase(tmp_path, action):
 
     # A windowed phase mixes its total-source planes from frozen ones at any order.
     assert job("phase_derivative").kernel_derivative["source_derivative"] == "total"
+    assert job("wavenumber").kernel_derivative["source_derivative"] == "total"
     with pytest.raises(ValueError, match="waveform series require a frozen source"):
         job("waveform")
 
