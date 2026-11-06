@@ -3597,14 +3597,13 @@ class Linearization:
         """Run one ``normal`` job; its postprocess may apply ``regularization``."""
 
         if len(directions) > 1 and (
-            self.problem.kernel_derivative is not None
-            or self.problem._reflectivity() is not None
+            self.problem._reflectivity() is not None
             or any(
                 block.kind in {"source", "reflectivity"}
                 for block in self.space.resolved_blocks
             )
         ):
-            # Sauce applies several directions to material ordinary/phase normals only.
+            # Sauce applies several directions to material ordinary, phase and kernel_derivative normals only.
             parts = [self._normal_job([d], regularization) for d in directions]
             return [p[0][0] for p in parts], [i for p in parts for i in p[1]]
         directory = self._ops_dir()

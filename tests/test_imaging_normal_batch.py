@@ -125,6 +125,22 @@ def test_normal_matmat_applies_all_columns_in_one_job(tmp_path):
     assert len({path.name for path in job.covectors}) == 4
 
 
+def test_kernel_derivative_normals_share_one_job(tmp_path):
+    fake = FakeImagingSite(seed=11)
+    kernel = dict(order=1, residual="derivative", axis="fourier", source_derivative="frozen")
+    lin = _problem(tmp_path, fake).restrict(kernel_derivative=kernel).linearize()
+    directions = [lin.space.random(seed) for seed in (1, 2, 3)]
+
+    products = lin.apply_normal_batch(directions)
+
+    (job,) = _normal_jobs(fake)
+    assert len(job.directions) == 3 and job.kernel_derivative is not None
+    for direction, product in zip(directions, products):
+        np.testing.assert_allclose(
+            product.values, (lin.normal @ direction).values, rtol=1e-12
+        )
+
+
 def test_source_controls_keep_one_job_per_direction(tmp_path):
     fake = FakeImagingSite(seed=11)
     lin = _problem(tmp_path, fake, source=True).linearize()
