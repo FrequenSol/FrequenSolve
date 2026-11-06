@@ -19,7 +19,9 @@
         "dipole",
         "electric_current",
         "magnetic_current",
-        "magnetic_dipole"
+        "magnetic_dipole",
+        "pressure_monopole",
+        "isotropic_moment"
       ]
     },
     "complexCoefficient": {
@@ -54,7 +56,7 @@
         },
         "amplitude": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/quantity",
-          "description": "Optional source-strength multiplier. A number is dimensionless. An object with `value` is an exact physical source strength; omitted units default to m^3/s in every dimension for explicit acoustic volume_injection sources, N for vector sources, and N*m for seismic moment sources. volume_injection defaults to 1 m^3/s; its reciprocal measurement is pressure without density weighting. Existing seismic scalar/monopole sources retain N*m units and default strength 1e9. Planar 2D spreads Q over a fixed 1 m out-of-plane thickness (internal line rate Q / 1 m); metadata remains in m^3/s. Cartesian Maxwell electric_current strengths default to A*m in 3D and A per unit invariant length in 2D; magnetic_current uses V*m and V respectively. These are impressed current moments, not loop magnetic dipole moments. magnetic_dipole is a loop or coil moment (current times area, times turns) in A*m^2 in 3D and A*m per unit invariant length in 2D; its load is the equivalent magnetic current i*omega*mu0*m, so it is the one Maxwell point source with a frequency derivative."
+          "description": "Optional source-strength multiplier. A number is dimensionless. An object with `value` is an exact physical source strength; omitted units default to m^3/s in every dimension for explicit acoustic volume_injection sources, N for vector sources, and N*m for seismic moment sources. volume_injection defaults to 1 m^3/s; its reciprocal measurement is pressure without density weighting. Explicit isotropic_moment and legacy monopole sources retain N*m units and default strength 1e9. Acoustic/coupled scalar is an alias for pressure_monopole; elastic scalar remains an isotropic moment. Planar 2D spreads Q over a fixed 1 m out-of-plane thickness (internal line rate Q / 1 m); metadata remains in m^3/s. Cartesian Maxwell electric_current strengths default to A*m in 3D and A per unit invariant length in 2D; magnetic_current uses V*m and V respectively. These are impressed current moments, not loop magnetic dipole moments. magnetic_dipole is a loop or coil moment (current times area, times turns) in A*m^2 in 3D and A*m per unit invariant length in 2D; its load is the equivalent magnetic current i*omega*mu0*m, so it is the one Maxwell point source with a frequency derivative. Acoustic pressure_monopole amplitudes use m^3/s^2 (default 1). Their signature directly forces the second-order pressure equation; first-order frequency equations load S/(i*omega), requiring nonzero frequency. Planar 2D uses a fixed 1 m thickness. Use isotropic_moment with N*m amplitudes to recover the former acoustic scalar convention."
         },
         "mechanism": {
           "oneOf": [
@@ -115,6 +117,9 @@
             },
             "footprint": {
               "$ref": "#/$defs/forceFootprint"
+            },
+            "support": {
+              "$ref": "#/$defs/gaussianSupport"
             }
           }
         },
@@ -130,6 +135,14 @@
                 "const": "vector"
               }
             }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "support",
+              "footprint"
+            ]
           }
         }
       ]
@@ -225,7 +238,8 @@
           "type": "string"
         },
         "units": {
-          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units"
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/units",
+          "description": "Coordinate units. When omitted, a string units attribute on the coordinate dataset applies, then km. When both are present they must name the same unit."
         },
         "defaults": {
           "allOf": [
@@ -376,6 +390,9 @@
           "type": "boolean",
           "default": false,
           "description": "Conjugate all source coefficients in the runtime without rewriting authored storage."
+        },
+        "convolution": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/convolutionFilters"
         }
       },
       "additionalProperties": false
@@ -430,6 +447,9 @@
           "type": "boolean",
           "default": false,
           "description": "Conjugate all source coefficients in the runtime without rewriting authored storage."
+        },
+        "convolution": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/convolutionFilters"
         }
       },
       "additionalProperties": false
@@ -486,6 +506,9 @@
           ],
           "default": "frozen",
           "description": "Derivative policy for authored encoding coefficients. total requires frequency_derivative_dataset; frozen sets E_f to zero."
+        },
+        "convolution": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/convolutionFilters"
         }
       },
       "allOf": [
@@ -531,6 +554,16 @@
           "type": "string",
           "minLength": 1,
           "description": "Optional complex physical-Hz derivative q_f with the same shape as dataset. Required when spectral_derivative is total."
+        },
+        "higher_frequency_derivative_datasets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Optional raw physical-Hz derivatives of orders two and above (q_d2f, q_d3f, ...), in order, each with the same shape as dataset. Read only with spectral_derivative total; total-source spectral planes above first order, such as windowed phase objectives, need them through the hierarchy order."
         },
         "frequencies_dataset": {
           "type": "string",
@@ -1136,8 +1169,29 @@
           "description": "Optional imaginary part of the reference electric polarization."
         },
         "amplitude": {
-          "type": "number",
-          "default": 1.0
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "required": [
+                "value"
+              ],
+              "properties": {
+                "value": {
+                  "type": "number"
+                },
+                "units": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "default": 1.0,
+          "description": "Physical incident electric-field amplitude. A bare number is V/m; an object may name any electric-field unit."
         },
         "phase": {
           "type": "number",
@@ -1987,6 +2041,76 @@
       },
       "additionalProperties": false,
       "description": "Cached analytic fast/slow Biot P waves applied through Cartesian poroelastic impedance boundaries. Origins use the standard acquisition coordinate convention. Only ordinary forward propagation at the declared real frequency is supported."
+    },
+    "gaussianSupport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "sigma"
+      ],
+      "properties": {
+        "type": {
+          "const": "gaussian"
+        },
+        "sigma": {
+          "type": "object",
+          "required": [
+            "value",
+            "units"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "units": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "cutoff": {
+          "type": "number",
+          "const": 1,
+          "default": 1
+        },
+        "tolerance": {
+          "type": "number",
+          "exclusiveMinimum": 1e-07,
+          "maximum": 0.01,
+          "description": "Optional adaptive quadrature tolerance. Omit for inexpensive width-resolved source sampling; reject boundary policy uses 1e-4 when omitted."
+        },
+        "boundary": {
+          "enum": [
+            "truncate_renormalize",
+            "reject"
+          ],
+          "default": "truncate_renormalize"
+        },
+        "surface": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "description": "Compact radial Gaussian with a C2 taper to zero at one sigma. Only samples in the selected physical domain contribute; their globally integrated weights are normalized to one. Amplitude remains total integrated strength, including at interfaces and corners.",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "surface"
+            ]
+          },
+          "then": {
+            "properties": {
+              "boundary": {
+                "const": "truncate_renormalize"
+              }
+            }
+          }
+        }
+      ]
     }
   },
   "type": "object",

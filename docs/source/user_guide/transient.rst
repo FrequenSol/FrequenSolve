@@ -315,6 +315,9 @@ is every step. The final sample is always included. ``write_initial=False``
 omits step zero unless explicitly requested in ``times``. Cadences are mutually
 exclusive. The constructor also accepts ``output_stride=25`` and
 ``write_initial=False`` as conveniences when no ``output_schedule`` is supplied.
+``shard_samples`` and ``rate_operator`` configure receiver traces only; with a
+``trace_schedule`` set them on it, since the solver then ignores them on
+``output_schedule`` (``TransientJob`` rejects that combination).
 
 ParaView time series
 --------------------

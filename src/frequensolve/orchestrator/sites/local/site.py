@@ -15,7 +15,7 @@ import warnings
 from dataclasses import dataclass, field
 from logging import ERROR
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 from frequensolve._optional import optional_dependency_error
@@ -71,9 +71,12 @@ from frequensolve.simulation.artifact_contract import (
 )
 from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.solver import (
+    SolverCapabilities,
     SolverCompatibility,
     check_solver_compatibility,
+    query_local_solver_capabilities,
     resolve_solver_policy,
+    solver_backend_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -1025,6 +1028,9 @@ class LocalSite(BaseSite):
         default=None, init=False
     )
     _solver_compatibility_policy: Optional[str] = field(default=None, init=False)
+    _solver_capabilities: Dict[Tuple[str, str], SolverCapabilities] = field(
+        default_factory=dict, init=False, repr=False
+    )
     # ----------------- lifecycle -----------------
 
     def __post_init__(self) -> None:
@@ -1248,6 +1254,35 @@ class LocalSite(BaseSite):
         self._solver_compatibility_result = result
         self._solver_compatibility_policy = selected
         return result
+
+    def solver_capabilities(
+        self, *, dimension: Any = 2, precision: str = "single"
+    ) -> Optional[SolverCapabilities]:
+        """Return the local backend's operation catalog, queried once per backend.
+
+        The policy of the last compatibility check (else ``solver_policy``)
+        applies: ``off`` skips the query and returns ``None``.
+        """
+
+        policy = self._solver_compatibility_policy or resolve_solver_policy(
+            self.solver_policy
+        )
+        executable = str(self.executable or self.solver or "")
+        if policy == "off" or not executable:
+            return None
+        key = (executable, solver_backend_name(dimension, precision))
+        catalog = self.__dict__.setdefault("_solver_capabilities", {})
+        cached = catalog.get(key)
+        if cached is None:
+            cached = query_local_solver_capabilities(
+                executable,
+                dimension=dimension,
+                precision=precision,
+                environment=self.env,
+            )
+            if cached.operations is not None:
+                catalog[key] = cached
+        return cached
 
     def _submit_local_smooth_task(
         self,

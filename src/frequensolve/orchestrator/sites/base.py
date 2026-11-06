@@ -26,6 +26,11 @@ from typing import (
 )
 
 from frequensolve.simulation.jobs.run_state import SkipPolicy
+from frequensolve.solver import (
+    SolverCapabilities,
+    require_held_control_support,
+    solver_backend_selection,
+)
 
 TERMINAL_STATES = {
     "completed",
@@ -1259,10 +1264,38 @@ class BaseSite:
             self._emit_validation_warnings(job, report)
         if hasattr(job, "save"):
             job.save()
+            self._require_solver_features(job)
         project = getattr(getattr(job, "simulation", None), "_project", None)
         if sync_project and project is not None and hasattr(self, "sync"):
             self.sync(project)
         return job
+
+    def solver_capabilities(
+        self, *, dimension: Any = 2, precision: str = "single"
+    ) -> Optional[SolverCapabilities]:
+        """Return the operation catalog of the backend that runs such a simulation.
+
+        ``None`` means this site cannot report it, or solver checks are
+        ``off``; feature gates then assume the solver matches this SDK.
+        """
+
+        return None
+
+    def _require_solver_features(self, job: Any) -> None:
+        """Reject saved job inputs that the configured solver would silently ignore."""
+
+        simulation = getattr(job, "simulation", None)
+        if simulation is None:
+            return
+        files = [getattr(simulation, "_file", None)]
+        try:
+            files.append(job.job_file)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        require_held_control_support(
+            [Path(path) for path in files if path is not None],
+            lambda: self.solver_capabilities(**solver_backend_selection(simulation)),
+        )
 
     def _job_validation_options(self, job: Any) -> Dict[str, Any]:
         """Return execution-site-specific preflight options for one job."""

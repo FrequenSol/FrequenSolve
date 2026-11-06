@@ -54,7 +54,8 @@ class TransientJob(BaseJob):
     opts out. Explicit source supports take precedence. The width uses local
     material speed and ``time.f_max`` or the inferred wavelet/mesh bandwidth.
     ``output_schedule`` selects spatial snapshots and, by default, receiver samples.
-    ``trace_schedule`` optionally overrides receiver sampling. The existing
+    ``trace_schedule`` optionally overrides receiver sampling; the trace-only
+    ``shard_samples`` and ``rate_operator`` then belong on it. The existing
     ``TimeDomainJob`` continues to provide harmonic reconstruction.
 
     Restart paths identify complete rank-local checkpoint directories. Keep the
@@ -345,6 +346,19 @@ class TransientJob(BaseJob):
         self.output_schedule.validate(self.time)
         if self.trace_schedule is not None:
             self.trace_schedule.validate(self.time)
+            # The solver configures traces from trace_output alone once it is
+            # present, and wavefields ignore these knobs.
+            ignored = [
+                name
+                for name in ("shard_samples", "rate_operator")
+                if getattr(self.output_schedule, name) is not None
+            ]
+            if ignored:
+                raise ValueError(
+                    f"output_schedule {' and '.join(ignored)} would be ignored "
+                    "because trace_schedule sets the receiver trace cadence; set "
+                    "them on trace_schedule"
+                )
         sim = self.effective_simulation
         sim._validate_azimuthal_mode()
         if self.n_modes is not None:

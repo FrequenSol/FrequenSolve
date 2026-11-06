@@ -11,6 +11,7 @@ from frequensolve.imaging.controls import SourceParameters
 from frequensolve.imaging.jobs import RegularizationJob
 from frequensolve.imaging.regularization import Quadratic, _SymmetricModelOperator
 from frequensolve.imaging.workflows import _StageObjective
+from frequensolve.solver import SolverCapabilities
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
 pytestmark = pytest.mark.unit
@@ -149,13 +150,16 @@ def test_direction_set_is_one_file_for_every_task(tmp_path):
     (job,) = _normal_jobs(fake)
     directory = job.direction_set.parent
     # No per-task copies: one direction set, read as is by both frequency tasks.
-    assert sorted(path.name for path in directory.glob("direction*.h5")) == ["directions.h5"]
+    assert sorted(path.name for path in directory.glob("direction*.h5")) == [
+        "directions.h5"
+    ]
     inputs = ControlVectorSetFile.read(job.direction_set)
     assert inputs.n_vectors == 3 and inputs.state_fingerprint is None
     assert inputs.control_identity == lin.control_identity
     for row, direction in enumerate(directions):
         np.testing.assert_array_equal(
-            inputs.vector(row).pack(lin.space.blocks), direction.to_file().pack(lin.space.blocks)
+            inputs.vector(row).pack(lin.space.blocks),
+            direction.to_file().pack(lin.space.blocks),
         )
     # Outputs stay per task: one covector set each, holding every direction as a row.
     for task in (1, 2):
@@ -174,15 +178,21 @@ def test_solvers_without_control_identity_keep_per_task_directions(tmp_path):
     (job,) = _normal_jobs(fake)
     assert job.direction_set is None and len(job.directions) == 2
     for stem in job.directions:
-        assert all(stem.with_name(f"{stem.stem}_{task}.h5").is_file() for task in (1, 2))
+        assert all(
+            stem.with_name(f"{stem.stem}_{task}.h5").is_file() for task in (1, 2)
+        )
     expected = _dense_normal(fake, lin)
     for direction, product in zip(directions, products):
-        np.testing.assert_allclose(product.values, expected @ direction.values, rtol=1e-12)
+        np.testing.assert_allclose(
+            product.values, expected @ direction.values, rtol=1e-12
+        )
 
 
 def test_kernel_derivative_normals_share_one_job(tmp_path):
     fake = FakeImagingSite(seed=11)
-    kernel = dict(order=1, residual="derivative", axis="fourier", source_derivative="frozen")
+    kernel = dict(
+        order=1, residual="derivative", axis="fourier", source_derivative="frozen"
+    )
     lin = _problem(tmp_path, fake).restrict(kernel_derivative=kernel).linearize()
     directions = [lin.space.random(seed) for seed in (1, 2, 3)]
 
@@ -190,6 +200,34 @@ def test_kernel_derivative_normals_share_one_job(tmp_path):
 
     (job,) = _normal_jobs(fake)
     assert _n_directions(job) == 3 and job.kernel_derivative is not None
+    for direction, product in zip(directions, products):
+        np.testing.assert_allclose(
+            product.values, (lin.normal @ direction).values, rtol=1e-12
+        )
+
+
+def test_kernel_derivative_normals_split_when_the_solver_cannot_stack_them(tmp_path):
+    # Solvers whose catalog lacks the operation reject a multi-direction
+    # kernel_derivative normal; each direction then runs its own job.
+    fake = FakeImagingSite(seed=11)
+    queries = []
+
+    def solver_capabilities(**selection):
+        queries.append(selection)
+        return SolverCapabilities("fs2d_s", frozenset())
+
+    fake.solver_capabilities = solver_capabilities
+    kernel = dict(
+        order=1, residual="derivative", axis="fourier", source_derivative="frozen"
+    )
+    lin = _problem(tmp_path, fake).restrict(kernel_derivative=kernel).linearize()
+    directions = [lin.space.random(seed) for seed in (1, 2, 3)]
+
+    products = lin.apply_normal_batch(directions)
+
+    jobs = _normal_jobs(fake)
+    assert len(jobs) == 3 and all(job.directions is None for job in jobs)
+    assert queries and queries[0] == {"dimension": 2, "precision": "single"}
     for direction, product in zip(directions, products):
         np.testing.assert_allclose(
             product.values, (lin.normal @ direction).values, rtol=1e-12
@@ -431,10 +469,15 @@ def test_batched_regularized_normal_job_round_trips_and_validates(tmp_path):
     assert _n_directions(job) == 2 and request["operation"] == "gradient"
     loaded = BaseJob.load(job.save())
     assert isinstance(loaded, FWIOperatorJob)
-    assert loaded.direction_set == job.direction_set and loaded.covector_set == job.covector_set
+    assert (
+        loaded.direction_set == job.direction_set
+        and loaded.covector_set == job.covector_set
+    )
     assert loaded.regularization == job.regularization
     staged = {pair[0] for pair in loaded.remote_input_files("/remote/project")}
-    assert {*map(str, [*job.regularization["inputs"], job.direction_set])} <= {*map(str, staged)}
+    assert {*map(str, [*job.regularization["inputs"], job.direction_set])} <= {
+        *map(str, staged)
+    }
 
 
 @pytest.mark.parametrize("native", [False, True])
