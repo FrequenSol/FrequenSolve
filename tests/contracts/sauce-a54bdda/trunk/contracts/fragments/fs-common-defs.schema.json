@@ -34,6 +34,168 @@
       ],
       "description": "A scalar unit string or component-wise unit strings."
     },
+    "guidedNormalAdapt": {
+      "type": "object",
+      "description": "Wall-normal guided-wave boundary-layer controls. Values are dimensionless multiples of the selected evanescent decay length.",
+      "properties": {
+        "grading": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Power-law coarsening exponent from the wall-normal target back to ordinary EPW sizing."
+        },
+        "thickness": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Boundary-layer thickness as a multiple of the selected evanescent decay length."
+        },
+        "h0": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Wall-adjacent target element size as a multiple of the selected evanescent decay length. Zero disables the normal profile."
+        }
+      },
+      "additionalProperties": false
+    },
+    "guidedTangentialAdapt": {
+      "type": "object",
+      "description": "Wall-tangential guided-wave sizing controls.",
+      "properties": {
+        "grading": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Power-law coarsening exponent from the wall target back to ordinary EPW sizing."
+        },
+        "thickness": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Reach of the propagated tangential profile as a multiple of the active guided-wave decay band. Zero keeps only wall-local tangential sizing."
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 1,
+          "description": "Multiplier applied to the target elements per wavelength at the wall."
+        }
+      },
+      "additionalProperties": false
+    },
+    "scholteNormalAdapt": {
+      "type": "object",
+      "description": "Wall-normal Scholte-wave boundary-layer controls. Sizes are dimensionless multiples of the selected evanescent decay length.",
+      "properties": {
+        "grading": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Power-law coarsening exponent from the wall-normal target back to ordinary EPW sizing."
+        },
+        "thickness": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Boundary-layer thickness as a multiple of the selected evanescent decay length."
+        },
+        "h0": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Wall-adjacent target element size as a multiple of the selected evanescent decay length. Zero disables the normal profile."
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 1,
+          "default": 4,
+          "description": "Maximum wall-normal refinement factor relative to Scholte-wave EPW sizing. The profile still coarsens to the local body-wave EPW size."
+        }
+      },
+      "additionalProperties": false
+    },
+    "scholteWaveAdapt": {
+      "type": "object",
+      "description": "Normal and tangential mesh controls for Scholte waves.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether Scholte-wave mesh adaptivity is enabled."
+        },
+        "lower_bound": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "object",
+              "required": [
+                "value"
+              ],
+              "properties": {
+                "value": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "units": {
+                  "$ref": "#/$defs/units"
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "description": "Optional floor on the Scholte velocity used for mesh sizing. Numeric values use solver velocity units; value/units objects are nondimensionalized by the active runtime."
+        },
+        "normal": {
+          "$ref": "#/$defs/scholteNormalAdapt"
+        },
+        "tangential": {
+          "$ref": "#/$defs/guidedTangentialAdapt"
+        }
+      },
+      "additionalProperties": false
+    },
+    "guidedWaveAdapt": {
+      "type": "object",
+      "description": "Normal and tangential mesh controls for one guided-wave family.",
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/guidedNormalAdapt"
+        },
+        "tangential": {
+          "$ref": "#/$defs/guidedTangentialAdapt"
+        }
+      },
+      "additionalProperties": false
+    },
+    "gravitySurfaceTangentialAdapt": {
+      "type": "object",
+      "description": "Tangential sizing for finite-depth gravity waves throughout the water column.",
+      "properties": {
+        "thickness": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1,
+          "description": "Reach below the free surface as a multiple of local water depth. Zero disables gravity-wave sizing."
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 1,
+          "default": 1,
+          "description": "Multiplier applied to the target elements per gravity-wave wavelength."
+        }
+      },
+      "additionalProperties": false
+    },
+    "gravitySurfaceAdapt": {
+      "type": "object",
+      "description": "Finite-depth gravity-wave mesh sizing for the top acoustic formation.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether gravity-wave mesh sizing is enabled. The block is opt-in when omitted."
+        },
+        "tangential": {
+          "$ref": "#/$defs/gravitySurfaceTangentialAdapt"
+        }
+      },
+      "additionalProperties": false
+    },
     "numericVector": {
       "type": "array",
       "items": {
@@ -188,7 +350,8 @@
           "additionalProperties": true
         },
         "overrides": {
-          "type": "object"
+          "type": "object",
+          "description": "Partial settings merged after loading and verifying the source file. Objects merge recursively; arrays, scalars, and null replace base values. Omitted members survive. The source file is not modified."
         }
       },
       "oneOf": [
@@ -244,6 +407,102 @@
         }
       },
       "additionalProperties": true
+    },
+    "convolutionFilters": {
+      "type": "object",
+      "description": "Causal real discrete FIR coefficients, dimensionless, with no dt multiplier. Source shape is (encoding, source, tap); receiver shape is (encoding, component, receiver, tap). HDF5 combines leading encoding/component axes into channel.",
+      "required": [
+        "dt",
+        "shape"
+      ],
+      "properties": {
+        "dt": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "shape": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "taps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number"
+          }
+        },
+        "file": {
+          "$ref": "#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "taps"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "file"
+                ]
+              },
+              {
+                "required": [
+                  "dataset"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "file",
+            "dataset"
+          ],
+          "not": {
+            "required": [
+              "taps"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "lengthLimits": {
+      "description": "Two length endpoints, bare in the model length units or with explicit units.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/vec2"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/vec2"
+            },
+            "units": {
+              "$ref": "#/$defs/units"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     }
   }
 }

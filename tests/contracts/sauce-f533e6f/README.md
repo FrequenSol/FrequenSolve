@@ -80,3 +80,14 @@ the matching fs-job-1 contract passage are copied from Sauce `next` `856b1277`
 digests. Sauce treats `fs-background-state-1` manifests as a cache miss;
 FrequenSolve still lists and deletes their files. These are targeted overlays
 and require a solver built from `ace2325a` or later.
+
+## 2026-11-05 acquisition, imaging and common-fragment refresh
+
+`inputs/fs-acquisition-2` (contract and schema), `inputs/fs-imaging-1`
+(contract and schema) and `fragments/fs-common-defs.schema.json` are copied
+verbatim from Sauce `rez` `ea58e6eaf66a814936831e2b1992451dbcd9084d`. They add
+the source spectrum's `higher_frequency_derivative_datasets`, Gaussian source
+supports and convolution filters (with their `convolutionFilters` fragment
+definition), the `slow_velocity_pass` hook documentation and the phase-slope
+`source_delay` option. Other contracts and the examples retain their earlier
+provenance.

@@ -635,6 +635,30 @@ def test_frequency_jet_is_exact_through_fourth_order(laplace):
         np.testing.assert_allclose((lower[1] - lower[0]) / (2 * h), jet[k], rtol=1e-6)
 
 
+def _validate_physical_signature(spec):
+    """Validate one exported spectrum against the adopted fs-acquisition-2 schema."""
+
+    import json
+    from pathlib import Path
+
+    from jsonschema import Draft202012Validator
+    from referencing import Registry, Resource
+
+    root = Path(__file__).parent / "contracts/sauce-f533e6f/trunk/contracts"
+    registry = Registry()
+    for file in root.rglob("*.json"):
+        payload = json.loads(file.read_text())
+        if isinstance(payload, dict) and "$id" in payload:
+            registry = registry.with_resource(
+                payload["$id"], Resource.from_contents(payload)
+            )
+    schema = json.loads((root / "inputs/fs-acquisition-2/schema.json").read_text())
+    Draft202012Validator(
+        {"$ref": schema["$id"] + "#/$defs/physicalSourceSignature"},
+        registry=registry,
+    ).validate(spec)
+
+
 def test_signature_exports_requested_higher_derivatives(tmp_path):
     a = SampledWavelet([0, 2, 1, 0], dt=0.01, t0=-0.01) * GainDelay(delay=0.004)
     signature = SourceSignature(
@@ -642,6 +666,7 @@ def test_signature_exports_requested_higher_derivatives(tmp_path):
     )
     spec = signature.to_fs(ExportContext(tmp_path), source_count=2)
     assert spec["higher_frequency_derivative_datasets"] == ["q_d2f", "q_d3f"]
+    _validate_physical_signature(spec)
     jet = a.frequency_jet(signature.frequencies, laplace=-0.4, order=3)
     with h5py.File(tmp_path / spec["file"]) as h5:
         for k, key in enumerate(["q", "q_f", "q_d2f", "q_d3f"]):
@@ -651,9 +676,9 @@ def test_signature_exports_requested_higher_derivatives(tmp_path):
             )
     # The default export keeps its first-order layout and content hash.
     plain = SourceSignature(a, frequencies=[2, 7], laplace=[-0.4])
-    assert "higher_frequency_derivative_datasets" not in plain.to_fs(
-        ExportContext(tmp_path), source_count=2
-    )
+    plain_spec = plain.to_fs(ExportContext(tmp_path), source_count=2)
+    assert "higher_frequency_derivative_datasets" not in plain_spec
+    _validate_physical_signature(plain_spec)
     with pytest.raises(ValueError, match="spectral_derivative='total'"):
         SourceSignature(
             a, frequencies=[2], spectral_derivative="frozen", derivative_order=2

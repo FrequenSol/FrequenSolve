@@ -160,7 +160,7 @@ def _text(h5, name, value):
     h5.create_dataset(name, data=value, dtype=h5py.string_dtype())
 
 
-def commit(job, *, sparse=False, first_step=0, task=None, block=None):
+def commit(job, *, sparse=False, first_step=0, task=None, block=None, layout=None):
     root = job._result_path
     root.mkdir(parents=True, exist_ok=True)
     prefix = Path() if task is None else Path("modes") / f"mode_{task - 1:06d}"
@@ -199,13 +199,17 @@ def commit(job, *, sparse=False, first_step=0, task=None, block=None):
     schedule = job.trace_schedule or job.output_schedule
     steps = [int(s) for s in schedule.steps(job.time) if s >= first_step]
     # block=None writes fs-time-step-1 shards; block=n groups n samples per fs-time-steps-1 shard.
+    # layout lists explicit (steps, held) shards instead, e.g. a mixed family.
     groups = (
-        [[s] for s in steps]
-        if block is None
-        else [steps[i : i + block] for i in range(0, len(steps), block)]
+        [(list(group), bool(held)) for group, held in layout]
+        if layout is not None
+        else (
+            [([s], False) for s in steps]
+            if block is None
+            else [(steps[i : i + block], True) for i in range(0, len(steps), block)]
+        )
     )
-    for group in groups:
-        held = block is not None
+    for group, held in groups:
         name = (
             prefix / f"steps_{group[0]:012d}_{group[-1]:012d}.h5"
             if held
@@ -220,7 +224,9 @@ def commit(job, *, sparse=False, first_step=0, task=None, block=None):
             h5["time_step"] = np.asarray(group, dtype=np.int64) if held else group[0]
             h5["time"] = np.asarray(times) if held else times[0]
             data = np.zeros((len(group),) + ((2, 2) if sparse else (1, 1, 2, 2)))
-            data[..., 0] = np.reshape(group, (-1,) + (1,) * (data.ndim - 2)) * (task or 1)
+            data[..., 0] = np.reshape(group, (-1,) + (1,) * (data.ndim - 2)) * (
+                task or 1
+            )
             h5["pressure"] = data if held else data[0]
         records.append(
             dict(
@@ -295,6 +301,139 @@ def test_reader_combines_block_shards_in_step_order(tmp_path):
     np.testing.assert_array_equal(array.step, [9, 2, 5, 3])
     np.testing.assert_array_equal(array.values[:, 0, 0, 0], [9, 2, 5, 3])
     assert job.results_exist()
+
+
+def test_reader_combines_mixed_block_and_single_sample_shards(tmp_path):
+    # fs-time-steps-1 lets one family mix blocks, single-sample shards and
+    # one-sample blocks (the short block written before a checkpoint).
+    job = job_at(
+        tmp_path, outputs=fs.TraceOutput(), output_schedule=fs.TimeOutput(stride=1)
+    )
+    commit(
+        job,
+        layout=[
+            ([0, 1, 2], True),
+            ([3], False),
+            ([4], True),
+            ([5, 6, 7, 8], True),
+            ([9], False),
+            ([10], False),
+        ],
+    )
+    data = job.traces.open()
+    np.testing.assert_array_equal(data.steps, np.arange(job.time.steps + 1))
+    np.testing.assert_array_equal(
+        data.read("pressure").values[:, 0, 0, 0], np.arange(job.time.steps + 1)
+    )
+    array = data.read("pressure", steps=[9, 4, 2, 3])
+    np.testing.assert_array_equal(array.values[:, 0, 0, 0], [9, 4, 2, 3])
+    assert job.results_exist()
+
+
+def test_reader_rejects_a_step_held_by_a_block_and_a_single_shard(tmp_path):
+    # The contract stores each step in exactly one shard of its family.
+    job = job_at(
+        tmp_path, outputs=fs.TraceOutput(), output_schedule=fs.TimeOutput(stride=1)
+    )
+    commit(
+        job,
+        layout=[([0, 1, 2, 3, 4], True), ([4], False), ([5, 6, 7, 8, 9, 10], True)],
+    )
+    assert not job.results_exist()
+    with pytest.raises(ValueError, match="Duplicate output"):
+        job.traces.open()
+
+
+def test_restarted_block_shards_cover_the_schedule_from_the_checkpoint(tmp_path):
+    import shutil
+
+    job = job_at(tmp_path, outputs=fs.TraceOutput())
+    path = tmp_path / "checkpoint"
+    path.mkdir()
+    with h5py.File(path / "newmark_manifest_R00000.h5", "w") as h5:
+        h5["layout"] = [2, 0, 2, 5]
+        h5["scheme"] = [0.5, 0, 1, 0.1, 0.25, 0.5]
+    resumed = job.with_restart(path, name="resume")
+    resumed.save()
+    commit(resumed, first_step=5, block=4)
+    resumed.write_run_state()
+    assert resumed.is_run_current()
+    data = resumed.traces.open()
+    np.testing.assert_array_equal(data.steps, range(5, 11))
+    np.testing.assert_array_equal(
+        data.read("pressure").values[:, 0, 0, 0], range(5, 11)
+    )
+    # A block reaching back before the checkpoint step is not this run's output.
+    commit(resumed, layout=[([4, 5, 6, 7], True), ([8, 9, 10], True)])
+    assert not resumed.results_exist()
+    with pytest.raises(ValueError, match="does not cover"):
+        resumed.traces.open()
+    # Without the checkpoint copy the committed blocks still define the series.
+    commit(resumed, first_step=5, block=4)
+    shutil.rmtree(path)
+    np.testing.assert_array_equal(resumed.traces.open().steps, range(5, 11))
+
+
+@pytest.mark.parametrize("corruption", ["missing", "truncated", "unlisted", "short"])
+def test_reader_rejects_missing_or_truncated_blocks(tmp_path, corruption):
+    job = job_at(
+        tmp_path, outputs=fs.TraceOutput(), output_schedule=fs.TimeOutput(stride=1)
+    )
+    payload = commit(job, block=4)
+    path = job._result_path / "steps_000000000004_000000000007.h5"
+    (record,) = [a for a in payload["artifacts"] if a["path"] == path.name]
+    if corruption == "missing":
+        path.unlink()
+    elif corruption == "truncated":
+        with open(path, "r+b") as stream:
+            stream.truncate(path.stat().st_size // 2)
+    elif corruption == "unlisted":
+        payload["artifacts"].remove(record)
+    else:
+        # The block lost its last sample but kept its name and committed size.
+        with h5py.File(path, "a") as h5:
+            for key in ("time_step", "time", "pressure"):
+                kept = h5[key][:-1]
+                del h5[key]
+                h5[key] = kept
+        record["bytes"] = path.stat().st_size
+    job.result_manifest_file.write_text(json.dumps(payload))
+    assert not job.results_exist()
+    with pytest.raises(
+        ValueError, match="Missing or truncated|does not cover|filename"
+    ):
+        job.traces.open()
+
+
+def test_trace_only_output_knobs_belong_on_the_trace_schedule(tmp_path):
+    # The solver configures traces from trace_output alone once it is given.
+    for name, knobs in (
+        ("shard", {"shard_samples": 16}),
+        ("rate", {"rate_operator": False}),
+    ):
+        with pytest.raises(ValueError, match="set them on trace_schedule"):
+            job_at(
+                tmp_path / name,
+                output_schedule=fs.TimeOutput(stride=2, **knobs),
+                trace_schedule=fs.TimeOutput(stride=1),
+            )
+    job = job_at(
+        tmp_path / "trace",
+        outputs=fs.TraceOutput(),
+        output_schedule=fs.TimeOutput(stride=2),
+        trace_schedule=fs.TimeOutput(stride=1, shard_samples=16, rate_operator=False),
+    )
+    payload = job.to_fs()["Time"]
+    assert payload["trace_output"]["shard_samples"] == 16
+    assert payload["trace_output"]["rate_operator"] is False
+    assert "shard_samples" not in payload["output"]
+    # Without a trace schedule the output schedule also drives the traces.
+    job.trace_schedule = None
+    job.output_schedule = fs.TimeOutput(stride=2, shard_samples=16)
+    job.validate_outputs()
+    job.trace_schedule = fs.TimeOutput(stride=1)
+    with pytest.raises(ValueError, match="shard_samples would be ignored"):
+        job.validate_outputs()
 
 
 def test_time_output_shard_samples_roundtrip():
@@ -395,6 +534,14 @@ def test_export_matches_adopted_time_contract(tmp_path):
     job = job_at(tmp_path, output_schedule=fs.TimeOutput(times=[0.2, 0.7]))
     validator.validate(job.to_fs()["Time"])
     job.output_schedule = fs.TimeOutput(interval=0.2)
+    validator.validate(job.to_fs()["Time"])
+    # Receiver-trace knobs on the output schedule, then on a separate trace one.
+    job.output_schedule = fs.TimeOutput(
+        interval=0.2, shard_samples=8, rate_operator=False
+    )
+    validator.validate(job.to_fs()["Time"])
+    job.output_schedule = fs.TimeOutput(interval=0.2)
+    job.trace_schedule = fs.TimeOutput(stride=1, shard_samples=1, rate_operator=True)
     validator.validate(job.to_fs()["Time"])
 
 

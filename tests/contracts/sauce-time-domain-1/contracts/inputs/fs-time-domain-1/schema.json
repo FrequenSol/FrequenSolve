@@ -21,9 +21,10 @@
       "enum": [
         "newmark",
         "backward_euler",
-        "gauss4"
+        "gauss4",
+        "radau3"
       ],
-      "description": "Implicit scheme. Newmark is used by acoustic, elastic, low-frequency Biot poroelastic, and supported coupled Galerkin waves; backward Euler is used by pressure-form Darcy flow and temperature-form thermal diffusion. Gauss4 is fourth-order two-stage Gauss collocation for acoustic, elastic, their axisymmetric/coupled formulations, and low-frequency Biot with acoustic or bonded elastic coupling; its accepted state is real and its complex stage uses FGMRES. CPU execution supports Cartesian/cylindrical PML, GSLS, restart and MPI within the physics restrictions. Metal and CUDA/HIP support complex FGMRES stages on their existing execution paths; SYCL bulk histories, coupled interface actions and Cartesian PML filters are resident, including frequency-shifted interface filters. Bulk GSLS and composed GSLS/PML histories are also resident, with Cartesian 2D/3D MPI and checkpoint/restart support."
+      "description": "Implicit scheme. Acoustic, elastic, low-frequency Biot and supported coupled Galerkin waves default to Radau3 when omitted; an existing newmark coefficient block retains Newmark. Reduced boreholes also default to Radau3; their axial PML requires explicit Newmark selection. Backward Euler is used by pressure-form Darcy flow and temperature-form thermal diffusion. Gauss4 is fourth-order two-stage Gauss collocation for acoustic, elastic, their axisymmetric/coupled formulations, and low-frequency Biot with acoustic or bonded elastic coupling; its accepted state is real and its complex stage uses MR by default, with FGMRES selectable. CPU execution supports Cartesian/cylindrical PML, GSLS, restart and MPI within the physics restrictions. Metal and CUDA/HIP support complex FGMRES stages on their existing execution paths; SYCL bulk histories, coupled interface actions and Cartesian PML filters are resident, including frequency-shifted interface filters. Bulk GSLS and composed GSLS/PML histories are also resident, with Cartesian 2D/3D MPI and checkpoint/restart support. Radau3 is third-order, two-stage L-stable Radau IIA for the same wave formulations and PML/GSLS histories, with real accepted primary, rate and integral state and one complex stage solve. GPU execution follows Gauss4 backend capabilities and fallbacks. SYCL retains primary state, bulk/interface actions, Cartesian PML/GSLS histories and physical-channel PML reconstruction, including MPI and restart. Metal supports complex stages and resident GSLS with its existing host primary/PML paths. It damps unresolved high-frequency modes; its timestep must still resolve the desired signal band. Gauss phase fitting is unavailable with Radau3."
     },
     "start": {
       "type": "number",
@@ -85,6 +86,17 @@
             "type": "number"
           },
           "description": "Strictly increasing physical times in seconds within the integration interval."
+        },
+        "shard_samples": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 64,
+          "description": "Receiver traces only: scheduled samples held in memory per shard file. Eligible trace families write one steps_<first>_<last>.h5 block (fs-time-steps-1) per this many samples, before every checkpoint and after the final step; 1 writes one step_<step>.h5 per sample. Does not change which steps are sampled; wavefields ignore it."
+        },
+        "rate_operator": {
+          "type": "boolean",
+          "default": true,
+          "description": "Receiver traces only: sample rate-only averaged channels (for example DAS strain_rate gauges) through a linear operator probed once from the element evaluation, applied on the device to the resident rate when available. false evaluates every element at every sample."
         }
       },
       "additionalProperties": false,
@@ -147,6 +159,12 @@
       "minimum": 0,
       "default": 0,
       "description": "Uniform mass-proportional bulk wave damping alpha in inverse seconds: M u_tt + (C_boundary + alpha M) u_t + K u = f. Applies to acoustic pressure and elastic displacement, including coupled and axisymmetric waves. Nonzero values require Newmark waves without PML; history loads use the CPU path. This is not constant-Q attenuation."
+    },
+    "pml_frequency": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0,
+      "description": "Frequency in Hz at which absorbing layers are sized, like the command line --pml-frequency (which takes precedence). Zero sizes them from the transient source-band floor."
     },
     "n_modes": {
       "type": "integer",

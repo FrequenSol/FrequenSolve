@@ -767,6 +767,9 @@ class TimeOutput:
     ``rate_operator=False`` makes the solver evaluate rate-only averaged
     receivers (e.g. DAS strain_rate) element by element instead of through
     their probed, device-gathered operator (solver default True).
+    Both knobs configure receiver traces only: when a job has a separate
+    trace schedule, set them on that schedule (``TransientJob`` rejects them
+    on its ``output_schedule`` then, since the solver would ignore them).
     """
 
     stride: int | None = None
