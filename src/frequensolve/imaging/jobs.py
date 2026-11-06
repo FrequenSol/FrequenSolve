@@ -1234,6 +1234,12 @@ class FWIOperatorJob(_ImagingJobBase):
             solve (or restore) per source batch.
         covectors: One ``fs-control-vector-1`` output stem per entry of
             ``directions``.
+        direction_set: One ``fs-control-vector-set-1`` input holding every
+            direction of a ``jvp`` (one row) or ``normal`` as rows; every
+            frequency task reads it as is and checks its control identity.
+        covector_set: ``fs-control-vector-set-1`` output stem of a
+            ``direction_set`` normal: each task writes one file with a
+            covector row per direction.
         regularization: Native ``control_sensitivities.Regularization``
             request with ``inputs``/``outputs`` lists that a ``normal`` job's
             postprocess applies after its tasks (requires ``control_active``).
@@ -1299,6 +1305,8 @@ class FWIOperatorJob(_ImagingJobBase):
         direction: Optional[Union[str, Path]] = None,
         directions: Optional[Sequence[Union[str, Path]]] = None,
         covectors: Optional[Sequence[Union[str, Path]]] = None,
+        direction_set: Optional[Union[str, Path]] = None,
+        covector_set: Optional[Union[str, Path]] = None,
         regularization: Optional[Mapping[str, Any]] = None,
         objective_vector: Optional[Union[str, Path]] = None,
         objective: Optional[Union[str, Path]] = None,
@@ -1388,6 +1396,8 @@ class FWIOperatorJob(_ImagingJobBase):
         output_path = functools.partial(_output_path, result_dir=result_dir)
         self.directions = None if directions is None else _paths(directions, input_path)
         self.covectors = None if covectors is None else _paths(covectors, output_path)
+        self.direction_set = _input_path(direction_set, simulation)
+        self.covector_set = _output_path(covector_set, result_dir)
         self.regularization: Optional[Dict[str, Any]] = None
         if regularization is not None:
             request = dict(regularization)
@@ -1563,6 +1573,8 @@ class FWIOperatorJob(_ImagingJobBase):
         action = self.action
         if self.directions is not None or self.covectors is not None:
             self._validate_directions()
+        if self.direction_set is not None or self.covector_set is not None:
+            self._validate_direction_set()
         if self.regularization is not None:
             request = self.regularization
             if action != "normal" or self.control_active is None:
@@ -1813,7 +1825,7 @@ class FWIOperatorJob(_ImagingJobBase):
                         "extension jvp takes extension.direction, not direction"
                     )
             else:
-                if self.direction is None:
+                if self.direction is None and self.direction_set is None:
                     raise ValueError("jvp requires a direction input")
                 if not self.active:
                     raise ValueError("jvp requires a nonempty active subspace")
@@ -1851,7 +1863,7 @@ class FWIOperatorJob(_ImagingJobBase):
             else:
                 if (
                     self.direction is None or self.covector is None
-                ) and self.directions is None:
+                ) and self.directions is None and self.direction_set is None:
                     raise ValueError("normal requires direction and covector")
                 if not self.active:
                     raise ValueError("normal requires a nonempty active subspace")
@@ -1899,9 +1911,15 @@ class FWIOperatorJob(_ImagingJobBase):
                 raise ValueError(
                     "physical extension covectors require model_gradient or reduced_normal"
                 )
-            if self.reduced_normal is not None and self.direction is None:
+            if (
+                self.reduced_normal is not None
+                and self.direction is None
+                and self.direction_set is None
+            ):
                 raise ValueError("reduced_normal requires a physical control direction")
-            if self.reduced_normal is None and self.direction is not None:
+            if self.reduced_normal is None and (
+                self.direction is not None or self.direction_set is not None
+            ):
                 raise ValueError("solve takes a direction only with reduced_normal")
 
         if (
@@ -1954,6 +1972,29 @@ class FWIOperatorJob(_ImagingJobBase):
             raise ValueError(
                 "several normal directions require material-only ordinary, phase or spectral-kernel normals"
             )
+
+    def _validate_direction_set(self) -> None:
+        """Check a direction set's action and that it replaces the per-task vector keys.
+
+        Material and reflectivity jvp/normal take it, and so does an extension
+        reduced-normal solve (one row, with its ``covector`` output).
+        """
+
+        reduced = self.action == "solve" and self.reduced_normal is not None
+        if self.action not in {"jvp", "normal", "receiver_jvp"} and not reduced:
+            raise ValueError(
+                "direction_set requires jvp, normal or an extension reduced-normal solve"
+            )
+        if self.extension is not None and not reduced:
+            raise ValueError("extension actions take extension.direction, not direction_set")
+        if any(value is not None for value in (self.direction, self.directions, self.covectors)):
+            raise ValueError("direction_set replaces direction and directions")
+        if self.direction_set is None:
+            raise ValueError("covector_set requires direction_set")
+        if self.action == "normal" and (self.covector_set is None or self.covector is not None):
+            raise ValueError("a direction-set normal writes covector_set, not covector")
+        if self.action != "normal" and self.covector_set is not None:
+            raise ValueError("only a direction-set normal writes covector_set")
 
     def _validate_receiver(self) -> None:
         """Validate the raw receiver actions independently of objective states."""
@@ -2104,6 +2145,13 @@ class FWIOperatorJob(_ImagingJobBase):
                 raise ValueError("raw aggregate covectors do not have task parts")
             return _raw_path(self.covector)
         return _task_path(self.covector, task)
+
+    def covector_set_file(self, task: Optional[int] = None) -> Path:
+        """Return the covector-set stem or one task's file of a direction-set normal."""
+
+        if self.covector_set is None:
+            raise ValueError("this job has no covector_set output")
+        return _task_path(self.covector_set, task)
 
     def diagonal_file(self, task: Optional[int] = None) -> Path:
         """Return one task's control-basis Gauss–Newton diagonal."""
@@ -2490,6 +2538,10 @@ class FWIOperatorJob(_ImagingJobBase):
                 op["covector"] = _job_path(self.covector, ctx, False)
             if self.directions is not None:
                 op["directions"] = [_job_path(p, ctx, False) for p in self.directions]
+            if self.direction_set is not None:
+                op["direction_set"] = _job_path(self.direction_set, ctx, False)
+            if self.covector_set is not None:
+                op["covector_set"] = _job_path(self.covector_set, ctx, False)
             if self.covectors is not None:
                 op["covectors"] = [_job_path(p, ctx, False) for p in self.covectors]
             if self.objective_vector is not None:
@@ -2589,6 +2641,9 @@ class FWIOperatorJob(_ImagingJobBase):
             inputs["directions"] = [
                 self._resolved_input_fingerprint(path) for path in self.directions
             ]
+        if self.direction_set is not None:
+            # Every task reads the one direction-set file as is.
+            inputs["direction_set"] = self._path_content_fingerprint(self.direction_set)
         if self.regularization is not None:
             inputs["regularization"] = [
                 self._path_content_fingerprint(path)
@@ -2746,6 +2801,8 @@ class FWIOperatorJob(_ImagingJobBase):
                 if op.get("covectors") is None
                 else _paths(op["covectors"], resolve)
             ),
+            direction_set=resolve(op.get("direction_set")),
+            covector_set=resolve(op.get("covector_set")),
             regularization=(
                 _resolve_regularization(sensitivities["Regularization"], resolve)
                 if action == "normal" and "Regularization" in sensitivities

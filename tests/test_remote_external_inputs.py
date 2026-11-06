@@ -30,8 +30,9 @@ pytestmark = pytest.mark.unit
 FREQUENCIES = [4.0, 6.0]
 
 
-def _problem(tmp_path, *, project=None, workdir=None, source=False):
-    fake = FakeImagingSite(seed=7)
+def _problem(tmp_path, *, project=None, workdir=None, source=False, control_identity=False):
+    # Per-task direction copies (older solvers) exercise the task-sibling staging; direction sets are one file.
+    fake = FakeImagingSite(seed=7, control_identity=control_identity)
     controls = {"vp": DepthProfile("vp", "sediment", count=4)}
     if source:
         # Source blocks are Sauce-owned: points are staged as controls.state.
@@ -102,6 +103,27 @@ def test_normal_batch_directions_outside_project_are_staged_with_the_job(tmp_pat
     # The local job definition still names the local files.
     saved = json.loads(job.job_file.read_text())
     assert saved["fwi_operator"]["directions"] == local_directions
+
+
+def test_direction_set_outside_project_is_staged_as_one_file(tmp_path):
+    workdir = tmp_path / "imaging" / "outside"
+    problem, fake = _problem(tmp_path, workdir=workdir, control_identity=True)
+    lin = problem.linearize()
+    lin.apply_normal_batch([lin.space.random(seed) for seed in (1, 2)])
+    (job,) = _jobs(fake, "normal")
+    local = str(job.to_fs()["fwi_operator"]["direction_set"])
+    assert local.startswith(str(workdir.resolve()))
+
+    remote_project = tmp_path / "remote" / "project"
+    payload, pairs = _materialize(job, remote_project)
+
+    remote = Path(payload["fwi_operator"]["direction_set"])
+    assert remote.is_relative_to(remote_project) and remote.is_file()
+    assert remote.name == Path(local).name
+    # One file serves every task: nothing task-suffixed is staged beside it.
+    assert [Path(source).name for source, _ in pairs if Path(source).parent == Path(local).parent] == [
+        Path(local).name
+    ]
 
 
 def test_vjp_objective_vector_manifest_outside_project_keeps_its_files(tmp_path):

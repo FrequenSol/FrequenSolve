@@ -5,6 +5,7 @@ import pytest
 
 from frequensolve import imaging as im
 from frequensolve.imaging import ControlSpace, DepthProfile, ImagingProblem
+from frequensolve.imaging._artifacts import ControlVectorSetFile
 from frequensolve.imaging._native_regularization import bind_workflow_regularization
 from frequensolve.imaging.controls import SourceParameters
 from frequensolve.imaging.jobs import RegularizationJob
@@ -54,6 +55,20 @@ def _normal_jobs(fake):
     return [job for job in fake.jobs if getattr(job, "action", None) == "normal"]
 
 
+def _n_directions(job, fake=None):
+    """Return how many directions one normal job applies, in either input form.
+
+    A site that cleans a job's files once its products are read leaves the
+    count in ``fake.direction_set_rows``.
+    """
+
+    if job.direction_set is not None:
+        if fake is not None:
+            return fake.direction_set_rows[job.name]
+        return ControlVectorSetFile.read(job.direction_set).n_vectors
+    return len(job.directions or [None])
+
+
 def _dense_normal(fake, lin):
     """Return the weighted dense ``Re(J^H W J)`` of the fake's frozen surrogate."""
 
@@ -74,7 +89,7 @@ def test_batch_runs_one_job_and_matches_single_products(tmp_path, weights):
     products = lin.apply_normal_batch(directions)
 
     (job,) = _normal_jobs(fake)
-    assert len(job.directions) == 3 and job.direction is None
+    assert _n_directions(job) == 3 and job.direction is None and job.directions is None
     assert job.f_list == FREQUENCIES  # one job carries every frequency task
     expected = _dense_normal(fake, lin)
     for direction, product in zip(directions, products):
@@ -88,7 +103,7 @@ def test_batch_runs_one_job_and_matches_single_products(tmp_path, weights):
     for direction, product in zip(directions, products):
         reference = single.apply_normal(direction.values)
         np.testing.assert_allclose(product.values, reference.values, rtol=1e-12)
-    assert [len(j.directions or [None]) for j in _normal_jobs(single_fake)] == [1] * 3
+    assert [_n_directions(j) for j in _normal_jobs(single_fake)] == [1] * 3
 
 
 def test_batch_memoizes_per_direction_and_splits_only_large_batches(tmp_path):
@@ -102,13 +117,13 @@ def test_batch_memoizes_per_direction_and_splits_only_large_batches(tmp_path):
     fresh = lin.space.random(3)
     again = lin.apply_normal_batch(np.vstack([known[1].values, fresh.values]))
     jobs = _normal_jobs(fake)
-    assert len(jobs) == 2 and jobs[-1].directions is None
+    assert len(jobs) == 2 and _n_directions(jobs[-1]) == 1
     assert again[0] == lin.apply_normal(known[1])
     assert len(_normal_jobs(fake)) == 2
 
     lin.max_normal_directions = 2
     lin.apply_normal_batch([lin.space.random(seed) for seed in (4, 5, 6)])
-    assert [len(j.directions or [None]) for j in _normal_jobs(fake)[2:]] == [2, 1]
+    assert [_n_directions(j) for j in _normal_jobs(fake)[2:]] == [2, 1]
 
 
 def test_normal_matmat_applies_all_columns_in_one_job(tmp_path):
@@ -121,8 +136,48 @@ def test_normal_matmat_applies_all_columns_in_one_job(tmp_path):
     assert product.shape == block.shape
     np.testing.assert_allclose(product, _dense_normal(fake, lin) @ block, rtol=1e-12)
     (job,) = _normal_jobs(fake)
-    assert len(job.directions) == 4
-    assert len({path.name for path in job.covectors}) == 4
+    assert _n_directions(job) == 4 and job.covector_set is not None
+
+
+def test_direction_set_is_one_file_for_every_task(tmp_path):
+    fake = FakeImagingSite(seed=11)
+    lin = _problem(tmp_path, fake).linearize()
+    directions = [lin.space.random(seed) for seed in (1, 2, 3)]
+
+    lin.apply_normal_batch(directions)
+
+    (job,) = _normal_jobs(fake)
+    directory = job.direction_set.parent
+    # No per-task copies: one direction set, read as is by both frequency tasks.
+    assert sorted(path.name for path in directory.glob("direction*.h5")) == ["directions.h5"]
+    inputs = ControlVectorSetFile.read(job.direction_set)
+    assert inputs.n_vectors == 3 and inputs.state_fingerprint is None
+    assert inputs.control_identity == lin.control_identity
+    for row, direction in enumerate(directions):
+        np.testing.assert_array_equal(
+            inputs.vector(row).pack(lin.space.blocks), direction.to_file().pack(lin.space.blocks)
+        )
+    # Outputs stay per task: one covector set each, holding every direction as a row.
+    for task in (1, 2):
+        part = ControlVectorSetFile.read(job.covector_set_file(task))
+        assert part.n_vectors == 3 and part.control_identity == lin.control_identity
+
+
+def test_solvers_without_control_identity_keep_per_task_directions(tmp_path):
+    fake = FakeImagingSite(seed=11, control_identity=False)
+    lin = _problem(tmp_path, fake).linearize()
+    directions = [lin.space.random(seed) for seed in (1, 2)]
+
+    products = lin.apply_normal_batch(directions)
+
+    assert lin.control_identity is None
+    (job,) = _normal_jobs(fake)
+    assert job.direction_set is None and len(job.directions) == 2
+    for stem in job.directions:
+        assert all(stem.with_name(f"{stem.stem}_{task}.h5").is_file() for task in (1, 2))
+    expected = _dense_normal(fake, lin)
+    for direction, product in zip(directions, products):
+        np.testing.assert_allclose(product.values, expected @ direction.values, rtol=1e-12)
 
 
 def test_kernel_derivative_normals_share_one_job(tmp_path):
@@ -134,7 +189,7 @@ def test_kernel_derivative_normals_share_one_job(tmp_path):
     products = lin.apply_normal_batch(directions)
 
     (job,) = _normal_jobs(fake)
-    assert len(job.directions) == 3 and job.kernel_derivative is not None
+    assert _n_directions(job) == 3 and job.kernel_derivative is not None
     for direction, product in zip(directions, products):
         np.testing.assert_allclose(
             product.values, (lin.normal @ direction).values, rtol=1e-12
@@ -149,7 +204,7 @@ def test_source_controls_keep_one_job_per_direction(tmp_path):
     products = lin.apply_normal_batch(directions)
 
     jobs = _normal_jobs(fake)
-    assert len(jobs) == 2 and all(job.directions is None for job in jobs)
+    assert len(jobs) == 2 and all(_n_directions(job) == 1 for job in jobs)
     for direction, product in zip(directions, products):
         np.testing.assert_allclose(
             product.values, (lin.normal @ direction).values, rtol=1e-12
@@ -225,7 +280,7 @@ def test_native_tikhonov_hessian_folds_into_the_normal_job(tmp_path, fractional_
     regularized = lin.apply_normal_batch(directions, regularization=native)
 
     (job,) = _normal_jobs(fake)  # tasks and regularization postprocess together
-    assert len(job.directions) == 3 and len(job.regularization["inputs"]) == 3
+    assert _n_directions(job) == 3 and len(job.regularization["inputs"]) == 3
     assert job.regularization.get("fractional_scales", {}) == (fractional_scales or {})
     assert len(_regularization_jobs(fake)) == prepared
     assert lin.apply_normal(directions[0], regularization=native) == regularized[0]
@@ -291,7 +346,7 @@ def test_curvature_refresh_transition_costs_one_normal_job(tmp_path, monkeypatch
     # Stage 0 measures its initial scale alone; the refresh transition evaluates
     # its retained directions and the scale probe Bg in one normal job.
     assert count > 1 and provenance["hessian_actions"] == count
-    assert [len(job.directions or [None]) for job in _normal_jobs(site)] == [
+    assert [_n_directions(job, site) for job in _normal_jobs(site)] == [
         1,
         count + 1,
     ]
@@ -312,7 +367,7 @@ def test_curvature_refresh_transition_costs_one_normal_job(tmp_path, monkeypatch
 
     monkeypatch.setattr(workflows, "_prepare_seed", separate)
     site, reference = run(tmp_path / "separate")
-    assert [len(job.directions or [None]) for job in _normal_jobs(site)] == [
+    assert [_n_directions(job, site) for job in _normal_jobs(site)] == [
         1,
         1,
         count,
@@ -372,14 +427,14 @@ def test_batched_regularized_normal_job_round_trips_and_validates(tmp_path):
 
     payload = _assert_valid(job.to_fs())
     request = payload["control_sensitivities"]["Regularization"]
-    assert len(payload["fwi_operator"]["directions"]) == len(request["inputs"]) == 2
-    assert request["operation"] == "gradient"
+    assert "directions" not in payload["fwi_operator"] and len(request["inputs"]) == 2
+    assert _n_directions(job) == 2 and request["operation"] == "gradient"
     loaded = BaseJob.load(job.save())
     assert isinstance(loaded, FWIOperatorJob)
-    assert loaded.directions == job.directions and loaded.covectors == job.covectors
+    assert loaded.direction_set == job.direction_set and loaded.covector_set == job.covector_set
     assert loaded.regularization == job.regularization
     staged = {pair[0] for pair in loaded.remote_input_files("/remote/project")}
-    assert {*map(str, job.regularization["inputs"])} <= {*map(str, staged)}
+    assert {*map(str, [*job.regularization["inputs"], job.direction_set])} <= {*map(str, staged)}
 
 
 @pytest.mark.parametrize("native", [False, True])

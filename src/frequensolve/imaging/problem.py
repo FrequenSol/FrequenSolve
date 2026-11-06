@@ -77,11 +77,13 @@ from frequensolve.imaging._artifacts import (
     ControlRegistryManifest,
     ControlStateFile,
     ControlVectorFile,
+    ControlVectorSetFile,
     ObjectiveReport,
     SmoothingConfig,
     control_smoothing,
     unqualified_block_name,
 )
+from frequensolve.imaging._vector_sets import reduce_covector_sets
 from frequensolve.imaging._backend import (
     Backend,
     LinearizationCache,
@@ -3044,6 +3046,7 @@ class Linearization:
         # each task's objective-vector input against its own fingerprint, so
         # operator inputs are written per task.
         self.task_fingerprints: List[Tuple[str, str]] = self._task_fingerprints()
+        self.control_identity: Optional[str] = self._control_identity()
         self.frequency_weights: np.ndarray = frequency_weights(
             self.job, problem.weights
         )
@@ -3265,6 +3268,59 @@ class Linearization:
             )
         return pairs
 
+    def _control_identity(self) -> Optional[str]:
+        """Return the control identity every task's linearization covector carries, if any.
+
+        Sauce writes one frequency-independent ``/control_identity`` (control
+        space and linearization inputs) on every covector; a solver without it,
+        or tasks that disagree, keep per-task direction copies.
+        """
+
+        job = self.job
+        if job.covector is None:
+            return None
+        identities = set()
+        for task in range(1, len(self.reports) + 1):
+            path = job.covector_file(task)
+            if not path.is_file():
+                return None
+            identities.add(ControlVectorFile.read(path, native=False).control_identity)
+        if len(identities) != 1 or None in identities:
+            return None
+        return identities.pop()
+
+    @property
+    def _uses_direction_sets(self) -> bool:
+        """Whether jobs send one direction set: the solver reported a control identity."""
+
+        return self.control_identity is not None
+
+    def _direction_set(
+        self,
+        directions: Sequence[ControlVector],
+        directory: Path,
+        name: str = "directions.h5",
+    ) -> Path:
+        """Write every direction once, as a row of one file every task reads; return it.
+
+        Sauce checks the set against :attr:`control_identity` and rescales
+        mechanism rows into each task's coordinates from ``/scaling`` (the
+        reference strength of one stored coordinate, ``y * s_ref / s_task``).
+        """
+
+        assert self.control_identity is not None
+        reference = self.problem._shared.reference_scaling or {}
+        scaling = {
+            block: reference[block]
+            for block in _mechanism_blocks(self.space)
+            if block in reference
+        }
+        return ControlVectorSetFile.from_vectors(
+            [dv.to_file() for dv in directions],
+            control_identity=self.control_identity,
+            scaling=scaling,
+        ).write(directory / name)
+
     def _direction_stem(
         self, dv: ControlVector, directory: Path, name: str = "direction.h5"
     ) -> Path:
@@ -3383,11 +3439,11 @@ class Linearization:
 
         def compute() -> DataVector:
             directory = self._ops_dir()
-            job = self._action_job(
-                "jvp",
-                direction=self._direction_stem(direction, directory),
-                objective_vector="jvp.json",
-            )
+            if self._uses_direction_sets:
+                inputs = {"direction_set": self._direction_set([direction], directory)}
+            else:
+                inputs = {"direction": self._direction_stem(direction, directory)}
+            job = self._action_job("jvp", objective_vector="jvp.json", **inputs)
             self.problem._run_job(job)
             return read_task_objective_vectors(
                 job,
@@ -3613,6 +3669,22 @@ class Linearization:
             options = self._regularization_options(
                 regularization, directions, directory
             )
+        if self._uses_direction_sets:
+            # One file of every direction serves all frequency tasks; each writes one covector set.
+            job = self._action_job(
+                "normal",
+                direction_set=self._direction_set(directions, directory),
+                covector_set="normal.h5",
+                **options,
+            )
+            self.problem._run_job(job)
+            products = [
+                _vector_from_file(part, self.space)
+                for part in reduce_covector_sets(job, weights, self.task_factors)
+            ]
+            if regularization is None:
+                return products, []
+            return products, self._regularization_images(job, regularization)
         if len(directions) == 1:
             job = self._action_job(
                 "normal",

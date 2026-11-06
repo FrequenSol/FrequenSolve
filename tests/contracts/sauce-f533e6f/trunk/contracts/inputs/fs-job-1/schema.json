@@ -1500,6 +1500,14 @@
           },
           "description": "One distinct output fs-control-vector-1 covector stem per directions entry, in the same order, task-suffixed like covector."
         },
+        "direction_set": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Input fs-control-vector-set-1 file holding every tangent of the action as a row of /controls/<block> (n_vectors x n_dof), read by every frequency task as is (never task-suffixed) and checked against the frequency-independent /control_identity of the linearization; mechanism rows are rescaled per task from /scaling/<block>. One row serves jvp, receiver_jvp, normal (reflectivity included) and an extension reduced-normal solve; several rows require a material normal and stack like directions. Excludes direction, directions and covectors; a set normal writes covector_set instead of covector."
+        },
+        "covector_set": {
+          "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",
+          "description": "Output fs-control-vector-set-1 stem of a normal over direction_set: each task writes <stem>_<task><ext> with one covector row per direction, the task's state fingerprint and the control identity. Requires direction_set."
+        },
         "extension": {
           "type": "object",
           "description": "Auxiliary physical-property extension over material control bases. Auxiliary actions hold the background fixed; active physical model controls select the optional reduced background gradient after solve. Volume scattering excludes PML and boundary terms; the DPG test metric is held fixed. Real or complex physical frequencies are supported. For f=f_real+i*f_imag, lag factors are exp(2*pi*f_imag*tau)*exp(-i*2*pi*f_real*tau); adjoints retain their conjugate amplitudes.",
@@ -2089,8 +2097,17 @@
               }
             },
             "else": {
-              "required": [
-                "direction"
+              "anyOf": [
+                {
+                  "required": [
+                    "direction"
+                  ]
+                },
+                {
+                  "required": [
+                    "direction_set"
+                  ]
+                }
               ]
             }
           }
@@ -2174,6 +2191,12 @@
                   "required": [
                     "directions",
                     "covectors"
+                  ]
+                },
+                {
+                  "required": [
+                    "direction_set",
+                    "covector_set"
                   ]
                 }
               ]
@@ -2388,8 +2411,17 @@
                 },
                 "then": {
                   "not": {
-                    "required": [
-                      "direction"
+                    "anyOf": [
+                      {
+                        "required": [
+                          "direction"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "direction_set"
+                        ]
+                      }
                     ]
                   }
                 }
@@ -2598,7 +2630,6 @@
           "then": {
             "required": [
               "extension",
-              "direction",
               "covector",
               "controls"
             ],
@@ -2618,6 +2649,20 @@
               }
             },
             "allOf": [
+              {
+                "anyOf": [
+                  {
+                    "required": [
+                      "direction"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "direction_set"
+                    ]
+                  }
+                ]
+              },
               {
                 "not": {
                   "required": [
@@ -2710,6 +2755,112 @@
                 "const": "solve"
               }
             }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "direction_set"
+                ]
+              },
+              {
+                "required": [
+                  "covector_set"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "direction_set"
+            ],
+            "properties": {
+              "action": {
+                "enum": [
+                  "jvp",
+                  "normal",
+                  "receiver_jvp",
+                  "solve"
+                ]
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "direction"
+                  ]
+                },
+                {
+                  "required": [
+                    "directions"
+                  ]
+                },
+                {
+                  "required": [
+                    "covectors"
+                  ]
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "if": {
+                  "required": [
+                    "covector_set"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "action": {
+                      "const": "normal"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "action": {
+                      "const": "normal"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "covector_set"
+                  ],
+                  "not": {
+                    "required": [
+                      "covector"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "action": {
+                      "const": "solve"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "reduced_normal",
+                    "extension"
+                  ]
+                }
+              }
+            ]
           }
         }
       ],

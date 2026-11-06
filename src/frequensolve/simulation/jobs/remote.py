@@ -1157,6 +1157,8 @@ class JobRemoteMixin:
                 keys.append("background")
             if operator.get("action") in {"jvp", "normal", "solve", "wri"}:
                 keys.append("direction")
+            if operator.get("action") in {"jvp", "normal", "receiver_jvp", "solve"}:
+                keys.append("direction_set")
             if operator.get("action") == "vjp":
                 keys.append("objective_vector")
             for key in keys:

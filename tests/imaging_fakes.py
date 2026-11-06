@@ -116,6 +116,7 @@ from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging._artifacts import (
     ControlStateFile,
     ControlVectorFile,
+    ControlVectorSetFile,
     ExtensionVectorField,
     ExtensionVectorFile,
     qualified_block_name,
@@ -466,9 +467,13 @@ class FakeImagingSite(BaseSite):
         mechanism_reference_frequency: float = 4.0,
         mechanism_scaling_exponent: float = 2.0,
         mechanism_units: str = "N*m",
+        control_identity: bool = True,
         verbose: bool = False,
     ) -> None:
         super().__init__(verbose=verbose)
+        # Current Sauce writes a frequency-independent /control_identity on covectors and reads
+        # direction sets; False emulates an older solver that needs per-task direction copies.
+        self.emits_control_identity = bool(control_identity)
         self.mechanism_baseline = float(mechanism_baseline)
         self.mechanism_scaling = float(mechanism_scaling)
         self.mechanism_reference_frequency = float(mechanism_reference_frequency)
@@ -494,6 +499,7 @@ class FakeImagingSite(BaseSite):
         self.jobs: List[Any] = []
         self.removed: List[Tuple[str, Tuple[str, ...]]] = []
         self.linearizations: Dict[str, FakeLinearization] = {}
+        self.direction_set_rows: Dict[str, int] = {}  # job name -> rows of its direction set
 
     def support_mask(self, name: str, size: int, frequency: Any = None) -> np.ndarray:
         """Return the configured support mask of ``name`` (all true by default).
@@ -860,7 +866,9 @@ class FakeImagingSite(BaseSite):
                 ext = self.extension_surrogate(lin, fields, sizes)
                 if job.extension.get("manifest") is not None:
                     self._write_extension_manifest(
-                        _task_path(job.extension_manifest_file(), task), ext
+                        _task_path(job.extension_manifest_file(), task),
+                        ext,
+                        self.control_identity(lin) if self.emits_control_identity else None,
                     )
                 if job.extension.get("covector") is not None:
                     rows = lin.rows(frequency)
@@ -982,7 +990,10 @@ class FakeImagingSite(BaseSite):
             )
             report["background_gradient_stationary"] = True
         if job.reduced_normal is not None:
-            dv = self._direction(job, lin, task)
+            if job.direction_set is not None:
+                (dv,) = self._direction_rows(job, lin, frequency)
+            else:
+                dv = self._direction(job, lin, task)
             options = job.reduced_normal
             response_converged = int(options.get("max_iterations", 50)) > 0
             action = ext.reduced_normal_matrix(rows, G, solver) @ dv
@@ -1016,7 +1027,13 @@ class FakeImagingSite(BaseSite):
         vector = ExtensionVectorFile.read(path)
         if vector.fingerprint != ext.fingerprint:
             raise ValueError(f"{path} belongs to another extension basis")
-        if vector.baseline != ext.baseline:
+        if vector.control_identity is not None:
+            # One tap vector for every task: checked against the linearization's identity.
+            if not self.emits_control_identity:
+                raise ValueError("this fake solver predates single-copy tap vectors")
+            if vector.control_identity != _sha256({"control_identity": ext.baseline}):
+                raise ValueError(f"{path} belongs to another linearization")
+        elif vector.baseline != ext.baseline:
             raise ValueError(f"{path} belongs to another objective state")
         if vector.role != "tangent":
             raise ValueError(f"{path} is not a tangent extension vector")
@@ -1045,7 +1062,9 @@ class FakeImagingSite(BaseSite):
         ).write(path)
 
     @staticmethod
-    def _write_extension_manifest(path: Path, ext: FakeExtension) -> None:
+    def _write_extension_manifest(
+        path: Path, ext: FakeExtension, control_identity: Optional[str] = None
+    ) -> None:
         fields = []
         for field in ext.fields:
             entry: Dict[str, Any] = {
@@ -1065,6 +1084,8 @@ class FakeImagingSite(BaseSite):
             "baseline": ext.baseline,
             "fields": fields,
         }
+        if control_identity is not None:
+            payload["control_identity"] = control_identity
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
@@ -1142,7 +1163,10 @@ class FakeImagingSite(BaseSite):
             # directions and covectors are in the executing task's coordinates
             c = self.column_scale(lin.active, lin.sizes, frequency)
             if job.action == "jvp":
-                dv = self._direction(job, lin, task)
+                if job.direction_set is not None:
+                    (dv,) = self._direction_rows(job, lin, frequency)
+                else:
+                    dv = self._direction(job, lin, task)
                 values = np.zeros(lin.space.size, dtype=np.complex128)
                 values[rows] = J @ (c * dv)
                 DataVector(values, lin.space).write_objective_vector(
@@ -1159,6 +1183,22 @@ class FakeImagingSite(BaseSite):
                     c * np.real(J.conj().T @ r[rows]),
                     frequency=frequency,
                 )
+            elif job.direction_set is not None:  # one direction set, a covector set per task
+                rows = [
+                    c * np.real(J.conj().T @ (J @ (c * dv)))
+                    for dv in self._direction_rows(job, lin, frequency)
+                ]
+                parts = [ControlVectorFile.from_packed(row, lin.sizes) for row in rows]
+                ControlVectorSetFile(
+                    {name: np.stack([part.blocks[name] for part in parts]) for name in lin.sizes},
+                    control_identity=self.control_identity(lin),
+                    state_fingerprint=lin.state_fingerprint,
+                    control_registry_fingerprint=lin.control_registry_fingerprint,
+                    support={
+                        name: self.support_mask(name, size, frequency)
+                        for name, size in lin.sizes.items()
+                    },
+                ).write(job.covector_set_file(task))
             elif job.directions is not None:  # one normal job, several directions
                 for output, direction in enumerate(job.directions):
                     dv = self._direction(job, lin, task, direction)
@@ -1701,6 +1741,37 @@ class FakeImagingSite(BaseSite):
                 ).reshape(-1)
         return baselines
 
+    @staticmethod
+    def control_identity(lin: FakeLinearization) -> str:
+        """Return the fake frequency-independent control identity of ``lin``."""
+
+        return _sha256({"control_identity": lin.state_fingerprint})
+
+    def _direction_rows(
+        self, job: FWIOperatorJob, lin: FakeLinearization, frequency: Any
+    ) -> List[np.ndarray]:
+        """Read every row of ``direction_set`` in the executing task's coordinates."""
+
+        if not self.emits_control_identity:
+            raise ValueError("this fake solver predates direction sets")
+        vectors = ControlVectorSetFile.read(job.direction_set)
+        if vectors.control_identity != self.control_identity(lin):
+            raise ValueError("direction set control identity mismatch")
+        self.direction_set_rows[job.name] = vectors.n_vectors
+        rows = []
+        for index in range(vectors.n_vectors):
+            vector = vectors.vector(index)
+            for name, stored in vectors.scaling.items():
+                if name.endswith(".mechanism"):
+                    vector.blocks[name] = vector.blocks[name] * (
+                        stored / self.mechanism_scale(frequency)
+                    )
+            dv = vector.pack(lin.active)
+            if dv.size != lin.J.shape[1]:
+                raise ValueError("direction size does not match the active subspace")
+            rows.append(dv)
+        return rows
+
     def _direction(
         self,
         job: FWIOperatorJob,
@@ -2082,6 +2153,8 @@ class FakeImagingSite(BaseSite):
             name: self.support_mask(name, size, frequency)
             for name, size in lin.sizes.items()
         }
+        if self.emits_control_identity:
+            vector.control_identity = self.control_identity(lin)
         vector.write(path)
 
     def _write_manifest(

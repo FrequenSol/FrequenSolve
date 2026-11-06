@@ -18,7 +18,11 @@ from frequensolve.imaging import (
     SourceParameters,
     TraceStoreRef,
 )
-from frequensolve.imaging._artifacts import ControlStateFile, ControlVectorFile
+from frequensolve.imaging._artifacts import (
+    ControlStateFile,
+    ControlVectorFile,
+    ControlVectorSetFile,
+)
 from frequensolve.model.parameterization import ParameterizedProperty
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
@@ -570,9 +574,9 @@ def test_frozen_dofs_are_dropped_from_vectors_and_expanded_to_sauce_layout(
     np.testing.assert_array_equal(expanded[[1, 4]], 0.0)
     J = lin.jacobian
     np.testing.assert_allclose((J @ dv).values, surrogate.J @ expanded, rtol=1e-12)
-    direction = ControlVectorFile.read(
-        lin.entry.directory / "ops" / "0001" / "direction_1.h5"
-    )
+    direction = ControlVectorSetFile.read(
+        lin.entry.directory / "ops" / "0001" / "directions.h5"
+    ).vector(0)
     np.testing.assert_array_equal(direction.pack(ACTIVE), expanded)
     np.testing.assert_array_equal(direction.support_mask("model.vp"), [1, 0, 1, 1, 0])
     r = lin.data_space.random(2)
@@ -1032,11 +1036,13 @@ MECHANISMS = ["source.1.mechanism", "source.2.mechanism"]
 TAYLOR_STEPS = (1.0e-1, 5.0e-2, 2.5e-2)
 
 
-def _mechanism_problem(tmp_path, **options):
+def _mechanism_problem(tmp_path, control_identity=True, **options):
     # s(f) = 2e9 * (5 / f)^2: the tasks at 4 and 6 Hz store mechanisms in
     # different nondimensional units, and neither equals the fake's
     # normalized physical coordinate
-    fake = FakeImagingSite(seed=7, mechanism_reference_frequency=5.0)
+    fake = FakeImagingSite(
+        seed=7, mechanism_reference_frequency=5.0, control_identity=control_identity
+    )
     _sim, problem = _source_problem(
         tmp_path, fake, mechanism=True, signature=False, **options
     )
@@ -1121,7 +1127,8 @@ def test_unconverted_mechanism_vectors_fail_the_taylor_test(tmp_path, monkeypatc
     """The bug this conversion fixes: per-task mechanism vectors summed as is.
 
     The dot test cannot see it (J and J^H stay mutually adjoint), but the
-    gradient no longer matches the objective.
+    gradient no longer matches the objective. Per-task direction copies are
+    the older solvers' path; a direction set's ``/scaling`` lets Sauce convert.
     """
 
     monkeypatch.setattr(
@@ -1129,7 +1136,7 @@ def test_unconverted_mechanism_vectors_fail_the_taylor_test(tmp_path, monkeypatc
         "_task_factors",
         lambda self, job, space: [{} for _ in range(job.n_tasks)],
     )
-    _fake, problem = _mechanism_problem(tmp_path)
+    _fake, problem = _mechanism_problem(tmp_path, control_identity=False)
 
     report = problem.check(seed=5, steps=TAYLOR_STEPS)
 

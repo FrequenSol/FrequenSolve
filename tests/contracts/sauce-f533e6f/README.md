@@ -13,6 +13,12 @@ fields require the matching rebuilt backend; other snapshot provenance follows.
 The same local overlay adopts `wri.formulation: centered | original`, with
 centered as the default, and the corresponding objective metadata.
 
+The fs-job-1 schema also adopts `fwi_operator.direction_set` and `covector_set`
+(fs-control-vector-set-1 rows checked against a frequency-independent
+`/control_identity`) from Sauce branch `direction-set-2026-11-05`; they require
+the matching solver, and the SDK keeps per-task directions when a
+linearization's covectors carry no control identity.
+
 Baseline copied from `FrequenSol/Sauce@f533e6fd7dbc907805c92b0e6f3aa38d71c7aaae` (`imaging-api-phase0`, 2026-09-21): `trunk/contracts/fragments`, inputs fs-acquisition-1 fs-acquisition-2 fs-coordinate-system-1 fs-eikonal-1 fs-imaging-1 fs-implicit-geometry-1 fs-job-1 fs-material-model-1 fs-output-config-1 fs-simulation-1 fs-units-1 and the imaging output contracts. Refresh only when FrequenSolve intentionally adopts newer Sauce contracts; keep the SHA explicit.
 
 Changes adopted relative to the previous `sauce-83c7f06` pin:
