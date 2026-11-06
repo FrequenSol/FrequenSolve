@@ -691,12 +691,19 @@ class UncertaintyResult:
             BSplineControl,
             HatControl,
             MeshControl,
+            TensorBSplineControl,
             TensorHatControl,
         )
 
         constructors = {
             cls.__name__: cls
-            for cls in (HatControl, BSplineControl, TensorHatControl, MeshControl)
+            for cls in (
+                HatControl,
+                BSplineControl,
+                TensorHatControl,
+                TensorBSplineControl,
+                MeshControl,
+            )
         }
         selected = space.restrict(record["blocks"])
         blocks = []

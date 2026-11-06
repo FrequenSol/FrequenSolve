@@ -21,6 +21,7 @@ __all__ = [
     "MeshControl",
     "MeshPropertySpace",
     "ParameterizedProperty",
+    "TensorBSplineControl",
     "TensorHatControl",
     "control_from_fs",
 ]
@@ -31,7 +32,7 @@ __all__ = [
 #: ``sigmoid(logit(r) + c)`` for a dimensionless reference in ``(0, 1)``.
 CONTROL_TRANSFORMS: Tuple[str, ...] = ("identity", "log", "inverse", "logit")
 
-#: Behaviour of a hat, B-spline or tensor-hat control outside its knot span.
+#: Behaviour of a hat, B-spline or tensor control outside its knot span.
 #: ``zero`` leaves the reference property untouched there (no update, no
 #: sensitivity); ``hold`` clamps the evaluation coordinate into the span, so
 #: the end value, JVP and VJP hold outside it with zero spatial gradient.
@@ -449,6 +450,328 @@ class TensorHatControl:
         )
 
 
+#: Largest per-axis degree the Sauce ``tensor_bspline`` contract accepts.
+_TENSOR_BSPLINE_MAX_DEGREE = 7
+
+
+def _tensor_degrees(values: Any, count: int) -> Tuple[int, ...]:
+    """Return one validated B-spline degree per tensor axis."""
+
+    array = np.asarray(values)
+    if array.ndim == 0:
+        array = np.full(count, array)
+    if array.ndim != 1 or array.size != count:
+        raise ValueError(
+            f"tensor B-spline degree must be one integer or one per axis ({count})"
+        )
+    if (
+        not np.issubdtype(array.dtype, np.integer)
+        or np.any(array < 1)
+        or np.any(array > _TENSOR_BSPLINE_MAX_DEGREE)
+    ):
+        raise ValueError(
+            "tensor B-spline degrees must be integers between 1 and "
+            f"{_TENSOR_BSPLINE_MAX_DEGREE}"
+        )
+    return tuple(int(value) for value in array)
+
+
+@dataclass
+class TensorBSplineControl:
+    """Tensor product of two or three one-dimensional B-spline axes.
+
+    Every axis has its own degree and full knot vector; its basis is the
+    standard B-spline basis of that knot vector, closed at the right end,
+    exactly as in :class:`BSplineControl`, and axis ``a`` carries
+    ``n_a = len(knots_a) - degree_a - 1`` coefficients. The control is
+    independent of the simulation mesh. Coefficients are stored flat in the
+    Sauce contract ordering with the first listed axis fastest
+    (``i = i_0 + n_0 * (i_1 + n_1 * i_2)``), like :class:`TensorHatControl`;
+    an array with shape ``shape`` is flattened with the same convention.
+
+    Degree one with open knots ``[x_0, x_0, x_1, ..., x_m, x_m]`` is the hat
+    basis on the nodes ``x_0 .. x_m``, so a degree-one tensor B-spline on
+    uniform nodes reproduces the equivalent :class:`TensorHatControl`;
+    :meth:`from_nodes` builds such open knot vectors from breakpoints. Updates
+    vanish outside the closed knot-span box; with ``extrapolate="hold"`` every
+    axis coordinate is clamped into its active knot interval, so the edge
+    values continue outward.
+
+    Args:
+        axes: Distinct axis names in coefficient storage order.
+        degree: Degree per axis (1 to 7), or one degree for every axis.
+        knots: Full nondecreasing knot vector per axis (multiplicity at most
+            ``degree + 1``, positive active interval, at least ``degree + 1``
+            coefficients).
+        coefficients: Flat coefficient vector of length ``prod(shape)`` or an
+            array with shape ``shape``.
+        coordinate_system: Coordinate system the axes belong to.
+        units: Optional length units shared by all knot vectors; defaults to
+            the model coordinate units.
+        extrapolate: ``"zero"`` (default) or ``"hold"`` outside the knot
+            spans, applied along every axis (see :data:`CONTROL_EXTRAPOLATIONS`).
+    """
+
+    axes: Sequence[str]
+    degree: Any
+    knots: Sequence[ArrayLike]
+    coefficients: ArrayLike
+    coordinate_system: str = "global"
+    units: Optional[str] = None
+    extrapolate: str = "zero"
+    kind: str = field(default="tensor_bspline", init=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.axes, str):
+            raise ValueError("tensor B-spline axes must be a sequence of axis names")
+        self.axes = tuple(str(axis).strip() for axis in self.axes)
+        self.coordinate_system = str(self.coordinate_system).strip()
+        self.units = None if self.units is None else str(self.units).strip()
+        self.extrapolate = _validate_extrapolate(self.extrapolate)
+        ndim = len(self.axes)
+        if ndim not in (2, 3):
+            raise ValueError("tensor B-spline control requires two or three axes")
+        if any(not axis for axis in self.axes):
+            raise ValueError("tensor B-spline axis names cannot be empty")
+        if len(set(self.axes)) != ndim:
+            raise ValueError("tensor B-spline axes must be distinct")
+        if not self.coordinate_system:
+            raise ValueError("tensor B-spline control requires a coordinate system")
+        if self.units == "":
+            raise ValueError("tensor B-spline control units cannot be empty")
+        self.degree = _tensor_degrees(self.degree, ndim)
+        if isinstance(self.knots, (str, bytes)) or len(self.knots) != ndim:
+            raise ValueError(
+                f"tensor B-spline knots must list one knot vector per axis ({ndim})"
+            )
+        knots: List[np.ndarray] = []
+        for axis, degree, values in zip(self.axes, self.degree, self.knots):
+            vector = np.asarray(values, dtype=np.float64)
+            try:
+                # The per-axis rules are exactly those of a 1-D B-spline map.
+                BSplineControl(
+                    axis=axis,
+                    knots=vector,
+                    degree=degree,
+                    coefficients=np.zeros(max(1, vector.size - degree - 1)),
+                )
+            except ValueError as exc:
+                raise ValueError(f"tensor B-spline axis {axis!r}: {exc}") from exc
+            knots.append(np.array(vector, copy=True))
+        self.knots = tuple(knots)
+        self.coefficients = self._flatten(self.coefficients)
+
+    def _flatten(self, values: ArrayLike) -> np.ndarray:
+        shape = self.shape
+        array = np.asarray(values)
+        if np.iscomplexobj(array):
+            raise ValueError("material control coefficients must be real-valued")
+        if array.ndim == len(shape) and array.ndim > 1:
+            if tuple(array.shape) != shape:
+                raise ValueError(
+                    f"tensor B-spline coefficient array shape {tuple(array.shape)} "
+                    f"does not match the coefficient shape {shape}"
+                )
+            array = np.asarray(array, dtype=np.float64).reshape(-1, order="F")
+        expected = int(np.prod(shape))
+        flat = _coefficient_vector(array, minimum=4)
+        if flat.size != expected:
+            raise ValueError(
+                f"tensor B-spline coefficient count {flat.size} must equal the "
+                f"product of len(knots) - degree - 1 over the axes = {expected}"
+            )
+        return flat
+
+    @classmethod
+    def from_nodes(
+        cls,
+        axes: Sequence[str],
+        nodes: Any,
+        degree: Any = 1,
+        coefficients: Optional[ArrayLike] = None,
+        *,
+        coordinate_system: str = "global",
+        units: Optional[str] = None,
+        extrapolate: str = "zero",
+    ) -> "TensorBSplineControl":
+        """Return a tensor B-spline with open knots on per-axis breakpoints.
+
+        Axis ``a`` with strictly increasing breakpoints ``b`` (at least two)
+        and degree ``p`` gets the open knot vector ``[b_0]*p + b + [b_last]*p``
+        and ``len(b) + p - 1`` coefficients; its first and last Greville
+        abscissae are the end breakpoints. Degree one is the hat basis on the
+        breakpoints.
+
+        Args:
+            axes: Distinct axis names in coefficient storage order.
+            nodes: Breakpoints per axis, as a sequence in ``axes`` order or a
+                mapping keyed by axis name.
+            degree: Degree per axis or one degree for every axis.
+            coefficients: Flat or shaped coefficients; zeros by default.
+            coordinate_system: Coordinate system the axes belong to.
+            units: Optional length units of the breakpoints.
+            extrapolate: ``"zero"`` or ``"hold"`` outside the spans.
+        """
+
+        if isinstance(axes, str):
+            raise ValueError("tensor B-spline axes must be a sequence of axis names")
+        axes = tuple(str(axis).strip() for axis in axes)
+        if isinstance(nodes, Mapping):
+            missing = [axis for axis in axes if axis not in nodes]
+            if missing or len(nodes) != len(axes):
+                raise ValueError(
+                    f"tensor B-spline nodes must list breakpoints for exactly the "
+                    f"axes {list(axes)}; got {list(nodes)}"
+                )
+            nodes = [nodes[axis] for axis in axes]
+        if isinstance(nodes, (str, bytes)) or len(nodes) != len(axes):
+            raise ValueError(
+                f"tensor B-spline nodes must list breakpoints per axis ({len(axes)})"
+            )
+        degrees = _tensor_degrees(degree, len(axes))
+        knots: List[np.ndarray] = []
+        for axis, p, values in zip(axes, degrees, nodes):
+            breaks = np.asarray(values, dtype=np.float64)
+            if breaks.ndim != 1 or breaks.size < 2:
+                raise ValueError(
+                    f"tensor B-spline breakpoints of axis {axis!r} must be a 1-D "
+                    "array of at least two values"
+                )
+            if not np.all(np.isfinite(breaks)) or np.any(np.diff(breaks) <= 0.0):
+                raise ValueError(
+                    f"tensor B-spline breakpoints of axis {axis!r} must be finite "
+                    "and strictly increasing"
+                )
+            knots.append(np.concatenate(([breaks[0]] * p, breaks, [breaks[-1]] * p)))
+        if coefficients is None:
+            coefficients = np.zeros(
+                int(np.prod([k.size - p - 1 for k, p in zip(knots, degrees)]))
+            )
+        return cls(
+            axes=axes,
+            degree=degrees,
+            knots=knots,
+            coefficients=coefficients,
+            coordinate_system=coordinate_system,
+            units=units,
+            extrapolate=extrapolate,
+        )
+
+    @property
+    def ndim(self) -> int:
+        """Return the number of tensor axes."""
+
+        return len(self.axes)
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        """Return the coefficient count per axis, ``len(knots) - degree - 1``."""
+
+        return tuple(
+            int(np.asarray(knots).size - degree - 1)
+            for knots, degree in zip(self.knots, self.degree)
+        )
+
+    @property
+    def size(self) -> int:
+        """Return the number of ordered tensor coefficients."""
+
+        return int(np.asarray(self.coefficients).size)
+
+    @property
+    def axis_controls(self) -> List[BSplineControl]:
+        """Return one zero-coefficient :class:`BSplineControl` per axis.
+
+        Each shares the tensor's coordinate system, units and extrapolation
+        policy, so it evaluates the one-dimensional factor of the basis.
+        """
+
+        return [
+            BSplineControl(
+                axis=axis,
+                knots=knots,
+                degree=degree,
+                coefficients=np.zeros(count),
+                coordinate_system=self.coordinate_system,
+                units=self.units,
+                extrapolate=self.extrapolate,
+            )
+            for axis, knots, degree, count in zip(
+                self.axes, self.knots, self.degree, self.shape
+            )
+        ]
+
+    @property
+    def axis_coordinates(self) -> List[np.ndarray]:
+        """Return the Greville abscissae of the coefficients along each axis."""
+
+        return [control.coordinates for control in self.axis_controls]
+
+    @property
+    def coordinates(self) -> np.ndarray:
+        """Return an ``(size, ndim)`` array of tensor Greville nodes.
+
+        Rows follow the flat coefficient ordering, so ``coordinates[i]`` is the
+        node owning ``coefficients[i]`` and the first axis varies fastest.
+        """
+
+        grids = np.meshgrid(*self.axis_coordinates, indexing="ij")
+        return np.stack([grid.reshape(-1, order="F") for grid in grids], axis=1)
+
+    @property
+    def grid(self) -> np.ndarray:
+        """Return the coefficients as an array with shape ``shape``.
+
+        ``grid[i_0, i_1, ...]`` is the coefficient of basis ``(i_0, i_1, ...)``.
+        """
+
+        return np.asarray(self.coefficients).reshape(self.shape, order="F")
+
+    def with_coefficients(self, coefficients: ArrayLike) -> "TensorBSplineControl":
+        """Return a copy with a replacement flat or tensor-shaped vector."""
+
+        return replace(self, coefficients=coefficients)
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize this control using the Sauce material contract."""
+
+        payload: Dict[str, Any] = {
+            "kind": self.kind,
+            "coordinate_system": self.coordinate_system,
+        }
+        if self.units is not None:
+            payload["units"] = self.units
+        if self.extrapolate != "zero":
+            payload["extrapolate"] = self.extrapolate
+        payload["axes"] = [
+            {"axis": axis, "degree": degree, "knots": np.asarray(knots).tolist()}
+            for axis, degree, knots in zip(self.axes, self.degree, self.knots)
+        ]
+        payload["coefficients"] = np.asarray(self.coefficients).tolist()
+        return payload
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "TensorBSplineControl":
+        """Deserialize a tensor B-spline control."""
+
+        axes = data["axes"]
+        if isinstance(axes, (str, bytes)) or not all(
+            isinstance(axis, Mapping) for axis in axes
+        ):
+            raise ValueError(
+                "tensor B-spline axes must be objects with axis, degree and knots"
+            )
+        return cls(
+            axes=[axis["axis"] for axis in axes],
+            degree=[axis["degree"] for axis in axes],
+            knots=[axis["knots"] for axis in axes],
+            coefficients=data["coefficients"],
+            coordinate_system=data.get("coordinate_system", "global"),
+            units=data.get("units"),
+            extrapolate=data.get("extrapolate", "zero"),
+        )
+
+
 @dataclass
 class MeshControl:
     """First-order nodal controls on a named frozen mesh property space.
@@ -618,12 +941,15 @@ class MeshPropertySpace:
         return spaces
 
 
-PropertyControl = Union[HatControl, BSplineControl, TensorHatControl, MeshControl]
+PropertyControl = Union[
+    HatControl, BSplineControl, TensorHatControl, TensorBSplineControl, MeshControl
+]
 
 _CONTROL_KINDS = {
     "hat": HatControl,
     "bspline": BSplineControl,
     "tensor_hat": TensorHatControl,
+    "tensor_bspline": TensorBSplineControl,
     "mesh": MeshControl,
 }
 
@@ -755,13 +1081,21 @@ class ParameterizedProperty(Property):
         from scipy.interpolate import RegularGridInterpolator
         from scipy.special import expit
 
-        from frequensolve.model.representation import ControlRepresentation
+        from frequensolve.model.representation import (
+            ControlRepresentation,
+            TensorControlRepresentation,
+        )
 
         if isinstance(self.control, MeshControl):
             raise NotImplementedError(
                 "mesh controls require solver-backed materialization"
             )
-        if isinstance(self.control, TensorHatControl):
+        if isinstance(self.control, TensorBSplineControl):
+            # Row-wise Khatri-Rao product of the per-axis B-spline maps.
+            update = TensorControlRepresentation(self.control).evaluate(
+                np.asarray(self.control.coefficients), context
+            )
+        elif isinstance(self.control, TensorHatControl):
             points = np.column_stack(
                 [
                     context.coordinate(axis, self.control.coordinate_system)
@@ -820,7 +1154,7 @@ class ParameterizedProperty(Property):
             )
         axes = (
             self.control.axes
-            if isinstance(self.control, TensorHatControl)
+            if isinstance(self.control, (TensorHatControl, TensorBSplineControl))
             else (getattr(self.control, "axis", None),)
         )
         coordinates = {}

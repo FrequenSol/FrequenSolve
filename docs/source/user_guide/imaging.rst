@@ -245,12 +245,15 @@ plain numbers in the model's units or Pint quantities.
        (below). Hat nodes end at the subdomain boundaries, B-spline knots
        are open-uniform over the same span. Outside explicit ``nodes`` the
        update is zero unless ``extrapolate="hold"`` continues the end values.
-   * - :class:`~frequensolve.imaging.GridParameters` ``(props, subdomain=None, spacing | shape | grid, transform, limits, extrapolate)``
-     - one ``model.<id>`` per property (tensor-hat lattice)
+   * - :class:`~frequensolve.imaging.GridParameters` ``(props, subdomain=None, spacing | shape | grid | nodes, degree=1, coordinate_system, pin_zero, transform, limits, extrapolate)``
+     - one ``model.<id>`` per property (tensor-hat lattice or tensor B-spline)
      - Lattice over the subdomain's bounding box, or the whole model; nodes
        without support are frozen (see below). An explicit ``grid`` over part
        of the subdomain updates only its span unless ``extrapolate="hold"``
-       continues the boundary rows and columns to the domain edges.
+       continues the boundary rows and columns to the domain edges. A
+       ``degree`` above one, or explicit per-axis ``nodes`` in a named
+       coordinate system, gives a tensor B-spline; ``pin_zero`` fixes rows or
+       columns at zero (see :ref:`imaging-tensor-grids`).
    * - :class:`~frequensolve.imaging.MeshParameters` ``(prop, subdomain, frequency, epw)``
      - ``model.<id>`` (mesh-native nodal controls)
      - Sauce sizes and prunes the property space; the coefficient count is
@@ -353,6 +356,58 @@ surface is rejected as ambiguous. Rendered profiles use the ``depth``
 dimension (``z`` for ``"global"``) and plot vertically, depth increasing
 downwards.
 
+.. _imaging-tensor-grids:
+
+Tensor grids
+~~~~~~~~~~~~
+
+A :class:`~frequensolve.imaging.GridParameters` block is the tensor product
+of one 1-D basis per axis, independent of the mesh, with the coefficients
+stored first axis fastest. With ``spacing``, ``shape`` or ``grid`` and the
+default ``degree=1`` it is the compact ``tensor_hat`` lattice. ``degree`` (one
+integer, or a mapping of axis name to degree with missing axes 1) turns an
+axis into a B-spline of that degree on the same nodes, and explicit per-axis
+``nodes`` (increasing breakpoints, possibly nonuniform) in a
+``coordinate_system`` always give a ``tensor_bspline`` map with open knots:
+degree ``p`` on ``m`` breakpoints has ``m + p - 1`` coefficients, and degree
+one is the hat basis on the breakpoints.
+
+The node of a coefficient is its hat node or, along a B-spline axis, its
+Greville abscissa; with open knots the first and last abscissae are the end
+breakpoints. Limits against a varying reference are evaluated at these nodes,
+also in surface-relative systems (each axis must follow one physical
+direction), so for degree above one they bound the coefficients rather than
+the field between nodes. ``pin_zero`` fixes the coefficients whose node
+matches a listed coordinate at zero (lower = upper = 0); an unknown
+coordinate raises and lists the available ones. ``extrapolate="hold"`` clamps
+every axis into its span, so a pinned edge column makes the update taper to
+zero at it and stay zero beyond it.
+
+A smooth land depth profile blended laterally between a few anchors is cubic
+in depth below the sediment surface and linear in ``x``, held on the land
+side and tapering to zero at a pinned offshore anchor:
+
+.. code-block:: python
+
+   simulation.add_surface_coordinate_system("seabed_depth", "seabed", normal="down")
+   land = im.GridParameters(
+       "vs", "sediment",
+       coordinate_system="seabed_depth",      # x, and z = depth below the seabed (km)
+       nodes={"x": [0.45, 0.90, 1.27, 1.60], "z": np.linspace(0.0, 0.15, 6)},
+       degree={"z": 3},                       # x stays linear (degree 1)
+       transform="log", extrapolate="hold",
+       pin_zero={"x": [1.60], "z": [0.15]},   # offshore anchor and bottom row stay at the reference
+   )
+   space = im.ControlSpace(vs=land).bind(simulation)
+   space.block("vs").control.shape            # (4, 8): 4 anchors x (6 + 3 - 1) depth coefficients
+   space.block("vs").coords["z"]              # Greville depths 0, 0.01, 0.03, ..., 0.14, 0.15
+
+Every ``x`` anchor carries its own depth profile; equal coefficients on the
+0.45, 0.90 and 1.27 km columns give one land profile. West of 0.45 km the
+0.45 km column holds, between 1.27 and 1.60 km the update fades linearly to
+zero, and offshore of 1.60 km and below 150 m the property stays at the
+reference.
+
 .. _imaging-support:
 
 Support masks and conditioning
@@ -399,7 +454,8 @@ transition; nodes that become supported as an interface moves are picked up
 by the next stage. ``ImagingProblem(min_support=...)`` and
 ``Stage(min_support=...)`` change the threshold. Before the first
 linearization FrequenSolve uses a geometric fallback for layered models
-(exact for 1-D profiles in any datum, bounding box for lattices), and
+(exact for 1-D profiles in any datum, the bounding box in the control's
+frame for tensor grids), and
 ``space.with_support({...})`` installs an explicit mask.
 
 State versus vector

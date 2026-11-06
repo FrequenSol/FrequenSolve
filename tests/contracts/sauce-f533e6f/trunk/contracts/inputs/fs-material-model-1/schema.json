@@ -497,6 +497,9 @@
             },
             {
               "$ref": "#/$defs/tensorHatControlMap"
+            },
+            {
+              "$ref": "#/$defs/tensorBSplineControlMap"
             }
           ]
         }
@@ -2313,6 +2316,80 @@
             "type": "number"
           },
           "description": "Flat coefficient array of length product(shape). Shape, axes, origin and spacing lengths must agree and cannot exceed the simulation dimension; runtime validates these relations."
+        }
+      },
+      "additionalProperties": false
+    },
+    "tensorBSplineControlMap": {
+      "type": "object",
+      "description": "Tensor product of two or three one-dimensional B-spline axes, each with its own degree and knot vector, independent of the simulation mesh. The first listed axis varies fastest in the flat coefficient array. Updates vanish outside the closed knot-span box unless extrapolate is hold, which continues the edge values outward along every axis. Degree one on every axis with open knots on uniform nodes reproduces tensor_hat.",
+      "required": [
+        "kind",
+        "axes",
+        "coefficients"
+      ],
+      "properties": {
+        "kind": {
+          "const": "tensor_bspline"
+        },
+        "coordinate_system": {
+          "type": "string",
+          "default": "global"
+        },
+        "units": {
+          "type": "string",
+          "description": "Units shared by all axis knots; defaults to model coordinate units."
+        },
+        "extrapolate": {
+          "type": "string",
+          "enum": [
+            "zero",
+            "hold"
+          ],
+          "default": "zero",
+          "description": "Behaviour outside the knot spans (every axis): zero leaves the reference property (no update, no sensitivity); hold clamps the evaluation coordinate into the span so the edge value, JVP and VJP hold outside it with zero spatial gradient."
+        },
+        "axes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "description": "Distinct active axes in the selected coordinate system, in coefficient storage order.",
+          "items": {
+            "type": "object",
+            "required": [
+              "axis",
+              "degree",
+              "knots"
+            ],
+            "properties": {
+              "axis": {
+                "type": "string",
+                "minLength": 1
+              },
+              "degree": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 7
+              },
+              "knots": {
+                "type": "array",
+                "minItems": 4,
+                "items": {
+                  "type": "number"
+                },
+                "description": "Full nondecreasing knot vector; the axis has len(knots) - degree - 1 coefficients."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "coefficients": {
+          "type": "array",
+          "minItems": 4,
+          "items": {
+            "type": "number"
+          },
+          "description": "Flat coefficient array of length product over axes of len(knots) - degree - 1."
         }
       },
       "additionalProperties": false

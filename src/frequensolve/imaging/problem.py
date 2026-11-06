@@ -2467,10 +2467,15 @@ class ImagingProblem:
         if smoothing is not None:
             if not any(b.name.startswith("model.") for b in blocks):
                 errors.append("smoothing requires at least one model.* block")
-            if "grid" in kinds:
+            if (
+                "grid" in kinds
+                and smoothing.kind != "none"
+                and smoothing.derivative_order != 1
+            ):
                 warnings.append(
-                    "tensor_hat (GridParameters) smoothing is an unimplemented "
-                    "Sauce stub"
+                    "GridParameters (tensor_hat, tensor_bspline) smoothing supports "
+                    "derivative_order 1 only; Sauce rejects derivative_order "
+                    f"{smoothing.derivative_order}"
                 )
         if shared.pending_manifest:
             warnings.append(

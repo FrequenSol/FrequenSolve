@@ -22,6 +22,7 @@ from frequensolve.model.parameterization import (
     HatControl,
     MeshControl,
     ParameterizedProperty,
+    TensorBSplineControl,
     TensorHatControl,
 )
 from frequensolve.seismic.acquisition import Acquisition
@@ -149,6 +150,43 @@ def _full_space() -> im.ControlSpace:
         ),
         (lambda: im.GridParameters("vp", shape=[1, 4]), ">= 2"),
         (lambda: im.GridParameters(["vp", "vp"], shape=[4, 4]), "distinct"),
+        (
+            lambda: im.GridParameters(
+                "vp", shape=[3, 3], nodes={"x": [0, 1], "z": [0, 1]}
+            ),
+            "exactly one of spacing, shape, grid, nodes",
+        ),
+        (lambda: im.GridParameters("vp", nodes={"x": [0, 1]}), "two or three axes"),
+        (
+            lambda: im.GridParameters("vp", nodes={"x": [0, 1], "z": [1, 0]}),
+            "strictly increasing",
+        ),
+        (lambda: im.GridParameters("vp", nodes=[[0, 1], [0, 1]]), "mapping"),
+        (lambda: im.GridParameters("vp", shape=[3, 3], degree=0), "between 1 and 7"),
+        (
+            lambda: im.GridParameters("vp", shape=[3, 3], degree={"z": 8}),
+            "between 1 and 7",
+        ),
+        (lambda: im.GridParameters("vp", shape=[3, 3], degree=2.0), "integer"),
+        (
+            lambda: im.GridParameters(
+                "vp", shape=[3, 3], coordinate_system="seabed_depth"
+            ),
+            "applies to explicit nodes",
+        ),
+        (
+            lambda: im.GridParameters(
+                "vp",
+                grid=CartesianGrid(n=[2, 2], x0=[0, 0], x1=[1, 1]),
+                coordinate_system="seabed_depth",
+            ),
+            "conflicts with the grid's own system",
+        ),
+        (lambda: im.GridParameters("vp", shape=[3, 3], pin_zero=[1.0]), "mapping"),
+        (
+            lambda: im.GridParameters("vp", shape=[3, 3], pin_zero={"z": []}),
+            "at least one value",
+        ),
         (
             lambda: im.MeshParameters("vp", "sediment", frequency=0.0, epw=2.0),
             "positive",
@@ -1732,3 +1770,361 @@ def test_volume_injection_mechanism_has_one_complex_component(tmp_path):
     bound = im.ControlSpace(src=im.SourceParameters(mechanism=True)).bind(simulation)
     assert bound.block("source.1.mechanism").components == ("c1",)
     assert bound.sizes["source.1.mechanism"] == 2
+
+
+# ---------------------------------------------------------------------------
+# tensor B-spline grids and pinned coefficients
+# ---------------------------------------------------------------------------
+
+
+def test_grid_degree_turns_uniform_layouts_into_tensor_bsplines(simulation):
+    hat = im.ControlSpace(vp=im.GridParameters("vp", "sediment", shape=[3, 4])).bind(
+        simulation
+    )
+    same = im.ControlSpace(
+        vp=im.GridParameters("vp", "sediment", shape=[3, 4], degree={"x": 1})
+    ).bind(simulation)
+    control = hat.block("vp").control
+    # Every degree one: the unchanged tensor-hat lattice.
+    assert isinstance(control, TensorHatControl)
+    assert control.to_fs() == {
+        "kind": "tensor_hat",
+        "coordinate_system": "global",
+        "axes": ["x", "z"],
+        "shape": [3, 4],
+        "origin": [0.0, 200.0],
+        "spacing": [2000.0, 1300.0 / 3],
+        "coefficients": [0.0] * 12,
+    }
+    assert same.block("vp").control.to_fs() == control.to_fs()
+    assert hat.equivalent(same)
+
+    spline = im.ControlSpace(
+        vp=im.GridParameters("vp", "sediment", shape=[3, 4], degree={"z": 2})
+    ).bind(simulation)
+    block = spline.block("vp")
+    assert isinstance(block.control, TensorBSplineControl)
+    assert block.kind == "grid"
+    assert block.control.degree == (1, 2)
+    assert block.control.shape == (3, 5) and block.size == 15
+    # The uniform lattice nodes become the breakpoints of open knot vectors.
+    np.testing.assert_allclose(block.control.knots[0], [0, 0, 2000, 4000, 4000])
+    np.testing.assert_allclose(
+        block.control.knots[1],
+        np.concatenate(([200.0] * 2, np.linspace(*SEDIMENT, 4), [1500.0] * 2)),
+    )
+    np.testing.assert_allclose(block.coords["z"], block.control.axis_coordinates[1])
+    assert block.coords["z"][0] == SEDIMENT[0] and block.coords["z"][-1] == SEDIMENT[1]
+    assert not hat.equivalent(spline)
+
+    # An explicit grid keeps its own frame and needs no simulation.
+    grid = CartesianGrid(
+        n=[3, 3], x0=[0.0, 0.0], x1=[1.0, 2.0], dims=["x", "z"], system="local"
+    )
+    cubic = im.ControlSpace(g=im.GridParameters("vp", grid=grid, degree=3))
+    assert cubic.resolved
+    control = cubic.block("g").control
+    assert control.coordinate_system == "local" and control.shape == (5, 5)
+    with pytest.raises(ValueError, match="not lattice axes"):
+        im.ControlSpace(
+            vp=im.GridParameters("vp", "sediment", shape=[3, 4], degree={"y": 2})
+        ).bind(simulation)
+
+
+def test_pin_zero_fixes_lattice_rows_and_columns_within_the_limits(simulation):
+    bound = im.ControlSpace(
+        vp=im.GridParameters(
+            "vp",
+            "sediment",
+            shape=[3, 4],
+            limits=(1700.0, 3500.0),
+            pin_zero={"z": [1500.0], "x": [0.0]},
+        )
+    ).bind(simulation)
+    block = bound.block("vp")
+    assert isinstance(block.control, TensorHatControl)
+    nodes = block.control.coordinates
+    pinned = np.isclose(nodes[:, 1], 1500.0) | np.isclose(nodes[:, 0], 0.0)
+    assert pinned.sum() == 3 + 4 - 1
+    assert block.lower.shape == block.upper.shape == (12,)
+    np.testing.assert_array_equal(block.lower[pinned], 0.0)
+    np.testing.assert_array_equal(block.upper[pinned], 0.0)
+    np.testing.assert_allclose(block.lower[~pinned], 1700.0 - 1900.0)
+    np.testing.assert_allclose(block.upper[~pinned], 3500.0 - 1900.0)
+    clipped = im.ControlVector(np.full(bound.size, 500.0), bound).clip()
+    np.testing.assert_array_equal(clipped["vp"], np.where(pinned, 0.0, 500.0))
+
+    def bind(**kwargs):
+        spec = im.GridParameters("vp", "sediment", shape=[3, 4], **kwargs)
+        return im.ControlSpace(vp=spec).bind(simulation)
+
+    with pytest.raises(
+        ValueError,
+        match=r"pin_zero z=1000 is not a node coordinate .*available: \[200\.0, 633\.3",
+    ):
+        bind(pin_zero={"z": [1000.0]})
+    with pytest.raises(ValueError, match="'depth' is not a lattice axis"):
+        bind(pin_zero={"depth": [0.0]})
+    # A pinned coefficient keeps the reference, even where these limits exclude it.
+    tight = bind(pin_zero={"z": [1500.0]}, limits=(2000.0, 3500.0)).block("vp")
+    row = np.isclose(tight.control.coordinates[:, 1], 1500.0)
+    np.testing.assert_array_equal(tight.lower[row], 0.0)
+    np.testing.assert_array_equal(tight.upper[row], 0.0)
+    np.testing.assert_allclose(tight.lower[~row], 2000.0 - 1900.0)
+
+
+def test_grid_nodes_give_nonuniform_tensor_bsplines_and_their_support(simulation):
+    bound = im.ControlSpace(
+        vp=im.GridParameters(
+            "vp",
+            "sediment",
+            nodes={
+                "x": [0.0, 1000.0, 4000.0],
+                "z": [0.0, 500.0, 1000.0, 1500.0, 2000.0],
+            },
+            degree={"z": 3},
+        )
+    ).bind(simulation)
+    control = bound.block("vp").control
+    assert isinstance(control, TensorBSplineControl)
+    assert control.shape == (3, 7) and control.coordinate_system == "global"
+    # The last cubic row is supported on (1500, 2000] only, below the layer.
+    mask = bound.geometric_support()["model.vp"]
+    np.testing.assert_array_equal(
+        mask.reshape(3, 7, order="F"), np.repeat([[True] * 6 + [False]], 3, axis=0)
+    )
+
+    # Pint lengths convert to the model units (Sauce's default km) and are
+    # recorded on the control; pins convert to the control units.
+    units = im.ControlSpace(
+        vp=im.GridParameters(
+            "vp",
+            "sediment",
+            nodes={"x": [0.0, 2.0, 4.0] * u.km, "z": [200.0, 1500.0] * u.m},
+            pin_zero={"z": 1.5 * u.km},
+        )
+    ).bind(simulation)
+    control = units.block("vp").control
+    assert control.units == "km" and control.degree == (1, 1)
+    np.testing.assert_allclose(control.axis_coordinates[1], [0.2, 1.5])
+    np.testing.assert_array_equal(units.block("vp").upper, [np.inf] * 3 + [0.0] * 3)
+
+    def bind(**kwargs):
+        return im.ControlSpace(vp=im.GridParameters("vp", "sediment", **kwargs)).bind(
+            simulation
+        )
+
+    with pytest.raises(ValueError, match="'nope' is not registered"):
+        bind(coordinate_system="nope", nodes={"x": [0, 1], "z": [0, 1]})
+    with pytest.raises(ValueError, match="are not global axes"):
+        bind(nodes={"x": [0, 1], "depth": [0, 1]})
+
+
+def test_transfer_between_tensor_hat_and_tensor_bspline_blocks(simulation):
+    hat = im.ControlSpace(g=im.GridParameters("vp", "water", shape=[5, 3])).bind(
+        simulation
+    )
+    spline = im.ControlSpace(
+        g=im.GridParameters(
+            "vp",
+            "water",
+            nodes={"x": [0.0, 1500.0, 4000.0], "z": [0.0, 50.0, 200.0]},
+            degree={"z": 2},
+        )
+    ).bind(simulation)
+    nodes = hat.block("g").control.coordinates
+    vector = hat.pack({"g": 1.0 + 0.001 * nodes[:, 0] + 0.01 * nodes[:, 1]})
+
+    moved = hat.transfer_to(spline, vector)
+    target = spline.block("g").control.coordinates  # Greville nodes
+    np.testing.assert_allclose(
+        moved["g"], 1.0 + 0.001 * target[:, 0] + 0.01 * target[:, 1], atol=1e-8
+    )
+    back = spline.transfer_to(hat, moved)
+    np.testing.assert_allclose(back.values, vector.values, atol=1e-8)
+
+
+def _gulf_simulation(tmp_path) -> SeismicSimulation:
+    """A small Gulf-like section: water over sediment below a sloping seabed.
+
+    ``seabed_depth`` is the Gulf frame: ``x`` is inherited from the global
+    frame and ``z`` is the depth below the seabed (model units, km).
+    """
+
+    from frequensolve.model.property import Property
+
+    model = LayeredModel(name="gulf", dimension=2, x_limits=[0.0, 2.0])
+    model.add_surface(0.0, name="top")
+    model.add_layer(
+        name="water", physics="acoustic", properties={"vp": 1.5, "rho": 1.0}
+    )
+    model.add_surface(0.05, name="seabed")
+    model.add_layer(
+        name="sediment",
+        physics="elastic",
+        properties={"vp": 1.8, "vs": 0.4, "rho": 2.0},
+    )
+    model.add_surface(1.0, name="bottom")
+    model.surfaces["seabed"].depth = Property(
+        xr.DataArray([0.01, 0.21], dims=["x"], coords={"x": [0.0, 2.0]})
+    )
+    simulation = SeismicSimulation(
+        name="gulf",
+        physics="elastic",
+        dimension=2,
+        project_path=tmp_path,
+        model=model,
+        acquisition=Acquisition(
+            source_geometry=SourceGeometry.points(kind="scalar", coords=[[1.0, 0.0]])
+        ),
+    )
+    simulation.add_surface_coordinate_system("seabed_depth", "seabed", normal="down")
+    return simulation
+
+
+def _seabed(x):
+    return 0.01 + 0.1 * np.asarray(x)
+
+
+def _land_lattice(**kwargs) -> im.GridParameters:
+    """The Gulf land S-wave block: cubic in depth, linear between x anchors."""
+
+    return im.GridParameters(
+        "vs",
+        "sediment",
+        coordinate_system="seabed_depth",
+        nodes={"x": [0.45, 0.90, 1.27, 1.60], "z": np.linspace(0.0, 0.15, 6)},
+        degree={"z": 3},
+        transform="log",
+        extrapolate="hold",
+        pin_zero={"x": [1.60], "z": [0.15]},
+        **kwargs,
+    )
+
+
+def test_gulf_land_profile_tapers_to_a_pinned_offshore_anchor(tmp_path):
+    from frequensolve.model.representation import (
+        ControlRepresentation,
+        EvaluationContext,
+    )
+
+    assert im.ControlSpace(vs=_land_lattice()).size == 32  # needs no simulation
+    bound = im.ControlSpace(vs=_land_lattice()).bind(_gulf_simulation(tmp_path))
+    block = bound.block("vs")
+    control = block.control
+    assert isinstance(control, TensorBSplineControl)
+    assert (block.kind, block.size, control.shape) == ("grid", 32, (4, 8))
+    assert block.dims == ("x", "z") and block.coordinate_system == "seabed_depth"
+    np.testing.assert_allclose(block.coords["x"], [0.45, 0.9, 1.27, 1.6])
+    np.testing.assert_allclose(
+        block.coords["z"], [0.0, 0.01, 0.03, 0.06, 0.09, 0.12, 0.14, 0.15]
+    )
+    payload = control.to_fs()
+    assert (payload["kind"], payload["coordinate_system"], payload["extrapolate"]) == (
+        "tensor_bspline",
+        "seabed_depth",
+        "hold",
+    )
+    assert [(a["axis"], a["degree"]) for a in payload["axes"]] == [("x", 1), ("z", 3)]
+    np.testing.assert_allclose(
+        payload["axes"][0]["knots"], [0.45, 0.45, 0.9, 1.27, 1.6, 1.6]
+    )
+    np.testing.assert_allclose(
+        payload["axes"][1]["knots"],
+        [0, 0, 0, 0, 0.03, 0.06, 0.09, 0.12, 0.15, 0.15, 0.15, 0.15],
+    )
+    vs = bound.simulation.model.layers["sediment"].properties["vs"]
+    schema_id = json.loads(MATERIAL_SCHEMA.read_text())["$id"]
+    Draft202012Validator(
+        {"$ref": schema_id + "#/$defs/property"}, registry=_registry()
+    ).validate(vs.to_fs())
+
+    # The x = 1.60 column and the z = 0.15 row are fixed at zero.
+    nodes = control.coordinates
+    pinned = np.isclose(nodes[:, 0], 1.6) | np.isclose(nodes[:, 1], 0.15)
+    assert pinned.sum() == 8 + 4 - 1
+    np.testing.assert_array_equal(block.lower[pinned], 0.0)
+    np.testing.assert_array_equal(block.upper[pinned], 0.0)
+    assert np.isneginf(block.lower[~pinned]).all()
+    assert np.isposinf(block.upper[~pinned]).all()
+    np.testing.assert_array_equal(bound.ones().clip()["vs"], np.where(pinned, 0.0, 1.0))
+    # Every coefficient meets the sediment in the seabed-relative frame.
+    assert bound.geometric_support() == {}
+
+    # One land profile on the 0.45 / 0.90 / 1.27 columns.
+    profile = np.array([0.3, 0.25, 0.2, 0.1, 0.05, -0.05, 0.02, 0.0])
+    grid = np.zeros((4, 8))
+    grid[:3] = profile
+    coefficients = grid.reshape(-1, order="F")
+    vs = vs.with_coefficients(coefficients)
+    x = np.array([0.0, 0.2, 0.45, 0.7, 1.27, 1.35, 1.5, 1.6, 1.8, 2.0])
+    depth = np.array([0.0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.6])
+    mesh_x, mesh_depth = np.meshgrid(x, depth, indexing="ij")
+    context = EvaluationContext(
+        {"x": mesh_x, "z": mesh_depth},
+        coordinate_system="seabed_depth",
+        shape=mesh_x.shape,
+    )
+    update = np.log(vs.apply_control(0.4, context) / 0.4)
+
+    def land(depths):
+        return ControlRepresentation(
+            BSplineControl("z", control.knots[1], profile, degree=3, extrapolate="hold")
+        ).evaluate(profile, EvaluationContext({"z": depths}))
+
+    def taper(lateral):
+        return np.clip((1.6 - np.asarray(lateral)) / (1.6 - 1.27), 0.0, 1.0)
+
+    column = land(depth)
+    assert np.abs(column[depth < 0.15]).min() > 0.0
+    np.testing.assert_allclose(update, np.outer(taper(x), column), atol=1e-12)
+    np.testing.assert_allclose(update[0], update[2])  # hold: x < 0.45 is x = 0.45
+    np.testing.assert_array_equal(update[x >= 1.6], 0.0)  # offshore of the anchor
+    np.testing.assert_allclose(update[:, depth >= 0.15], 0.0, atol=1e-15)
+
+    # Rendered on a global grid the update follows the sloping seabed.
+    image = bound.pack({"vs": coefficients}).to_grid(
+        CartesianGrid(n=[21, 31], x0=[0.0, 0.0], x1=[2.0, 0.3], dims=["x", "z"]),
+        "vs",
+    )
+    assert image.dims == ("z", "x")
+    below = image.z.values[:, None] - _seabed(image.x.values)[None, :]
+    expected = taper(image.x.values)[None, :] * land(below.reshape(-1)).reshape(
+        below.shape
+    )
+    assert np.isnan(image.values[below < -1e-9]).all()
+    np.testing.assert_allclose(
+        image.values[below > 1e-9], expected[below > 1e-9], atol=1e-12
+    )
+
+
+def test_gulf_land_lattice_limits_follow_the_reference_at_seabed_relative_nodes(
+    tmp_path,
+):
+    simulation = _gulf_simulation(tmp_path)
+    z = np.linspace(0.0, 1.0, 41)
+    simulation.model.layers["sediment"].set_property(
+        "vs", xr.DataArray(0.3 + z, dims=["z"], coords={"z": z})
+    )
+    bound = im.ControlSpace(vs=_land_lattice(limits=(0.1, 2.0))).bind(simulation)
+    block = bound.block("vs")
+    nodes = block.control.coordinates
+    # Each node sits at global z = seabed(x) + depth below it.
+    reference = 0.3 + _seabed(nodes[:, 0]) + nodes[:, 1]
+    pinned = np.isclose(nodes[:, 0], 1.6) | np.isclose(nodes[:, 1], 0.15)
+    np.testing.assert_allclose(block.lower[~pinned], np.log(0.1 / reference[~pinned]))
+    np.testing.assert_allclose(block.upper[~pinned], np.log(2.0 / reference[~pinned]))
+    np.testing.assert_array_equal(block.lower[pinned], 0.0)
+    np.testing.assert_array_equal(block.upper[pinned], 0.0)
+    # Pins keep the reference even where it lies outside the limits (offshore 0.47 .. 0.62).
+    tight = im.ControlSpace(vs=_land_lattice(limits=(0.5, 2.0))).bind(simulation)
+    np.testing.assert_array_equal(tight.block("vs").lower[pinned], 0.0)
+    np.testing.assert_array_equal(tight.block("vs").upper[pinned], 0.0)
+
+
+def test_plot_draws_tensor_bspline_blocks_at_their_greville_nodes(tmp_path, plt):
+    bound = im.ControlSpace(vs=_land_lattice()).bind(_gulf_simulation(tmp_path))
+    ax = bound.random(2).plot("vs")
+    (mesh,) = ax.collections
+    assert mesh.get_array().size == 32
+    assert ax.yaxis_inverted()

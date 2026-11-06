@@ -31,7 +31,7 @@ import copy
 import itertools
 import math
 import warnings
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import (
@@ -62,6 +62,7 @@ from frequensolve.imaging._artifacts import (
 )
 from frequensolve.model.implicit_geometry import ImplicitSurfaceControl, RBFSurface
 from frequensolve.model.parameterization import (
+    _TENSOR_BSPLINE_MAX_DEGREE,
     CONTROL_EXTRAPOLATIONS,
     CONTROL_TRANSFORMS,
     BSplineControl,
@@ -69,10 +70,15 @@ from frequensolve.model.parameterization import (
     MeshControl,
     MeshPropertySpace,
     ParameterizedProperty,
+    TensorBSplineControl,
     TensorHatControl,
 )
 from frequensolve.model.property import Property, canonical_property_name
-from frequensolve.model.representation import ControlRepresentation, EvaluationContext
+from frequensolve.model.representation import (
+    ControlRepresentation,
+    EvaluationContext,
+    TensorControlRepresentation,
+)
 from frequensolve.units import is_quantity, unit_expression
 
 __all__ = [
@@ -104,6 +110,10 @@ _DEFAULT_LENGTH_UNITS = "km"  # Sauce's default model coordinate unit
 # varying reference property along the iso-lines of profile nodes.
 _LATERAL_SAMPLES = {2: 33, 3: 9}
 _DEPTH_SAMPLES = 33
+# Tensor-product material controls behind ``GridParameters`` blocks.
+_TENSOR_CONTROLS = (TensorHatControl, TensorBSplineControl)
+# ``GridParameters`` fields added for tensor B-splines; left out of the repr at their defaults.
+_GRID_SPLINE_FIELDS = frozenset({"nodes", "degree", "coordinate_system", "pin_zero"})
 
 
 def source_metres_per_unit(simulation: Any) -> Optional[np.ndarray]:
@@ -464,6 +474,22 @@ def _material_bounds(
             f"there: {exc}"
         ) from exc
     return _node_bounds(block, transform, limits, extrema, units)
+
+
+def _pin_bounds(
+    lower: Any, upper: Any, pinned: np.ndarray, size: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return per-DOF optimizer bounds with ``lower = upper = 0`` at pinned DOFs.
+
+    A pinned coefficient keeps the reference property at its node, so pins
+    replace the limit bounds there.
+    """
+
+    low = np.array(np.broadcast_to(np.asarray(lower, dtype=np.float64), (size,)))
+    high = np.array(np.broadcast_to(np.asarray(upper, dtype=np.float64), (size,)))
+    low[pinned] = 0.0
+    high[pinned] = 0.0
+    return low, high
 
 
 # ---------------------------------------------------------------------------
@@ -878,15 +904,16 @@ class _BindContext:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Return per-coefficient ``(min, max)`` of ``reference`` at the nodes.
 
-        A tensor-hat coefficient stands for its lattice node.  A profile
-        coefficient stands for the iso-line of its node coordinate (hat node
-        or B-spline Greville abscissa) through the subdomain: the line is
-        sampled laterally (or in depth for a lateral axis) and points outside
-        the subdomain are dropped.
+        A tensor coefficient stands for its node: the lattice node of a
+        tensor hat, the tensor product of the per-axis Greville abscissae of
+        a tensor B-spline.  A profile coefficient stands for the iso-line of
+        its node coordinate (hat node or B-spline Greville abscissa) through
+        the subdomain: the line is sampled laterally (or in depth for a
+        lateral axis) and points outside the subdomain are dropped.
         """
 
         reference = self._loaded_reference(reference)
-        if isinstance(control, TensorHatControl):
+        if isinstance(control, _TENSOR_CONTROLS):
             values = self._lattice_reference(subdomain, prop, reference, control)
             return values, values
         if isinstance(control, (HatControl, BSplineControl)):
@@ -941,21 +968,110 @@ class _BindContext:
     def _lattice_reference(
         self, subdomain: str, prop: str, reference: Property, control: Any
     ) -> np.ndarray:
-        system = control.coordinate_system or "global"
-        if not self.is_global(system):
-            raise ValueError(
-                f"lattice nodes in coordinate system {system!r} cannot be located "
-                "(global lattices only)"
-            )
+        """Return the reference at every tensor node, first axis fastest.
+
+        Global lattices sample their node grid directly.  In a named system
+        every axis must follow one physical direction: lateral axes depend on
+        their own direction only, and a vertical axis is affine in ``z`` at a
+        fixed lateral position (a surface-relative depth), so each lateral
+        node column is located separately (see :meth:`_axis_positions`).
+        """
+
+        name = control.coordinate_system or "global"
         physical = _axis_names(self.dimension)
         axes = tuple(control.axes)
-        if sorted(axes) != sorted(physical):
-            raise ValueError(f"lattice axes {axes} do not span {physical}")
         coords = dict(zip(axes, control.axis_coordinates))
-        samples = _sample_grid({axis: coords[axis] for axis in physical})
-        values = self._reference_on(samples, subdomain, prop, reference)
-        order = [physical.index(axis) for axis in axes]
-        return np.transpose(values, order).reshape(-1, order="F")
+        if self.is_global(name):
+            if sorted(axes) != sorted(physical):
+                raise ValueError(f"lattice axes {axes} do not span {physical}")
+            samples = _sample_grid({axis: coords[axis] for axis in physical})
+            values = self._reference_on(samples, subdomain, prop, reference)
+            order = [physical.index(axis) for axis in axes]
+            return np.transpose(values, order).reshape(-1, order="F")
+        try:
+            system = self.coordinate_system(name)
+        except KeyError as exc:
+            raise ValueError(
+                f"lattice nodes in coordinate system {name!r} cannot be located: "
+                f"{exc}"
+            ) from exc
+        directions = tuple(self._axis_direction(system, axis) for axis in axes)
+        if sorted(directions) != sorted(physical):
+            raise ValueError(
+                f"lattice axes {axes} of coordinate system {name!r} follow the "
+                f"directions {directions}, which do not span {physical}"
+            )
+        axis_of = dict(zip(directions, axes))
+        lateral = [d for d in physical if d != "z"]
+        positions: Dict[str, np.ndarray] = {}
+        for direction in lateral:
+            fixed = {other: 0.0 for other in physical if other != direction}
+            locate = self._axis_positions(system, axis_of[direction], direction, fixed)
+            positions[direction] = locate(coords[axis_of[direction]])
+        values = np.empty(tuple(coords[axis].size for axis in axes))
+        for index in itertools.product(*(range(positions[d].size) for d in lateral)):
+            fixed = {d: float(positions[d][i]) for d, i in zip(lateral, index)}
+            depth = self._axis_positions(system, axis_of["z"], "z", fixed)(
+                coords[axis_of["z"]]
+            )
+            line = _sample_grid(
+                {
+                    d: depth if d == "z" else np.array([fixed[d]], dtype=np.float64)
+                    for d in physical
+                }
+            )
+            slot: List[Any] = [slice(None)] * len(axes)
+            for d, i in zip(lateral, index):
+                slot[axes.index(axis_of[d])] = i
+            values[tuple(slot)] = self._reference_on(
+                line, subdomain, prop, reference
+            ).reshape(-1)
+        return values.reshape(-1, order="F")
+
+    def lattice_box(
+        self, subdomain: Optional[str], control: Any
+    ) -> Dict[str, Tuple[float, float]]:
+        """Return the subdomain's extent along every axis of a tensor control.
+
+        Global lattices use :meth:`bounding_box`.  In a named system a lateral
+        axis spans the model's lateral extent mapped into the system, and the
+        vertical axis spans the subdomain measured in that system as a
+        :class:`DepthProfile` datum would (:meth:`profile_extent`).
+        """
+
+        name = control.coordinate_system or "global"
+        if self.is_global(name):
+            return self.bounding_box(subdomain)
+        system = self.coordinate_system(name)
+        physical = _axis_names(self.dimension)
+        box: Dict[str, Tuple[float, float]] = {}
+        for axis in control.axes:
+            direction = self._axis_direction(system, axis)
+            if direction not in physical:
+                raise ValueError(
+                    f"lattice axis {axis!r} of {name!r} has no physical direction "
+                    f"in {self.dimension}D"
+                )
+            if direction == "z":
+                if subdomain is None:
+                    raise ValueError(
+                        f"the vertical extent in {name!r} needs a subdomain"
+                    )
+                datum = self.resolve_datum(subdomain, name)
+                if datum.axis != axis:
+                    raise ValueError(
+                        f"lattice axis {axis!r} is not the vertical axis of {name!r}"
+                    )
+                box[axis] = self.profile_extent(subdomain, datum)
+                continue
+            fixed = {other: 0.0 for other in physical if other != direction}
+            # ``locate`` maps the (affine) system coordinate to the physical one.
+            p0, p1 = self._axis_positions(system, axis, direction, fixed)(
+                np.array([0.0, 1.0])
+            )
+            ends = (np.asarray(self.lateral_extent(direction)) - p0) / (p1 - p0)
+            box[axis] = (float(ends.min()), float(ends.max()))
+        return box
 
     def _profile_reference(
         self, subdomain: str, prop: str, reference: Property, control: Any
@@ -1516,29 +1632,130 @@ class DepthProfile(_BlockSpec):
         ]
 
 
+def _grid_degree(value: Any) -> int:
+    integral = isinstance(value, (int, np.integer)) and not isinstance(value, bool)
+    if not integral or not 1 <= int(value) <= _TENSOR_BSPLINE_MAX_DEGREE:
+        raise ValueError(
+            "GridParameters degree must be an integer between 1 and "
+            f"{_TENSOR_BSPLINE_MAX_DEGREE}; got {value!r}"
+        )
+    return int(value)
+
+
+def _axis_mapping(value: Any, label: str) -> Dict[str, Any]:
+    """Return a ``{axis: value}`` copy with stripped, distinct axis names."""
+
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError(
+            f"GridParameters {label} must be a non-empty mapping of axis names"
+        )
+    mapping: Dict[str, Any] = {}
+    for axis, item in value.items():
+        name = str(axis).strip()
+        if not name:
+            raise ValueError(f"GridParameters {label} axis names cannot be empty")
+        if name in mapping:
+            raise ValueError(f"GridParameters {label} repeats axis {name!r}")
+        mapping[name] = item
+    return mapping
+
+
+def _axis_coordinates(values: Any, label: str, *, breakpoints: bool) -> Any:
+    """Validate per-axis coordinates; plain numbers become a float tuple.
+
+    Pint lengths are kept (as a 1-D quantity) and converted when the space
+    binds.  ``breakpoints`` requires at least two strictly increasing values.
+    """
+
+    quantity = is_quantity(values)
+    magnitude = values.magnitude if quantity else values
+    array = np.atleast_1d(np.asarray(magnitude, dtype=np.float64))
+    if array.ndim != 1 or array.size < (2 if breakpoints else 1):
+        size = "at least two values" if breakpoints else "at least one value"
+        raise ValueError(f"GridParameters {label} need a 1-D array of {size}")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"GridParameters {label} must be finite")
+    if breakpoints and np.any(np.diff(array) <= 0.0):
+        raise ValueError(f"GridParameters {label} must be strictly increasing")
+    if quantity:
+        from frequensolve.units import Q_
+
+        return Q_(array, values.units)
+    return tuple(float(v) for v in array)
+
+
 @dataclass(frozen=True)
 class GridParameters(_BlockSpec):
-    """Tensor-product hat lattice over a subdomain's bounding box.
+    """Tensor-product hat or B-spline control over a subdomain.
+
+    Every axis has its own one-dimensional basis and the control is their
+    tensor product, independent of the simulation mesh; coefficients are
+    stored with the first axis fastest.  The ``spacing``, ``shape`` and
+    ``grid`` layouts place uniform nodes over the subdomain's bounding box
+    along the global axes ``x, [y,] z`` (or over the grid); with every
+    ``degree`` one that is the compact tensor-hat lattice
+    (:class:`~frequensolve.model.parameterization.TensorHatControl`, at most
+    two coefficients per axis contribute at a point), and a degree above one
+    on any axis turns the same uniform nodes into the breakpoints of a
+    :class:`~frequensolve.model.parameterization.TensorBSplineControl`.
+    Explicit ``nodes`` name the axes of ``coordinate_system`` in coefficient
+    storage order and always give a tensor B-spline with open knots on the
+    (possibly nonuniform) breakpoints: degree ``p`` on ``m`` breakpoints has
+    ``m + p - 1`` coefficients, and degree one is the hat basis on them.  For
+    example ``nodes={"x": anchors, "z": depths}, degree={"z": 3}`` blends a
+    smooth cubic depth profile linearly between lateral anchors.
+
+    The node coordinate of a coefficient is its hat node, or along a B-spline
+    axis its Greville abscissa (coefficient ``i`` sits at the mean of knots
+    ``i + 1 .. i + degree``); with open knots the first and last abscissae are
+    the end breakpoints.  Limits
+    against a varying reference are evaluated at these tensor nodes (in a
+    named system located through it: every axis must follow one physical
+    direction, e.g. a lateral ``x`` and a depth below a surface), so for
+    degree above one they bound the coefficients and the field between
+    nodes only approximately.
+
+    ``pin_zero`` fixes coefficients at zero (lower = upper = 0, replacing the
+    limit bounds there): every coefficient whose node coordinate along a
+    listed axis matches one of the listed values.  With ``extrapolate="hold"`` a
+    pinned edge column makes the update taper to zero at it and stay zero
+    beyond it, and a pinned bottom row confines the update to the depths
+    above it.
 
     Args:
         props: One property name or a list of names; one block per property.
         subdomain: Subdomain whose bounding box the lattice covers; ``None``
             covers the whole model.
         spacing: Maximum spacing per axis (``x, [y,] z``) or one scalar.
-        shape: Node count per axis.
-        grid: Explicit :class:`~frequensolve.geometry.grids.CartesianGrid`.
+        shape: Node (breakpoint) count per axis.
+        grid: Explicit :class:`~frequensolve.geometry.grids.CartesianGrid`;
+            its own coordinate system and units are used.
         transform: Sauce control transform shared by every property.
         limits: Optional ``(lower, upper)`` physical limits (all properties);
-            with a varying reference property the bounds are per lattice node
-            (see :class:`DepthProfile`).
+            with a varying reference property the bounds are per tensor node
+            (see :class:`DepthProfile` and above).
         id: Block id prefix; blocks are ``model.<id>`` for one property and
             ``model.<id>_<prop>`` for several.
-        extrapolate: Behaviour outside the lattice span along every axis:
+        extrapolate: Behaviour outside the knot spans along every axis:
             ``"zero"`` (default) leaves the reference property there;
             ``"hold"`` continues the boundary rows and columns outward, so an
-            explicit ``grid`` over part of the subdomain (a few columns over
-            a receiver stretch, say) still reaches the domain edges without
-            extra nodes.
+            explicit ``grid`` or ``nodes`` over part of the subdomain (a few
+            columns over a receiver stretch, say) still reaches the domain
+            edges without extra nodes.
+        nodes: Mapping of axis name to strictly increasing breakpoints (at
+            least two) in ``coordinate_system``, as numbers in the model's
+            coordinate units or Pint lengths; the mapping order is the
+            coefficient storage order.  Exclusive with ``spacing``, ``shape``
+            and ``grid``.
+        degree: B-spline degree of every axis, or a mapping of axis name to
+            degree (missing axes default to 1); 1 to 7.
+        coordinate_system: Frame of the ``nodes`` axes (default
+            ``"global"``), e.g. a surface-relative system with the lateral
+            axis ``x`` and the depth ``z`` below a seabed.  Only meaningful
+            with ``nodes``; a ``grid`` carries its own system.
+        pin_zero: Mapping of axis name to node coordinates (in the control's
+            coordinate units, or Pint lengths) whose coefficients are fixed at
+            zero.  A value that is not a node coordinate of that axis raises.
     """
 
     props: Any
@@ -1550,6 +1767,10 @@ class GridParameters(_BlockSpec):
     limits: Any = None
     id: Optional[str] = None
     extrapolate: str = "zero"
+    nodes: Any = None
+    degree: Any = 1
+    coordinate_system: Optional[str] = None
+    pin_zero: Any = None
 
     def __post_init__(self) -> None:
         props = self.props
@@ -1569,11 +1790,59 @@ class GridParameters(_BlockSpec):
                 ("spacing", self.spacing),
                 ("shape", self.shape),
                 ("grid", self.grid),
+                ("nodes", self.nodes),
             )
             if value is not None
         ]
         if len(given) != 1:
-            raise ValueError("GridParameters needs exactly one of spacing, shape, grid")
+            raise ValueError(
+                "GridParameters needs exactly one of spacing, shape, grid, nodes"
+            )
+        if self.nodes is not None:
+            nodes = {
+                axis: _axis_coordinates(
+                    values, f"nodes of axis {axis!r}", breakpoints=True
+                )
+                for axis, values in _axis_mapping(self.nodes, "nodes").items()
+            }
+            if len(nodes) not in (2, 3):
+                raise ValueError("GridParameters nodes need two or three axes")
+            object.__setattr__(self, "nodes", nodes)
+        if isinstance(self.degree, Mapping):
+            degree: Any = {
+                axis: _grid_degree(value)
+                for axis, value in _axis_mapping(self.degree, "degree").items()
+            }
+        else:
+            degree = _grid_degree(self.degree)
+        object.__setattr__(self, "degree", degree)
+        if self.coordinate_system is not None:
+            system = str(self.coordinate_system).strip()
+            if not system:
+                raise ValueError("GridParameters coordinate_system cannot be empty")
+            object.__setattr__(self, "coordinate_system", system)
+            if self.grid is not None:
+                own = getattr(self.grid, "system", None) or "global"
+                if system != own:
+                    raise ValueError(
+                        f"GridParameters coordinate_system {system!r} conflicts "
+                        f"with the grid's own system {own!r}; a grid carries its "
+                        "own coordinate system"
+                    )
+            elif self.nodes is None and system != "global":
+                raise ValueError(
+                    f"GridParameters coordinate_system {system!r} applies to "
+                    "explicit nodes; spacing and shape lattices cover the global "
+                    "bounding box"
+                )
+        if self.pin_zero is not None:
+            pins = {
+                axis: _axis_coordinates(
+                    values, f"pin_zero of axis {axis!r}", breakpoints=False
+                )
+                for axis, values in _axis_mapping(self.pin_zero, "pin_zero").items()
+            }
+            object.__setattr__(self, "pin_zero", pins)
         if self.shape is not None:
             shape = tuple(int(n) for n in np.asarray(self.shape).reshape(-1))
             if len(shape) not in (2, 3) or any(n < 2 for n in shape):
@@ -1597,6 +1866,17 @@ class GridParameters(_BlockSpec):
             object.__setattr__(self, "id", _hdf5_safe_id(self.id, "block id"))
         object.__setattr__(self, "extrapolate", _validate_extrapolate(self.extrapolate))
 
+    def __repr__(self) -> str:
+        # The repr keys layout fingerprints (``ImagingProblem.with_controls``);
+        # default spline fields stay out so tensor-hat specs keep their keys.
+        parts = [
+            f"{item.name}={getattr(self, item.name)!r}"
+            for item in fields(self)
+            if item.name not in _GRID_SPLINE_FIELDS
+            or getattr(self, item.name) != item.default
+        ]
+        return f"{type(self).__qualname__}({', '.join(parts)})"
+
     def default_key(self) -> str:
         if self.id:
             return self.id
@@ -1608,8 +1888,126 @@ class GridParameters(_BlockSpec):
             return {self.props[0]: base}
         return {prop: f"{base}_{prop}" for prop in self.props}
 
-    def build_control(self, ctx: Optional[_BindContext]) -> TensorHatControl:
-        """Return the shared lattice with zero coefficients."""
+    def build_control(
+        self, ctx: Optional[_BindContext]
+    ) -> Union[TensorHatControl, TensorBSplineControl]:
+        """Return the shared tensor control with zero coefficients.
+
+        Explicit ``nodes`` give a tensor B-spline; the uniform layouts give a
+        tensor-hat lattice when every degree is one and otherwise a tensor
+        B-spline whose breakpoints are the lattice nodes.
+        """
+
+        if self.nodes is not None:
+            return self._node_control(ctx)
+        lattice = self._lattice(ctx)
+        degrees = self._axis_degrees(lattice.axes)
+        if all(degree == 1 for degree in degrees):
+            return lattice
+        return TensorBSplineControl.from_nodes(
+            lattice.axes,
+            lattice.axis_coordinates,
+            degree=degrees,
+            coordinate_system=lattice.coordinate_system,
+            units=lattice.units,
+            extrapolate=lattice.extrapolate,
+        )
+
+    def _axis_degrees(self, axes: Sequence[str]) -> Tuple[int, ...]:
+        if not isinstance(self.degree, Mapping):
+            return (int(self.degree),) * len(axes)
+        unknown = [axis for axis in self.degree if axis not in axes]
+        if unknown:
+            raise ValueError(
+                f"GridParameters degree names axes {unknown} that are not lattice "
+                f"axes {list(axes)}"
+            )
+        return tuple(int(self.degree.get(axis, 1)) for axis in axes)
+
+    def _node_control(self, ctx: Optional[_BindContext]) -> TensorBSplineControl:
+        """Return the tensor B-spline with open knots on the explicit nodes."""
+
+        system = self.coordinate_system or "global"
+        axes = tuple(self.nodes)
+        breakpoints: List[np.ndarray] = []
+        units: Optional[str] = None
+        for axis in axes:
+            values = self.nodes[axis]
+            if is_quantity(values):
+                if ctx is None:
+                    raise UnresolvedControlError("unit-bearing nodes need a simulation")
+                values = [ctx.length(value)[0] for value in values]
+                units = ctx.length_units or _DEFAULT_LENGTH_UNITS
+            breakpoints.append(np.asarray(values, dtype=np.float64))
+        if ctx is not None:
+            if system == "global":
+                physical = _axis_names(ctx.dimension)
+                unknown = [axis for axis in axes if axis not in physical]
+                if unknown:
+                    raise ValueError(
+                        f"GridParameters nodes axes {unknown} are not global axes "
+                        f"{list(physical)}"
+                    )
+            elif not ctx.is_global(system):
+                try:
+                    frame = ctx.coordinate_system(system)
+                except KeyError:
+                    known = [s.name for s in ctx.simulation.coordinate_systems]
+                    raise ValueError(
+                        f"GridParameters coordinate_system {system!r} is not "
+                        f"registered on the simulation; known: {known}"
+                    ) from None
+                for axis in axes:
+                    ctx._axis_direction(frame, axis)
+        return TensorBSplineControl.from_nodes(
+            axes,
+            breakpoints,
+            degree=self._axis_degrees(axes),
+            coordinate_system=system,
+            units=units,
+            extrapolate=self.extrapolate,
+        )
+
+    def _pinned(self, control: Any, ctx: Optional[_BindContext]) -> np.ndarray:
+        """Return the coefficients ``pin_zero`` fixes (first axis fastest)."""
+
+        axes = tuple(control.axes)
+        nodes = control.axis_coordinates
+        index = np.unravel_index(
+            np.arange(control.size), tuple(n.size for n in nodes), order="F"
+        )
+        pinned = np.zeros(control.size, dtype=bool)
+        for axis, values in self.pin_zero.items():
+            if axis not in axes:
+                raise ValueError(
+                    f"GridParameters pin_zero axis {axis!r} is not a lattice axis "
+                    f"{list(axes)}"
+                )
+            k = axes.index(axis)
+            if is_quantity(values):
+                if control.units is not None:
+                    values = values.to(control.units).magnitude
+                elif ctx is None:
+                    raise UnresolvedControlError(
+                        "unit-bearing pin_zero coordinates need a simulation"
+                    )
+                else:
+                    values = [ctx.length(value)[0] for value in values]
+            coordinates = np.asarray(nodes[k], dtype=np.float64)
+            tolerance = 1e-9 * float(coordinates[-1] - coordinates[0])
+            for value in np.atleast_1d(np.asarray(values, dtype=np.float64)):
+                hit = np.isclose(coordinates, value, rtol=0.0, atol=tolerance)
+                if not hit.any():
+                    raise ValueError(
+                        f"GridParameters pin_zero {axis}={value:g} is not a node "
+                        f"coordinate of lattice axis {axis!r}; available: "
+                        f"{np.round(coordinates, 12).tolist()}"
+                    )
+                pinned |= hit[index[k]]
+        return pinned
+
+    def _lattice(self, ctx: Optional[_BindContext]) -> TensorHatControl:
+        """Return the uniform tensor-hat lattice of the spacing/shape/grid layout."""
 
         if self.grid is not None:
             grid = self.grid
@@ -1679,6 +2077,7 @@ class GridParameters(_BlockSpec):
             axis: np.asarray(values, dtype=np.float64)
             for axis, values in zip(control.axes, control.axis_coordinates)
         }
+        pinned = None if self.pin_zero is None else self._pinned(control, ctx)
         for prop, block_id in ids.items():
             lower: Any = -math.inf
             upper: Any = math.inf
@@ -1722,6 +2121,8 @@ class GridParameters(_BlockSpec):
                     self.limits,
                     control,
                 )
+            if pinned is not None:
+                lower, upper = _pin_bounds(lower, upper, pinned, control.size)
             blocks.append(
                 ResolvedBlock(
                     name=f"model.{block_id}",
@@ -2240,7 +2641,7 @@ class ReflectivityParameters(_BlockSpec):
                     label, downward = datum.label, datum.downward
                 dims = (dim,)
                 coords = {dim: np.asarray(control.coordinates, dtype=np.float64)}
-            elif isinstance(control, TensorHatControl):
+            elif isinstance(control, _TENSOR_CONTROLS):
                 dims = tuple(control.axes)
                 coords = {
                     axis: np.asarray(v, dtype=np.float64)
@@ -3108,95 +3509,87 @@ def _transfer_profile(
 
 
 class _LatticeRepresentation:
-    """Separable multilinear evaluation of a tensor-hat lattice."""
+    """Point sampling of a tensor-hat or tensor B-spline control.
 
-    def __init__(self, control: TensorHatControl):
+    A thin adapter of
+    :class:`~frequensolve.model.representation.TensorControlRepresentation`
+    that takes the sample coordinates as a ``{axis: values}`` mapping.
+    """
+
+    def __init__(self, control: Union[TensorHatControl, TensorBSplineControl]):
         self.control = control
-        self.axes_1d = [
-            ControlRepresentation(
-                HatControl(
-                    axis=axis,
-                    spacing=float(control.spacing[k]),
-                    origin=float(control.origin[k]),
-                    coefficients=np.zeros(control.shape[k]),
-                    coordinate_system=control.coordinate_system,
-                    extrapolate=control.extrapolate,
-                )
-            )
-            for k, axis in enumerate(control.axes)
-        ]
+        self._tensor = TensorControlRepresentation(control)
+        self.axes_1d = self._tensor.axes_1d
 
     @property
     def size(self) -> int:
         return self.control.size
 
     def sampling_operator(self, points: Mapping[str, np.ndarray]) -> csr_matrix:
-        """Return the point-sampling operator (row-wise Khatri-Rao of 1-D hats).
+        """Return the point-sampling operator (row-wise Khatri-Rao of 1-D maps).
 
         Coefficients follow the Sauce ordering with the first axis fastest,
         so the flat column index is ``i_0 + n_0 * (i_1 + n_1 * i_2)``.
         """
 
-        n_points = int(np.asarray(next(iter(points.values()))).size)
-        result: Optional[csr_matrix] = None
-        stride = 1
-        for k, rep in enumerate(self.axes_1d):
-            axis = self.control.axes[k]
-            context = EvaluationContext(
-                {axis: points[axis]}, coordinate_system=self.control.coordinate_system
-            )
-            op = rep.sampling_operator(context).tocsr()
-            if result is None:
-                result = op
-            else:
-                prev = result.tocsr()
-                prev_rows = np.repeat(np.arange(n_points), np.diff(prev.indptr))
-                repeats = np.diff(op.indptr)[prev_rows]
-                prev_index = np.repeat(np.arange(prev.nnz), repeats)
-                starts = np.repeat(op.indptr[prev_rows], repeats)
-                offsets = np.arange(prev_index.size) - np.repeat(
-                    np.cumsum(repeats) - repeats, repeats
-                )
-                op_index = starts + offsets
-                result = csr_matrix(
-                    (
-                        prev.data[prev_index] * op.data[op_index],
-                        (
-                            prev_rows[prev_index],
-                            prev.indices[prev_index] + stride * op.indices[op_index],
-                        ),
-                    ),
-                    shape=(n_points, stride * rep.size),
-                )
-            stride *= rep.size
-        assert result is not None
-        return result
+        context = EvaluationContext(
+            {axis: points[axis] for axis in self.control.axes},
+            coordinate_system=self.control.coordinate_system,
+        )
+        return self._tensor.sampling_operator(context)
+
+
+def _span_samples(rep: ControlRepresentation, lo: float, hi: float) -> np.ndarray:
+    """Return ``degree + 1`` interior samples of every knot span in ``[lo, hi]``.
+
+    Uniform samples alone can miss narrow spans of a nonuniform knot vector;
+    these keep the least-squares transfer full rank on every basis function.
+    """
+
+    breaks = np.unique(rep.knots)
+    edges = np.unique(np.concatenate(([lo, hi], breaks[(breaks > lo) & (breaks < hi)])))
+    fractions = (np.arange(rep.degree + 1) + 0.5) / (rep.degree + 1)
+    return (edges[:-1, None] + np.diff(edges)[:, None] * fractions).reshape(-1)
 
 
 def _transfer_lattice(
     source: ResolvedBlock, target: ResolvedBlock, values: np.ndarray
 ) -> np.ndarray:
-    if not isinstance(source.control, TensorHatControl) or not isinstance(
-        target.control, TensorHatControl
+    """Least-squares transfer between tensor-hat and tensor B-spline blocks.
+
+    The source field is sampled on a tensor grid over the overlap of both
+    knot-span boxes (axis by axis) and projected into the target basis.
+    """
+
+    if not isinstance(source.control, _TENSOR_CONTROLS) or not isinstance(
+        target.control, _TENSOR_CONTROLS
     ):
-        raise ValueError("lattice transfer requires tensor-hat controls")
+        raise ValueError(
+            "lattice transfer requires tensor-hat or tensor B-spline controls"
+        )
     if tuple(source.control.axes) != tuple(target.control.axes):
         raise ValueError("lattice transfer requires the same axes")
     if source.control.coordinate_system != target.control.coordinate_system:
         raise ValueError("lattice transfer requires the same coordinate system")
     src = _LatticeRepresentation(source.control)
     dst = _LatticeRepresentation(target.control)
+    splines = isinstance(source.control, TensorBSplineControl) or isinstance(
+        target.control, TensorBSplineControl
+    )
     axes_points: List[np.ndarray] = []
-    for k, axis in enumerate(target.control.axes):
-        s_coords = source.control.axis_coordinates[k]
-        t_coords = target.control.axis_coordinates[k]
-        lo = max(s_coords[0], t_coords[0])
-        hi = min(s_coords[-1], t_coords[-1])
+    for s_rep, t_rep in zip(src.axes_1d, dst.axes_1d):
+        lo = max(s_rep.knots[s_rep.degree], t_rep.knots[t_rep.degree])
+        hi = min(s_rep.knots[s_rep.size], t_rep.knots[t_rep.size])
         if not hi > lo:
             raise ValueError("lattice transfer requires overlapping extents")
-        axes_points.append(
-            np.linspace(lo, hi, 4 * max(s_coords.size, t_coords.size) + 1)
-        )
+        along = np.linspace(lo, hi, 4 * max(s_rep.size, t_rep.size) + 1)
+        if splines:
+            along = np.unique(
+                np.concatenate(
+                    [along] + [_span_samples(rep, lo, hi) for rep in (s_rep, t_rep)]
+                )
+            )
+        axes_points.append(along)
     mesh = np.meshgrid(*axes_points, indexing="ij")
     points = {axis: grid.reshape(-1) for axis, grid in zip(target.control.axes, mesh)}
     samples = src.sampling_operator(points) @ values
@@ -3314,9 +3707,10 @@ class BoundControlSpace(ControlSpace):
 
         A profile coefficient is supported when the open support of its basis
         function meets the open extent of its subdomain along the profile
-        axis; lattice nodes are supported when their hat support meets the
-        subdomain's bounding box.  Only blocks with at least one frozen DOF
-        are returned.
+        axis; tensor coefficients are supported when their basis support meets
+        the subdomain's bounding box in the control's frame
+        (:meth:`_BindContext.lattice_box`) along every axis.  Only blocks with
+        at least one frozen DOF are returned.
         """
 
         ctx = _BindContext(self.simulation)
@@ -3333,7 +3727,7 @@ class BoundControlSpace(ControlSpace):
                 mask = _profile_support(block.control, extent)
             elif block.kind == "grid" and isinstance(spec, GridParameters):
                 try:
-                    box = ctx.bounding_box(spec.subdomain)
+                    box = ctx.lattice_box(spec.subdomain, block.control)
                 except (UnresolvedControlError, KeyError, ValueError):
                     continue
                 mask = _lattice_support(block.control, box)
@@ -3375,9 +3769,41 @@ def _profile_support(
 
 
 def _lattice_support(
-    control: TensorHatControl, box: Mapping[str, Tuple[float, float]]
+    control: Union[TensorHatControl, TensorBSplineControl],
+    box: Mapping[str, Tuple[float, float]],
 ) -> np.ndarray:
+    """Return the coefficients whose basis support meets ``box`` on every axis.
+
+    A tensor-hat node is supported on ``node +/- spacing``.  B-spline
+    coefficient ``i`` along an axis is supported on
+    ``[knots[i], knots[i + degree + 1]]``; with ``extrapolate="hold"`` the
+    coefficients that are nonzero at an end of the active interval continue
+    outward without bound.
+    """
+
     mask = np.ones(control.size, dtype=bool)
+    if isinstance(control, TensorBSplineControl):
+        from scipy.interpolate import BSpline
+
+        index = np.unravel_index(np.arange(control.size), control.shape, order="F")
+        for k, axis in enumerate(control.axes):
+            lo, hi = box[axis]
+            knots = np.asarray(control.knots[k], dtype=np.float64)
+            degree, count = control.degree[k], control.shape[k]
+            starts = np.array(knots[:count], copy=True)
+            ends = np.array(knots[degree + 1 : degree + 1 + count], copy=True)
+            if control.extrapolate == "hold":
+                held = (
+                    BSpline.design_matrix(
+                        np.array([knots[degree], knots[count]]), knots, degree
+                    ).toarray()
+                    != 0.0
+                )
+                starts[held[0]] = -math.inf
+                ends[held[1]] = math.inf
+            supported = (np.minimum(ends, hi) - np.maximum(starts, lo)) > 0.0
+            mask &= supported[index[k]]
+        return mask
     coordinates = control.coordinates
     for k, axis in enumerate(control.axes):
         lo, hi = box[axis]
@@ -3897,9 +4323,9 @@ class ControlVector:
             raise TypeError("to_grid requires a CartesianGrid")
         block = self.space.block(key)
         control = block.control
-        if not isinstance(control, (HatControl, BSplineControl, TensorHatControl)):
+        if not isinstance(control, (HatControl, BSplineControl) + _TENSOR_CONTROLS):
             raise NotImplementedError(
-                "to_grid supports hat, B-spline and tensor-hat blocks"
+                "to_grid supports hat, B-spline, tensor-hat and tensor B-spline blocks"
             )
         dims = tuple(grid.dims[::-1])
         coords = {
@@ -3924,7 +4350,7 @@ class ControlVector:
             if units:
                 samples.coords[dim].attrs["units"] = units
         axes = (
-            control.axes if isinstance(control, TensorHatControl) else (control.axis,)
+            control.axes if isinstance(control, _TENSOR_CONTROLS) else (control.axis,)
         )
         system_name = control.coordinate_system
         if context is None:
@@ -3967,7 +4393,7 @@ class ControlVector:
             raise ValueError(
                 "evaluation context must follow the grid's shape and dimension order"
             )
-        if isinstance(control, TensorHatControl):
+        if isinstance(control, _TENSOR_CONTROLS):
             operator = _LatticeRepresentation(control).sampling_operator(
                 {axis: context.coordinate(axis, system_name) for axis in axes}
             )
