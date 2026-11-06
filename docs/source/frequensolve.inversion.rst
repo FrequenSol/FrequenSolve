@@ -3,15 +3,23 @@ Inversion Toolkit
 
 ``frequensolve.inversion`` is the generic optimizer toolkit that
 :doc:`frequensolve.imaging` builds on: bounded L-BFGS and inexact Newton-CG
-minimizers, frequency and Laplace continuation schedules, restartable
-optimization history and checkpoints, inverse-Hessian preconditioning
-estimates, and derivative checks. It is independent of the solver and can be
-used with any real-valued objective.
+minimizers, trust-region Gauss-Newton for small spaces, frequency and Laplace
+continuation schedules, restartable optimization history and checkpoints,
+inverse-Hessian preconditioning estimates, and derivative checks. It is
+independent of the solver and can be used with any real-valued objective.
 
 Optimizers
 ----------
 
 .. automodule:: frequensolve.inversion.optimization
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Trust-Region Gauss-Newton
+-------------------------
+
+.. automodule:: frequensolve.inversion.trust_region
    :members:
    :show-inheritance:
    :noindex:

@@ -20,6 +20,9 @@ run:
 ``<prefix>model_<iteration>.h5`` / ``<prefix>scaling_<n>.h5``
     An optimizer-coordinate iterate that differs from the checkpoint model,
     and the coordinate scaling of a local patch solve.
+``<prefix>diagonal_<iteration>.h5``
+    The Marquardt scaling ``D`` of a trust-region Gauss-Newton restart; its
+    radius and stopping references are JSON scalars of the record.
 
 Files are published by atomic rename and never modified afterwards. A
 checkpoint records its stage directory and every file it needs; once the
@@ -35,12 +38,16 @@ import json
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, Mapping, Optional, Set, Tuple, Union
 
 import h5py
 import numpy as np
 
 from frequensolve.inversion.optimization import LBFGS_RESTART_SCHEMA, LBFGSRestart
+from frequensolve.inversion.trust_region import (
+    GAUSS_NEWTON_RESTART_SCHEMA,
+    GaussNewtonRestart,
+)
 from frequensolve.util.atomic import atomic_output_path
 
 RESTART_SCHEMA = "fs-fwi-restart-1"
@@ -90,12 +97,20 @@ class StageFiles:
         return arrays, attrs
 
     def save_state(
-        self, state: LBFGSRestart, prefix: str = "", *, model: bool = True
+        self,
+        state: Union[LBFGSRestart, GaussNewtonRestart],
+        prefix: str = "",
+        *,
+        model: bool = True,
     ) -> Dict[str, Any]:
         """Persist new pairs (and the iterate) of ``state``; return its JSON record.
 
         ``model=False`` records that the iterate equals the checkpoint model.
+        A :class:`GaussNewtonRestart` stores its iterate and Marquardt
+        diagonal; its radius and counters are scalars of the record.
         """
+        if isinstance(state, GaussNewtonRestart):
+            return self._save_trust_region(state, prefix, model=model)
         for identifier, step, difference in zip(
             state.pair_ids, state.steps, state.gradient_differences
         ):
@@ -118,10 +133,61 @@ class StageFiles:
             improvement=state.improvement,
         )
 
+    def _restart_model(
+        self, record: Mapping[str, Any], model: Optional[np.ndarray]
+    ) -> np.ndarray:
+        """Return a record's stored iterate, or the checkpoint model it equals."""
+        if record["model"] is not None:
+            model = self.get(record["model"])[0]["model"]
+        if model is None:
+            raise ValueError("FWI optimizer restart record needs the checkpoint model")
+        if model.flags.writeable:
+            model = _frozen(np.array(model, dtype=np.float64, copy=True))
+        return model
+
+    def _save_trust_region(
+        self, state: GaussNewtonRestart, prefix: str, *, model: bool
+    ) -> Dict[str, Any]:
+        accepted = state.accepted_iterations
+        model_name = None
+        if model:
+            model_name = self.put(
+                f"{prefix}model_{accepted}.h5", dict(model=state.model)
+            )
+        diagonal_name = None
+        if state.diagonal is not None:
+            diagonal_name = self.put(
+                f"{prefix}diagonal_{accepted}.h5", dict(diagonal=state.diagonal)
+            )
+        return dict(
+            schema=GAUSS_NEWTON_RESTART_SCHEMA,
+            prefix=prefix,
+            model=model_name,
+            diagonal=diagonal_name,
+            radius=state.radius,
+            scaling=state.scaling,
+            accepted_iterations=accepted,
+            initial_objective=state.initial_objective,
+            improvement=state.improvement,
+        )
+
     def load_state(
         self, record: Mapping[str, Any], model: Optional[np.ndarray] = None
-    ) -> LBFGSRestart:
-        """Rebuild an :class:`LBFGSRestart` from its record (shared read-only arrays)."""
+    ) -> Union[LBFGSRestart, GaussNewtonRestart]:
+        """Rebuild an optimizer restart from its record (shared read-only arrays)."""
+        if record.get("schema") == GAUSS_NEWTON_RESTART_SCHEMA:
+            diagonal = None
+            if record["diagonal"] is not None:
+                diagonal = self.get(record["diagonal"])[0]["diagonal"]
+            return GaussNewtonRestart(
+                model=self._restart_model(record, model),
+                radius=record["radius"],
+                scaling=record["scaling"],
+                diagonal=diagonal,
+                accepted_iterations=record["accepted_iterations"],
+                initial_objective=record["initial_objective"],
+                improvement=record["improvement"],
+            )
         if record.get("schema") != LBFGS_RESTART_SCHEMA:
             raise ValueError("Unsupported FWI optimizer restart record")
         prefix = record["prefix"]
@@ -130,12 +196,7 @@ class StageFiles:
             arrays, _ = self.get(f"{prefix}pair_{identifier}.h5")
             steps.append(arrays["step"])
             differences.append(arrays["difference"])
-        if record["model"] is not None:
-            model = self.get(record["model"])[0]["model"]
-        if model is None:
-            raise ValueError("FWI optimizer restart record needs the checkpoint model")
-        if model.flags.writeable:
-            model = _frozen(np.array(model, dtype=np.float64, copy=True))
+        model = self._restart_model(record, model)
         return LBFGSRestart(
             model=model,
             steps=tuple(steps),
@@ -153,10 +214,12 @@ def state_files(record: Optional[Mapping[str, Any]]) -> Set[str]:
     if not record:
         return set()
     names = {
-        f"{record['prefix']}pair_{identifier}.h5" for identifier in record["pairs"]
+        f"{record['prefix']}pair_{identifier}.h5"
+        for identifier in record.get("pairs", ())
     }
-    if record.get("model"):
-        names.add(record["model"])
+    for key in ("model", "diagonal"):
+        if record.get(key):
+            names.add(record[key])
     return names
 
 

@@ -10,6 +10,9 @@ The workflow layer owns the outer loop of an inversion while
   generic optimizers in :mod:`frequensolve.inversion.optimization`; they add
   an RMS step cap per block and an optional diagonal change of variables
   (per-block curvature scaling), both ported from the TCCS production driver.
+  :class:`GaussNewton` configures the trust-region Gauss-Newton method of
+  :mod:`frequensolve.inversion.trust_region` for small control spaces, with
+  the explicit Gauss-Newton matrix from one batched ``normal`` job.
 - :class:`FWI` runs the stage sequence through
   :func:`~frequensolve.inversion.continuation.run_continuation`, threads the
   complete :class:`~frequensolve.imaging.controls.ControlState` through the
@@ -125,11 +128,19 @@ from frequensolve.inversion.optimization import (
     minimize_lbfgs,
     minimize_proximal_gradient,
 )
+from frequensolve.inversion.trust_region import (
+    GaussNewtonIteration,
+    GaussNewtonOptions,
+    GaussNewtonRestart,
+    GaussNewtonResult,
+    minimize_gauss_newton_trust_region,
+)
 from frequensolve.util.atomic import atomic_output_path
 
 __all__ = [
     "FWI",
     "FWIIteration",
+    "GaussNewton",
     "LBFGS",
     "LSRTM",
     "NewtonCG",
@@ -327,8 +338,8 @@ class Stage:
         regularization: Regularization overriding the workflow-level regularization.
         smoothing: Gradient-output and search-step smoothing overriding the workflow/problem
             smoothing; ``False`` switches smoothing off for the stage.
-        optimizer: :class:`LBFGS` / :class:`NewtonCG` overriding the
-            workflow optimizer.
+        optimizer: :class:`LBFGS` / :class:`NewtonCG` / :class:`GaussNewton`
+            overriding the workflow optimizer.
         weights: One nonnegative objective weight per stage frequency.
         patches: PatchSet overriding the problem's patch policy for this stage.
         name: Stage label (default ``stage_<index>``).
@@ -1129,6 +1140,368 @@ class NewtonCG(_OptimizerConfig):
         )
 
 
+_NONSMOOTH_GAUSS_NEWTON = (
+    "GaussNewton needs a smooth objective: native TV/TGV regularization runs "
+    "the proximal-gradient method of LBFGS or NewtonCG; use Tikhonov, "
+    "Quadratic or GaussianPrior with GaussNewton"
+)
+
+
+def _trust_region_metrics(it: Any, blocks: Mapping[str, slice]) -> Dict[str, Any]:
+    """Return the scalar history metrics of a trust-region Gauss-Newton record.
+
+    ``block_step_norms`` is the JSON ``{block: ||step||}`` of the accepted
+    step (physical coordinates). Other optimizers' records add nothing.
+    """
+
+    if not isinstance(it, GaussNewtonIteration):
+        return {}
+    step = np.asarray(it.step)
+    return {
+        "trust_radius": it.trust_radius,
+        "next_trust_radius": it.next_trust_radius,
+        "marquardt_parameter": it.marquardt_parameter,
+        "gain_ratio": it.gain_ratio,
+        "predicted_reduction": it.predicted_reduction,
+        "actual_reduction": it.actual_reduction,
+        "trust_region_trials": it.trust_region_trials,
+        "boundary_step": it.boundary_step,
+        "hard_case": it.hard_case,
+        "active_bounds": it.active_bounds,
+        "scaled_step_norm": it.scaled_step_norm,
+        "hessian_refreshed": it.hessian_refreshed,
+        "hessian_seconds": it.hessian_seconds,
+        "hessian_eigenvalue_min": it.eigenvalue_min,
+        "hessian_eigenvalue_max": it.eigenvalue_max,
+        "block_step_norms": json.dumps(
+            {name: float(np.linalg.norm(step[block])) for name, block in blocks.items()}
+        ),
+    }
+
+
+@dataclass(frozen=True)
+class GaussNewton:
+    """Gauss-Newton with a Levenberg-Marquardt trust region.
+
+    A configuration of
+    :func:`~frequensolve.inversion.trust_region.minimize_gauss_newton_trust_region`
+    for control spaces whose Gauss-Newton matrix on the free coordinates can
+    be formed explicitly (at most ``max_explicit`` free DOFs; larger spaces
+    use :class:`NewtonCG`). Inside :class:`FWI` every matrix is
+    ``sym(Re J^H W J)[F, F]`` from one batched ``normal`` job over the
+    identity directions of the free coordinates ``F`` (coordinates with equal
+    lower and upper bounds are excluded) plus the Hessian of every smooth
+    regularization term, built once per stage for quadratic terms. Each step
+    solves the scaled trust-region subproblem exactly, so the damping enters
+    the step itself, ``p = -(H + lambda D^T D)^-1 g``, and the gain ratio
+    adapts ``lambda`` through the radius (More 1978; Nocedal & Wright ch. 4).
+
+    The trust region replaces the line search, RMS step cap and
+    preconditioner of :class:`LBFGS` and :class:`NewtonCG`: :class:`FWI`'s
+    ``step_limit`` and ``preconditioner`` do not apply to GaussNewton stages.
+    Native TV/TGV regularization needs the proximal method of those
+    optimizers. Checkpoints keep the trust radius and Marquardt scaling, so a
+    resumed stage continues with the same radius.
+
+    Args:
+        max_iterations: Default iteration budget (a stage's ``iterations``
+            overrides it).
+        initial_radius: First trust radius in the scaled norm ``||D p||``
+            (optimizer coordinates); ``None`` uses ``min(||D p_GN||, 1)``.
+        max_radius: Largest trust radius; ``None`` leaves it unbounded.
+        eta: Gain-ratio acceptance threshold (``0 <= eta < 1/4``).
+        scaling: ``"identity"`` (Levenberg; dimensionless or logarithmic
+            controls) or ``"marquardt"`` (MINPACK ``D_k = max(D_{k-1},
+            sqrt(diag H_k))``; invariant to the units of each coordinate).
+        max_trust_region_trials: Subproblems allowed per iteration (rejected
+            trials plus the accepted one); ``None`` removes the cap.
+        max_explicit: Largest number of free coordinates.
+        refresh: Rebuild the matrix every that many accepted iterations.
+        scaling_max_ratio: Curvature floor ratio of block scaling
+            (``FWI(scaling="curvature")``, a change of variables).
+
+    The stopping tolerances (``gradient_tolerance``, ``step_tolerance``,
+    ``grad_abs_tol``, ``grad_rel_tole``, ``obj_abs_tol``, ``obj_rel_tol``,
+    ``objective_tolerance``, ``objective_target``,
+    ``objective_tolerance_momentum``, ``objective_minimum_iterations``) and
+    ``max_objective_evaluations`` and ``bound_tolerance`` follow
+    :class:`LBFGS` and :class:`NewtonCG`.
+    """
+
+    max_iterations: Optional[int] = None
+    initial_radius: Optional[float] = None
+    max_radius: Optional[float] = None
+    eta: float = 1.0e-4
+    scaling: str = "identity"
+    max_trust_region_trials: Optional[int] = 10
+    max_explicit: int = 256
+    refresh: int = 1
+    gradient_tolerance: Optional[float] = None
+    step_tolerance: float = 1.0e-9
+    objective_tolerance: Optional[float] = None
+    grad_abs_tol: float = 0.0
+    grad_rel_tole: Optional[float] = None
+    obj_abs_tol: float = 0.0
+    obj_rel_tol: Optional[float] = None
+    objective_target: Optional[float] = None
+    objective_tolerance_momentum: float = 0.0
+    objective_minimum_iterations: int = 1
+    max_objective_evaluations: Optional[int] = None
+    bound_tolerance: float = 1.0e-12
+    scaling_max_ratio: Optional[float] = None
+
+    kind: str = dataclasses.field(default="gauss_newton", init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.max_iterations is not None and int(self.max_iterations) < 1:
+            raise ValueError("max_iterations must be positive when supplied")
+        if self.scaling_max_ratio is not None:
+            ratio = float(self.scaling_max_ratio)
+            if not math.isfinite(ratio) or ratio < 1.0:
+                raise ValueError("scaling_max_ratio must be finite and at least one")
+        self.options()  # Validate every option once, at construction.
+
+    def options(self, max_iterations: Optional[int] = None) -> GaussNewtonOptions:
+        """Return the :class:`~frequensolve.inversion.trust_region.GaussNewtonOptions`."""
+
+        limit = max_iterations if max_iterations is not None else self.max_iterations
+        return GaussNewtonOptions(
+            max_iterations=50 if limit is None else int(limit),
+            max_objective_evaluations=self.max_objective_evaluations,
+            max_trust_region_trials=self.max_trust_region_trials,
+            initial_radius=self.initial_radius,
+            max_radius=self.max_radius,
+            eta=self.eta,
+            scaling=self.scaling,
+            max_explicit=self.max_explicit,
+            refresh=self.refresh,
+            gradient_tolerance=self.gradient_tolerance,
+            step_tolerance=self.step_tolerance,
+            objective_tolerance=self.objective_tolerance,
+            grad_abs_tol=self.grad_abs_tol,
+            grad_rel_tole=self.grad_rel_tole,
+            obj_abs_tol=self.obj_abs_tol,
+            obj_rel_tol=self.obj_rel_tol,
+            objective_target=self.objective_target,
+            objective_tolerance_momentum=self.objective_tolerance_momentum,
+            objective_minimum_iterations=self.objective_minimum_iterations,
+            bound_tolerance=self.bound_tolerance,
+        )
+
+    def solve(
+        self,
+        objective: Any,
+        x0: Any,
+        *,
+        bounds: Optional[Tuple[Any, Any]] = None,
+        preconditioner: Any = None,
+        hessian_action: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
+        gauss_newton_matrix: Optional[
+            Callable[[np.ndarray, np.ndarray], np.ndarray]
+        ] = None,
+        step_transform: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
+        history: Optional[OptimizationHistory] = None,
+        callback: Optional[Callable[[InexactNewtonIteration], None]] = None,
+        max_iterations: Optional[int] = None,
+        initial_objective: Optional[float] = None,
+        step_limit: Optional[float] = None,
+        scaling: Optional[Any] = None,
+        block_slices: Optional[Sequence[slice]] = None,
+        space: Optional[ControlSpace] = None,
+        restart: Optional[GaussNewtonRestart] = None,
+    ) -> GaussNewtonResult:
+        """Minimize ``objective`` from ``x0``.
+
+        Args:
+            objective: Object with ``value(x) -> float``, ``gradient(x) ->
+                ndarray`` and ``gauss_newton_matrix(x, free) -> (k, k)`` (the
+                matrix on the coordinate indices ``free``) or
+                ``hessian_action(x, dx)`` (one action per free coordinate
+                then builds the matrix); optionally ``loss(x)`` for history
+                records.
+            x0: Initial point in optimizer coordinates.
+            bounds: ``(lower, upper)`` arrays; ``space.bounds`` when a space
+                is given and ``bounds`` is omitted.
+            gauss_newton_matrix, hessian_action: Override the objective's.
+            history: Optional history receiving one iteration record per
+                accepted iterate, with the trust-region metrics.
+            callback: Called with every accepted
+                :class:`~frequensolve.inversion.trust_region.GaussNewtonIteration`
+                (physical coordinates).
+            max_iterations: Iteration budget overriding the configuration.
+            initial_objective: Original stage objective on restart; relative
+                stopping tolerances retain this fixed reference.
+            scaling: Per-DOF change-of-variables scale ``s`` (``x = s * y``)
+                or a ``block -> curvature`` mapping resolved with ``space``;
+                the trust region and ``D`` act on ``y``.
+            block_slices: Blocks of the per-block step norms in history
+                records (``space.slices`` when a space is given).
+            space: Control space of ``x0`` (bounds, slices, curvature scaling).
+            restart: The ``optimizer_state`` of an earlier run's record at
+                ``x0`` (same scaling); continues its radius and ``D``.
+            preconditioner, step_transform, step_limit: Not supported; the
+                trust region bounds and scales every step.
+        """
+
+        for name, value in (
+            ("preconditioner", preconditioner),
+            ("step_transform", step_transform),
+            ("step_limit", step_limit),
+        ):
+            if value is not None:
+                raise ValueError(
+                    f"GaussNewton takes no {name}: its trust region bounds and "
+                    "scales every step (see initial_radius, max_radius, scaling)"
+                )
+        if getattr(objective, "native_regularization", None) is not None:
+            raise ValueError(_NONSMOOTH_GAUSS_NEWTON)
+        x0 = _real_vector(x0, name="initial model")
+        size = x0.size
+        if bounds is None and space is not None:
+            bounds = space.bounds
+        if block_slices is None and space is not None:
+            blocks: Dict[str, slice] = dict(space.slices)
+        else:
+            blocks = {
+                f"block_{i}": block
+                for i, block in enumerate(block_slices or (slice(0, size),))
+            }
+        if isinstance(scaling, Mapping):
+            if space is None:
+                raise ValueError("curvature scaling by block requires a space")
+            scaling = curvature_scaling(
+                scaling, space, max_ratio=self.scaling_max_ratio
+            )
+        scale = None
+        if scaling is not None:
+            scale = _real_vector(scaling, size=size, name="scaling")
+            if np.any(~np.isfinite(scale)) or np.any(scale <= 0.0):
+                raise ValueError("scaling must be finite and positive")
+        value_fn = objective.value
+        gradient_fn = objective.gradient
+        matrix_fn = gauss_newton_matrix
+        if matrix_fn is None:
+            matrix_fn = getattr(objective, "gauss_newton_matrix", None)
+        curvature_fn = hessian_action
+        if curvature_fn is None:
+            curvature_fn = getattr(objective, "hessian_action", None)
+        if matrix_fn is None and curvature_fn is None:
+            raise ValueError(
+                "GaussNewton requires a gauss_newton_matrix or hessian_action"
+            )
+
+        def to_physical(y: np.ndarray) -> np.ndarray:
+            return y if scale is None else scale * y
+
+        def to_scaled(x: np.ndarray) -> np.ndarray:
+            return x if scale is None else x / scale
+
+        def f(y: np.ndarray) -> float:
+            return float(value_fn(to_physical(y)))
+
+        def g(y: np.ndarray) -> np.ndarray:
+            grad = _real_vector(gradient_fn(to_physical(y)), size=size, name="gradient")
+            return grad if scale is None else scale * grad
+
+        def h(y: np.ndarray, free: np.ndarray) -> np.ndarray:
+            x = to_physical(y)
+            if matrix_fn is not None:
+                matrix = np.asarray(matrix_fn(x, free))
+            else:
+                assert curvature_fn is not None
+                matrix = np.empty((free.size, free.size))
+                for column, index in enumerate(free):
+                    direction = np.zeros(size)
+                    direction[index] = 1.0
+                    product = _real_vector(
+                        curvature_fn(x, direction), size=size, name="curvature product"
+                    )
+                    matrix[:, column] = product[free]
+            if scale is not None:
+                matrix = matrix * np.outer(scale[free], scale[free])
+            return matrix
+
+        # Only SDK callables skip the optimizer's defensive copies (see
+        # ``_OptimizerConfig.solve``).
+        for wrapper, wrapped in (
+            (f, value_fn),
+            (g, gradient_fn),
+            (h, matrix_fn if matrix_fn is not None else curvature_fn),
+        ):
+            if scale is not None or _shares(wrapped):
+                _shares_arrays(wrapper)
+
+        def physical(it: GaussNewtonIteration) -> GaussNewtonIteration:
+            if scale is None:
+                return it
+            # Read-only like the optimizer's own records; spaces are small.
+            return dataclasses.replace(
+                it,
+                model=_read_only(scale * it.model),
+                gradient=_read_only(it.gradient / scale),
+                linearization_gradient=_read_only(it.linearization_gradient / scale),
+                step=_read_only(scale * it.step),
+                raw_step=_read_only(scale * it.raw_step),
+            )
+
+        def on_iteration(it: GaussNewtonIteration) -> None:
+            record = physical(it)
+            if history is not None:
+                loss_fn = getattr(objective, "loss", None)
+                loss = (
+                    loss_fn(record.model)
+                    if callable(loss_fn)
+                    else LossTerms(data=record.objective)
+                )
+                history.record_iteration(
+                    record.model,
+                    loss,
+                    gradient_norm=float(np.linalg.norm(record.gradient)),
+                    step_norm=float(np.linalg.norm(record.step)),
+                    step_length=record.step_length,
+                    metrics={
+                        "optimizer": self.kind,
+                        **_trust_region_metrics(record, blocks),
+                    },
+                )
+            if callback is not None:
+                callback(record)
+
+        scaled_bounds: Optional[Tuple[Any, Any]] = None
+        if bounds is not None:
+            lower = np.broadcast_to(np.asarray(bounds[0], dtype=np.float64), (size,))
+            upper = np.broadcast_to(np.asarray(bounds[1], dtype=np.float64), (size,))
+            scaled_bounds = (to_scaled(lower), to_scaled(upper))
+        options = self.options(max_iterations)
+        if initial_objective is not None:
+            options = dataclasses.replace(options, initial_objective=initial_objective)
+        y0 = cast(Sequence[float], to_scaled(x0))
+        if restart is not None:
+            # Preserve the exact saved iterate: dividing S*y by S can round
+            # differently even after its physical checkpoint was validated.
+            restarted = _real_vector(restart.model, size=size, name="restart model")
+            if not np.array_equal(to_physical(restarted), x0):
+                raise ValueError(
+                    "Gauss-Newton restart belongs to a different model or scaling"
+                )
+            y0 = cast(Sequence[float], restarted)
+        result = minimize_gauss_newton_trust_region(
+            f,
+            g,
+            h,
+            y0,
+            bounds=scaled_bounds,
+            options=options,
+            callback=on_iteration,
+            restart=restart,
+        )
+        if scale is None:
+            return result
+        return dataclasses.replace(
+            result, model=to_physical(result.model), gradient=result.gradient / scale
+        )
+
+
 # ---------------------------------------------------------------------------
 # stage objective
 # ---------------------------------------------------------------------------
@@ -1176,6 +1549,9 @@ class _StageObjective:
         self._linearization: Optional[Linearization] = None
         self._loss: Optional[LossTerms] = None
         self._gradient: Optional[np.ndarray] = None
+        # Constant (quadratic) regularization Hessian blocks of this stage,
+        # by term position and free-coordinate set.
+        self._regularization_blocks: Dict[Tuple[int, bytes], np.ndarray] = {}
 
     def vector(self, x: Any) -> ControlVector:
         return ControlVector(
@@ -1304,6 +1680,110 @@ class _StageObjective:
                 )
         return out
 
+    @_shares_arrays
+    def gauss_newton_matrix(self, x: Any, free: Any) -> np.ndarray:
+        """Return the stage Gauss-Newton matrix on the coordinate indices ``free``.
+
+        One ``apply_normal_batch`` over the identity directions of ``free``
+        (``cache=False``: one-use directions) gives ``Re(J^H W J)[free, free]``
+        at the linearization of ``x``; every smooth regularization term adds
+        its ``hessian_operator`` columns, computed once per stage when the
+        term is quadratic (its Hessian does not depend on the model).
+        """
+
+        indices = np.asarray(free, dtype=np.intp).reshape(-1)
+        size = self.space.size
+        rows = np.zeros((indices.size, size))
+        rows[np.arange(indices.size), indices] = 1.0
+        products = _normal_batch(self.linearization(x), rows)
+        matrix = np.empty((indices.size, indices.size))
+        for column, product in enumerate(products):
+            matrix[:, column] = _real_vector(
+                getattr(product, "values", product), size=size, name="normal product"
+            )[indices]
+        for position, term in enumerate(_smooth_terms(self.regularization)):
+            matrix += self._regularization_block(position, term, x, indices, rows)
+        return matrix
+
+    def _regularization_block(
+        self,
+        position: int,
+        term: Any,
+        x: Any,
+        indices: np.ndarray,
+        rows: np.ndarray,
+    ) -> np.ndarray:
+        """Return one term's Hessian on ``indices``, cached when constant."""
+
+        constant = _constant_hessian(term)
+        key = (position, indices.tobytes())
+        if constant:
+            cached = self._regularization_blocks.get(key)
+            if cached is not None:
+                return cached
+        operator = term.hessian_operator(self.vector(x))
+        block = np.empty((indices.size, indices.size))
+        for column, row in enumerate(rows):
+            block[:, column] = _real_vector(
+                operator @ self.vector(row),
+                size=self.space.size,
+                name="regularization curvature product",
+            )[indices]
+        if constant:
+            block.flags.writeable = False
+            self._regularization_blocks[key] = block
+        return block
+
+
+def _normal_batch(linearization: Any, rows: np.ndarray) -> List[Any]:
+    """Apply a linearization's normal operator to one-use directions.
+
+    ``cache=False`` keeps the identity directions out of the memoized
+    products where the linearization supports it.
+    """
+
+    batch = linearization.apply_normal_batch
+    if "cache" in inspect.signature(batch).parameters:
+        return list(batch(rows, cache=False))
+    return list(batch(rows))
+
+
+def _smooth_terms(regularization: Any) -> List[Any]:
+    """Flatten a bound regularization into its summands (nested sums included)."""
+
+    from .regularization import _BoundSum
+
+    if regularization is None:
+        return []
+    if isinstance(regularization, _BoundSum):
+        return [t for term in regularization.terms for t in _smooth_terms(term)]
+    return [regularization]
+
+
+def _constant_hessian(term: Any) -> bool:
+    """Whether a bound smooth term's Hessian is the same at every model.
+
+    Quadratic forms (an ``operator()`` ``R`` with Hessian ``R^T R``), Gaussian
+    priors and native Tikhonov (whose weights are frozen in the stage's native
+    context at binding) qualify; any other term is re-evaluated at every
+    matrix.
+    """
+
+    from ._native_regularization import BoundNativeRegularization
+    from .regularization import _BoundScaled, _BoundSum
+    from .statistics import BoundGaussianPrior
+
+    if isinstance(term, _BoundSum):
+        return all(_constant_hessian(t) for t in term.terms)
+    if isinstance(term, _BoundScaled):
+        return _constant_hessian(term.inner)
+    if isinstance(term, BoundNativeRegularization):
+        return term.is_smooth
+    if isinstance(term, BoundGaussianPrior):
+        return True
+    operator = getattr(term, "operator", None)
+    return callable(operator) and operator() is not None
+
 
 # ---------------------------------------------------------------------------
 # FWI
@@ -1383,17 +1863,19 @@ class FWI:
             first stage runs on.
         stages: :class:`Stage` sequence, a single stage, or a
             :class:`ContinuationSchedule`.
-        optimizer: :class:`LBFGS` (default) or :class:`NewtonCG`; a stage's
-            ``optimizer`` overrides it.
+        optimizer: :class:`LBFGS` (default), :class:`NewtonCG` or
+            :class:`GaussNewton`; a stage's ``optimizer`` overrides it.
         regularization: Regularization (``bind(space)`` protocol) added to the misfit; a
             stage's ``regularization`` overrides it.
         preconditioner: Preconditioner (``bind(space)`` protocol) or plain
             ``(model, g) -> ndarray`` callable; bound preconditioners are
             updated at every stage start and every
-            ``optimizer.preconditioner_refresh`` iterations.
+            ``optimizer.preconditioner_refresh`` iterations. GaussNewton
+            stages ignore it.
         smoothing: Search-step smoothing applied by Sauce for every stage
             (overrides the problem's; ``False`` switches it off).
-        step_limit: RMS step cap per block (overrides the optimizer's).
+        step_limit: RMS step cap per block (overrides the optimizer's);
+            GaussNewton stages ignore it.
         scaling: ``None``, ``"curvature"`` (estimate block curvatures with
             one JVP per block at every stage start) or a ``block ->
             curvature`` mapping, or a positive per-DOF scale array ``s``
@@ -2090,7 +2572,7 @@ class FWI:
                     seed_eigenvalues=arrays.get("seed_eigenvalues"),
                     provenance=identities["provenance"],
                 )
-                if state is not None:
+                if isinstance(state, LBFGSRestart):
                     # The archive and the optimizer share the loaded pairs.
                     archive._set_pairs(
                         state.steps, state.gradient_differences, state.pair_ids
@@ -2446,6 +2928,7 @@ class FWI:
             )
             self._views[label] = view
         optimizer = self.optimizer if stage.optimizer is None else stage.optimizer
+        gauss_newton = getattr(optimizer, "kind", None) == "gauss_newton"
         regularization = (
             self.regularization
             if stage.regularization is None
@@ -2509,7 +2992,7 @@ class FWI:
         timing_snapshot = (
             timing_backend.timing_snapshot() if timing_backend is not None else None
         )
-        probes = _receiver_probe_request(self.preconditioner)
+        probes = None if gauss_newton else _receiver_probe_request(self.preconditioner)
         first = (
             view.linearize(gradient=True)
             if probes is None
@@ -2569,6 +3052,8 @@ class FWI:
                     [bound_regularization, native_regularization],
                 )
             native_regularization = None
+        if gauss_newton and native_regularization is not None:
+            raise ValueError(_NONSMOOTH_GAUSS_NEWTON)
         if self.patch_updates is not None:
             from ._patch_updates import solve_local_stage
 
@@ -2620,7 +3105,18 @@ class FWI:
             self._stage_initial_objective = float(reference)
         linearizations_before = objective.evaluations
 
-        preconditioner = self.preconditioner if native_regularization is None else None
+        # The trust-region scaling of GaussNewton replaces any preconditioner.
+        preconditioner = (
+            self.preconditioner
+            if native_regularization is None and not gauss_newton
+            else None
+        )
+        if gauss_newton and self.preconditioner is not None:
+            warnings.warn(
+                f"stage {label!r} uses GaussNewton, which ignores the FWI "
+                "preconditioner (its trust-region scaling D replaces it)",
+                stacklevel=3,
+            )
         bound_preconditioner: Any = None
         if preconditioner is not None and callable(
             getattr(preconditioner, "bind", None)
@@ -2792,7 +3288,13 @@ class FWI:
                 self._curvature_archive = archive
 
         optimizer_restart = None
-        if getattr(view, "patches", None) is not None or capture_curvature:
+        # GaussNewton checkpoints its trust radius and Marquardt scaling.
+        keeps_restart = (
+            getattr(view, "patches", None) is not None
+            or capture_curvature
+            or gauss_newton
+        )
+        if keeps_restart:
             if isinstance(scaling, Mapping):
                 scaling = curvature_scaling(
                     scaling, space, max_ratio=optimizer.scaling_max_ratio
@@ -2819,6 +3321,14 @@ class FWI:
         step_limit = self.step_limit
         if step_limit is None:
             step_limit = getattr(optimizer, "step_limit", None)
+        if gauss_newton:
+            if step_limit is not None:
+                warnings.warn(
+                    f"stage {label!r} uses GaussNewton, which ignores the FWI "
+                    "step_limit (its trust radius bounds every step)",
+                    stacklevel=3,
+                )
+            step_limit = None
 
         self._write_checkpoint(
             index,
@@ -2832,6 +3342,8 @@ class FWI:
             history=history,
         )
 
+        stage_blocks = space.slices
+
         def on_iteration(it: InexactNewtonIteration) -> None:
             if capture_uncertainty:
                 archive(it)
@@ -2842,7 +3354,7 @@ class FWI:
                     )
                 # Share the optimizer's limited-memory pairs (no copies).
                 archive._follow(it.optimizer_state)
-            if getattr(view, "patches", None) is not None or capture_curvature:
+            if keeps_restart:
                 self._optimizer_checkpoint = it.optimizer_state
             loss = objective.loss(it.model)
             stage_iteration = start_iteration + it.iteration
@@ -2864,6 +3376,7 @@ class FWI:
                     "line_search_evaluations": it.line_search_evaluations,
                     "directional_derivative": it.directional_derivative,
                     "objective_relative_reduction": it.objective_relative_reduction,
+                    **_trust_region_metrics(it, stage_blocks),
                 },
             )
             self._write_checkpoint(
@@ -2920,8 +3433,11 @@ class FWI:
             space=space,
             **(
                 {"restart": optimizer_restart}
-                if (getattr(view, "patches", None) is not None or capture_curvature)
-                and getattr(optimizer, "kind", None) == "lbfgs"
+                if gauss_newton
+                or (
+                    (getattr(view, "patches", None) is not None or capture_curvature)
+                    and getattr(optimizer, "kind", None) == "lbfgs"
+                )
                 else {}
             ),
         )
@@ -3006,6 +3522,15 @@ class FWI:
                 "steepest_descent_fallbacks": int(result.steepest_descent_fallbacks),
                 "frozen_dofs": int(space.support.frozen_count),
                 "gradient_norm": float(np.linalg.norm(result.gradient)),
+                **(
+                    {
+                        "trust_radius": result.trust_radius,
+                        "hessian_refreshes": int(result.hessian_refreshes),
+                        "trust_region_trials": int(result.trust_region_trials),
+                    }
+                    if isinstance(result, GaussNewtonResult)
+                    else {}
+                ),
             },
         )
         if timing_snapshot is not None:

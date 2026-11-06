@@ -1655,8 +1655,8 @@ so each stage starts fresh optimizer history.
 Optimizer stopping tolerances
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``LBFGS`` and ``NewtonCG`` accept separate absolute and relative tolerances
-for the projected gradient norm and objective decrease:
+``LBFGS``, ``NewtonCG`` and ``GaussNewton`` accept separate absolute and
+relative tolerances for the projected gradient norm and objective decrease:
 
 .. code-block:: python
 
@@ -1688,6 +1688,109 @@ Existing explicit ``gradient_tolerance`` means an absolute gradient tolerance
 and suppresses the default relative gradient term. Existing
 ``objective_tolerance`` now means decrease relative to the fixed initial
 objective. Prefer the four explicit names above.
+
+Gauss-Newton with a trust region
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~frequensolve.imaging.GaussNewton` is the Levenberg-Marquardt method in
+its trust-region form (More 1978; MINPACK ``lmder``; Nocedal & Wright,
+*Numerical Optimization*, ch. 4 and sec. 10.3) for small control spaces, such
+as depth profiles and coarse lattices with up to a few hundred free
+coefficients. Use it when the Gauss-Newton matrix is badly conditioned, i.e.
+when some coefficients are sensed much more weakly than others. A damped
+Gauss-Newton preconditioner for ``NewtonCG`` changes only how CG converges,
+not where: CG still approaches the undamped step ``H^-1 g``, which moves
+weakly sensed coefficients far. ``GaussNewton`` instead puts the damping into
+the step itself and adapts it at every iteration:
+
+.. code-block:: python
+
+   optimizer = im.GaussNewton(
+       scaling="marquardt",           # D = max(D_prev, sqrt(diag H)); "identity" for log controls
+       initial_radius=None,           # min(||D p_GN||, 1)
+       max_trust_region_trials=10,
+   )
+   result = im.FWI(problem, stages, optimizer=optimizer,
+                   regularization=im.Tikhonov(alpha=1e-2)).run()
+
+Every accepted iterate forms the matrix ``H = sym(Re J^H W J)[F, F]`` on the
+free coordinates ``F`` from one batched ``normal`` job over their unit
+directions. Coordinates with equal lower and upper bounds are not in ``F``.
+The Hessian of each smooth regularization term (``Tikhonov``, ``Quadratic``,
+``GaussianPrior`` or a custom smooth term) is added to ``H``. Quadratic terms
+are computed once per stage; native ``Tikhonov`` then runs one regularization
+job per free coordinate.
+
+The step solves ``min g^T p + 1/2 p^T H p`` subject to ``||D p|| <= Delta``
+exactly, through the eigendecomposition of ``D^-1 H D^-1`` and the secular
+equation for the multiplier ``lambda``. This also covers small negative
+eigenvalues and the hard case. ``lambda`` is the Levenberg-Marquardt parameter
+of the step ``p = -(H + lambda D^T D)^-1 g``.
+
+A trial costs one objective value. The gain ratio ``rho`` (actual over
+predicted reduction) accepts the trial when ``rho > eta`` and updates the
+radius: ``rho < 1/4`` shrinks it to ``||D p|| / 4``, and ``rho > 3/4`` with a
+step on the boundary doubles it, up to ``max_radius``. A rejected trial is
+solved again with the same matrix, without a new ``normal`` job.
+
+Box bounds use an active-set projection. A coordinate at a bound whose step
+would leave the box is frozen for that subproblem, the subproblem is solved
+again, and the step is then clipped to the box. The gain ratio uses the
+clipped step.
+
+The options are:
+
+``initial_radius``
+   First radius in the scaled norm of optimizer coordinates; ``None`` uses
+   ``min(||D p_GN||, 1)``.
+``max_radius``
+   Largest radius; ``None`` (default) leaves it unbounded.
+``eta``
+   Acceptance threshold on the gain ratio (``1e-4``; must be below ``1/4``).
+``scaling``
+   ``"identity"`` (Levenberg, the default, for dimensionless or logarithmic
+   controls) or ``"marquardt"`` (MINPACK, invariant to the units of each
+   coefficient).
+``max_trust_region_trials``
+   Subproblems tried in one iteration before the stage stops (``10``).
+``max_explicit``
+   Largest number of free coordinates (``256``). A larger space raises an
+   error that points to matrix-free Newton-CG (``NewtonCG``).
+``refresh``
+   Rebuild the matrix every that many accepted iterations (``1``).
+
+Stopping tolerances are those of ``LBFGS`` and ``NewtonCG``. In addition, a
+rejected trial that shrinks the radius below
+``step_tolerance * max(1, ||D x||)`` ends the stage as converged.
+
+The trust region replaces the line search, the RMS step cap and the
+preconditioner, so ``FWI(step_limit=...)`` and ``FWI(preconditioner=...)`` do
+not apply to ``GaussNewton`` stages, and a warning says so. Native TV and TGV
+regularization need the proximal method of ``LBFGS`` or ``NewtonCG``.
+
+History records and ``FWIIteration.diagnostics`` (a
+:class:`~frequensolve.inversion.GaussNewtonIteration`) report, for every
+iteration:
+
+- the radius and the multiplier ``lambda``;
+- the gain ratio and the predicted and actual reductions;
+- the number of trials;
+- the step norm of each control block (``block_step_norms``);
+- the eigenvalue range of ``H`` and the time spent building it.
+
+Checkpoints keep the radius and the Marquardt diagonal ``D``, so a resumed
+stage continues with the same radius. The resumed stage rebuilds ``H`` at
+the checkpointed iterate. The numerical core is
+:func:`frequensolve.inversion.minimize_gauss_newton_trust_region`; it takes
+plain callables for the value, the gradient and the matrix.
+
+References: J. J. More, "The Levenberg-Marquardt algorithm: implementation and
+theory", *Numerical Analysis*, Lecture Notes in Mathematics 630 (1978); J. J.
+More and D. C. Sorensen, "Computing a trust region step", *SIAM J. Sci. Stat.
+Comput.* 4 (1983); J. Nocedal and S. J. Wright, *Numerical Optimization*, 2nd
+ed., Springer (2006), Algorithms 4.1 and 4.3 and sec. 10.3; K. Madsen, H. B.
+Nielsen and O. Tingleff, *Methods for Non-Linear Least Squares Problems*, DTU
+(2004).
 
 Running and resuming
 ~~~~~~~~~~~~~~~~~~~~
