@@ -2618,7 +2618,11 @@ class FWIOperatorJob(_ImagingJobBase):
         return inputs
 
     def remote_input_files(self, remote_project):
-        """Stage complete immutable patch bundles with their relative layout intact."""
+        """Stage complete immutable patch bundles with their relative layout intact.
+
+        Inputs the base staging already uploads (a control state outside the
+        project goes below the job's ``inputs/external``) keep that location.
+        """
         files = super().remote_input_files(remote_project)
         if self.pml_stage is None:
             return files
@@ -2630,8 +2634,11 @@ class FWIOperatorJob(_ImagingJobBase):
             inputs.extend(self.stage_mesh.input_files())
         project = Path(self.project_path).resolve()
         seen = {(Path(local).resolve(), Path(remote)) for local, remote in files}
+        staged = {local for local, _ in seen}
         for path in inputs:
             local = Path(path).resolve(strict=True)
+            if local in staged:
+                continue
             if not local.is_relative_to(project):
                 raise ValueError(
                     "Remote patch inputs must be inside the job project; "

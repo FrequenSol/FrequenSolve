@@ -152,10 +152,13 @@ from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.task_index import TaskIndex
 from frequensolve.solver import (
     IDENTITY_QUERY_TIMEOUT_SECONDS,
+    SolverCapabilities,
     SolverCompatibility,
     check_solver_compatibility,
+    query_remote_solver_capabilities,
     query_remote_solver_identity,
     resolve_solver_policy,
+    solver_backend_name,
 )
 from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.setup_logger import init_logger
@@ -992,6 +995,7 @@ class SlurmSite(BaseSite):
         self.solver_policy = solver_policy
         self._solver_compatibility_result = None
         self._solver_compatibility_policy = None
+        self._solver_capabilities: Dict[Tuple[str, str], SolverCapabilities] = {}
         self._enterprise_hpc_preflight_result = None
         self._enterprise_hpc_limits = None
         self.transfer_method = transfer_method
@@ -1517,6 +1521,38 @@ class SlurmSite(BaseSite):
         self._solver_compatibility_result = result
         self._solver_compatibility_policy = selected
         return result
+
+    def solver_capabilities(
+        self, *, dimension: Any = 2, precision: str = "single"
+    ) -> Optional[SolverCapabilities]:
+        """Return the remote backend's operation catalog, queried once per backend.
+
+        The policy of the last compatibility check (else ``solver_policy``)
+        applies: ``off`` skips the query and returns ``None``.
+        """
+
+        policy = getattr(
+            self, "_solver_compatibility_policy", None
+        ) or resolve_solver_policy(self.solver_policy)
+        if policy == "off" or getattr(self, "_executable", None) is None:
+            return None
+        key = (str(self.executable), solver_backend_name(dimension, precision))
+        catalog = self.__dict__.setdefault("_solver_capabilities", {})
+        cached = catalog.get(key)
+        if cached is None:
+            cached = query_remote_solver_capabilities(
+                self.executable,
+                lambda command: self.run_login(
+                    command,
+                    timeout=IDENTITY_QUERY_TIMEOUT_SECONDS,
+                ),
+                dimension=dimension,
+                precision=precision,
+                setup_commands=self._runtime_setup_lines(),
+            )
+            if cached.operations is not None:
+                catalog[key] = cached
+        return cached
 
     def _run_login_checked(self, command: str, *, purpose: str) -> str:
         """Run a bounded login-node probe and reject a nonzero result."""

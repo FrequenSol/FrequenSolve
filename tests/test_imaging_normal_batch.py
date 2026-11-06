@@ -10,6 +10,7 @@ from frequensolve.imaging.controls import SourceParameters
 from frequensolve.imaging.jobs import RegularizationJob
 from frequensolve.imaging.regularization import Quadratic, _SymmetricModelOperator
 from frequensolve.imaging.workflows import _StageObjective
+from frequensolve.solver import SolverCapabilities
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
 pytestmark = pytest.mark.unit
@@ -127,7 +128,9 @@ def test_normal_matmat_applies_all_columns_in_one_job(tmp_path):
 
 def test_kernel_derivative_normals_share_one_job(tmp_path):
     fake = FakeImagingSite(seed=11)
-    kernel = dict(order=1, residual="derivative", axis="fourier", source_derivative="frozen")
+    kernel = dict(
+        order=1, residual="derivative", axis="fourier", source_derivative="frozen"
+    )
     lin = _problem(tmp_path, fake).restrict(kernel_derivative=kernel).linearize()
     directions = [lin.space.random(seed) for seed in (1, 2, 3)]
 
@@ -135,6 +138,34 @@ def test_kernel_derivative_normals_share_one_job(tmp_path):
 
     (job,) = _normal_jobs(fake)
     assert len(job.directions) == 3 and job.kernel_derivative is not None
+    for direction, product in zip(directions, products):
+        np.testing.assert_allclose(
+            product.values, (lin.normal @ direction).values, rtol=1e-12
+        )
+
+
+def test_kernel_derivative_normals_split_when_the_solver_cannot_stack_them(tmp_path):
+    # Solvers whose catalog lacks the operation reject a multi-direction
+    # kernel_derivative normal; each direction then runs its own job.
+    fake = FakeImagingSite(seed=11)
+    queries = []
+
+    def solver_capabilities(**selection):
+        queries.append(selection)
+        return SolverCapabilities("fs2d_s", frozenset())
+
+    fake.solver_capabilities = solver_capabilities
+    kernel = dict(
+        order=1, residual="derivative", axis="fourier", source_derivative="frozen"
+    )
+    lin = _problem(tmp_path, fake).restrict(kernel_derivative=kernel).linearize()
+    directions = [lin.space.random(seed) for seed in (1, 2, 3)]
+
+    products = lin.apply_normal_batch(directions)
+
+    jobs = _normal_jobs(fake)
+    assert len(jobs) == 3 and all(job.directions is None for job in jobs)
+    assert queries and queries[0] == {"dimension": 2, "precision": "single"}
     for direction, product in zip(directions, products):
         np.testing.assert_allclose(
             product.values, (lin.normal @ direction).values, rtol=1e-12

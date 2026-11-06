@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 import warnings
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +21,7 @@ from frequensolve.solver import (
     SolverCompatibilityError,
     SolverCompatibilityManifest,
     SolverCompatibilityWarning,
+    SolverFeatureError,
     SolverIdentity,
     SolverIdentityQuery,
     check_solver_compatibility,
@@ -834,3 +838,261 @@ def test_invalid_selected_solver_policy_does_not_silently_fall_back(
             monkeypatch.setenv(key, value)
     with pytest.raises(ValueError, match="compatibility policy"):
         solver.resolve_solver_policy()
+
+
+# ---------------------------------------------------------------------------
+# Backend operation catalog (--capabilities-json) and feature gates
+# ---------------------------------------------------------------------------
+
+_DISPATCHER_REPORT = {
+    "schema": "fs-solver-capabilities-2",
+    "product": "Solver",
+    "scope": "dispatcher",
+    "backend_query_required": True,
+    "inventory": None,
+    "build": None,
+    "runtime": None,
+    "license_status": "not_evaluated",
+    "request_validation": "required",
+}
+
+
+def _backend_report(*operations, available=True):
+    return {
+        "schema": "fs-solver-capabilities-2",
+        "product": "Solver",
+        "scope": "backend",
+        "backend_query_required": False,
+        "catalog": {
+            "schema": "solver-capability-catalog-1",
+            "coverage": "partial",
+            "capabilities": [
+                {"id": operation, "version": 1, "available": available}
+                for operation in operations
+            ],
+        },
+    }
+
+
+def _reporting_executable(path, payload):
+    """Write an executable that prints ``payload`` for ``--capabilities-json``."""
+
+    path.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = --capabilities-json || exit 3\n'
+        f"printf '%s\\n' {shlex.quote(json.dumps(payload))}\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def _install(root, *operations):
+    """Create a dispatcher whose 2D single backend lists ``operations``."""
+
+    root.mkdir()
+    dispatcher = _reporting_executable(root / "FS_seismic", _DISPATCHER_REPORT)
+    _reporting_executable(root / "fs2d_s", _backend_report(*operations))
+    _reporting_executable(root / "fs3d", _backend_report())
+    return dispatcher
+
+
+def _shell(command):
+    """Run a login-node command locally, without the caller's FS_SOLVER_PATH."""
+
+    environment = {k: v for k, v in os.environ.items() if k != "FS_SOLVER_PATH"}
+    return subprocess.run(
+        ["sh", "-c", command],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=environment,
+    ).stdout
+
+
+def test_local_capabilities_follow_the_dispatcher_to_its_backend(tmp_path):
+    dispatcher = _install(tmp_path / "install", solver.CONTROL_EXTRAPOLATE_HOLD)
+    env = {"PATH": os.environ["PATH"]}
+
+    report = solver.query_local_solver_capabilities(
+        dispatcher, dimension=2.5, precision="single", environment=env
+    )
+    assert report.backend == str(tmp_path / "install" / "fs2d_s")
+    assert report.supports(solver.CONTROL_EXTRAPOLATE_HOLD)
+    older = solver.query_local_solver_capabilities(
+        dispatcher, dimension=3, precision="double", environment=env
+    )
+    assert older.operations == frozenset()
+    assert not older.supports(solver.CONTROL_EXTRAPOLATE_HOLD)
+    assert "fs3d --capabilities-json does not list" in older.missing_reason(
+        solver.CONTROL_EXTRAPOLATE_HOLD
+    )
+    # FS_SOLVER_PATH redirects the routed backend, as it does in FS_seismic.
+    other = tmp_path / "other"
+    other.mkdir()
+    _reporting_executable(other / "fs2d_s", _backend_report())
+    routed = solver.query_local_solver_capabilities(
+        dispatcher, environment={**env, "FS_SOLVER_PATH": str(other)}
+    )
+    assert routed.backend == str(other / "fs2d_s")
+    assert not routed.supports(solver.CONTROL_EXTRAPOLATE_HOLD)
+    missing = solver.query_local_solver_capabilities(
+        dispatcher, dimension=3, precision="single", environment=env
+    )
+    assert missing.operations is None
+    assert "could not be queried" in missing.missing_reason("any")
+
+
+def test_unavailable_and_version_one_catalogs_list_no_operation(tmp_path):
+    gated = _reporting_executable(
+        tmp_path / "fs2d_s", _backend_report("imaging.x", available=False)
+    )
+    assert solver.query_local_solver_capabilities(gated).operations == frozenset()
+    legacy = _reporting_executable(
+        tmp_path / "fs2d", {"schema": "fs-solver-capabilities-1", "fwi": ["normal"]}
+    )
+    assert solver.query_local_solver_capabilities(legacy).operations == frozenset()
+
+
+def test_remote_capability_query_routes_through_the_dispatcher(tmp_path):
+    install = tmp_path / "install"
+    dispatcher = _install(install, solver.KERNEL_DERIVATIVE_NORMAL_DIRECTIONS)
+    other = tmp_path / "other"
+    other.mkdir()
+    _reporting_executable(other / "fs2d_s", _backend_report())
+
+    report = solver.query_remote_solver_capabilities(
+        dispatcher, _shell, setup_commands=["echo module output"]
+    )
+    assert report.backend == str(install / "fs2d_s")
+    assert report.supports(solver.KERNEL_DERIVATIVE_NORMAL_DIRECTIONS)
+    routed = solver.query_remote_solver_capabilities(
+        dispatcher,
+        _shell,
+        setup_commands=[f"export FS_SOLVER_PATH={shlex.quote(str(other))}"],
+    )
+    assert routed.backend == str(other / "fs2d_s")
+    assert routed.operations == frozenset()
+    # A backend executable reports its own catalog.
+    direct = solver.query_remote_solver_capabilities(
+        install / "fs2d_s", _shell, dimension=3
+    )
+    assert direct.backend == str(install / "fs2d_s")
+    assert direct.supports(solver.KERNEL_DERIVATIVE_NORMAL_DIRECTIONS)
+    absent = solver.query_remote_solver_capabilities(dispatcher, _shell, dimension=3)
+    assert absent.operations is None and "not found" in absent.error
+    failed = solver.query_remote_solver_capabilities(dispatcher, lambda _: "partial")
+    assert failed.operations is None
+
+
+def test_held_control_maps_are_found_wherever_a_job_names_them():
+    hat = {"kind": "hat", "axis": "x", "origin": 0, "spacing": 1, "extrapolate": "hold"}
+    payload = {
+        "Model": {
+            "subdomains": [
+                {
+                    "properties": {
+                        "vp": {"parameterized": {"control": hat}},
+                        "rho": {
+                            "parameterized": {
+                                "control": {"kind": "bspline", "extrapolate": "zero"}
+                            }
+                        },
+                    }
+                }
+            ]
+        },
+        "fwi_operator": {
+            "reflectivity": {
+                "fields": [{"control": {"knots": [0, 1], "extrapolate": " Hold "}}]
+            }
+        },
+        "Other": {"kind": "nearest", "extrapolate": "hold"},
+    }
+    assert solver.held_control_maps(payload) == [
+        "/Model/subdomains/0/properties/vp/parameterized/control",
+        "/fwi_operator/reflectivity/fields/0/control",
+    ]
+
+
+def test_held_controls_require_a_solver_that_lists_hold(tmp_path):
+    plain = tmp_path / "plain.json"
+    plain.write_text(json.dumps({"control": {"kind": "hat"}}))
+    held = tmp_path / "held.json"
+    held.write_text(
+        json.dumps({"control": {"kind": "tensor_hat", "extrapolate": "hold"}})
+    )
+    queries = []
+
+    def catalog(*operations):
+        def query():
+            queries.append(operations)
+            return solver.SolverCapabilities("fs2d_s", frozenset(operations))
+
+        return query
+
+    solver.require_held_control_support([plain, tmp_path / "absent.json"], catalog())
+    assert queries == []
+    solver.require_held_control_support(
+        [held], catalog(solver.CONTROL_EXTRAPOLATE_HOLD)
+    )
+    solver.require_held_control_support([held], lambda: None)
+    with pytest.raises(
+        SolverFeatureError, match="held.json:/control.*fs2d_s --capabilities-json"
+    ):
+        solver.require_held_control_support([held], catalog())
+
+
+class _HeldControlJob:
+    """Saved job whose simulation file holds one ``extrapolate: hold`` map."""
+
+    def __init__(self, root):
+        root.mkdir(exist_ok=True)
+        model = {"control": {"kind": "hat", "extrapolate": "hold"}}
+        self.simulation = SimpleNamespace(
+            _file=root / "sim.json", dimension=2, solver=None
+        )
+        self.simulation._file.write_text(json.dumps({"Model": model}))
+        self.job_file = root / "job.json"
+
+    def save(self):
+        self.job_file.write_text("{}")
+
+
+def test_local_prepare_rejects_held_controls_without_solver_support(tmp_path):
+    site = _bare_local_site()
+    site.executable = str(_install(tmp_path / "old"))
+    site.env = {"PATH": os.environ["PATH"]}
+    with pytest.raises(SolverFeatureError, match="does not list"):
+        site.prepare_job(_HeldControlJob(tmp_path / "job"), validate=False)
+
+    current = _bare_local_site()
+    current.executable = str(
+        _install(tmp_path / "new", solver.CONTROL_EXTRAPOLATE_HOLD)
+    )
+    current.env = {"PATH": os.environ["PATH"]}
+    job = _HeldControlJob(tmp_path / "job")
+    assert current.prepare_job(job, validate=False) is job
+    # Solver checks turned off do not query the solver.
+    site.solver_policy = "off"
+    assert site.prepare_job(job, validate=False) is job
+
+
+def test_slurm_capabilities_query_the_login_node_once_per_backend(tmp_path):
+    site = _bare_slurm_site()
+    site._executable = str(
+        _install(tmp_path / "install", solver.CONTROL_EXTRAPOLATE_HOLD)
+    )
+    site._runtime_setup_lines = lambda: ["echo setup"]
+    calls = []
+
+    def run_login(command, *, timeout=None):
+        calls.append(timeout)
+        return _shell(command)
+
+    site.run_login = run_login
+    first = site.solver_capabilities(dimension=2, precision="single")
+    again = site.solver_capabilities(dimension=2, precision="single")
+    assert first is again and first.supports(solver.CONTROL_EXTRAPOLATE_HOLD)
+    assert calls == [IDENTITY_QUERY_TIMEOUT_SECONDS]
+    site.solver_policy = "off"
+    assert site.solver_capabilities(dimension=3, precision="double") is None

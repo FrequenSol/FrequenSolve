@@ -134,6 +134,10 @@ from frequensolve.imaging.transfer import Transfer, resolve_transfer
 from frequensolve.inversion.validation import gradient_taylor_test, real_adjoint_test
 from frequensolve.orchestrator.sites.base import BaseSite
 from frequensolve.orchestrator.sites.execution import resolve_execution
+from frequensolve.solver import (
+    KERNEL_DERIVATIVE_NORMAL_DIRECTIONS,
+    solver_backend_selection,
+)
 
 __all__ = ["ImagingProblem", "Linearization"]
 
@@ -1508,6 +1512,19 @@ class ImagingProblem:
 
         self.backend.run(job)
         self._check_tasks(job)
+
+    def _solver_supports(self, operation: str) -> bool:
+        """Whether the site's solver backend lists catalog ``operation``.
+
+        A site that cannot report its backend (or with solver checks ``off``)
+        is assumed to run a solver matching this SDK.
+        """
+
+        query = getattr(self.site, "solver_capabilities", None)
+        if not callable(query):
+            return True
+        report = query(**solver_backend_selection(self.simulation))
+        return report is None or report.supports(operation)
 
     @staticmethod
     def _check_tasks(job: FWIOperatorJob) -> None:
@@ -3602,8 +3619,15 @@ class Linearization:
                 block.kind in {"source", "reflectivity"}
                 for block in self.space.resolved_blocks
             )
+            or (
+                self.problem.kernel_derivative is not None
+                and not self.problem._solver_supports(
+                    KERNEL_DERIVATIVE_NORMAL_DIRECTIONS
+                )
+            )
         ):
-            # Sauce applies several directions to material ordinary, phase and kernel_derivative normals only.
+            # Sauce applies several directions to material ordinary, phase and
+            # kernel_derivative normals only; older solvers reject the latter.
             parts = [self._normal_job([d], regularization) for d in directions]
             return [p[0][0] for p in parts], [i for p in parts for i in p[1]]
         directory = self._ops_dir()

@@ -238,3 +238,41 @@ def test_remote_staging_requires_project_contained_bundle(tmp_path):
     )
     with pytest.raises(ValueError, match="inside the job project"):
         job.remote_input_files(tmp_path / "remote_project")
+
+
+def test_remote_staging_uploads_external_control_state_with_the_job(tmp_path):
+    # A problem workdir outside the project writes its candidate control state
+    # there; the base staging uploads it below the job's inputs/external.
+    stage, simulation, _, _ = _publish(
+        tmp_path, directory=tmp_path / "project" / "stage"
+    )
+    mesh = stage.publish_mesh(
+        _capture(tmp_path / "capture", stage),
+        Path(simulation.project_path) / "mesh",
+    )
+    candidate = tmp_path / "workdir" / "candidate.h5"
+    candidate.parent.mkdir()
+    shutil.copyfile(stage.control_state, candidate)
+    job = FWIOperatorJob(
+        "remote_stage",
+        simulation,
+        [3],
+        action="linearize",
+        active=[],
+        state="linearization.json",
+        control_state=candidate,
+        pml_stage=stage,
+        stage_mesh=mesh,
+    )
+    destination = tmp_path / "remote_project"
+    staged, _ = job.save_for_remote("fixture", destination)
+    payload = json.loads(staged.read_text())
+    pairs = job.remote_input_files(destination)
+    assert len(pairs) == len(set(pairs))
+    remote_state = Path(payload["fwi_operator"]["controls"]["state"])
+    assert "inputs/external" in remote_state.as_posix()
+    assert (candidate.resolve(), remote_state) in {
+        (Path(local).resolve(), Path(remote)) for local, remote in pairs
+    }
+    transferred = {Path(local).resolve() for local, _ in pairs}
+    assert set(stage.input_files()) | set(mesh.input_files()) <= transferred

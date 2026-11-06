@@ -282,6 +282,10 @@ plain numbers in the model's units or Pint quantities.
 A single block can be passed directly as ``controls=``. ``limits=(lo, hi)``
 are value limits in physical units that the optimizer enforces as bound
 constraints; they are optional and independent of extent.
+``extrapolate="hold"`` needs a solver whose ``--capabilities-json`` catalog
+lists ``physics.control_map.extrapolate_hold``: older builds ignore the key, so
+local and SLURM sites refuse such a job with
+``frequensolve.solver.SolverFeatureError`` unless the solver policy is ``off``.
 
 Blocks and coefficients
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1180,7 +1184,10 @@ names, which Sauce resolves in each task. Several normal products share one
 job: ``H @ V`` for a ``(n, k)`` array, or ``lin.apply_normal_batch(directions)``,
 solves (or restores) each source batch's background and factors the operator
 once for all ``k`` material directions. ``regularization=`` adds a bound native
-Tikhonov Hessian, applied by the same job when that is exact.
+Tikhonov Hessian, applied by the same job when that is exact. A
+``kernel_derivative`` view shares one job only when the site's solver lists
+``imaging.normal.kernel_derivative_directions`` in its ``--capabilities-json``
+catalog; otherwise each direction runs its own job.
 
 Operators are :class:`scipy.sparse.linalg.LinearOperator` subclasses that
 know their control and data spaces, accept typed vectors or plain arrays, and
