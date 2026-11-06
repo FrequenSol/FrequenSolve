@@ -5,6 +5,17 @@ prepared.
 
 ## Unreleased
 
+- Local and SLURM sites read the solver backend's `--capabilities-json`
+  operation catalog before using features older builds would silently ignore
+  or reject. A job with an `extrapolate="hold"` control map fails with
+  `SolverFeatureError` unless the backend lists
+  `physics.control_map.extrapolate_hold`, and `kernel_derivative` normals with
+  several directions fall back to one job per direction unless it lists
+  `imaging.normal.kernel_derivative_directions`. Solver policy `off` skips the
+  query.
+- `TransientJob` rejects `shard_samples` or `rate_operator` on
+  `output_schedule` when a `trace_schedule` is set; the solver configures
+  traces from the trace schedule alone, so set them there.
 - Persistent sessions can be reused across scripts.
   `site.session(reuse=project, linger="30m")` adopts a compatible session
   that the same user started with the same reuse scope and that no client is
