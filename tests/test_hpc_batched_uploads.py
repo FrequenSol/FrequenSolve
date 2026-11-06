@@ -20,32 +20,35 @@ WORK = PurePosixPath("/scratch/user/gulf")
 
 
 class FakeRsync:
-    """``subprocess.run`` double that records rsync argv and --files-from lists."""
+    """``subprocess.run`` double that records rsync argv and its local sources."""
 
     def __init__(self):
         self.calls = []
         self.statuses = []
 
     def __call__(self, argv, **kwargs):
-        option = next((arg for arg in argv if arg.startswith("--files-from=")), None)
-        listed = None
-        if option is not None:
-            raw = Path(option.split("=", 1)[1]).read_bytes()
-            listed = [item.decode() for item in raw.split(b"\0")[:-1]]
-        self.calls.append(SimpleNamespace(argv=list(argv), listed=listed))
+        # argv: rsync [-e <ssh>] <flags/options> <source>... <target>
+        sources = []
+        skip = False
+        for arg in argv[1:-1]:
+            if skip:
+                skip = False
+            elif arg == "-e":
+                skip = True
+            elif not arg.startswith("-"):
+                sources.append(arg)
+        self.calls.append(SimpleNamespace(argv=list(argv), listed=sources))
         status = self.statuses.pop(0) if self.statuses else 0
         return SimpleNamespace(returncode=status, stdout="", stderr="")
 
     def sent(self, start=0):
         """Return the file names the calls from ``start`` on transferred."""
 
-        names = []
-        for call in self.calls[start:]:
-            if call.listed is None:
-                names.append(PurePosixPath(call.argv[-2]).name)
-            else:
-                names.extend(PurePosixPath(item).name for item in call.listed)
-        return names
+        return [
+            PurePosixPath(item).name
+            for call in self.calls[start:]
+            for item in call.listed
+        ]
 
 
 class RecordingSFTP:
@@ -203,7 +206,7 @@ def _gulf_job(tmp_path):
     return StagedJob(project, inputs, simulation)
 
 
-def test_put_files_sends_one_root_with_one_mkdir_and_one_rsync(rsync, tmp_path):
+def test_put_files_sends_one_mkdir_and_one_rsync_per_directory(rsync, tmp_path):
     site = BatchSite()
     project = tmp_path / "project"
     files = _ops_files(project, ops=("0001", "0002"))
@@ -218,16 +221,22 @@ def test_put_files_sends_one_root_with_one_mkdir_and_one_rsync(rsync, tmp_path):
         f"{WORK}/imaging/fwi/abc123/ops/0001",
         f"{WORK}/imaging/fwi/abc123/ops/0002",
     ]
-    (call,) = rsync.calls
-    assert call.listed == [local.relative_to(project).as_posix() for local in files]
-    for option in ("--relative", "--no-implied-dirs", "--from0", "--partial"):
-        assert option in call.argv
-    assert "--timeout=120" in call.argv
-    assert call.argv[1] == "-e" and "ssh" in call.argv[2]
-    assert call.argv[-2:] == [f"{project}/", f"user@{HOST}:{WORK}/"]
+    # One plain multi-source rsync into each existing directory: no --relative
+    # path reconstruction (it replaces symlinked remote directories, and its
+    # --no-implied-dirs form fails between macOS openrsync and rsync 3).
+    assert [call.argv[-1] for call in rsync.calls] == [
+        f"user@{HOST}:{WORK}/imaging/fwi/abc123/ops/0001/",
+        f"user@{HOST}:{WORK}/imaging/fwi/abc123/ops/0002/",
+    ]
+    for op, call in zip(("0001", "0002"), rsync.calls):
+        assert call.listed == [str(local) for local in files if f"/{op}/" in str(local)]
+        for option in ("--relative", "--no-implied-dirs", "--files-from", "--from0"):
+            assert not any(arg.startswith(option) for arg in call.argv)
+        assert "--partial" in call.argv and "--timeout=120" in call.argv
+        assert call.argv[1] == "-e" and "ssh" in call.argv[2]
 
 
-def test_put_files_groups_by_local_and_remote_root(rsync, tmp_path):
+def test_put_files_groups_by_remote_directory(rsync, tmp_path):
     site = BatchSite()
     project = tmp_path / "project"
     ops = _ops_files(project, directions=1, tasks=2)
@@ -253,20 +262,13 @@ def test_put_files_groups_by_local_and_remote_root(rsync, tmp_path):
         str(external_remote.parent),
         f"{WORK}/jobs/sim/normal/logs/batch",
     }
-    roots = {tuple(call.argv[-2:]): call.listed for call in rsync.calls}
-    assert roots == {
-        (f"{project}/", f"user@{HOST}:{WORK}/"): [
-            local.relative_to(project).as_posix() for local in ops
-        ],
-        (f"{staged.parent}/", f"user@{HOST}:{WORK}/simulations/sim/"): ["sim.json"],
-        ("/", f"user@{HOST}:{WORK}/jobs/sim/normal/inputs/external/"): [
-            external.as_posix().lstrip("/")
-        ],
-        # Stored under another name: a plain single-file rsync.
-        (
-            str(renamed),
-            f"user@{HOST}:{WORK}/jobs/sim/normal/logs/batch/sweep-1.slurm",
-        ): None,
+    targets = {call.argv[-1]: call.listed for call in rsync.calls}
+    assert targets == {
+        f"user@{HOST}:{WORK}/imaging/fwi/abc123/ops/0001/": [str(local) for local in ops],
+        f"user@{HOST}:{WORK}/simulations/sim/": [str(staged)],
+        f"user@{HOST}:{external_remote.parent}/": [str(external)],
+        # Stored under another name: a single-file rsync to the exact path.
+        f"user@{HOST}:{WORK}/jobs/sim/normal/logs/batch/sweep-1.slurm": [str(renamed)],
     }
 
 

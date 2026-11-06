@@ -82,6 +82,8 @@ _monotonic = time.monotonic
 # Quoted directories per ``mkdir -p`` command; well below Linux's 128 KiB cap
 # on the one ``-c`` argument a remote command reaches the login shell as.
 _MKDIR_COMMAND_BYTES = 64 * 1024
+# Local sources per rsync invocation: keeps argv well below ARG_MAX for long paths.
+_RSYNC_SOURCES_PER_CALL = 256
 # Seconds a staged-upload record is trusted. Rounds normally last seconds; an
 # older record (an upload whose job never launched) is re-sent, since scratch
 # file systems purge idle files.
@@ -381,85 +383,54 @@ class SlurmTransferManager:
     def _put_files_rsync(
         self, files: Sequence[Tuple[Path, PurePosixPath]], *, compress: bool
     ) -> None:
-        """Send ``files`` with one rsync per local root and remote root pair."""
+        """Send ``files`` with one rsync per remote directory.
 
-        groups, renamed = self._rsync_upload_groups(files)
-        for (local_root, remote_root), relatives in groups.items():
-            self._rsync_file_list(local_root, remote_root, relatives, compress=compress)
-        # A file stored under another name cannot join a --files-from list.
+        The directories already exist (``_make_remote_dirs``), so each group
+        is a plain multi-source rsync into its directory: no ``--relative`` path
+        reconstruction, which would replace a symlinked remote directory and
+        whose ``--no-implied-dirs`` form macOS openrsync (protocol 29) cannot
+        negotiate with rsync 3 ("invalid path from sender"). Existing remote
+        directories and symlinks are left alone, like a single-file ``put``.
+        """
+
+        groups, renamed = self._rsync_directory_groups(files)
+        for remote_dir, locals_ in groups.items():
+            for start in range(0, len(locals_), _RSYNC_SOURCES_PER_CALL):
+                self._rsync_into_directory(
+                    locals_[start : start + _RSYNC_SOURCES_PER_CALL],
+                    remote_dir,
+                    compress=compress,
+                )
+        # A file stored under another name needs its own destination path.
         for local, remote in renamed:
             self._rsync_file(local, remote, compress=compress)
 
     @staticmethod
-    def _rsync_upload_groups(
+    def _rsync_directory_groups(
         files: Sequence[Tuple[Path, PurePosixPath]],
-    ) -> Tuple[
-        Dict[Tuple[Path, PurePosixPath], List[PurePosixPath]],
-        List[Tuple[Path, PurePosixPath]],
-    ]:
-        """Split each upload into roots plus the relative path both sides share.
+    ) -> Tuple[Dict[PurePosixPath, List[Path]], List[Tuple[Path, PurePosixPath]]]:
+        """Group uploads by remote directory; a renamed file is returned apart."""
 
-        The relative path is the longest common trailing part of the local and
-        remote paths (both roots keep at least their first component), so all
-        files mapped between the same two trees share one group. A file whose
-        remote name differs from its local one is returned separately.
-        """
-
-        groups: Dict[Tuple[Path, PurePosixPath], List[PurePosixPath]] = {}
+        groups: Dict[PurePosixPath, List[Path]] = {}
         renamed: List[Tuple[Path, PurePosixPath]] = []
         for local, remote in files:
-            local_parts = local.absolute().parts
-            remote_parts = remote.parts
-            limit = min(len(local_parts), len(remote_parts)) - 1
-            common = 0
-            while (
-                common < limit and local_parts[-1 - common] == remote_parts[-1 - common]
-            ):
-                common += 1
-            if not common:
+            if local.name != remote.name:
                 renamed.append((local, remote))
                 continue
-            roots = (
-                Path(*local_parts[:-common]),
-                PurePosixPath(*remote_parts[:-common]),
-            )
-            groups.setdefault(roots, []).append(PurePosixPath(*remote_parts[-common:]))
+            groups.setdefault(remote.parent, []).append(local)
         return groups, renamed
 
-    def _rsync_file_list(
-        self,
-        local_root: Path,
-        remote_root: PurePosixPath,
-        relatives: Sequence[PurePosixPath],
-        *,
-        compress: bool,
+    def _rsync_into_directory(
+        self, locals_: Sequence[Path], remote_dir: PurePosixPath, *, compress: bool
     ) -> None:
-        """Send ``local_root/<relative>`` to ``remote_root/<relative>``.
+        """Send ``locals_`` into the existing ``remote_dir`` with one rsync."""
 
-        ``--no-implied-dirs`` leaves the existing remote directories (created
-        beforehand) and their attributes alone, like a single-file ``put``.
-        """
-
-        with tempfile.NamedTemporaryFile(
-            mode="wb", dir=self._local_tmp_parent()
-        ) as file_list:
-            for relative in relatives:
-                file_list.write(relative.as_posix().encode("utf-8") + b"\0")
-            file_list.flush()
-            options = [
-                "--relative",
-                "--no-implied-dirs",
-                "--from0",
-                f"--files-from={file_list.name}",
-            ]
-            source = _directory_argument(str(local_root))
-            target = self._remote_spec(_directory_argument(remote_root.as_posix()))
-            self._with_retries(
-                "upload",
-                lambda: self._run_rsync(
-                    source, target, options=options, compress=compress
-                ),
-            )
+        sources = [str(local) for local in locals_]
+        target = self._remote_spec(_directory_argument(remote_dir.as_posix()))
+        self._with_retries(
+            "upload",
+            lambda: self._run_rsync(sources, target, compress=compress),
+        )
 
     def _rsync_file(
         self, local: Path, remote: PurePosixPath, *, compress: bool
@@ -775,7 +746,7 @@ class SlurmTransferManager:
 
     def _run_rsync(
         self,
-        source: str,
+        source: Union[str, Sequence[str]],
         target: str,
         *,
         options: Sequence[str] = (),
@@ -794,7 +765,8 @@ class SlurmTransferManager:
         # rsync's own I/O timeout stops a transfer that stalls.
         rsync_cmd.append(f"--timeout={max(1, math.ceil(self._stall_timeout()))}")
         rsync_cmd.extend(options)
-        rsync_cmd.extend([source, target])
+        rsync_cmd.extend([source] if isinstance(source, str) else list(source))
+        rsync_cmd.append(target)
         if self.site._login_client.is_proxy():
             control_path, _ = self.site._login_client.get_proxy_details()
             if not control_path:
