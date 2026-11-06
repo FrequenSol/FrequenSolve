@@ -327,21 +327,51 @@ class Comparison:
     inside Sauce: the objective is the minimum over the delays, its gradient
     is the fixed-delay gradient, and the fitted delays are reported per task
     (``ObjectiveTermReport.source_delay``).
+
+    ``wavenumber`` compares the instantaneous wavenumber along the receiver
+    line (see :meth:`wavenumber`); it takes the same observed inputs as
+    ``phase_derivative`` and composes with it in one windowed misfit.
     """
 
-    kind: Literal["waveform", "phase_derivative", "spectral_derivative"] = "waveform"
+    kind: Literal[
+        "waveform", "phase_derivative", "spectral_derivative", "wavenumber"
+    ] = "waveform"
     source_derivative: Literal["frozen", "total"] = "frozen"
     relative_amplitude_floor: float = 0.01
     array: Any = None
     reliability: Optional[str] = None
     confidence_floor: float = 0.0
     source_delay: Literal["none", "fit"] = "none"
+    measure: Literal["wavenumber", "slowness"] = "wavenumber"
+    max_spacing_m: Optional[float] = None
 
     def __post_init__(self) -> None:
         kind = str(self.kind).strip().lower()
-        if kind not in {"waveform", "phase_derivative", "spectral_derivative"}:
+        if kind not in {
+            "waveform",
+            "phase_derivative",
+            "spectral_derivative",
+            "wavenumber",
+        }:
             raise ValueError(
-                "comparison kind must be 'waveform', 'phase_derivative', or 'spectral_derivative'"
+                "comparison kind must be 'waveform', 'phase_derivative', "
+                "'spectral_derivative', or 'wavenumber'"
+            )
+        measure = str(self.measure).strip().lower()
+        if measure not in {"wavenumber", "slowness"}:
+            raise ValueError("measure must be 'wavenumber' or 'slowness'")
+        if kind != "wavenumber" and (
+            measure != "wavenumber" or self.max_spacing_m is not None
+        ):
+            raise ValueError(
+                "measure and max_spacing_m require a wavenumber comparison"
+            )
+        object.__setattr__(self, "measure", measure)
+        if self.max_spacing_m is not None:
+            object.__setattr__(
+                self,
+                "max_spacing_m",
+                _positive_float(self.max_spacing_m, "max_spacing_m"),
             )
         source_derivative = str(self.source_derivative).strip().lower()
         if source_derivative not in {"frozen", "total"}:
@@ -371,7 +401,10 @@ class Comparison:
             raise TypeError("array must be an im.SyntheticArray")
         if self.reliability not in {None, "predicted"}:
             raise ValueError("reliability must be None or 'predicted'")
-        if self.array is not None or self.reliability is not None:
+        if self.array is not None and kind == "wavenumber":
+            if self.reliability is not None:
+                raise ValueError("reliability requires phase_derivative")
+        elif self.array is not None or self.reliability is not None:
             if kind != "phase_derivative":
                 raise ValueError(
                     "synthetic arrays and reliability require phase_derivative"
@@ -412,6 +445,55 @@ class Comparison:
             reliability=reliability,
             confidence_floor=confidence_floor,
             source_delay=source_delay,
+        )
+
+    @classmethod
+    def wavenumber(
+        cls,
+        *,
+        source_derivative: Literal["frozen", "total"] = "frozen",
+        relative_amplitude_floor: float = 0.01,
+        array: Any = None,
+        measure: Literal["wavenumber", "slowness"] = "wavenumber",
+        max_spacing=None,
+    ) -> "Comparison":
+        """Return the instantaneous-wavenumber comparison along the receiver line.
+
+        Consecutive output channels a, b = a+1 at distance h form a pair with
+        cross-product ``C = conj(S_a) S_b`` and midpoint energy
+        ``E = |S_a + S_b|^2 / 4`` of the compared series S (the windowed series
+        with ``kernel_derivative``). Each channel pools ``N = sum W Im C``,
+        ``D = eps^2 + sum W E`` and ``H = sum W h`` over normalized pair
+        weights and compares ``k = (2/H) atan(N / (2 D))``: the continuum
+        ``Im(conj(S) dS/ds) / |S|^2``, made exact for a plane wave up to
+        spatial Nyquist (a centred derivative stencil aliases there). A wave
+        travelling towards increasing channel index gives ``-omega/c`` (the
+        convention in which ``phase_derivative`` gives minus the delay).
+
+        Without ``array`` a channel pools its one or two adjacent pairs; an
+        :class:`SyntheticArray` weights pairs by the distance from the channel to
+        their midpoints, pooling energy and cross-products. ``eps`` is
+        ``relative_amplitude_floor`` times the observed RMS amplitude per RHS
+        and component. ``measure="slowness"`` compares ``k / (2 pi f)`` in s/m
+        instead of rad/m. Pairs farther apart than ``max_spacing`` (a length,
+        default 2.5 times the median channel spacing) are not formed, so line
+        gaps split the cable. Needs dense output-channel rows (``fwi_operator``).
+        """
+
+        spacing = None
+        if max_spacing is not None:
+            if not hasattr(max_spacing, "to"):
+                raise TypeError(
+                    "max_spacing requires length units, e.g. fs.Q_(25, 'm')"
+                )
+            spacing = max_spacing.to("m").magnitude
+        return cls(
+            kind="wavenumber",
+            source_derivative=source_derivative,
+            relative_amplitude_floor=relative_amplitude_floor,
+            array=array,
+            measure=measure,
+            max_spacing_m=spacing,
         )
 
     @property
@@ -468,7 +550,9 @@ class Comparison:
         """Return the observed derivative axes this comparison needs."""
 
         return (
-            ("df",) if self.kind in {"phase_derivative", "spectral_derivative"} else ()
+            ("df",)
+            if self.kind in {"phase_derivative", "spectral_derivative", "wavenumber"}
+            else ()
         )
 
     @classmethod
@@ -504,6 +588,20 @@ class Comparison:
                 "derivative_axis": "frequency",
                 "source_derivative": self.source_derivative,
             }
+        if self.kind == "wavenumber":
+            return {
+                "kind": self.kind,
+                "derivative_axis": "receiver_line",
+                "source_derivative": self.source_derivative,
+                "relative_amplitude_floor": self.relative_amplitude_floor,
+                "measure": self.measure,
+                **({"array": self.array.to_dict()} if self.array is not None else {}),
+                **(
+                    {"max_spacing_m": self.max_spacing_m}
+                    if self.max_spacing_m is not None
+                    else {}
+                ),
+            }
         return {
             "kind": self.kind,
             "derivative_axis": "frequency",
@@ -536,18 +634,29 @@ class Comparison:
             "confidence_floor",
             "reliability",
             "source_delay",
+            "measure",
+            "max_spacing_m",
         }
         unknown = sorted(set(data).difference(allowed))
         if unknown:
             raise ValueError(f"unsupported comparison option(s): {', '.join(unknown)}")
-        axis = str(data.get("derivative_axis", "frequency")).strip().lower()
-        if axis != "frequency":
+        line = str(data.get("kind", "waveform")).strip().lower() == "wavenumber"
+        axis = (
+            str(data.get("derivative_axis", "receiver_line" if line else "frequency"))
+            .strip()
+            .lower()
+        )
+        if axis != ("receiver_line" if line else "frequency"):
             raise ValueError(
-                "phase-derivative comparison requires derivative_axis='frequency'"
+                "wavenumber comparison requires derivative_axis='receiver_line'"
+                if line
+                else "phase-derivative comparison requires derivative_axis='frequency'"
             )
         from .synthetic_array import SyntheticArray
 
         return cls(
+            measure=data.get("measure", "wavenumber"),
+            max_spacing_m=data.get("max_spacing_m"),
             array=SyntheticArray.from_dict(data["array"]) if "array" in data else None,
             confidence_floor=data.get("confidence_floor", 0.0),
             reliability=data.get("reliability"),

@@ -2416,7 +2416,7 @@ class ImagingProblem:
         }
         if self.kernel_derivative is not None:
             kernel = self.kernel_derivative
-            phase = {"phase_derivative", "spectral_derivative"}
+            phase = {"phase_derivative", "spectral_derivative", "wavenumber"}
             if comparisons & phase:
                 # Windowed traveltime: the phase comparison of (S, dS/df), S the windowed series.
                 window = kernel.get("window")

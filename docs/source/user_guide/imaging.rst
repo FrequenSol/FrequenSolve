@@ -782,7 +782,7 @@ degree (at most three)::
 
 ``window=[0, 1]`` weights by ``t exp(-2*pi*sigma*t)``, which peaks at
 ``1/(2*pi*sigma)`` seconds, so later arrivals dominate the attribute. Every
-objective term must be a phase comparison with the same source policy; floors,
+objective term must be a phase or wavenumber comparison with the same source policy; floors,
 synthetic arrays and robust losses act on the windowed pair. A total source
 above first order needs point-force sources and a signature exported with
 ``derivative_order`` at least the window degree plus one; Sauce then mixes the
@@ -791,6 +791,34 @@ and material independent (a DAS gauge built from constant-weight velocity
 differences, i.e. strain rate). One gradient costs ``2*(degree+2)`` solves.
 Exact higher derivatives come from ``TransferFunction.frequency_jet``, which
 ``SampledWavelet``, ``GainDelay`` and products implement through any order.
+
+The traveltime constrains timing along the source path but is nearly blind to
+moveout across the cable. ``Comparison.wavenumber`` compares the instantaneous
+wavenumber of the same series along the receiver line, i.e. the local phase
+velocity ``omega/|k|``. Combine both in one windowed misfit::
+
+   array = im.SyntheticArray.gaussian(sigma=fs.Q_(10, "m"))
+   misfit = im.Misfit.terms(
+       im.ObjectiveTerm("das", id="traveltime", loss=im.Loss.student_t(c2=0.09),
+                        comparison=im.Comparison.phase_derivative(
+                            source_derivative="total", array=array)),
+       im.ObjectiveTerm("das", id="moveout", loss=im.Loss.student_t(c2=1e-4),
+                        comparison=im.Comparison.wavenumber(
+                            source_derivative="total", array=array)),
+   )
+
+Consecutive channels form pairs; each channel pools their cross-products
+``conj(S_a) S_b`` and midpoint energies (adjacent pairs only, or by an array's
+distance to the pair midpoints) and compares ``k = (2/H) atan(N/(2D))``. That is
+``Im(conj(S) dS/ds)/|S|^2`` in the continuum and exact for a plane wave up to
+spatial Nyquist: with 10 m channels a 400 m/s wave at 15 Hz has ``k h = 2.4``,
+where a smoothed derivative stencil would alias and reverse the measured
+moveout. A wave travelling towards increasing channel index gives
+``-omega/c``. ``measure="slowness"`` compares ``k/(2*pi*f)`` in s/m. Pairs farther
+apart than ``max_spacing`` (default 2.5 times the median spacing) are not
+formed. The comparison needs dense output-channel rows, i.e. ``fwi_operator``
+actions (``linearize``, ``vjp``, ``jvp``, ``normal``), and costs no solves beyond
+the traveltime's hierarchy.
 
 Nonlinear spectral attributes can compose those saved derivative-data
 states through ``SpectralJetLinearization``::
