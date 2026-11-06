@@ -191,6 +191,9 @@ print('solver success')
         shutil.copyfile(remote, local)
 
     monkeypatch.setattr(site, "put", put)
+    monkeypatch.setattr(
+        site, "put_files", lambda pairs, **kwargs: [put(*pair) for pair in pairs]
+    )
     monkeypatch.setattr(site, "get", get)
     monkeypatch.setattr(site, "_read_remote_json", read)
     monkeypatch.setattr(site, "_run_session_command", login)

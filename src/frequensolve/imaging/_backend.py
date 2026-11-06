@@ -771,18 +771,27 @@ class Backend:
         except (AttributeError, ValueError):
             return
         remote_root = Path(Project.remote_root_for(self.site, root))
-        upload = getattr(self.site, "put")
         input_files = getattr(job, "remote_input_files", None)
         if callable(input_files):
-            for local, remote in input_files(remote_root):
-                upload(local, remote)
+            pairs = list(input_files(remote_root))
+        else:
+            pairs = []
+            for path in _operator_input_files(job):
+                try:
+                    relative = path.resolve().relative_to(root.resolve())
+                except ValueError:
+                    continue
+                pairs.append((path, remote_root / relative))
+        # A site that batches uploads sends them with one remote mkdir and few
+        # transfers instead of two SSH round trips per file.
+        upload_many = getattr(self.site, "put_files", None)
+        if callable(upload_many):
+            if pairs:
+                upload_many(pairs)
             return
-        for path in _operator_input_files(job):
-            try:
-                relative = path.resolve().relative_to(root.resolve())
-            except ValueError:
-                continue
-            upload(path, remote_root / relative)
+        upload = getattr(self.site, "put")
+        for local, remote in pairs:
+            upload(local, remote)
 
     def run(
         self,

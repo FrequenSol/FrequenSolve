@@ -475,6 +475,9 @@ class AllocationSession(BaseSite):
     supports_curvature = True
     supports_background_reuse = True
     shutdown_on_completion = False
+    # submit uploads remote_input_files with the simulation JSON (the base
+    # site's _transfer_remote_simulation_inputs); callers upload nothing.
+    stages_job_inputs = True
 
     def __init__(
         self,

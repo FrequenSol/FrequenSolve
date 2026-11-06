@@ -386,6 +386,10 @@ def test_direct_remote_submission_stages_nested_and_absolute_vector_payloads(
             target.write_bytes(Path(local).read_bytes())
             uploads.append(target)
 
+        def put_files(self, pairs, **kwargs):
+            for local, target in pairs:
+                self.put(local, target)
+
     Site()._transfer_remote_simulation_inputs(job)
     for task in (1, 2):
         staged = remote / "jobs" / "client_inputs" / f"dual_{task}.json"
@@ -580,6 +584,10 @@ def test_slurm_sites_upload_operator_inputs_once(tmp_path):
 
         def put(self, local, target):
             uploads.append((Path(local), Path(target)))
+
+        def put_files(self, pairs, **kwargs):
+            for local, target in pairs:
+                self.put(local, target)
 
     site = Site()
     Backend(site, root / "imaging")._stage_remote_inputs(vjp)

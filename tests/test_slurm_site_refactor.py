@@ -887,6 +887,9 @@ def test_slurm_job_transfer_overwrites_remote_simulation_and_mesh(
             captured["simulation"] = json.loads(local.read_text())
 
     monkeypatch.setattr(site, "put", fake_put)
+    monkeypatch.setattr(
+        site, "put_files", lambda pairs, **kwargs: [fake_put(*pair) for pair in pairs]
+    )
     monkeypatch.setattr(site, "run_login", lambda cmd: "")
     monkeypatch.setattr(site, "_claim_remote_project", claimed.append)
 

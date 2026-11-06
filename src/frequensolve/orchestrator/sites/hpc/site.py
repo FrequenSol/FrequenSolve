@@ -2279,6 +2279,30 @@ class SlurmSite(BaseSite):
 
         return self._transfer.put(local_path, remote_path, compress=compress)
 
+    def put_files(
+        self,
+        pairs: Iterable[Tuple[Union[str, Path], Union[str, Path]]],
+        *,
+        compress: bool = True,
+        before_launch: bool = False,
+    ) -> List[PurePosixPath]:
+        """Transfer many local files to remote paths in one batch.
+
+        One remote ``mkdir`` creates every parent directory, and files that
+        share a local and a remote root travel in one rsync (or one SFTP
+        session) instead of two SSH round trips per file. A file whose content
+        was already sent to the same remote path since the last run launched
+        is skipped; ``before_launch=True`` marks the batch that completes a
+        run's inputs. See :meth:`SlurmTransferManager.put_files`.
+
+        Returns:
+            The remote paths sent.
+        """
+
+        return self._transfer.put_files(
+            pairs, compress=compress, before_launch=before_launch
+        )
+
     def fetch_traces(
         self,
         job: Union[BaseJob, List[BaseJob]],
@@ -3811,18 +3835,29 @@ class SlurmSite(BaseSite):
         return self.work_dir / relative
 
     def _transfer_remote_simulation_inputs(self, job: BaseJob) -> None:
-        """Transfer the simulation JSON and direct file inputs for a staged job."""
+        """Transfer the simulation JSON and direct file inputs for a staged job.
+
+        They travel as one batch (one remote ``mkdir``, one transfer per root
+        pair). A file already sent with identical content to the same path
+        since the last launch is skipped; the job may rewrite files once it
+        runs, so this batch ends that staging round.
+        """
 
         self._claim_remote_project(job.project_path)
         local_sim, remote_sim = job.save_simulation_for_remote(
             self.__class__.__name__, self.work_dir
         )
-        logger.debug("Transferring simulation file to remote path: %s", remote_sim)
-        self.put(Path(local_sim), Path(remote_sim))
-
-        for local_file, remote_file in job.remote_input_files(self.work_dir):
-            logger.debug("Transferring input file to remote path: %s", remote_file)
-            self.put(Path(local_file), Path(remote_file))
+        pairs = [(Path(local_sim), Path(remote_sim))]
+        pairs.extend(
+            (Path(local_file), Path(remote_file))
+            for local_file, remote_file in job.remote_input_files(self.work_dir)
+        )
+        logger.debug(
+            "Transferring simulation file %s and %d input file(s)",
+            remote_sim,
+            len(pairs) - 1,
+        )
+        self.put_files(pairs, before_launch=True)
 
     def _is_running(self, job_id: int) -> bool:
         """Check if a job is running."""

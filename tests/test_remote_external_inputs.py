@@ -244,6 +244,9 @@ def test_slurm_transfer_uploads_external_inputs_to_the_rewritten_paths(
         puts[Path(remote)] = Path(local)
 
     monkeypatch.setattr(site, "put", fake_put)
+    monkeypatch.setattr(
+        site, "put_files", lambda pairs, **kwargs: [fake_put(*pair) for pair in pairs]
+    )
     monkeypatch.setattr(site, "run_login", lambda cmd: "")
     monkeypatch.setattr(site, "_claim_remote_project", lambda path: None)
 
