@@ -84,6 +84,7 @@ class FrequencyDomainJob(BaseJob):
         source_derivative: Literal["total", "frozen"] = "total",
         preserve_task_outputs: bool = False,
         patches: PatchSet | None = None,
+        simulation_overrides=None,
     ):
         if source_derivative not in {"total", "frozen"}:
             raise ValueError("source_derivative must be total or frozen")
@@ -112,6 +113,9 @@ class FrequencyDomainJob(BaseJob):
             k_weights=k_weights,
             k_units=k_units,
             preserve_task_outputs=preserve_task_outputs,
+            simulation_overrides=(
+                {} if simulation_overrides is None else simulation_overrides
+            ),
         )
         self.phase_derivatives: int = phase_derivatives
 
@@ -212,6 +216,7 @@ class FrequencyDomainJob(BaseJob):
                 None if d.get("patches") is None else cls._restore_patches(d["patches"])
             ),
         )
+        job._restore_simulation_overrides(d)
         job.preserve_task_outputs = d.get("preserve_task_outputs", False)
         if not isinstance(job.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")
@@ -302,6 +307,7 @@ class TimeDomainJob(BaseJob):
         phase_derivatives: int = 0,
         *,
         preserve_task_outputs: bool = False,
+        simulation_overrides=None,
     ):
         if damping_factor is not None and laplace is not None:
             raise ValueError("Specify only one of damping_factor or laplace")
@@ -381,6 +387,9 @@ class TimeDomainJob(BaseJob):
             simulation=simulation,
             workflow=workflow,
             f_list=f_list,
+            simulation_overrides=(
+                {} if simulation_overrides is None else simulation_overrides
+            ),
             outputs=JobOutputs(outputs),
             k_list=k_list,
             k_weights=k_weights,
@@ -496,6 +505,7 @@ class TimeDomainJob(BaseJob):
             ),
         )
         job.f_list = f_list.tolist()
+        job._restore_simulation_overrides(d)
         job.preserve_task_outputs = d.get("preserve_task_outputs", False)
         if not isinstance(job.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")

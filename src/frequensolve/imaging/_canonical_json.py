@@ -219,35 +219,49 @@ def _contains_float(payload: Any) -> bool:
     return False
 
 
-def _write_canonical(value: Any, write: Callable[[str], Any]) -> None:
+def _write_canonical(
+    value: Any, write: Callable[[str], Any], indent: int | None = None, level: int = 0
+) -> None:
+    prefix = "" if indent is None else "\n" + " " * indent * (level + 1)
+    suffix = "" if indent is None else "\n" + " " * indent * level
     if isinstance(value, Mapping):
         write("{")
         for index, key in enumerate(sorted(value)):
             if not isinstance(key, str):
                 raise TypeError("canonical JSON object keys must be strings")
-            write(("," if index else "") + json.dumps(key, ensure_ascii=False) + ":")
-            _write_canonical(value[key], write)
-        write("}")
+            write(
+                ("," if index else "")
+                + prefix
+                + json.dumps(key, ensure_ascii=False)
+                + (":" if indent is None else ": ")
+            )
+            _write_canonical(value[key], write, indent, level + 1)
+        write((suffix if value else "") + "}")
     elif isinstance(value, (list, tuple)):
         write("[")
         for index, item in enumerate(value):
             if index:
                 write(",")
-            _write_canonical(item, write)
-        write("]")
+            write(prefix)
+            _write_canonical(item, write, indent, level + 1)
+        write((suffix if value else "") + "]")
     elif isinstance(value, float):
         write(nlohmann_double(value))
     else:
         write(json.dumps(value, ensure_ascii=False))
 
 
-def canonical_json_text(payload: Any) -> str:
-    """Return ``payload`` as Sauce's canonical compact sorted JSON text."""
+def canonical_json_text(payload: Any, *, indent: int | None = None) -> str:
+    """Return Sauce JSON text, optionally with its expanded-file indentation."""
 
     if not _contains_float(payload):
         return json.dumps(
-            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            payload,
+            sort_keys=True,
+            separators=(",", ":" if indent is None else ": "),
+            ensure_ascii=False,
+            indent=indent,
         )
     parts: List[str] = []
-    _write_canonical(payload, parts.append)
+    _write_canonical(payload, parts.append, indent)
     return "".join(parts)

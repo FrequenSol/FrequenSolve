@@ -717,6 +717,7 @@ class _ImagingJobBase(BaseJob):
         job.preserve_task_outputs = data.get("preserve_task_outputs", False)
         if not isinstance(job.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")
+        job._restore_simulation_overrides(data)
         job._job_id = data.get("job_id")
 
 
@@ -1862,8 +1863,10 @@ class FWIOperatorJob(_ImagingJobBase):
                     )
             else:
                 if (
-                    self.direction is None or self.covector is None
-                ) and self.directions is None and self.direction_set is None:
+                    (self.direction is None or self.covector is None)
+                    and self.directions is None
+                    and self.direction_set is None
+                ):
                     raise ValueError("normal requires direction and covector")
                 if not self.active:
                     raise ValueError("normal requires a nonempty active subspace")
@@ -1986,12 +1989,19 @@ class FWIOperatorJob(_ImagingJobBase):
                 "direction_set requires jvp, normal or an extension reduced-normal solve"
             )
         if self.extension is not None and not reduced:
-            raise ValueError("extension actions take extension.direction, not direction_set")
-        if any(value is not None for value in (self.direction, self.directions, self.covectors)):
+            raise ValueError(
+                "extension actions take extension.direction, not direction_set"
+            )
+        if any(
+            value is not None
+            for value in (self.direction, self.directions, self.covectors)
+        ):
             raise ValueError("direction_set replaces direction and directions")
         if self.direction_set is None:
             raise ValueError("covector_set requires direction_set")
-        if self.action == "normal" and (self.covector_set is None or self.covector is not None):
+        if self.action == "normal" and (
+            self.covector_set is None or self.covector is not None
+        ):
             raise ValueError("a direction-set normal writes covector_set, not covector")
         if self.action != "normal" and self.covector_set is not None:
             raise ValueError("only a direction-set normal writes covector_set")

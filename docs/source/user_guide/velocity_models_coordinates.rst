@@ -279,6 +279,22 @@ when the model is not unitless:
    gap.coords["x"].attrs["units"] = "m"
    model.add_fracture("frac", depth=500.0 * fs.ureg.m, gap=gap)
 
+Reduced Cased Borehole Fluid
+---------------------------
+
+For 3D coupled transient Galerkin jobs, set
+``LayeredModel(..., borehole_reduction="tube")`` to replace the fluid volumes
+with axial pressure carriers. Author the boreholes, fluid materials, and
+resolved casing normally; their definitions supply the section geometry and
+material properties. Omitting this option retains volumetric fluid.
+
+The tube approximation assumes long waves and continuous fluid columns without
+plugs. It supports Radau-3, Gauss-4, and Newmark, including Dirac pressure
+sources on the fluid axis. Reduced fractures may coexist outside sealed casing;
+fluid exchange with fractures is not modeled. Request
+``elastic:borehole_pressure`` for reduced pressure. Check its convergence
+separately from the per-step algebraic tolerance.
+
 Inspect Before Running
 ----------------------
 

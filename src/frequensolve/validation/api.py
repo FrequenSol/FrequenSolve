@@ -76,7 +76,15 @@ def validate_job(
     """
 
     report = ValidationReport.for_package_validators()
-    simulation = getattr(job, "simulation", None)
+    try:
+        simulation = getattr(
+            job, "effective_simulation", getattr(job, "simulation", None)
+        )
+    except (TypeError, ValueError) as exc:
+        report.error("job.config.invalid", str(exc), path="simulation.overrides")
+        if raise_errors:
+            report.raise_for_errors()
+        return report
     if simulation is None:
         report.error("job.simulation.missing", "Job requires a simulation.")
         if raise_errors:

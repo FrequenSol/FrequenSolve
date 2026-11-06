@@ -21,6 +21,7 @@ from frequensolve.simulation.artifact_contract import (
 from frequensolve.simulation.jobs.base import BaseJob
 from frequensolve.simulation.jobs.run_state import SkipPolicy, TaskRunPlan
 from frequensolve.simulation.outputs import JobOutputs
+from frequensolve.simulation.overrides import reference_overrides
 from frequensolve.simulation.time import (
     CheckpointSchedule,
     Gauss,
@@ -44,8 +45,9 @@ class TransientJob(BaseJob):
     ``n_modes=N`` creates N independent axisymmetric acoustic tasks, for angular
     orders 0 through N-1. Omit it for the legacy single-trajectory workflow.
 
-    Unset simulation settings are filled with Galerkin and lossless attenuation.
-    Cartesian 2D/3D also supports explicitly configured GSLS attenuation.
+    Unset settings resolve to Galerkin and lossless attenuation through job overrides.
+    Cartesian 2D/3D and axisymmetric 2D (azimuthal mode 0 for elastic and coupled
+    physics) also support explicitly configured GSLS attenuation.
     Supply a positive mesh ``f_adapt`` or ``time.f_max``. Source geometry and strengths remain
     in its acquisition; ``source`` supplies their shared physical-time function.
     Cartesian point loads use automatic Gaussian support; ``point_source="dirac"``
@@ -80,6 +82,7 @@ class TransientJob(BaseJob):
         write_initial: bool | None = None,
         checkpoint: CheckpointSchedule | None = None,
         restart: str | Path | None = None,
+        simulation_overrides: Mapping | None = None,
     ):
         if not isinstance(time, TimeIntegration):
             raise TypeError("time must be TimeIntegration")
@@ -110,40 +113,52 @@ class TransientJob(BaseJob):
         ):
             raise TypeError("Expected TimeOutput and CheckpointSchedule")
         self.restart = None if restart is None else _path(restart, "restart")
-        self._configure_simulation(simulation)
-        super().__init__(name, simulation, "transient", [], JobOutputs(outputs))
+        super().__init__(
+            name,
+            simulation,
+            "transient",
+            [],
+            JobOutputs(outputs),
+            simulation_overrides=(
+                {} if simulation_overrides is None else simulation_overrides
+            ),
+        )
         self.validate_outputs()
 
-    def _configure_simulation(self, simulation) -> None:
-        """Fill unset transient defaults on the supplied simulation, preserving overrides."""
-        from frequensolve.units import _scalar_in_units
+    def _simulation_overrides_payload(self) -> dict:
+        """Resolve transient defaults per job, preserving explicit simulation choices."""
+        from frequensolve.simulation.overrides import merge_simulation_overrides
 
-        simulation.discretization.extra.setdefault("method", "Galerkin")
+        explicit = super()._simulation_overrides_payload()
+        simulation = self._simulation_with_overrides(explicit)
+        defaults = {}
+        if "method" not in simulation.discretization.to_fs():
+            defaults["Discretization"] = {"method": "Galerkin"}
         # Sauce infers the required P/S parts from output and receiver fields.
         # Its legacy time-domain default is displacement; select velocity here
         # without enabling projection for jobs that do not request it.
-        projection = simulation.extra.setdefault("helmholtz_projection", {})
+        projection = simulation.extra.get("helmholtz_projection", {})
         if isinstance(projection, dict) and not (
             projection.get("enabled")
             or projection.get("parts")
             or projection.get("part")
         ):
-            projection.setdefault("field", "velocity")
+            if "field" not in projection:
+                defaults["helmholtz_projection"] = {"field": "velocity"}
         model = simulation.model
         if model is not None and model.attenuation_model is None:
             # An explicit attenuation reference/configuration is not an unset law.
             if model.reference_frequency is None and not model._attenuation_extra:
-                model.attenuation_model = "none"
-        adapt = simulation.mesh.adapt
+                defaults["Model"] = {"attenuation": {"model": "none"}}
+        adapt = getattr(simulation.mesh, "adapt", None)
         if adapt is None and self.time.f_max is not None:
-            simulation.mesh.set_adapt(
-                elems_per_wave=2, order=2, f_adapt=self.time.f_max
-            )
+            defaults["Mesh"] = {
+                "adapt": {"elems_per_wave": 2, "order": 2, "f_adapt": self.time.f_max}
+            }
         elif adapt is not None:
             if adapt.f_adapt is None and self.time.f_max is not None:
-                adapt.f_adapt = self.time.f_max
-            elif adapt.f_adapt is not None:
-                adapt.f_adapt = _scalar_in_units(adapt.f_adapt, "Hz", "f_adapt")
+                defaults["Mesh"] = {"adapt": {"f_adapt": self.time.f_max}}
+        return merge_simulation_overrides(defaults, explicit)
 
     @property
     def n_tasks(self):
@@ -159,7 +174,7 @@ class TransientJob(BaseJob):
         return (
             task - 1
             if self.n_modes is not None
-            else (self.simulation.azimuthal_mode or 0)
+            else (self.effective_simulation.azimuthal_mode or 0)
         )
 
     def task_manifest_file(self, task=1, *, result_path=None):
@@ -195,7 +210,7 @@ class TransientJob(BaseJob):
 
     def _point_source_payload(self) -> dict:
         """Resolve bandwidth here; Sauce samples physical speed on the mapped source."""
-        sim = self.simulation
+        sim = self.effective_simulation
         if (
             self.point_source == "dirac"
             or sim.axisymmetric
@@ -208,7 +223,13 @@ class TransientJob(BaseJob):
             frequency = self.time.f_max
         else:
             adapt = sim.mesh.adapt
-            frequency = float(adapt.f_adapt or 0) if adapt is not None else 0.0
+            from frequensolve.units import _scalar_in_units
+
+            frequency = (
+                _scalar_in_units(adapt.f_adapt, "Hz", "f_adapt")
+                if adapt is not None and adapt.f_adapt is not None
+                else 0.0
+            )
             source = self.source
             if source.kind == "ricker":
                 frequency = max(frequency, 3 * source.frequency)
@@ -313,6 +334,7 @@ class TransientJob(BaseJob):
             trace_schedule=trace_schedule,
             checkpoint=checkpoint,
             restart=restart.get("path"),
+            simulation_overrides=reference_overrides(data.get("simulation")),
         )
         job._job_id = data.get("job_id")
         job._imported_point_source = copy.deepcopy(point_source_config)
@@ -323,7 +345,7 @@ class TransientJob(BaseJob):
         self.output_schedule.validate(self.time)
         if self.trace_schedule is not None:
             self.trace_schedule.validate(self.time)
-        sim = self.simulation
+        sim = self.effective_simulation
         sim._validate_azimuthal_mode()
         if self.n_modes is not None:
             if (
@@ -356,9 +378,12 @@ class TransientJob(BaseJob):
                 raise ValueError(
                     "Native reduced fractures require Cartesian 2D/3D or axisymmetric 2D elastic or coupled physics"
                 )
-            if self.time.method != Newmark():
+            if (
+                not isinstance(self.time.method, (Gauss, Radau))
+                and self.time.method != Newmark()
+            ):
                 raise ValueError(
-                    "Native reduced fractures require Newmark(beta=0.25, gamma=0.5)"
+                    "Native reduced fractures require Gauss-4, Radau-3 or Newmark(beta=0.25, gamma=0.5)"
                 )
         if (
             physics not in {"acoustic", "elastic", "coupled"}
@@ -372,9 +397,10 @@ class TransientJob(BaseJob):
             raise ValueError("TransientJob requires Discretization(method='Galerkin')")
         attenuation = _transient_attenuation_model(sim.model)
         if attenuation == "gsls":
-            if axisymmetric:
+            # Sauce relaxes the axisymmetric hoop strain of azimuthal mode 0 only.
+            if axisymmetric and physics != "acoustic" and angular_order:
                 raise ValueError(
-                    "gsls attenuation requires Cartesian 2D/3D coordinates"
+                    "gsls attenuation in axisymmetric elastic or coupled models requires azimuthal mode 0"
                 )
             if (
                 not isinstance(self.time.method, (Gauss, Radau))
@@ -386,6 +412,10 @@ class TransientJob(BaseJob):
             # PML with gsls is composed in the solver (Sauce gsls-pml-qpqs change); no SDK gate.
         adapt = getattr(sim.mesh, "adapt", None)
         frequency = getattr(adapt, "f_adapt", None)
+        if frequency is not None:
+            from frequensolve.units import _scalar_in_units
+
+            frequency = _scalar_in_units(frequency, "Hz", "f_adapt")
         if frequency is None or not np.isfinite(frequency) or frequency <= 0:
             raise ValueError(
                 "TransientJob requires a positive mesh bandwidth: set "
@@ -417,6 +447,13 @@ class TransientJob(BaseJob):
                     )
         acquisition = getattr(sim, "acquisition", None)
         if acquisition is not None:
+            from frequensolve.seismic.transient_validation import (
+                validate_transient_acquisition,
+            )
+
+            validate_transient_acquisition(
+                acquisition, dt=self.time.dt, project_path=sim.project_path
+            )
             if (
                 acquisition.source_signature is not None
                 or acquisition.boundary_loadings
@@ -444,6 +481,16 @@ class TransientJob(BaseJob):
                     )
                 except ValueError:
                     pass  # External source catalogs are checked by Sauce after loading.
+            if (
+                acquisition.source_encoding is not None
+                and acquisition.source_encoding.filters is not None
+                and attenuation == "gsls"
+                and physics != "elastic"
+                and kinds & {"isotropic_moment", "monopole"}
+            ):
+                raise ValueError(
+                    "Filtered acoustic isotropic moments with GSLS are unsupported; use pressure_monopole or lossless media"
+                )
             if angular_order and kinds - {
                 None,
                 "scalar",
@@ -476,8 +523,14 @@ class TransientJob(BaseJob):
                 }:
                     self.source.require_quiet_start(self.time.start)
             for group in acquisition.receiver_groups:
+                group.resolve_expressions(sim.export_context())
                 _validate_fields(
-                    group.to_fs(),
+                    {
+                        "device": {
+                            "_type": type(group.device).__name__,
+                            "components": [c.to_fs() for c in group.device.components],
+                        }
+                    },
                     projection=projection,
                     azimuthal_mode=angular_order,
                 )
@@ -702,8 +755,8 @@ class TransientJob(BaseJob):
             expected_roles = set()
             if (
                 self.outputs.traces is not None
-                and self.simulation.acquisition is not None
-                and self.simulation.acquisition.receiver_groups
+                and self.effective_simulation.acquisition is not None
+                and self.effective_simulation.acquisition.receiver_groups
             ):
                 expected_roles.add("simulated_traces")
             if self.outputs.wavefields:

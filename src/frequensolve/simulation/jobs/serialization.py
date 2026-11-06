@@ -21,6 +21,10 @@ from frequensolve.simulation.artifact_contract import (
     COLLECTION_CONTRACT_VERSION,
     OPERATION_CONTRACT_VERSION,
 )
+from frequensolve.simulation.overrides import (
+    reference_overrides,
+    simulation_reference_path,
+)
 from frequensolve.simulation.simulation import (
     BaseSimulation,
     CustomJSONEncoder,
@@ -178,7 +182,7 @@ class JobSerializationMixin:
             "_type": self.__class__.__name__,
             "name": self.name,
             "project_path": str(self._project_path()),
-            "simulation": self._simulation_path(project_relative=project_relative),
+            "simulation": self._simulation_reference(project_relative=project_relative),
             "workflow": self.workflow,
             **({"f_list": f_list} if f_list is not None else {}),
             "Outputs": self.outputs.to_fs(),
@@ -295,7 +299,11 @@ class JobSerializationMixin:
                 "source_derivative",
             ]
         )
-        return {field: job_data[field] for field in fields if field in job_data}
+        payload = {field: job_data[field] for field in fields if field in job_data}
+        overrides = reference_overrides(job_data.get("simulation"))
+        if overrides:
+            payload["simulation_overrides"] = overrides
+        return payload
 
     def task_fingerprint(self, task: int) -> str:
         """Return the stable hash for one one-based frequency task.
@@ -364,24 +372,50 @@ class JobSerializationMixin:
 
     @staticmethod
     def _load_simulation_for_job(
-        path: Union[str, Path],
+        path: Union[str, Path, Mapping],
         *,
         base_path: Optional[Union[str, Path]] = None,
         project_path: Optional[Union[str, Path]] = None,
         source_project: Optional[Union[str, Path]] = None,
     ) -> BaseSimulation:
+        reference = path
+        path = simulation_reference_path(
+            path, job_file=Path(base_path) / "job.json" if base_path else None
+        )
         sim_file = JobSerializationMixin._resolve_simulation_file(
             path,
             base_path=base_path,
             project_path=project_path,
             source_project=source_project,
         )
+        if isinstance(reference, Mapping) and (
+            expected := reference.get("meta", {}).get("hash")
+        ):
+            actual = JobSerializationMixin._sha256_file(sim_file)
+            if actual.removeprefix("sha256:") != str(expected).removeprefix("sha256:"):
+                raise ValueError(f"Simulation file SHA-256 mismatch: {sim_file}")
         sim = BaseSimulation.load(sim_file)
         if project_path is not None:
             project = Path(project_path).expanduser().resolve()
             sim._file = Path(sim_file).expanduser().resolve()
             sim.relocate(project)
         return sim
+
+    def _restore_simulation_overrides(self, data) -> None:
+        """Keep imported job overrides separate from the loaded base simulation."""
+        self.simulation_overrides = reference_overrides(data.get("simulation"))
+
+    def _simulation_reference(self, *, project_relative=False):
+        """Keep the legacy filename for unmodified jobs, otherwise emit a File reference."""
+        overrides = self._simulation_overrides_payload()
+        if not overrides:
+            return self._simulation_path(project_relative=project_relative)
+        path = Path(self._simulation_path())
+        key = "absolute_path"
+        if project_relative:
+            key = "relative_path"
+            path = Path(os.path.relpath(path, self.job_file.parent))
+        return {"type": "File", key: str(path), "overrides": overrides}
 
     @staticmethod
     def _decode_frequencies(value: Any) -> np.ndarray:

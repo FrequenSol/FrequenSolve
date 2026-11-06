@@ -551,9 +551,32 @@ class JobRunStateMixin:
         ):
             return None
         job_fingerprint = self._sha256_file(job_file)
+        from frequensolve.simulation.overrides import expanded_simulation_hash
+
+        saved_job = json.loads(job_file.read_text())
+        if isinstance(saved_job.get("simulation"), Mapping):
+            from frequensolve.simulation.simulation import _file_status
+
+            key = (
+                str(simulation_file),
+                _file_status(simulation_file),
+                saved_job["simulation"],
+            )
+            cached = getattr(self, "_expanded_simulation_digest_cache", None)
+            if cached is not None and cached[0] == key:
+                simulation_digest = cached[1]
+            else:
+                simulation_digest = expanded_simulation_hash(
+                    saved_job,
+                    json.loads(simulation_file.read_text()),
+                    self._sha256_file(simulation_file),
+                )
+                self._expanded_simulation_digest_cache = (key, simulation_digest)
+        else:
+            simulation_digest = self._sha256_file(simulation_file)
         return {
             "job": job_fingerprint,
-            "simulation": self._sha256_file(simulation_file),
+            "simulation": simulation_digest,
             # Directly authored solver jobs predate the persisted request
             # digest. Sauce conservatively records the exact job-file digest
             # for those inputs, so the consumer must make the same fallback.
@@ -607,7 +630,11 @@ class JobRunStateMixin:
         import copy
         import hashlib
 
-        job, simulation = copy.deepcopy(job), copy.deepcopy(simulation)
+        from frequensolve.simulation.overrides import effective_simulation_payload
+
+        job, simulation = copy.deepcopy(job), effective_simulation_payload(
+            job, simulation
+        )
         job["simulation"] = None
         job["preserve_task_outputs"] = None
         job.setdefault("artifact_contract", {})["output_request"] = None
@@ -794,6 +821,12 @@ class JobRunStateMixin:
             raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
         job_data = self.to_fs(self.export_context())
         job_payload = self._fingerprint_job_payload(job_data)
+        if "simulation_overrides" in job_payload:
+            job_payload["simulation_overrides"] = {
+                key: value
+                for key, value in job_payload["simulation_overrides"].items()
+                if key not in policy.ignored_simulation_keys
+            }
         inputs = self._input_fingerprint_payload()
         return {
             "schema": "frequensolve-job-task-compatibility-fingerprint-1",

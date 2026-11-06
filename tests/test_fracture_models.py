@@ -9,7 +9,6 @@ from frequensolve.model.layered.surfaces import Fracture
 REDUCED = [
     "linear_slip",
     "lower_dimensional_fluid",
-    "hydraulic",
     "lower_dimensional_viscous_fluid",
 ]
 
@@ -219,7 +218,10 @@ def test_reduced_geometry_dimension_preflight(tmp_path):
     ],
 )
 @pytest.mark.parametrize("count", [1, 3])
-def test_native_transient_fracture_authoring(tmp_path, kind, physics, dimension, count):
+@pytest.mark.parametrize("method", ["newmark", "gauss4", "radau3"])
+def test_native_transient_fracture_authoring(
+    tmp_path, kind, physics, dimension, count, method
+):
     import frequensolve as fs
 
     project = fs.Project(name="p", path=tmp_path / "p")
@@ -246,10 +248,18 @@ def test_native_transient_fracture_authoring(tmp_path, kind, physics, dimension,
     job = fs.TransientJob(
         "pulse",
         sim,
-        time=fs.TimeIntegration(0, 1, 0.00025),
+        time=fs.TimeIntegration(
+            0,
+            1,
+            0.00025,
+            {"newmark": fs.Newmark(), "gauss4": fs.Gauss(), "radau3": fs.Radau()}[
+                method
+            ],
+        ),
         source=fs.TimeFunction.ricker(100, delay=0.015),
     )
     job.validate_outputs()
+    assert job.time.to_fs()["method"] == method
     payload = model.to_fs()
     assert payload["surfaces"][1]["constitutive"] == constitutive
     assert LayeredModel.from_fs(payload).to_fs() == payload
@@ -273,6 +283,19 @@ def test_invalid_native_fracture_constitutive(constitutive):
             "f",
             0.5,
             {"value": 1e-5},
-            fracture_model="hydraulic",
+            fracture_model="lower_dimensional_fluid",
             constitutive=constitutive,
         )
+
+
+@pytest.mark.parametrize("deserialize", [False, True])
+def test_hydraulic_fracture_is_disabled(deserialize):
+    payload = Fracture(
+        "f", 0.5, {"value": 0.01}, fracture_model="lower_dimensional_fluid"
+    ).to_fs()
+    payload["fracture_model"] = "hydraulic"
+    with pytest.raises(ValueError, match="hydraulic.*disabled"):
+        if deserialize:
+            Fracture.from_fs(payload)
+        else:
+            Fracture("f", 0.5, {"value": 0.01}, fracture_model="hydraulic")

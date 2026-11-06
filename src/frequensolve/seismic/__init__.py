@@ -10,6 +10,7 @@ from frequensolve.seismic.azimuthal import (
 )
 from frequensolve.seismic.boundary_loadings import *  # noqa: F403
 from frequensolve.seismic.boundary_loadings import __all__ as _boundary_loadings_all
+from frequensolve.seismic.convolution import ConvolutionFilters as ConvolutionFilters
 from frequensolve.seismic.eikonal import *  # noqa: F403
 from frequensolve.seismic.eikonal import __all__ as _eikonal_all
 from frequensolve.seismic.receivers import *  # noqa: F403
@@ -34,7 +35,7 @@ from frequensolve.seismic.wavelet import *  # noqa: F403
 from frequensolve.seismic.wavelet import __all__ as _wavelet_all
 
 __all__ = unique_exports(
-    ["reconstruct_azimuthal_pressure"],
+    ["reconstruct_azimuthal_pressure", "ConvolutionFilters"],
     _transient_all,
     _airgun_all,
     _acquisition_all,

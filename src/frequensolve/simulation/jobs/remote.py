@@ -24,6 +24,7 @@ from typing import (
 )
 
 from frequensolve.model.property import rsf_binary_path
+from frequensolve.simulation.overrides import expanded_simulation_hash
 from frequensolve.simulation.simulation import CustomJSONEncoder, _file_status
 from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.mixins import ExportContext
@@ -413,7 +414,25 @@ class JobRemoteMixin:
                     digest,
                 )
         provenance = self._read_staged_provenance(site)
-        provenance["simulation"] = {"digest": digest}
+        staged_job_payload = (
+            json.loads(staged_job.read_text())
+            if staged_job.is_file()
+            else self._payload_for_layout(
+                json.loads(self.job_file.read_text()),
+                source=local_layout,
+                target=remote_layout,
+            )
+        )
+        if isinstance(staged_job_payload.get("simulation"), Mapping):
+            staged_simulation = json.loads(staged_file.read_text())
+            provenance["simulation"] = {
+                "digest": expanded_simulation_hash(
+                    staged_job_payload, staged_simulation, digest
+                ),
+                "source_digest": digest,
+            }
+        else:
+            provenance["simulation"] = {"digest": digest}
         if compatibility:
             provenance["compatibility"] = self._compatibility_hash_payloads(
                 json.loads(staged_job.read_text()), data
@@ -512,7 +531,10 @@ class JobRemoteMixin:
                     staged_job != expected_job
                     or staged_simulation != expected_simulation
                     or self._sha256_file(staged_file) != recorded["job"]
-                    or self._sha256_file(simulation_file) != recorded["simulation"]
+                    or self._sha256_file(simulation_file)
+                    != self._read_staged_provenance(site)["simulation"].get(
+                        "source_digest", recorded["simulation"]
+                    )
                 ):
                     continue
             except (OSError, ValueError, KeyError, TypeError):
@@ -1083,7 +1105,12 @@ class JobRemoteMixin:
             target_project=target.project,
         )
         data["project_path"] = str(target.project)
-        data["simulation"] = str(target.simulation_file)
+        reference = data.get("simulation")
+        if isinstance(reference, Mapping):
+            reference.pop("relative_path", None)
+            reference["absolute_path"] = str(target.simulation_file)
+        else:
+            data["simulation"] = str(target.simulation_file)
         data["result_path"] = str(target.result_dir)
         return data
 

@@ -5,6 +5,7 @@ project paths, frequency metadata, output validation, serialization hooks, and
 run-state mixins used by concrete forward and imaging jobs.
 """
 
+import copy
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,11 @@ from frequensolve.simulation.outputs import (
     Output,
     OutputUnits,
     TraceOutput,
+)
+from frequensolve.simulation.overrides import (
+    expand_simulation_override_paths,
+    merge_simulation_overrides,
+    simulation_reference_path,
 )
 from frequensolve.simulation.simulation import BaseSimulation
 from frequensolve.units import ureg
@@ -97,9 +103,12 @@ class JobLayout:
 
         project = Path(payload["project_path"])
         job_name = str(payload["name"])
-        simulation_relpath = cls._project_relative(payload["simulation"], project)
+        simulation_path = simulation_reference_path(
+            payload["simulation"], job_file=Path(job_file) if job_file else None
+        )
+        simulation_relpath = cls._project_relative(simulation_path, project)
         simulation_name = cls._layout_name(
-            Path(payload["simulation"]).stem,
+            simulation_path.stem,
             field="simulation",
         )
         result_path = payload.get("result_path")
@@ -381,6 +390,7 @@ class BaseJob(
         k_list: Optional signed physical Fourier wavenumbers for 2.5D jobs.
         k_weights: Optional quadrature weights paired with ``k_list``.
         k_units: Optional units for ``k_list`` and ``k_weights``.
+        simulation_overrides: Partial Sauce simulation settings applied only to this job.
 
     Raises:
         ValueError: If the name, simulation, or frequency list is invalid.
@@ -396,6 +406,9 @@ class BaseJob(
     k_units: Optional[str] = None
     preserve_task_outputs: bool = field(default=False, kw_only=True)
     """Retain raw task outputs and reuse converged tasks across numerical solver changes."""
+
+    simulation_overrides: Dict[str, Any] = field(default_factory=dict, kw_only=True)
+    """Partial solver-JSON settings applied to this job's simulation."""
 
     _file: Optional[Path] = None
     _job_id: Optional[str] = None
@@ -413,6 +426,9 @@ class BaseJob(
     """Whether sites run only the solver postprocess step and no frequency tasks."""
 
     def __post_init__(self) -> None:
+        self.simulation_overrides = expand_simulation_override_paths(
+            self.simulation_overrides
+        )
         if not isinstance(self.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")
         if not self.name:
@@ -434,6 +450,132 @@ class BaseJob(
             self.k_units = self._normalize_wavenumber_units(self.k_units)
         if not isinstance(self.outputs, JobOutputs):
             self.outputs = JobOutputs(self.outputs)
+
+    def override_simulation(self, overrides=None, **sections) -> "BaseJob":
+        """Update job settings from JSON-path keys or nested simulation sections."""
+        overrides = merge_simulation_overrides(
+            expand_simulation_override_paths({} if overrides is None else overrides),
+            expand_simulation_override_paths(sections),
+        )
+        self.simulation_overrides = merge_simulation_overrides(
+            expand_simulation_override_paths(self.simulation_overrides), overrides
+        )
+        return self
+
+    def _simulation_overrides_payload(self) -> dict:
+        return expand_simulation_override_paths(self.simulation_overrides)
+
+    def _simulation_with_overrides(self, overrides) -> BaseSimulation:
+        """Overlay affected sections without exporting unrelated acquisition or control data."""
+        if not overrides:
+            return self.simulation
+        from frequensolve.mesh.boundary_conditions import BoundaryConditions
+        from frequensolve.mesh.mesh_manager import MeshManager
+        from frequensolve.model.model import ModelBase
+        from frequensolve.seismic.acquisition import Acquisition
+        from frequensolve.simulation.discretization import Discretization
+        from frequensolve.simulation.solver import SolverConfig
+        from frequensolve.units import UnitConfig
+
+        simulation = copy.copy(self.simulation)
+        simulation.extra = dict(simulation.extra)
+        sections = {
+            "Model": ("model", ModelBase),
+            "Mesh": ("mesh", MeshManager),
+            "Solver": ("solver", SolverConfig),
+            "Discretization": ("discretization", Discretization),
+            "Acquisition": ("acquisition", Acquisition),
+            "BCs": ("BCs", BoundaryConditions),
+        }
+        unit_keys = {
+            "f0",
+            "disable_scaling",
+            "length_scale",
+            "time_scale",
+            "mass_scale",
+            "Units",
+            "units",
+        }
+        unit_overrides = {}
+        for key, value in overrides.items():
+            if key in {"name", "project_path", "_type", "schema"}:
+                raise ValueError(
+                    f"simulation_overrides cannot change simulation identity field {key!r}"
+                )
+            if key in sections:
+                attribute, cls = sections[key]
+                original = getattr(simulation, attribute, None)
+                if value is None:
+                    setattr(simulation, attribute, None)
+                    continue
+                if (
+                    key == "Model"
+                    and isinstance(value, Mapping)
+                    and set(value) == {"attenuation"}
+                    and original is not None
+                ):
+                    from frequensolve.model.attenuation import AttenuationConfig
+
+                    model = copy.copy(original)
+                    current = original._attenuation_config()
+                    update = value["attenuation"]
+                    attenuation = (
+                        None
+                        if update is None
+                        else AttenuationConfig.from_fs(
+                            merge_simulation_overrides(
+                                current.to_fs() if current else {}, update
+                            )
+                        )
+                    )
+                    model.attenuation_model = attenuation.model if attenuation else None
+                    model.reference_frequency = (
+                        attenuation.reference_frequency if attenuation else None
+                    )
+                    model._attenuation_extra = (
+                        attenuation.fs_extra() if attenuation else {}
+                    )
+                    simulation.model = model
+                    continue
+                payload = original.to_fs() if original is not None else {}
+                if isinstance(value, Mapping):
+                    payload = merge_simulation_overrides(payload, value)
+                else:
+                    payload = copy.deepcopy(value)
+                setattr(simulation, attribute, cls.from_fs(payload))
+            elif key in unit_keys:
+                unit_overrides[key] = value
+            elif key in {"physics", "dimension", "axisymmetric", "azimuthal_mode"}:
+                setattr(simulation, key, value)
+            elif key == "global_coordinate_system":
+                from frequensolve.geometry.frame import CoordinateSystem
+
+                simulation.global_coordinate_system = (
+                    None if value is None else CoordinateSystem.from_fs(value)
+                )
+            elif key == "coordinate_systems":
+                from frequensolve.simulation.simulation import (
+                    _coerce_named_coordinate_systems,
+                )
+
+                simulation.coordinate_systems = _coerce_named_coordinate_systems(value)
+                if simulation.model is not None:
+                    simulation.model = copy.copy(simulation.model)
+                    simulation._bind_model_coordinate_systems()
+            else:
+                simulation.extra = merge_simulation_overrides(
+                    simulation.extra, {key: value}
+                )
+        if unit_overrides:
+            simulation.units = UnitConfig.from_fs(
+                merge_simulation_overrides(simulation.units.to_fs(), unit_overrides)
+            )
+        return simulation
+
+    @property
+    def effective_simulation(self) -> BaseSimulation:
+        """Return the merged runtime configuration; edit overrides to persist job changes."""
+        return self._simulation_with_overrides(self._simulation_overrides_payload())
 
     @staticmethod
     def _normalize_optional_real_list(
@@ -583,7 +725,14 @@ class BaseJob(
                 frequency layout.
         """
 
-        if getattr(self.simulation, "azimuthal_mode", None) is not None:
+        acquisition = getattr(self.effective_simulation, "acquisition", None)
+        if acquisition is not None:
+            if getattr(acquisition.source_encoding, "filters", None) is not None or any(
+                getattr(group.device, "filters", None) is not None
+                for group in acquisition.receiver_groups
+            ):
+                raise ValueError("Acquisition convolution filters require TransientJob")
+        if getattr(self.effective_simulation, "azimuthal_mode", None) is not None:
             raise ValueError("azimuthal_mode requires TransientJob")
         ordinary_vtk = [
             output

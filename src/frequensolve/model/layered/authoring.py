@@ -553,8 +553,8 @@ class LayeredAuthoringMixin:
                 property grids.
             fracture_model: ``volumetric`` (default), ``fluid_filled``,
                 ``linear_slip``, ``lower_dimensional_fluid`` (acoustic waves),
-                ``lower_dimensional_viscous_fluid`` (viscous acoustic flow), or
-                ``hydraulic`` (diffusion/storage/leakoff). Reduced selectors
+                ``lower_dimensional_viscous_fluid`` (viscous acoustic flow).
+                Reduced selectors
                 support Cartesian 2D/3D and axisymmetric 2D meshes.
             subdomain_name: Optional name for the generated material subdomain.
             **kwargs: Extra serialized fracture fields preserved on export.

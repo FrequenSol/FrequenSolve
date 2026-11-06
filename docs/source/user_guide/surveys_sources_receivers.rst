@@ -341,6 +341,29 @@ quantities with explicit units.
    )
    das.add_component(name="eps_tt", field="strain", direction=[1.0, 0.0])
 
+Use ``field="strain_rate"`` (or ``"strain-rate"``) to measure the time derivative of strain, with
+default output units ``1/s``. ``field="strain"`` remains dimensionless strain;
+choosing a fiber device does not implicitly differentiate the response.
+
+.. code-block:: python
+
+   das = fs.ReceiverFiber(
+       gauge_length = 23.93 * u.m,
+       points_per_gauge = 129,
+       coordinate_mode = "gauge_centers",
+   )
+   das.add_component(name = "strain_rate", field = "strain_rate")
+
+The fiber uses the local cable tangent and its usual gauge averaging for both
+quantities. Point and array receivers also accept ``strain_rate``;
+``elastic:strain_rate`` and component names such as ``strain_rate_xx`` are
+supported. These are native Sauce receiver fields: frequency-domain jobs
+apply ``i*omega`` to strain, and transient jobs sample the accepted rate state.
+FrequenSolve exports ``strain_rate`` directly; use a solver build with native
+strain-rate receiver support. Sauce also accepts the hyphenated spelling in
+handwritten job inputs.
+Match the observed data's units when choosing between strain and strain rate.
+
 For measured channel locations with nonuniform spacing, use
 ``coordinate_mode="gauge_centers"`` and supply those locations as the receiver
 group's coordinates in cable order. The native backend reconstructs the plain

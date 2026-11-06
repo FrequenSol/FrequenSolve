@@ -8,8 +8,8 @@ For acoustic angular sweeps, ``n_modes`` creates one task per mode. Both use
 native time samples with no frequency packing step.
 
 For an existing Cartesian 2D/3D or axisymmetric 2D simulation ``sim``,
-``TransientJob`` fills in unset Galerkin and lossless attenuation settings on the
-supplied simulation. Explicit settings are preserved and incompatible choices
+``TransientJob`` supplies unset Galerkin and lossless attenuation settings as
+job-specific simulation overrides. Explicit settings are preserved and incompatible choices
 are rejected. Set a physical bandwidth using ``time.f_max`` or an existing
 ``mesh.adapt.f_adapt``:
 
@@ -36,11 +36,22 @@ are rejected. Set a physical bandwidth using ``time.f_max`` or an existing
 If mesh adaptivity is unset, ``time.f_max`` creates it with
 ``elems_per_wave=2`` and ``order=2``. Existing mesh settings are retained; only
 an unset ``f_adapt`` is filled from ``f_max``. A source peak frequency is never
-used to guess bandwidth. Because setup updates ``sim``, use a separate simulation
-if harmonic and transient jobs need different discretization or attenuation.
+used to guess bandwidth. The shared ``sim`` remains the authored definition;
+``job.effective_simulation`` shows the merged runtime settings. Inferred settings
+are resolved when exporting, so jobs sharing a simulation can use different
+``time.f_max`` values without overwriting one another. An explicit job override
+has precedence over both the simulation setting and the inferred default:
+
+.. code-block:: python
+
+   job.override_simulation({"Mesh/adapt/f_adapt": 5.6})
+
+The same mapping can be supplied as ``simulation_overrides=...`` when constructing
+the job. It serializes inside ``simulation.overrides`` in a Sauce File reference.
 For attenuation, explicitly configure ``model.attenuation_model="gsls"`` and its
-frequency band; this SDK supports GSLS for Cartesian transients, while
-axisymmetric transients require lossless materials.
+frequency band. GSLS applies to Cartesian 2D/3D and axisymmetric 2D acoustic,
+elastic and coupled transients; axisymmetric elastic and coupled models relax the
+hoop strain of azimuthal mode 0 only, and axisymmetric PML layers stay lossless.
 
 Waiting for a transient job on a local or SLURM site displays completed/total
 time steps and an estimated finish time once a measured step rate is available.
@@ -78,6 +89,75 @@ Stored configurations use seconds and hertz. To refine a frozen configuration, u
 reconcile resolved selectors: an explicit ``dt`` clears error targets, and an
 error target recomputes ``dt``. For phase-fitted Gauss, changing ``dt`` preserves
 the physical fitting frequency. Use these helpers instead of ``dataclasses.replace``.
+
+
+Convolution arrays
+------------------
+
+``ConvolutionFilters`` defines real causal FIR coefficients for native transient
+source and receiver beam forming. Tap ``k`` multiplies the input at
+``t - k*dt``; coefficients are dimensionless and there is no implicit ``dt``
+factor. Existing real encoding weights multiply the filters. Complex weights,
+frequency-dependent source weights, and receiver spectral responses are rejected
+by transient acquisition validation.
+
+.. code-block:: python
+
+   import numpy as np
+
+   # One source beam: fire source 0 immediately and source 1 two samples later.
+   source_taps = np.zeros((1, 2, 3))  # encoding, physical source, tap
+   source_taps[0, 0, 0] = 1
+   source_taps[0, 1, 2] = 0.8
+   sim.acquisition.source_encoding = fs.SourceEncoding.filtered(
+       source_taps, dt=0.001, names=["transmit_beam"],
+   )
+
+   # One pressure beam from two sensors; apply different causal filters.
+   receiver_taps = np.zeros((1, 1, 2, 3))  # encoding, component, receiver, tap
+   receiver_taps[0, 0, 0, 2] = 1
+   receiver_taps[0, 0, 1, 0] = 1
+   device = fs.EncodedReceiver(
+       components=[fs.ReceiverComponent(name="p", field="pressure")],
+       filters=fs.ConvolutionFilters(receiver_taps, dt=0.001),
+       encoding_names=["receive_beam"], reduction="sum",
+   )
+   sim.acquisition.add_receiver_group("beam", device, [[0.2, 0.3], [0.4, 0.3]])
+
+Set the job integration timestep to the receiver filter ``dt``. Receiver filters
+advance on every accepted step even with sparse trace output. Pre-start receiver
+samples are zero; extend the simulation end time to record a delayed tail.
+Source filters sample the common ``TimeFunction`` at delayed integration-stage
+times and may use a different ``dt``. Derivative source channels use the same
+delays. Arbitrary real FIR taps allow tapering, fractional-delay approximations,
+and pulse shaping; use a common added delay when a beam design needs advances.
+
+Source spatial loads are cached per contributing physical source, while each
+encoded beam retains one solver RHS. Sparse source filters skip zero taps;
+dense banks use batched BLAS contractions with reusable buffers and omit inactive
+derivative columns. Receiver banks automatically select sparse accumulation,
+grouped direct sums, or partitioned FFT tails according to filter density and
+length. FFT tails add no signal delay and use precomputed plans and spectra.
+There is no whole-trace buffering or per-step FIR allocation.
+
+Short and sparse receiver filters retain only pending beam outputs, with history
+proportional to beam channels, source RHS count, and maximum active delay.
+Long dense filters also retain bounded local sensor/channel input rings and FFT
+workspaces, trading memory for faster convolution. Storage is independent of the
+number of simulation steps. Receiver sample buffers are reused between steps.
+``filters.apply(samples)`` provides offline matrix convolution with the full tail
+for three-axis banks; ``filters.frequency_response(frequencies)`` evaluates their
+complex response for design and verification.
+
+Filters are serialized into the acquisition HDF5 store. Receiver FIR checkpoints
+retain pending outputs and partially filled FFT input blocks, and require the
+same receiver definition and MPI partition on restart. MPI reductions operate on beam outputs only when those outputs are
+written.
+Use dense receiver sampling with ``sum`` or ``mean`` reduction. Filtered acoustic
+isotropic moments with GSLS relaxation are currently rejected; pressure-monopole
+and elastic forcing use the normal transient paths. Native FIR operators are
+available for forward ``TransientJob`` runs; they are not time-domain adjoint
+operators and cannot be used in frequency-domain jobs.
 
 Integration scheme and temporal accuracy
 ----------------------------------------
@@ -381,8 +461,9 @@ recorded bandwidth. Sampled sources do not infer a PML frequency floor.
 This addition requires a backend supporting ``Time.source.kind="sampled"``;
 older builds reject that kind rather than substituting another wavelet.
 
-``TimeIntegration`` defaults to ``Newmark(beta=0.25, gamma=0.5)``. Other Newmark
-coefficients must satisfy the backend's unconditional-stability constraint.
+``TimeIntegration`` defaults to L-stable ``Radau()`` (third order). Select
+``Newmark(beta=0.25, gamma=0.5)`` or ``Gauss()`` explicitly when needed. Other
+Newmark coefficients must satisfy the backend's unconditional-stability constraint.
 Acoustic and elastic PML require the default coefficients and axis-aligned layers. ``pml_cfs_frequency`` specifies a
 nonnegative complex-frequency shift in Hz; zero retains the unshifted form.
 Use the same shift on overlapping PML directions. Nonzero shifts use CPU

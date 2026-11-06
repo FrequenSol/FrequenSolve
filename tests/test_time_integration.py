@@ -13,7 +13,7 @@ import frequensolve as fs
 @pytest.mark.parametrize(
     "options,scheme,order",
     [
-        ({}, "newmark", 2),
+        ({}, "radau", 3),
         ({"order": 2}, "newmark", 2),
         ({"order": 4}, "radau", 3),
         ({"order": 3}, "radau", 3),
@@ -34,6 +34,14 @@ def test_scheme_defaults_and_legacy_roundtrip(options, scheme, order):
     assert fs.TimeIntegration.from_fs(time.to_fs()) == time
     assert ("newmark" in time.to_fs()) == (scheme == "newmark")
     assert time.estimated_window_error is None
+
+
+def test_omitted_method_uses_radau_and_preserves_newmark_coefficients():
+    payload = {"start": 0, "end": 1, "time_step": 0.1}
+    assert fs.TimeIntegration.from_fs(payload).method == fs.Radau()
+    assert fs.TimeIntegration.from_fs(
+        payload | {"newmark": {"beta": 0.3}}
+    ).method == fs.Newmark(beta=0.3)
 
 
 @pytest.mark.parametrize(

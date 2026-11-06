@@ -31,6 +31,7 @@ from frequensolve.geometry.frame import (
     coordinate_value_to_fs,
     direction_to_fs,
 )
+from frequensolve.seismic.convolution import ConvolutionFilters
 from frequensolve.units import (
     is_quantity,
     unit_expression,
@@ -1813,11 +1814,13 @@ class SourceEncoding(ExtraFieldsMixin):
     conjugate_coefficients: bool
     extra: Dict[str, Any]
     _storage: SourceEncodingStorage
+    filters: Optional[ConvolutionFilters]
 
     def __init__(
         self,
         *,
         encoding_type: str,
+        filters: Optional[ConvolutionFilters] = None,
         name: Optional[str] = None,
         fields: Optional[Iterable[EncodedSource]] = None,
         weights: Optional[Any] = None,
@@ -1832,6 +1835,11 @@ class SourceEncoding(ExtraFieldsMixin):
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
+        self.filters = filters
+        if isinstance(filters, Mapping):
+            self.filters = ConvolutionFilters.from_fs(filters)
+        if self.filters is not None and len(self.filters.shape) != 3:
+            raise ValueError("Source filters require (encoding, source, tap)")
         self.name = name
         normalized_type = str(encoding_type).strip().lower()
         field_objects = list(fields or [])
@@ -2275,6 +2283,20 @@ class SourceEncoding(ExtraFieldsMixin):
         )
 
     @classmethod
+    def filtered(
+        cls, taps: Any, *, dt: float, names: Optional[Iterable[str]] = None
+    ) -> "SourceEncoding":
+        """Encode sources with causal real FIRs (encoding, source, tap)."""
+        filters = ConvolutionFilters(taps, dt=dt)
+        if len(filters.shape) != 3:
+            raise ValueError("Source filters require (encoding, source, tap)")
+        return cls.dense(
+            np.any(filters.taps != 0, axis=-1).astype(float),
+            names=names,
+            filters=filters,
+        )
+
+    @classmethod
     def frequency_dense(
         cls,
         weights: Optional[Any] = None,
@@ -2401,6 +2423,7 @@ class SourceEncoding(ExtraFieldsMixin):
         )
         return cls(
             encoding_type=encoding_type,
+            filters=payload.pop("convolution", None),
             name=payload.pop("name", None),
             fields=fields,
             file=payload.pop("file", None),
@@ -2418,6 +2441,23 @@ class SourceEncoding(ExtraFieldsMixin):
         )
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        payload = self._to_fs_weights(ctx)
+        if self.filters is not None:
+            if self.filters.shape[:2] != (
+                self.field_count,
+                (
+                    self.weights.shape[-1]
+                    if self.weights is not None
+                    else self.filters.shape[1]
+                ),
+            ):
+                raise ValueError("Source filter dimensions differ from source encoding")
+            payload["convolution"] = self.filters.to_fs(
+                ctx, path="inputs/acquisition/source_encoding/convolution"
+            )
+        return payload
+
+    def _to_fs_weights(self, ctx=None):
         self.validate_dense_shape()
         store = getattr(ctx, "store", None) if ctx is not None else None
         if self.encoding_type == "FrequencyDense":
@@ -2568,6 +2608,8 @@ class SourceEncoding(ExtraFieldsMixin):
     def _resolve_project_reference(self, project_path: Path) -> None:
         """Resolve a loaded local coefficient reference without reading weights."""
 
+        if self.filters is not None:
+            self.filters.resolve(project_path)
         if not isinstance(self._storage, _HDF5SourceEncoding):
             return
         text = str(self._storage.file)
@@ -2817,7 +2859,13 @@ class SourceEncoding(ExtraFieldsMixin):
         encoding.conjugate_coefficients = not self.conjugate_coefficients
         return encoding
 
-    time_reversed = conjugated
+    def time_reversed(self) -> "SourceEncoding":
+        """Return harmonic time reversal; causal FIR reversal needs an explicit time origin."""
+        if self.filters is not None:
+            raise ValueError(
+                "Time reversal of causal convolution filters requires explicitly reversed taps and a time origin"
+            )
+        return self.conjugated()
 
 
 from frequensolve.seismic._legacy_source_types import (  # noqa: E402

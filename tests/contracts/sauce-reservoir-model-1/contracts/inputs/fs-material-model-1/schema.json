@@ -2500,7 +2500,7 @@
         "reduction",
         "radius"
       ],
-      "description": "Transient axisymmetric long-wave tube acoustics with constant radius and one borehole. All constitutive inputs are SI. Galerkin with CPU forms; either a single-rank monolithic CPU solve or block_schur with a direct pressure block and multi-rank CPU or single-rank Metal solid solve. The split requires MUMPS and at least two solver grids. CPU axial PML uses average-acceleration Newmark and a fixed time step; outer axial impedance boundaries also terminate the reduced fluid.",
+      "description": "Transient axisymmetric long-wave tube acoustics with constant radius and one borehole; the line model takes formation moduli from the elastic material at the matching ring. All constitutive inputs are SI. Galerkin supports full-system MR with FS_MG or direct CPU solves. Non-PML reductions support Radau-3, Gauss-4 and average-acceleration Newmark. CPU axial PML requires average-acceleration Newmark and a fixed time step; outer axial impedance boundaries also terminate the reduced fluid.",
       "properties": {
         "reduction": {
           "type": "string",
@@ -2545,7 +2545,7 @@
             "thickness",
             "young_modulus"
           ],
-          "description": "Bonded massless plane-strain hoop membrane. Thickness/radius must not exceed 0.1; no axial or flexural shell waves.",
+          "description": "Bonded massless thin membrane retaining hoop and axial strain and their Poisson coupling through the solid trace. Thickness/radius must not exceed 0.1; no independent shell displacement, inertia or bending.",
           "properties": {
             "thickness": {
               "type": "number",

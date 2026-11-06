@@ -861,6 +861,9 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
                 if not path.is_absolute():
                     reference.file = target_project_path / path
         for group in self.acquisition.receiver_groups:
+            filters = getattr(group.device, "filters", None)
+            if filters is not None:
+                filters.resolve(target_project_path)
             coords = getattr(group, "coordinates", None)
             if isinstance(coords, CoordsFromFile):
                 coords.file = coords._contextual_file(

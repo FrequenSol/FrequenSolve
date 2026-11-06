@@ -366,6 +366,12 @@ class SimpleSurface:
             "interface": self.interface,
             **({"cutting": True} if self.cutting else {}),
         }
+        if self.depth.darr is not None and "time" in self.depth.darr.dims:
+            # Native temporal surfaces use inline frames in first-dimension-fastest order.
+            depth = self.depth.to_fs(preserve_inline_coordinates=True)
+            depth["data"] = np.asarray(depth.pop("value")).ravel(order="F").tolist()
+            data["depth"] = depth
+            return data
         ctx = ctx or ExportContext()
         use_store = getattr(ctx, "store", None) is not None
         file = (
@@ -694,8 +700,8 @@ class Fracture(SimpleSurface):
             interval.
         fracture_model: ``volumetric`` (default), ``fluid_filled``,
             ``linear_slip``, ``lower_dimensional_fluid`` (acoustic waves),
-            ``lower_dimensional_viscous_fluid`` (viscous acoustic flow), or
-            ``hydraulic`` (diffusion/storage/leakoff). Reduced selectors
+            ``lower_dimensional_viscous_fluid`` (viscous acoustic flow).
+            Reduced selectors
             support Cartesian 2D/3D and axisymmetric 2D meshes.
         subdomain_name: Optional name for the generated material subdomain.
         **kwargs: Extra serialized fracture fields.
@@ -747,13 +753,16 @@ class Fracture(SimpleSurface):
             units=units,
             system=system,
         )
+        if fracture_model == "hydraulic":
+            raise ValueError(
+                "fracture_model='hydraulic' is disabled pending formulation and validation"
+            )
         if fracture_model not in {
             "volumetric",
             "fluid_filled",
             "linear_slip",
             "lower_dimensional_fluid",
             "lower_dimensional_viscous_fluid",
-            "hydraulic",
         }:
             raise ValueError(f"Unsupported fracture_model: {fracture_model!r}")
         self.fracture_model = fracture_model
@@ -819,7 +828,6 @@ class Fracture(SimpleSurface):
             "linear_slip",
             "lower_dimensional_fluid",
             "lower_dimensional_viscous_fluid",
-            "hydraulic",
         }
 
     @classmethod

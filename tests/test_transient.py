@@ -11,7 +11,7 @@ import frequensolve as fs
 from frequensolve.orchestrator.sites.local.site import _read_task_result
 
 
-def job_at(tmp_path, **kwargs):
+def job_at(tmp_path, time_method=None, **kwargs):
     project = fs.Project(name="p", path=tmp_path / "p")
     sim = project.new_simulation(name="wave", physics="acoustic", dimension=2)
     sim.discretization = fs.Discretization(method="Galerkin")
@@ -20,7 +20,7 @@ def job_at(tmp_path, **kwargs):
     job = fs.TransientJob(
         "pulse",
         sim,
-        time=fs.TimeIntegration(0, 1, 0.1),
+        time=fs.TimeIntegration(0, 1, 0.1, method=time_method),
         source=fs.TimeFunction.ricker(10, delay=0.3),
         **kwargs,
     )
@@ -220,7 +220,9 @@ def commit(job, *, sparse=False, first_step=0, task=None, block=None):
             h5["time_step"] = np.asarray(group, dtype=np.int64) if held else group[0]
             h5["time"] = np.asarray(times) if held else times[0]
             data = np.zeros((len(group),) + ((2, 2) if sparse else (1, 1, 2, 2)))
-            data[..., 0] = np.reshape(group, (-1,) + (1,) * (data.ndim - 2)) * (task or 1)
+            data[..., 0] = np.reshape(group, (-1,) + (1,) * (data.ndim - 2)) * (
+                task or 1
+            )
             h5["pressure"] = data if held else data[0]
         records.append(
             dict(
@@ -360,7 +362,7 @@ def test_reader_rejects_invalid_committed_outputs(tmp_path, corruption):
 
 
 def test_restart_checks_interval_and_fingerprints_content(tmp_path):
-    job = job_at(tmp_path)
+    job = job_at(tmp_path, time_method=fs.Newmark())
     path = tmp_path / "checkpoint"
     path.mkdir()
     with h5py.File(path / "newmark_manifest_R00000.h5", "w") as h5:
@@ -372,7 +374,7 @@ def test_restart_checks_interval_and_fingerprints_content(tmp_path):
     first = resumed.fingerprint()
     (path / "state.bin").write_bytes(b"changed")
     assert resumed.fingerprint() != first
-    resumed.time = fs.TimeIntegration(0, 2, 0.1)
+    resumed.time = fs.TimeIntegration(0, 2, 0.1, method=fs.Newmark())
     with pytest.raises(ValueError, match="Restart interval"):
         resumed.restart_step()
 
@@ -422,7 +424,7 @@ def test_preflight_allows_coupled_displacement_and_native_velocity(tmp_path):
 
 
 def test_remote_restart_stages_complete_directory(tmp_path):
-    job = job_at(tmp_path)
+    job = job_at(tmp_path, time_method=fs.Newmark())
     cp = tmp_path / "checkpoint"
     cp.mkdir()
     with h5py.File(cp / "newmark_manifest_R00000.h5", "w") as h5:
@@ -625,15 +627,21 @@ def test_transient_velocity_projection_is_automatic(tmp_path, physics, output_ki
     job.save()
     # The default selects the physical quantity; Sauce enables only requested
     # parts and schedules solves. Native-only jobs keep projection disabled.
-    assert job.simulation.to_fs()["helmholtz_projection"] == {"field": "velocity"}
+    assert job.effective_simulation.to_fs()["helmholtz_projection"] == {
+        "field": "velocity"
+    }
     restored = fs.TransientJob.from_fs(job.to_fs())
     restored.validate_outputs()
-    assert restored.simulation.extra["helmholtz_projection"] == {"field": "velocity"}
+    assert restored.effective_simulation.extra["helmholtz_projection"] == {
+        "field": "velocity"
+    }
 
 
 def test_transient_native_velocity_does_not_enable_projection(tmp_path):
     job = job_at(tmp_path, outputs=fs.VtkOutput(fields=["velocity"]))
-    assert job.simulation.to_fs()["helmholtz_projection"] == {"field": "velocity"}
+    assert job.effective_simulation.to_fs()["helmholtz_projection"] == {
+        "field": "velocity"
+    }
 
 
 @pytest.mark.parametrize(
@@ -761,7 +769,7 @@ def test_receiver_names_do_not_trip_harmonic_field_checks(tmp_path):
 def test_restarted_results_stay_readable_after_checkpoint_removal(tmp_path):
     import shutil
 
-    job = job_at(tmp_path, outputs=fs.TraceOutput())
+    job = job_at(tmp_path, time_method=fs.Newmark(), outputs=fs.TraceOutput())
     path = tmp_path / "checkpoint"
     path.mkdir()
     with h5py.File(path / "newmark_manifest_R00000.h5", "w") as h5:
@@ -957,19 +965,23 @@ def test_transient_configures_unset_defaults_and_preserves_explicit_choices(tmp_
         source=fs.TimeFunction.ricker(10, delay=0.3),
     )
     assert job.simulation is sim
-    assert sim.discretization.to_fs() == {
+    assert sim.discretization.to_fs() == {"geometry_tolerance": 1e-5}
+    effective = job.effective_simulation
+    assert effective.discretization.to_fs() == {
         "geometry_tolerance": 1e-5,
         "method": "Galerkin",
     }
-    assert sim.model.attenuation_model == "none"
-    assert sim.mesh.adapt.f_adapt == 20
+    assert sim.model.attenuation_model is None
+    assert sim.mesh.adapt.f_adapt is None
+    assert effective.model.attenuation_model == "none"
+    assert effective.mesh.adapt.f_adapt == 20
     job.save()
     assert fs.BaseJob.load(job.job_file).to_fs() == job.to_fs()
     sim.mesh.set_adapt(elems_per_wave=3, order=4, f_adapt=fs.Q_(0.03, "kHz"))
     sim.solver.tolerance = 2e-4
     fs.TransientJob("second", sim, time=job.time, source=job.source)
     assert (sim.mesh.adapt.f_adapt, sim.mesh.adapt.order, sim.solver.tolerance) == (
-        30,
+        fs.Q_(0.03, "kHz"),
         4,
         2e-4,
     )

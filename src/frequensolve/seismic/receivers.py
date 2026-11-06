@@ -32,6 +32,7 @@ import xarray as xr
 
 from frequensolve.geometry.frame import CoordinateValue, Direction, direction_to_fs
 from frequensolve.geometry.grids import CartesianGrid, Grid
+from frequensolve.seismic.convolution import ConvolutionFilters
 from frequensolve.seismic.source_signature import ReceiverTransferFunction
 from frequensolve.seismic.sparse_survey import ReceiverSampling
 from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
@@ -155,6 +156,29 @@ def _conjugated_complex_value(value: Any, *, label: str) -> complex:
     return _complex_from_value(value, label=label).conjugate()
 
 
+def _strain_rate_base(field: str) -> Optional[str]:
+    """Recognize legacy SDK derivative payloads when reloading saved receivers."""
+    prefix, separator, name = field.rpartition(":")
+    if separator and prefix != "elastic":
+        return None
+    for suffix in (
+        "",
+        "_all",
+        "_xx",
+        "_yy",
+        "_zz",
+        "_xy",
+        "_xz",
+        "_yz",
+        "_rr",
+        "_rz",
+        "_tt",
+    ):
+        if name == "strain_rate" + suffix:
+            return prefix + separator + "strain" + suffix
+    return None
+
+
 @dataclass(kw_only=True)
 class ReceiverComponent:
     """Defines a single component/measurement type for a receiver.
@@ -164,7 +188,9 @@ class ReceiverComponent:
 
     Args:
         name: String identifier for this receiver component.
-        field: Physical field being measured.
+        field: Physical field being measured. ``strain`` is dimensionless;
+            ``strain_rate`` is its time derivative, with default units ``1/s``.
+            Elastic-qualified names and tensor component suffixes are supported.
         direction: Optional measurement direction for vector fields.
         units: Optional output units for this component.
         weight: Optional constant complex weight applied to the component.
@@ -322,9 +348,14 @@ class ReceiverComponent:
         data = copy.deepcopy(data)
         if "direction" in data:
             data["direction"] = Direction.from_fs(data["direction"])
+        field = canonical_field(data.get("field", data["name"]))
+        if data.get("time_derivative") == 1 and "expression" not in data:
+            candidate = field.replace("strain", "strain_rate", 1)
+            if _strain_rate_base(candidate) == field:
+                field = candidate
         return cls(
             name=data["name"],
-            field=canonical_field(data.get("field", data["name"])),
+            field=field,
             expression=data.get("expression"),
             direction=data.get("direction"),
             units=data.get("units"),
@@ -723,6 +754,7 @@ class EncodedReceiver(ReceiverDevice):
             Hermitian transpose automatically.
     """
 
+    filters: Optional[ConvolutionFilters] = None
     weights: Optional[Any] = field(default=None, repr=False)
     encoding_names: Optional[Sequence[str]] = None
     encoding_count: Optional[int] = None
@@ -735,6 +767,19 @@ class EncodedReceiver(ReceiverDevice):
     )
 
     def __post_init__(self) -> None:
+        if isinstance(self.filters, Mapping):
+            self.filters = ConvolutionFilters.from_fs(self.filters)
+        if self.filters is not None:
+            if len(self.filters.shape) != 4 or self.filters.shape[1] != len(
+                self.components
+            ):
+                raise ValueError(
+                    "Receiver filters require (encoding, component, receiver, tap)"
+                )
+            if self.reduction not in {"sum", "mean"}:
+                raise ValueError("Convolution receivers require sum or mean reduction")
+            if self.weights is None and self.weight_table is None:
+                self.weights = np.any(self.filters.taps != 0, axis=-1).astype(float)
         if self.reduction not in {"none", "sum", "mean"}:
             raise ValueError(
                 "EncodedReceiver reduction must be 'none', 'sum', or 'mean'"
@@ -888,7 +933,13 @@ class EncodedReceiver(ReceiverDevice):
             result.encoding_names = list(self.encoding_names)
         return result
 
-    time_reversed = conjugated
+    def time_reversed(self) -> "EncodedReceiver":
+        """Return harmonic time reversal; causal FIR reversal needs an explicit time origin."""
+        if self.filters is not None:
+            raise ValueError(
+                "Time reversal of causal convolution filters requires explicitly reversed taps and a time origin"
+            )
+        return self.conjugated()
 
     def _load_encoding_names(self) -> None:
         """Resolve external channel identities after project paths are relocated."""
@@ -950,6 +1001,10 @@ class EncodedReceiver(ReceiverDevice):
     ) -> "EncodedReceiver":
         """Append one encoding over every base component and receiver point."""
 
+        if self.filters is not None:
+            raise ValueError(
+                "Create a new filter bank to add filtered receiver encodings"
+            )
         if self.weight_table is not None:
             raise ValueError(
                 "Cannot add authored encodings to an external weight table"
@@ -1012,6 +1067,15 @@ class EncodedReceiver(ReceiverDevice):
             raise ValueError(
                 "EncodedReceiver weight encoding dimension must match encoding_count"
             )
+        if self.filters is not None and self.filters.shape[:2] != (
+            self.encoding_count,
+            len(self.components),
+        ):
+            raise ValueError(
+                "Receiver filter encoding/component dimensions must match the device"
+            )
+        if self.filters is not None and self.filters.shape[2] != point_count:
+            raise ValueError("Receiver filter element count must match coordinates")
         has_pointwise = self.has_authored_weights or self.weight_table is not None
         if not has_pointwise:
             raise ValueError("EncodedReceiver requires a pointwise weight table")
@@ -1121,6 +1185,16 @@ class EncodedReceiver(ReceiverDevice):
             **({"encoding_names": list(inline_names)} if inline_names else {}),
             "reduction": self.reduction,
             "weights": weight_payload,
+            **(
+                {
+                    "convolution": self.filters.to_fs(
+                        ctx,
+                        path=f"inputs/acquisition/receivers/{group_name}/convolution",
+                    )
+                }
+                if self.filters is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -1137,6 +1211,7 @@ class EncodedReceiver(ReceiverDevice):
             encoding_count=data.get("encoding_count"),
             reduction=data.get("reduction", "sum"),
             weight_table=weight_table,
+            filters=data.get("convolution"),
         )
 
 

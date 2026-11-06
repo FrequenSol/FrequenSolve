@@ -1,6 +1,5 @@
-Time-domain API contract snapshot from Sauce trunk (base 46643a324 plus the coordinated TransientJob changes).
+Time-domain API contract snapshot from Sauce trunk.
 
-These schemas pin the public Time block, including explicit output times and intervals.
-
-The Time schema was refreshed from Sauce 5e2ca528a on 2026-10-30 to adopt
-Gauss4 method selection; other schemas retain their existing snapshot.
+These schemas pin the public Time block, including Radau3 as the default wave
+scheme, explicit Newmark and Gauss4 selection, output schedules and source
+configuration. Other schemas retain their existing snapshot.

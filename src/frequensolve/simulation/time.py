@@ -239,7 +239,7 @@ class TimeIntegration:
             scheme = (
                 self.scheme
                 if self.scheme is not None
-                else defaults.get(self.order or 2)
+                else defaults.get(self.order or 3)
             )
             if not isinstance(scheme, str) or scheme not in orders:
                 raise ValueError(
@@ -440,7 +440,7 @@ class TimeIntegration:
         )
         if data.get("schema", "fs-time-domain-1") != "fs-time-domain-1":
             raise ValueError("Expected fs-time-domain-1")
-        name = data.get("method", "newmark")
+        name = data.get("method", "newmark" if "newmark" in data else "radau3")
         if name not in {"newmark", "gauss4", "radau3"}:
             raise ValueError("Expected method newmark, gauss4 or radau3")
         if name != "newmark" and "newmark" in data:

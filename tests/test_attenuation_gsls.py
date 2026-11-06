@@ -191,8 +191,9 @@ def test_transient_job_rejects_kjartansson(tmp_path):
 
 def test_transient_job_defaults_unset_attenuation_to_lossless(tmp_path):
     job = _transient_job(tmp_path, None)
-    assert job.simulation.model.attenuation_model == "none"
-    assert job.simulation.model.to_fs()["attenuation"]["model"] == "none"
+    assert job.simulation.model.attenuation_model is None
+    assert job.effective_simulation.model.attenuation_model == "none"
+    assert job.effective_simulation.model.to_fs()["attenuation"]["model"] == "none"
 
 
 def test_frequency_domain_job_rejects_gsls(tmp_path):

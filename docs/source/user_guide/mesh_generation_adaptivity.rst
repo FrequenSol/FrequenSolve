@@ -205,3 +205,26 @@ This matches the style used by ``elems_per_wave`` and ``order``.
 Initial meshes do not need to resolve the final wavefield. A coarse generated
 mesh plus :term:`mesh adaptivity` is the preferred starting point for most
 tutorials.
+
+Multigrid Cycles
+---------------
+
+Traversal and smoothing are independent solver settings:
+
+.. code-block:: python
+
+   sim += fs.SolverConfig(mode="fast", cycle="auto")
+   sim.solver.cycle = "V"
+   sim.solver.pre_smooth = 0      # Post-smoothing only
+   sim.solver.post_smooth = 1
+
+``cycle="auto"`` is the default and leaves the backend's preset policy intact:
+2D fast mode with MUMPS uses V cycles, while 3D fast mode uses log-growth visits.
+Explicit choices are ``"V"``, ``"W"`` and ``"log"``. Log-growth chooses
+intermediate-level visits from DOF growth, retaining one fine-level visit.
+Both smoothing counts default to one; zero skips that leg.
+
+For a custom traversal, use ``cycle={"visits": [1, 2, 2]}``. Entries run from
+finest toward coarsest by default; missing entries mean one visit.
+``anchor="coarse"`` reverses the indexing origin, and ``coarse`` selects the
+coarse-solve grid. Coarse-solver iteration controls remain separate.

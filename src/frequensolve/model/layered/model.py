@@ -80,6 +80,10 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             2D models.
         surfaces: Optional initial surface collection.
         boreholes: Optional initial borehole collection.
+        borehole_reduction: ``"tube"`` replaces 3D cased-borehole fluid volumes
+            with axial pressure carriers for transient coupled Galerkin jobs.
+            Casing remains resolved; fluid columns must have no plugs. There
+            is no fluid exchange with fractures. Omit for volumetric fluid.
         ordering: Whether layers are authored from top to bottom or bottom to
             top.
         attenuation_model: Optional model-wide attenuation model name.
@@ -102,6 +106,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
     y_limits: Optional[Any] = None
     surfaces: NamedList = field(default_factory=NamedList)
     boreholes: NamedList = field(default_factory=NamedList)
+    borehole_reduction: Optional[Literal["tube"]] = None
     ordering: Literal["top_down", "bottom_up"] = "top_down"
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -125,12 +130,22 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         self.dimension = model_dimension(self.dimension)
         if self.dimension not in {2, 3}:
             raise ValueError("LayeredModel dimension must be 2 or 3")
+        self._validate_borehole_reduction()
         self._normalize_domain_limits()
         if self.dimension == 3:
             if self.y_limits is None:
                 raise ValueError("3D LayeredModel requires y_limits=[min, max]")
         elif self.y_limits is not None:
             raise ValueError("2D LayeredModel does not accept y_limits")
+
+    def _validate_borehole_reduction(self) -> None:
+        """Validate the public reduction selector independently of model completion."""
+        if self.borehole_reduction is None:
+            return
+        if self.borehole_reduction != "tube":
+            raise ValueError('borehole_reduction must be "tube" or None')
+        if self.dimension != 3:
+            raise ValueError('borehole_reduction="tube" requires a 3D model')
 
     def _normalize_domain_limits(self) -> None:
         x_units = self._x_units
@@ -482,6 +497,10 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
         data.pop("_type", None)
         data.pop("schema", None)
         dimension = data.pop("dimension", None)
+        borehole_reduction = None
+        if dimension == 3 and data.get("reduced_borehole") == {"reduction": "tube"}:
+            data.pop("reduced_borehole")
+            borehole_reduction = "tube"
         x_limits = data.pop("x_limits", data.pop("xlimits", None))
         y_limits = data.pop("y_limits", data.pop("ylimits", None))
         ordering = data.pop("ordering", "top_down")
@@ -497,6 +516,7 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             x_limits=x_limits,
             y_limits=y_limits,
             ordering=ordering,
+            borehole_reduction=borehole_reduction,
             attenuation_model=attenuation.model if attenuation else None,
             reference_frequency=(
                 attenuation.reference_frequency if attenuation else None
@@ -593,6 +613,11 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
                 **(
                     {"y_limits": value_and_units_to_fs(self.y_limits, self._y_units)}
                     if self.y_limits is not None
+                    else {}
+                ),
+                **(
+                    {"reduced_borehole": {"reduction": self.borehole_reduction}}
+                    if self.borehole_reduction is not None
                     else {}
                 ),
                 "ordering": self.ordering,
@@ -698,6 +723,19 @@ class LayeredModel(LayeredAuthoringMixin, LayeredSamplingMixin, ModelBase):
             raise ValueError("At least two surfaces are required before meshing")
 
     def _validate_complete(self) -> None:
+        self._validate_borehole_reduction()
+        if self.borehole_reduction is not None:
+            if not self.boreholes:
+                raise ValueError('borehole_reduction="tube" requires cased boreholes')
+            for borehole in self.boreholes:
+                if len(borehole.parts) < 2:
+                    raise ValueError(
+                        'borehole_reduction="tube" requires resolved casing outside the fluid'
+                    )
+                if borehole.plugs:
+                    raise ValueError(
+                        'borehole_reduction="tube" requires continuous fluid columns without plugs'
+                    )
         if len(self.surfaces) < 2:
             raise ValueError("LayeredModel requires at least two surfaces")
         if not self.layers:
