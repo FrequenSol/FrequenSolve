@@ -521,7 +521,9 @@ class BoreholeSurface(ExtraFieldsMixin):
             if self.is_axis():
                 raise ValueError("A borehole interface cannot lie on the axis")
             if not self.r.is_constant:
-                raise ValueError("Borehole linear-slip interfaces currently require a constant radius")
+                raise ValueError(
+                    "Borehole linear-slip interfaces currently require a constant radius"
+                )
             payload["interface"] = self.interface.to_fs()
         payload.update(self.merged_extra(payload))
         return payload
@@ -1146,7 +1148,10 @@ class Borehole:
             )
         if not self.parts:
             raise ValueError(f"Borehole '{self.name}' requires at least one layer/part")
-        if any(surface.is_axis() and surface.interface is not None for surface in self.surfaces):
+        if any(
+            surface.is_axis() and surface.interface is not None
+            for surface in self.surfaces
+        ):
             raise ValueError("A borehole interface cannot lie on the axis")
         payload = {
             "name": self.name,
@@ -1576,7 +1581,9 @@ class Borehole:
         if self._pending_layer is not None:
             pending_interface = self._pending_layer.get("interface")
             if interface is not None and pending_interface is not None:
-                raise ValueError("Specify the interface on the layer or its closing surface")
+                raise ValueError(
+                    "Specify the interface on the layer or its closing surface"
+                )
             interface = interface if interface is not None else pending_interface
 
         surface = BoreholeSurface(

@@ -196,7 +196,7 @@ but are not layer boundaries. The fluid layer extends to ``fluid_wall`` and the
 casing layer extends from ``fluid_wall`` to ``casing_wall``.
 
 Imperfect solid bonds
---------------------
+---------------------
 
 Interfaces are perfectly bonded by default. Set ``interface`` on a radial
 surface, or on the layer ending at that surface, to permit a displacement

@@ -64,7 +64,11 @@ def test_compact_pml_soft_axisymmetric_borehole_decays(tmp_path):
     sim += model
     sim += model.hex_mesh_generator([4, 1])
     sim.mesh.set_adapt(
-        order=6, elems_per_wave=1.5, f_adapt=200, adapt_sources=2, guided_anisotropy=True
+        order=6,
+        elems_per_wave=1.5,
+        f_adapt=200,
+        adapt_sources=2,
+        guided_anisotropy=True,
     )
     sim += fs.BoundaryCondition(boundaries=["x_min"], conditions=["axis"])
     sim += fs.BoundaryCondition(boundaries=["z_min"], conditions=["free"])
@@ -82,7 +86,10 @@ def test_compact_pml_soft_axisymmetric_borehole_decays(tmp_path):
         kind="vector",
         sources=[
             fs.PointSource(
-                "surface", coords=fs.Q_([2.5, 0], "m"), direction=[0, 1], amplitude=1 * u.MN
+                "surface",
+                coords=fs.Q_([2.5, 0], "m"),
+                direction=[0, 1],
+                amplitude=1 * u.MN,
             )
         ],
     )
@@ -98,7 +105,9 @@ def test_compact_pml_soft_axisymmetric_borehole_decays(tmp_path):
     job = fs.TransientJob(
         "pulse",
         sim,
-        time=fs.TimeIntegration(-0.0125, 0.3125, 0.000125, method=fs.Radau(), f_max=200),
+        time=fs.TimeIntegration(
+            -0.0125, 0.3125, 0.000125, method=fs.Radau(), f_max=200
+        ),
         source=fs.TimeFunction.ricker(80, delay=0.0125),
         trace_schedule=fs.TimeOutput(stride=8),
     )

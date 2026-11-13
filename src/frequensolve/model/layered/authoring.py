@@ -511,7 +511,9 @@ class LayeredAuthoringMixin:
             if isinstance(spec, BoreholeLayer) and spec.interface is not None:
                 wall = borehole.surfaces[borehole._outer_surface_index(index)]
                 if wall.interface is not None:
-                    raise ValueError("Specify the interface on the layer or its outer surface")
+                    raise ValueError(
+                        "Specify the interface on the layer or its outer surface"
+                    )
                 wall.interface = spec.interface
         self.boreholes.append(borehole)
         return borehole

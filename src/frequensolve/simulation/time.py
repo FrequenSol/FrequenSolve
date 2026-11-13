@@ -450,7 +450,16 @@ class TimeIntegration:
     ) -> TimeIntegration:
         data = _fields(
             data,
-            {"schema", "start", "end", "time_step", "method", "newmark", "gauss", "pml_frequency"},
+            {
+                "schema",
+                "start",
+                "end",
+                "time_step",
+                "method",
+                "newmark",
+                "gauss",
+                "pml_frequency",
+            },
             "TimeIntegration",
         )
         if data.get("schema", "fs-time-domain-1") != "fs-time-domain-1":

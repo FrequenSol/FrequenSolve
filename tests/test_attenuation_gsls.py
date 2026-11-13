@@ -142,12 +142,14 @@ def test_model_exports_gsls_band_from_attenuation_extra():
 def test_model_accepts_typed_attenuation_assignment_and_roundtrip():
     model = ModelBase(name="model", dimension=2)
     config = AttenuationConfig(
-        model="gsls", frequency_min=10*u.Hz, frequency_max=200*u.Hz,
-        reference_frequency=10*u.Hz,
+        model="gsls",
+        frequency_min=10 * u.Hz,
+        frequency_max=200 * u.Hz,
+        reference_frequency=10 * u.Hz,
     )
     model.attenuation = config
     expected = config.to_fs()
-    config.frequency_max = 100*u.Hz
+    config.frequency_max = 100 * u.Hz
     assert model.to_fs()["attenuation"] == expected
     assert ModelBase.from_fs(model.to_fs()).attenuation.to_fs() == expected
     model.attenuation = AttenuationConfig(model="none")
