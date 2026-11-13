@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/fragments/fs-runtime-components.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "product_profile",
+    "providers"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-runtime-components-1"
+    },
+    "product_profile": {
+      "type": "string"
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "category",
+          "entitlement",
+          "api_version",
+          "active"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "entitlement": {
+            "type": "string"
+          },
+          "api_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "active": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

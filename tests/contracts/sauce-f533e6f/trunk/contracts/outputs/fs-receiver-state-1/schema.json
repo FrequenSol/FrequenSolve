@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fs-receiver-state-1",
+  "type": "object",
+  "required": ["schema", "frequency_hz", "channel", "receiver_group", "n_rows", "partition", "payload_precision", "value_convention", "source_derivative", "physics", "dimension", "geometry", "modeling_mode", "control_kind", "source_mode", "units", "candidate_fingerprint", "acquisition_fingerprint", "observation_fingerprint", "preprocessing_fingerprint", "control_registry_fingerprint", "resolved_context_fingerprint", "state_fingerprint", "shards"],
+  "properties": {
+    "schema": {"const": "fs-receiver-state-1"},
+    "frequency_hz": {"type": "number", "exclusiveMinimum": 0},
+    "channel": {"enum": ["base", "base_df"]},
+    "receiver_group": {"type": "string", "minLength": 1},
+    "n_rows": {"type": "integer", "minimum": 0},
+    "partition": {
+      "type": "object",
+      "required": ["n_ranks", "compatibility"],
+      "properties": {
+        "n_ranks": {"type": "integer", "minimum": 1},
+        "compatibility": {"const": "same_mesh_partition"}
+      },
+      "additionalProperties": false
+    },
+    "payload_precision": {"enum": ["complex64", "complex128"]},
+    "value_convention": {"const": "physical_receiver"},
+    "source_derivative": {"enum": ["total", "frozen", "none"]},
+    "physics": {"enum": ["acoustic", "elastic", "coupled"]},
+    "dimension": {"enum": [2, 3]},
+    "geometry": {"enum": ["cartesian", "sparse"]},
+    "modeling_mode": {"const": "full_dimension"},
+    "control_kind": {"const": "material_only"},
+    "source_mode": {"const": "physical_shot"},
+    "field_retention": {"enum": ["checkpoint", "replay"]},
+    "units": {"type": "string", "minLength": 1},
+    "candidate_fingerprint": {"type": "string", "minLength": 1},
+    "acquisition_fingerprint": {"type": "string", "minLength": 1},
+    "observation_fingerprint": {"type": "string", "minLength": 1},
+    "preprocessing_fingerprint": {"type": "string", "minLength": 1},
+    "control_registry_fingerprint": {"type": "string", "minLength": 1},
+    "resolved_context_fingerprint": {"type": "string", "minLength": 1},
+    "state_fingerprint": {"type": "string", "minLength": 1},
+    "checkpoints": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["rank", "batch", "source_first", "n_sources", "base_file", "base_sha256"],
+        "properties": {
+          "rank": {"type": "integer", "minimum": 0},
+          "batch": {"type": "integer", "minimum": 1},
+          "source_first": {"type": "integer", "minimum": 1},
+          "n_sources": {"type": "integer", "minimum": 1},
+          "base_file": {"type": "string", "minLength": 1},
+          "base_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "df_file": {"type": "string", "minLength": 1},
+          "df_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "frames": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["file", "sha256", "rank", "batch", "source_first", "n_sources"],
+        "properties": {
+          "file": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "rank": {"type": "integer", "minimum": 0},
+          "batch": {"type": "integer", "minimum": 1},
+          "source_first": {"type": "integer", "minimum": 1},
+          "n_sources": {"type": "integer", "minimum": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "shards": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["file", "sha256", "rank"],
+        "properties": {
+          "file": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "rank": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"field_retention": {"const": "checkpoint"}}, "required": ["field_retention"]},
+     "then": {"required": ["checkpoints"]}}
+  ],
+  "additionalProperties": false
+}

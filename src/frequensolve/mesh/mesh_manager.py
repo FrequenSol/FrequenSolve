@@ -15,6 +15,7 @@ from frequensolve.util.mixins import (
     merge_extra,
 )
 
+from ._root_patch import RootPatchDescriptor
 from .mesh_generators import BaseMeshGenerator
 
 __all__ = [
@@ -148,7 +149,7 @@ def _serialize_adapt_extra(extra: Mapping[str, Any], ctx=None) -> Dict[str, Any]
 def _serialize_hp_payload(value: Any, ctx=None) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(
-            "hp adaptivity settings must be a mapping, " f"got {type(value).__name__}"
+            f"hp adaptivity settings must be a mapping, got {type(value).__name__}"
         )
     payload = copy.deepcopy(dict(value))
     if "order" in payload and "p_order" in payload:
@@ -177,7 +178,7 @@ def _serialize_hp_payload(value: Any, ctx=None) -> Dict[str, Any]:
 def _serialize_hp_overrides(value: Any, ctx=None) -> List[Dict[str, Any]]:
     if not isinstance(value, (list, tuple)):
         raise TypeError(
-            "hp.overrides must be a list of mappings, " f"got {type(value).__name__}"
+            f"hp.overrides must be a list of mappings, got {type(value).__name__}"
         )
 
     out = []
@@ -247,34 +248,6 @@ def _unwrap_hp_policy_literal(value: Any) -> Any:
     if isinstance(value, Mapping) and set(value) == {"value"}:
         return value["value"]
     return value
-
-
-def _resolve_f_low(
-    f_low: Optional[float] = None,
-    *,
-    f_adapt: Optional[float] = None,
-) -> Optional[float]:
-    values = [
-        (name, value)
-        for name, value in (
-            ("f_low", f_low),
-            ("f_adapt", f_adapt),
-        )
-        if value is not None
-    ]
-    if not values:
-        return None
-    if len(values) > 1:
-        names = ", ".join(name for name, _ in values)
-        raise ValueError(f"Specify only one of {names}")
-    return values[0][1]
-
-
-def _pop_f_low(payload: Dict[str, Any]) -> Optional[float]:
-    return _resolve_f_low(
-        payload.pop("f_low", None),
-        f_adapt=payload.pop("f_adapt", None),
-    )
 
 
 def _normalize_grade_mode(mode: str) -> str:
@@ -562,9 +535,13 @@ class MeshAdaptor(ExtraFieldsMixin):
         jump_factor: Multiplicative adaptation factor on jump elements.
         smooth_refs: Whether to add smoothing refinements around constrained
             degrees of freedom.
+        aspect_limit: Baseline physical element aspect limit (native default 3).
+        guided_anisotropy: Use local guided-wave spacing anisotropy to relax
+            aspect closure (native default True); False restores physical closure.
         f_low: Low frequency used for adaptation.
         f_high: High frequency used for adaptation.
-        f_adapt: Alias for ``f_low``.
+        f_adapt: Explicit physical frequency in hertz used for adaptation.
+            Required and positive for transient wave simulations.
         adapt_order: Whether to adapt element order.
         source_grading: Optional distance grading around sources.
         receiver_grading: Optional distance grading around receivers.
@@ -574,8 +551,7 @@ class MeshAdaptor(ExtraFieldsMixin):
 
     Raises:
         TypeError: If no elements-per-wave argument is supplied.
-        ValueError: If multiple elements-per-wave aliases or low-frequency
-            aliases are supplied.
+        ValueError: If multiple elements-per-wave aliases are supplied.
     """
 
     elems_per_wave: Union[float, Dict[str, float]]
@@ -583,8 +559,11 @@ class MeshAdaptor(ExtraFieldsMixin):
     jump_tolerance: Optional[float] = None  # 0.2
     jump_factor: Optional[float] = None  # 1.0
     smooth_refs: Optional[bool] = None  # False
+    aspect_limit: Optional[float] = None
+    guided_anisotropy: Optional[bool] = None
     f_low: Optional[float] = None
     f_high: Optional[float] = None
+    f_adapt: Optional[float] = None
     adapt_order: bool = False
     source_grading: Optional[DistanceGrading] = None
     receiver_grading: Optional[DistanceGrading] = None
@@ -601,6 +580,8 @@ class MeshAdaptor(ExtraFieldsMixin):
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
+        aspect_limit: Optional[float] = None,
+        guided_anisotropy: Optional[bool] = None,
         f_low: Optional[float] = None,
         f_high: Optional[float] = None,
         f_adapt: Optional[float] = None,
@@ -625,8 +606,11 @@ class MeshAdaptor(ExtraFieldsMixin):
         self.jump_tolerance = jump_tolerance
         self.jump_factor = jump_factor
         self.smooth_refs = smooth_refs
-        self.f_low = _resolve_f_low(f_low, f_adapt=f_adapt)
+        self.aspect_limit = aspect_limit
+        self.guided_anisotropy = guided_anisotropy
+        self.f_low = f_low
         self.f_high = f_high
+        self.f_adapt = f_adapt
         self.adapt_order = adapt_order
         self.source_grading = source_grading
         self.receiver_grading = receiver_grading
@@ -636,6 +620,18 @@ class MeshAdaptor(ExtraFieldsMixin):
         self.__post_init__()
 
     def __post_init__(self):
+        if self.aspect_limit is not None:
+            import math
+
+            if isinstance(self.aspect_limit, bool):
+                raise ValueError("aspect_limit must be finite and at least one")
+            self.aspect_limit = float(self.aspect_limit)
+            if not math.isfinite(self.aspect_limit) or self.aspect_limit < 1:
+                raise ValueError("aspect_limit must be finite and at least one")
+        if self.guided_anisotropy is not None and not isinstance(
+            self.guided_anisotropy, bool
+        ):
+            raise TypeError("guided_anisotropy must be a boolean")
         self.source_grading = _coerce_distance_grading(self.source_grading)
         self.receiver_grading = _coerce_distance_grading(self.receiver_grading)
         self.surface_gradings = _coerce_surface_gradings(self.surface_gradings)
@@ -664,18 +660,6 @@ class MeshAdaptor(ExtraFieldsMixin):
 
         self.elems_per_wave = value
 
-    @property
-    def f_adapt(self) -> Optional[float]:
-        """Alias for the low adaptation frequency ``f_low``."""
-
-        return self.f_low
-
-    @f_adapt.setter
-    def f_adapt(self, value: Optional[float]) -> None:
-        """Set ``f_low`` through the ``f_adapt`` alias."""
-
-        self.f_low = value
-
     def to_fs(self, ctx=None) -> Dict:
         """Serialize mesh adaptivity settings for solver input.
 
@@ -692,8 +676,19 @@ class MeshAdaptor(ExtraFieldsMixin):
             **({"jump_tolerance": self.jump_tolerance} if self.jump_tolerance else {}),
             **({"jump_factor": self.jump_factor} if self.jump_factor else {}),
             **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {}),
+            **(
+                {"aspect_limit": self.aspect_limit}
+                if self.aspect_limit is not None
+                else {}
+            ),
+            **(
+                {"guided_anisotropy": self.guided_anisotropy}
+                if self.guided_anisotropy is not None
+                else {}
+            ),
             **({"f_low": self.f_low} if self.f_low is not None else {}),
             **({"f_high": self.f_high} if self.f_high is not None else {}),
+            **({"f_adapt": self.f_adapt} if self.f_adapt is not None else {}),
             **({"adapt_order": self.adapt_order} if self.adapt_order else {}),
             **(
                 {"src_grading": self.source_grading.to_fs(ctx)}
@@ -739,8 +734,11 @@ class MeshAdaptor(ExtraFieldsMixin):
             jump_tolerance=data.pop("jump_tolerance", None),
             jump_factor=data.pop("jump_factor", None),
             smooth_refs=data.pop("smooth_refs", None),
-            f_low=_pop_f_low(data),
+            aspect_limit=data.pop("aspect_limit", None),
+            guided_anisotropy=data.pop("guided_anisotropy", None),
+            f_low=data.pop("f_low", None),
             f_high=data.pop("f_high", None),
+            f_adapt=data.pop("f_adapt", None),
             adapt_order=data.pop("adapt_order", False),
             source_grading=_pop_alias(data, "source_grading", "src_grading"),
             receiver_grading=_pop_alias(data, "receiver_grading", "rcv_grading"),
@@ -865,6 +863,7 @@ class MeshManager:
     format: Optional[str] = None
     parallel: Optional[MeshParallelism] = None
     adapt: Optional[MeshAdaptor] = None
+    root_patch: Optional["RootPatchDescriptor"] = None
 
     def set_adapt(
         self,
@@ -876,6 +875,8 @@ class MeshManager:
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
+        aspect_limit: Optional[float] = None,
+        guided_anisotropy: Optional[bool] = None,
         f_low: Optional[float] = None,
         f_high: Optional[float] = None,
         f_adapt: Optional[float] = None,
@@ -903,9 +904,13 @@ class MeshManager:
             jump_factor: Multiplicative adaptation factor on jump elements.
             smooth_refs: Whether to add smoothing refinements around constrained
                 degrees of freedom.
+            aspect_limit: Baseline physical element aspect limit (native default 3).
+            guided_anisotropy: Relax aspect closure using the local guided-wave
+                sizing ratio (native default True). False restores physical closure.
             f_low: Low frequency used for adaptation.
             f_high: High frequency used for adaptation.
-            f_adapt: Alias for ``f_low``.
+            f_adapt: Explicit physical frequency in hertz used for adaptation.
+                Required and positive for transient wave simulations.
             adapt_order: Whether to adapt element order.
             source_grading: Optional distance grading around sources.
             receiver_grading: Optional distance grading around receivers.
@@ -924,6 +929,8 @@ class MeshManager:
             jump_tolerance=jump_tolerance,
             jump_factor=jump_factor,
             smooth_refs=smooth_refs,
+            aspect_limit=aspect_limit,
+            guided_anisotropy=guided_anisotropy,
             f_low=f_low,
             f_high=f_high,
             f_adapt=f_adapt,
@@ -1065,6 +1072,10 @@ class MeshManager:
 
         data = copy.deepcopy(data)
         manager = cls()
+        if "root_patch" in data:
+            from frequensolve.mesh._root_patch import RootPatchDescriptor
+
+            manager.root_patch = RootPatchDescriptor.from_fs(data["root_patch"])
 
         # From file
         file = data.get("file")
@@ -1087,23 +1098,7 @@ class MeshManager:
             )
 
         if "adapt" in data:
-            a = copy.deepcopy(data["adapt"])
-            manager.set_adapt(
-                elems_per_wave=_pop_elems_per_wave(a),
-                order=a.pop("order", 3),
-                adapt_sources=a.pop("adapt_sources", 0),
-                adapt_receivers=a.pop("adapt_receivers", 0),
-                jump_tolerance=a.pop("jump_tolerance", None),
-                jump_factor=a.pop("jump_factor", None),
-                smooth_refs=a.pop("smooth_refs", False),
-                f_low=_pop_f_low(a),
-                f_high=a.pop("f_high", None),
-                adapt_order=a.pop("adapt_order", False),
-                source_grading=_pop_alias(a, "source_grading", "src_grading"),
-                receiver_grading=_pop_alias(a, "receiver_grading", "rcv_grading"),
-                surface_gradings=a.pop("surface_gradings", None),
-                **a,
-            )
+            manager.adapt = MeshAdaptor.from_fs(data["adapt"])
 
         return manager
 
@@ -1134,6 +1129,10 @@ class MeshManager:
         mesh_dict = {
             "adapt": self.adapt.to_fs(ctx),
         }
+        if self.root_patch is not None:
+            if self.mesh is not None or self.file is None:
+                raise ValueError("A root patch requires its immutable parent mesh file")
+            mesh_dict["root_patch"] = self.root_patch.to_fs()
 
         if self.parallel:
             mesh_dict["parallel"] = self.parallel.to_fs(ctx)

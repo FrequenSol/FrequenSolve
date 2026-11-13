@@ -1,0 +1,131 @@
+{
+  "schema": "fs-material-model-1",
+  "_type": "LayeredModel",
+  "name": "bounded_ip_controls",
+  "dimension": 2,
+  "units": "km",
+  "x_limits": [
+    0,
+    10
+  ],
+  "ordering": "top_down",
+  "surfaces": [
+    {
+      "name": "top",
+      "interface": true,
+      "depth": {
+        "value": 0,
+        "units": "km"
+      }
+    },
+    {
+      "name": "bottom",
+      "interface": true,
+      "depth": {
+        "value": 10,
+        "units": "km"
+      }
+    }
+  ],
+  "subdomains": [
+    {
+      "mesh_block_id": 1,
+      "name": "earth",
+      "physics": "em:geophysics",
+      "properties": {
+        "conductivity_xx": {
+          "value": 0.0175,
+          "units": "S/m"
+        },
+        "conductivity_yy": {
+          "value": 0.02,
+          "units": "S/m"
+        },
+        "conductivity_zz": {
+          "value": 0.0325,
+          "units": "S/m"
+        },
+        "conductivity_xz": {
+          "value": 0.01299038105676658,
+          "units": "S/m"
+        },
+        "chargeability": {
+          "parameterized": {
+            "id": "chargeability",
+            "reference": {
+              "value": 0.3
+            },
+            "transform": "logit",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "z",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                10,
+                10
+              ],
+              "coefficients": [
+                0,
+                0.2
+              ]
+            }
+          }
+        },
+        "ip_time_constant": {
+          "parameterized": {
+            "id": "ip_time_constant",
+            "reference": {
+              "value": 1,
+              "units": "s"
+            },
+            "transform": "log",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "z",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                10,
+                10
+              ],
+              "coefficients": [
+                0,
+                0.2
+              ]
+            }
+          }
+        },
+        "ip_exponent": {
+          "parameterized": {
+            "id": "ip_exponent",
+            "reference": {
+              "value": 0.7
+            },
+            "transform": "logit",
+            "control": {
+              "kind": "bspline",
+              "coordinate_system": "global",
+              "axis": "z",
+              "degree": 1,
+              "knots": [
+                0,
+                0,
+                10,
+                10
+              ],
+              "coefficients": [
+                0,
+                0.2
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

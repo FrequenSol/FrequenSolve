@@ -1,0 +1,36 @@
+{
+  "schema": "fs-job-1",
+  "workflow": "fwi_operator",
+  "simulation": "project/simulation.json",
+  "f_list": [
+    [
+      3.0,
+      0.0
+    ]
+  ],
+  "fwi_operator": {
+    "action": "linearize",
+    "state": "extension_state.json",
+    "controls": {
+      "active": [
+        "model.acoustic_vp",
+        "reflectivity.ip"
+      ]
+    },
+    "reflectivity": {
+      "parameterization": "vp_ip",
+      "fields": [
+        {
+          "name": "ip",
+          "layer": 2,
+          "axis": 2,
+          "basis": "acoustic_vp"
+        }
+      ]
+    },
+    "covector": "joint_gradient.h5"
+  },
+  "name": "joint-impedance-reflectivity",
+  "result_path": "results/lag_extension",
+  "Imaging": {}
+}

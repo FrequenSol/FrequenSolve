@@ -566,3 +566,67 @@ def test_terminal_failure_after_transient_read_still_raises():
     with pytest.raises(RunFailedError):
         run.wait()
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "timeout", "completed"])
+def test_result_preserves_failures_without_requiring_trace_outputs(state):
+    class FailedOutputJob(DummyJob):
+        @property
+        def trace_manifest(self):
+            pytest.fail("Failed jobs must not require complete trace artifacts")
+
+    run = failed_run()
+    run.job = FailedOutputJob()
+    status = JobStatus(
+        state=state,
+        return_code=0 if state == "completed" else 1,
+        message="Extension inner solve did not reach stationarity",
+        raw={"task_summary": {"failed": 1}},
+    )
+    run._status_fn = lambda _: status
+    result = run.wait(check=False)
+    assert result.status is status
+    assert result.trace_manifest is None
+    if state != "completed":
+        with pytest.raises(RunFailedError, match="did not reach stationarity") as exc:
+            result.raise_for_status()
+        assert exc.value.result is result
+
+
+def test_successful_result_still_validates_trace_manifest():
+    from frequensolve.simulation.artifact_contract import ArtifactContractError
+
+    class BrokenOutputJob(DummyJob):
+        @property
+        def trace_manifest(self):
+            raise ArtifactContractError("missing committed trace artifact")
+
+    run = successful_run()
+    run.job = BrokenOutputJob()
+    with pytest.raises(ArtifactContractError, match="missing committed trace artifact"):
+        run.wait()
+
+
+@pytest.mark.parametrize("mode", ["batch", "attached"])
+def test_remote_completion_does_not_open_undownloaded_trace_payloads(mode):
+    class RemoteJob(DummyJob):
+        @property
+        def trace_manifest(self):
+            pytest.fail("Metadata-only completion must defer reading trace payloads")
+
+    run = successful_run()
+    run.mode, run.job = mode, RemoteJob()
+    result = run.wait()
+    assert result.successful and result.trace_manifest is None
+
+
+def test_remote_wait_preserves_requested_download_failure():
+    run = successful_run()
+    run.mode = "batch"
+
+    def fetch(_):
+        raise FileNotFoundError("required packed payload is missing")
+
+    run._pending_fetch_fn = fetch
+    with pytest.raises(FileNotFoundError, match="required packed payload"):
+        run.wait()

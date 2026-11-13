@@ -1,0 +1,61 @@
+{
+  "schema": "fs-material-model-1",
+  "_type": "LayeredModel",
+  "name": "anisotropic_ip",
+  "dimension": 2,
+  "units": "km",
+  "x_limits": [
+    0,
+    10
+  ],
+  "ordering": "top_down",
+  "surfaces": [
+    {
+      "name": "top",
+      "interface": true,
+      "depth": {
+        "value": 0,
+        "units": "km"
+      }
+    },
+    {
+      "name": "bottom",
+      "interface": true,
+      "depth": {
+        "value": 10,
+        "units": "km"
+      }
+    }
+  ],
+  "subdomains": [
+    {
+      "mesh_block_id": 1,
+      "name": "earth",
+      "physics": "em:geophysics",
+      "properties": {
+        "conductivity_xx": {
+          "value": 0.0175,
+          "units": "S/m"
+        },
+        "conductivity_yy": {
+          "value": 0.02,
+          "units": "S/m"
+        },
+        "conductivity_zz": {
+          "value": 0.0325,
+          "units": "S/m"
+        },
+        "conductivity_xz": {
+          "value": 0.01299038105676658,
+          "units": "S/m"
+        },
+        "chargeability": 0.3,
+        "ip_time_constant": {
+          "value": 1,
+          "units": "s"
+        },
+        "ip_exponent": 0.7
+      }
+    }
+  ]
+}

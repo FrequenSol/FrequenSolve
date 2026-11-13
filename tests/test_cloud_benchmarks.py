@@ -31,8 +31,8 @@ from scripts.generate_cloud_benchmark_workloads import _behavior_sha256, generat
 def test_corpus_is_standalone_and_has_issue_linked_known_bugs():
     cases = list_cases()
 
-    assert len(cases) == 24
-    assert sum(case["expectedSubmissions"] for case in cases) == 45
+    assert len(cases) == 25
+    assert sum(case["expectedSubmissions"] for case in cases) == 64
     assert len({case["id"] for case in cases}) == len(cases)
     for case in cases:
         assert case["script"].endswith(".py")
@@ -104,6 +104,21 @@ def test_behavior_hash_ignores_formatting_and_generated_source_header():
     reformatted = '''"""Generated Cloud benchmark workload.\nSource SHA-256: new\n"""\nvalues = [x for x in range(3)]\n'''
 
     assert _behavior_sha256(compact) == _behavior_sha256(reformatted)
+
+
+def test_generator_preserves_existing_corpus_when_source_is_empty(tmp_path):
+    source = tmp_path / "tutorials"
+    source.mkdir()
+    output = tmp_path / "generated"
+    output.mkdir()
+    (output / ".generated-cloud-benchmark-workloads").touch()
+    script = output / "existing.py"
+    script.write_text("value = 1\n")
+
+    with pytest.raises(RuntimeError, match="No tutorial notebooks found"):
+        generate(source, output)
+
+    assert script.read_text() == "value = 1\n"
 
 
 def test_sanitizer_redacts_credentials_but_keeps_performance_authorization():

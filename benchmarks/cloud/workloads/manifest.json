@@ -1,6 +1,15 @@
 {
-  "caseCount": 24,
+  "caseCount": 25,
   "cases": [
+    {
+      "behaviorSha256": "8119b2fcb5b21db5af102212399eb1b22ff5c98f8d29e55c7462041b4ba7f057",
+      "expectedSubmissions": 0,
+      "id": "00_getting_started/acoustic_starter",
+      "script": "00_getting_started/acoustic_starter.py",
+      "scriptSha256": "88c0ffbe55a405dc1d6c4609232309a405c41d1bf86117211f6980f12b2914ee",
+      "source": "00_getting_started/acoustic_starter.ipynb",
+      "sourceSha256": "cc833850e77a81786fe118991ea11a5e02272620371e6d0fca58a8bcf4bcda1d"
+    },
     {
       "behaviorSha256": "3f5c2728243eaae6a31d58bcfbb0a7581dc1113d3d885648ccfdf4c31cfb0613",
       "expectedSubmissions": 2,
@@ -51,7 +60,7 @@
       "expectedSubmissions": 3,
       "id": "01_modeling_basics/06_laplace_time_domain",
       "script": "01_modeling_basics/06_laplace_time_domain.py",
-      "scriptSha256": "e14ad8ae28119ce9d82d6ebbb992f7b0f5a536846085ff12d3f83ea523b05ce6",
+      "scriptSha256": "2ef26bb5ba65ab198628aa199853a6ba54379607f904aa5bea4ac8ae0581ba53",
       "source": "01_modeling_basics/06_laplace_time_domain.ipynb",
       "sourceSha256": "1bc0cbe7736bb4fea15ddeccb6002c7f53ff6c447d094529b419b5232ac4eb5e"
     },
@@ -60,7 +69,7 @@
       "expectedSubmissions": 2,
       "id": "02_sites/01_aws_site",
       "script": "02_sites/01_aws_site.py",
-      "scriptSha256": "1c57192059f1754be8433edd62acc9a4ac482433f06a30a24cff0981d7069df4",
+      "scriptSha256": "ac7e47d658e7b3bc63c441566eb8d30fee835347d82e48a6f865b7cf0b64be38",
       "source": "02_sites/01_aws_site.ipynb",
       "sourceSha256": "4e867d9a5f9b61636484e36c504db6e136217ee9c5042beca2a76f92f3d0a497"
     },
@@ -69,7 +78,7 @@
       "expectedSubmissions": 2,
       "id": "02_sites/02_hpc_sites",
       "script": "02_sites/02_hpc_sites.py",
-      "scriptSha256": "c432b8b53c9c30b4bb84ab0ffdefbe4a5bb9adaa411f49c9c8dd319f7a939646",
+      "scriptSha256": "73e92f25dc4fe5c603f331a237d5ca48c8c527318e4ccfe4bee127eed8962e51",
       "source": "02_sites/02_hpc_sites.ipynb",
       "sourceSha256": "cf94da4bce07514c9c7d295a91acf3925f1966a2d4b19de2e7f6f754e2936a0f"
     },
@@ -78,7 +87,7 @@
       "expectedSubmissions": 2,
       "id": "02_sites/03_local_site",
       "script": "02_sites/03_local_site.py",
-      "scriptSha256": "24032d4bcd58698def7ffbdf05d248644b39cf3568ebaff1c539d108e3281b0e",
+      "scriptSha256": "b0ac76e800b7ba3d1b0d3acfcfdf285560f7543ea667c19e02838d927b5662aa",
       "source": "02_sites/03_local_site.ipynb",
       "sourceSha256": "20b7fd7a607050df5814c7d21ca350663efba91804d2fac6df3dca4e09577ee1"
     },
@@ -191,31 +200,31 @@
       "sourceSha256": "5ae164f19a946bf85cf11ab669a48ff881555e598101a9335b8daebef3297829"
     },
     {
-      "behaviorSha256": "d7982bd1529e3e294a8548ee5186f4921cd4c6b96d4fa19f49f1bd8005971756",
+      "behaviorSha256": "ddba56d78a2bd23a55d9399933775faa352a30822fcbe59b64e8fb28fca8a36f",
       "expectedSubmissions": 1,
       "id": "06_outputs/02_paraview_vtk",
       "script": "06_outputs/02_paraview_vtk.py",
-      "scriptSha256": "8fcb26f1cb0dfac16e206d0022c61622c6cf30dc23d1190640d78665ac45040f",
+      "scriptSha256": "24f2d5a128f2fd03b2a80044a5012ab847d43b2cfa7c21ae497cc153307f0c0c",
       "source": "06_outputs/02_paraview_vtk.ipynb",
-      "sourceSha256": "9ad8b26bc926c0e0c23eec3ab44b0751ee2812b5604b24fdc55bf799e3965ee9"
+      "sourceSha256": "446a3bf377b6946f4caf3ebe10de6269fc653f29bb8289aa2543cb76f19f3f2c"
     },
     {
-      "behaviorSha256": "1a74b495364947affe462801f8f8d3a5e7e655f5321d7d75d9bb1939a1899bef",
-      "expectedSubmissions": 2,
+      "behaviorSha256": "0179800c2784bcf7d13cd31b7f3d9de97bfb804d2419317f042ea5a6b559adfc",
+      "expectedSubmissions": 21,
       "id": "06_outputs/03_imaging",
       "script": "06_outputs/03_imaging.py",
-      "scriptSha256": "c81ff3dc324cf59ddd79aebafd746328e51a9c9bacbf424f320e771c04aa74ab",
+      "scriptSha256": "2e2762e81ccfb13d679da15b2d11c5362d9c7ee7911a5f1b74a2622d0e0f58af",
       "source": "06_outputs/03_imaging.ipynb",
-      "sourceSha256": "903bf51dc755ff4c1eb11e0d587b1bc011b13c0b4459686f5957a2af98b17f99"
+      "sourceSha256": "8632d14f26198f1338bd5155df1d23a2e984d72b5d12e7fe5e6470fefe6937e7"
     },
     {
-      "behaviorSha256": "1c4935c03853b2a0f8711efda47e2118d24e5c16e192a1e0b2ef4c045f07b515",
+      "behaviorSha256": "e6d03d5b92c4089055923643c8fe550ff5b3ea353c1dd03c3f2286d10b5c5a45",
       "expectedSubmissions": 9,
       "id": "07_performance/01_performance",
       "script": "07_performance/01_performance.py",
-      "scriptSha256": "431e266544fb243e1d9c8f335b3ed8b5489a6f3565ca44b8024b2841fed89c1c",
+      "scriptSha256": "aa802b8021e646fb85d015dc58592ce1165d3c03125c7ceac2891814b3b7d001",
       "source": "07_performance/01_performance.ipynb",
-      "sourceSha256": "d01d231b1c49372d1c06511cc5bf100f04fa9ec5d62a1f50bc684ddfcfe5ca66"
+      "sourceSha256": "5c8d2833b142e4f953efda459f79d7d438ab4dada482183b19b28ce9ff6d14a4"
     }
   ],
   "generator": "scripts/generate_cloud_benchmark_workloads.py",
@@ -225,5 +234,5 @@
     "python": "3.13"
   },
   "schema": "frequensolve-cloud-benchmark-corpus/v1",
-  "submissionCount": 45
+  "submissionCount": 64
 }

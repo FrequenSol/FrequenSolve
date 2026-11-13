@@ -1,0 +1,41 @@
+{
+  "schema": "fs-acquisition-2",
+  "boundary_loadings": [
+    {
+      "_type": "SurfacePressureCovarianceFactor",
+      "boundary_condition": "ocean_surface",
+      "factor_set": "gulf_storm_csd",
+      "source_prefix": "gulf_storm_factor",
+      "reference_coordinate": {
+        "system": "global",
+        "value": [500.0, 0.0],
+        "units": "m"
+      },
+      "rank": 3,
+      "rank_per_frequency": [3, 3, 2],
+      "rhs_normalizations": [1200.0, 700.0, 250.0],
+      "domain": "frequency",
+      "frequencies": [0.2, 0.5, 1.0],
+      "statistics": {
+        "quantity": "pressure_cross_spectral_density",
+        "spectral_measure": "per_hz",
+        "sidedness": "one_sided",
+        "covariance_convention": "E[s s^H]",
+        "factorization": {
+          "method": "eigendecomposition",
+          "source_covariance_hash": "sha256:example",
+          "relative_tolerance": 0.001,
+          "retained_variance": 0.995
+        }
+      },
+      "data": {
+        "file": "surface-pressure-covariance.h5",
+        "format": "HDF5",
+        "dataset": "pressure/gulf_storm_factor",
+        "units": "Pa",
+        "system": "global"
+      }
+    }
+  ],
+  "receiver_groups": []
+}

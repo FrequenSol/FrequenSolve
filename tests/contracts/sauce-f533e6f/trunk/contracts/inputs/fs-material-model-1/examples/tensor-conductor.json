@@ -1,0 +1,76 @@
+{
+  "schema": "fs-material-model-1",
+  "units": "km",
+  "subdomains": [
+    {
+      "name": "conductive_target",
+      "mesh_block_id": 1,
+      "physics": "em",
+      "properties": {
+        "conductivity": {
+          "parameterized": {
+            "id": "target_sigma",
+            "reference": {
+              "value": 0.01,
+              "units": "S/m"
+            },
+            "transform": "log",
+            "control": {
+              "kind": "tensor_hat",
+              "axes": [
+                "x",
+                "y",
+                "z"
+              ],
+              "shape": [
+                3,
+                3,
+                3
+              ],
+              "origin": [
+                0.25,
+                0.25,
+                0.25
+              ],
+              "spacing": [
+                0.25,
+                0.25,
+                0.25
+              ],
+              "units": "km",
+              "coefficients": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.6931471805599453,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

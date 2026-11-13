@@ -1,0 +1,48 @@
+{
+  "schema": "fs-material-model-1",
+  "subdomains": [
+    {
+      "name": "canonical-biot-direct",
+      "mesh_block_id": 1,
+      "physics": "poroelastic:direct",
+      "properties": {
+        "k_dry": {
+          "value": 8.0,
+          "units": "GPa"
+        },
+        "mu_dry": {
+          "value": 5.0,
+          "units": "GPa"
+        },
+        "k_solid": {
+          "value": 36.0,
+          "units": "GPa"
+        },
+        "k_fluid": {
+          "value": 2.2,
+          "units": "GPa"
+        },
+        "rho_solid": {
+          "value": 2.65,
+          "units": "g/cc"
+        },
+        "rho_fluid": {
+          "value": 1.0,
+          "units": "g/cc"
+        },
+        "porosity": 0.25,
+        "tortuosity": 2.0,
+        "kappa": {
+          "value": 1.0e-12,
+          "units": "m^2"
+        },
+        "viscosity": {
+          "value": 0.001,
+          "units": "Pa*s"
+        },
+        "qk": 100.0,
+        "qmu": 80.0
+      }
+    }
+  ]
+}

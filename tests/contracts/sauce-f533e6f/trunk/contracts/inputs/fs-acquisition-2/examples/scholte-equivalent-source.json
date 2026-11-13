@@ -1,0 +1,51 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "scalar",
+    "domain": 99,
+    "sources": [
+      {
+        "name": "scholte_equivalent_rhs",
+        "coordinates": [0.5, 0.25]
+      }
+    ]
+  },
+  "equivalent_sources": {
+    "surface": {
+      "kind": "internal_plane",
+      "point": [0.0, 0.25],
+      "normal": [0.0, 1.0],
+      "emission_side": "negative",
+      "tangential_window": {
+        "minimum": 0.0,
+        "maximum": {
+          "value": 0.6,
+          "units": "km"
+        },
+        "taper_width": {
+          "value": 0.1,
+          "units": "km"
+        }
+      }
+    },
+    "incident_field": {
+      "kind": "scholte_wave",
+      "rhs": 1,
+      "origin": [0.2, 0.25],
+      "tangent": [1.0, 0.0],
+      "normal": [0.0, 1.0],
+      "amplitude": 1.0,
+      "fluid": {
+        "speed": 1.5,
+        "density": 1.0
+      },
+      "solid": {
+        "vp": 3.0,
+        "vs": 1.5,
+        "density": 2.5
+      }
+    }
+  },
+  "receiver_groups": []
+}

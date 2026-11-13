@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import (
+    Any,
+    Callable,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Union,
+    runtime_checkable,
+)
 
 import numpy as np
 
@@ -13,13 +22,52 @@ from frequensolve.inversion.validation import (
     gradient_taylor_test,
     real_adjoint_test,
 )
-from frequensolve.simulation.jobs.control_sensitivity import ControlSpace
 
 __all__ = [
     "ControlLeastSquaresProblem",
     "ControlObjectiveProblem",
+    "ControlSpaceLike",
     "QuadraticRegularization",
 ]
+
+
+@runtime_checkable
+class ControlSpaceLike(Protocol):
+    """Real control vectorization the least-squares adapters require.
+
+    :class:`frequensolve.imaging.ControlSpace` satisfies it; so does any object
+    with an integer ``size`` and a ``pack`` that maps ``block -> values`` to a
+    real vector of that size.
+    """
+
+    @property
+    def size(self) -> int: ...
+
+    def pack(self, values: Mapping[str, Any]) -> Any: ...
+
+
+def _control_vector(space: ControlSpaceLike, model: Any) -> np.ndarray:
+    """Return ``model`` as a finite, real float64 vector on ``space``."""
+
+    if isinstance(model, Mapping):
+        model = space.pack(model)
+    vector = np.asarray(model)
+    if np.iscomplexobj(vector):
+        raise ValueError("control vectors must be real-valued")
+    vector = np.array(vector, dtype=np.float64)
+    if vector.ndim != 1 or vector.size != space.size:
+        raise ValueError(
+            f"control vector has shape {vector.shape}; expected ({space.size},)"
+        )
+    if not np.all(np.isfinite(vector)):
+        raise ValueError("control vectors must be finite")
+    return vector
+
+
+def _require_control_space(space: Any, label: str) -> ControlSpaceLike:
+    if not isinstance(space, ControlSpaceLike):
+        raise TypeError(f"{label} requires a control space with size and pack")
+    return space
 
 
 def _real_array(value: Any, *, name: str) -> np.ndarray:
@@ -87,7 +135,7 @@ class ControlLeastSquaresProblem:
 
     def __init__(
         self,
-        control_space: ControlSpace,
+        control_space: ControlSpaceLike,
         observed: Any,
         *,
         forward: Callable[[np.ndarray], Any],
@@ -101,8 +149,9 @@ class ControlLeastSquaresProblem:
         record_jacobian_iterations: bool = True,
         history_metrics: Optional[dict[str, Any]] = None,
     ):
-        if not isinstance(control_space, ControlSpace):
-            raise TypeError("control least-squares problem requires a ControlSpace")
+        control_space = _require_control_space(
+            control_space, "control least-squares problem"
+        )
         observed_values = np.asarray(observed, dtype=np.complex128)
         if observed_values.size < 1:
             raise ValueError("control least-squares problem requires observed data")
@@ -180,7 +229,7 @@ class ControlLeastSquaresProblem:
     def residual(self, model: Union[Sequence[float], np.ndarray]) -> np.ndarray:
         """Evaluate and record the realified least-squares residual."""
 
-        vector = self.control_space.pack(model)
+        vector = _control_vector(self.control_space, model)
         self._evaluate(vector)
         return np.array(self._cache_residual, copy=True)
 
@@ -192,7 +241,7 @@ class ControlLeastSquaresProblem:
     def jacobian(self, model: Union[Sequence[float], np.ndarray]) -> np.ndarray:
         """Evaluate native JVP columns and return a realified Jacobian."""
 
-        vector = self.control_space.pack(model)
+        vector = _control_vector(self.control_space, model)
         residual = self._evaluate(vector)
         values = self._complex_jacobian(vector)
         weighted = values * self.data_weights.reshape(-1, 1)
@@ -207,7 +256,7 @@ class ControlLeastSquaresProblem:
     def loss(self, model: Union[Sequence[float], np.ndarray]) -> LossTerms:
         """Return data and regularization loss terms for one model."""
 
-        vector = self.control_space.pack(model)
+        vector = _control_vector(self.control_space, model)
         self._evaluate(vector)
         if self._cache_loss is None:
             raise RuntimeError("least-squares loss cache was not populated")
@@ -216,7 +265,7 @@ class ControlLeastSquaresProblem:
     def gradient(self, model: Union[Sequence[float], np.ndarray]) -> np.ndarray:
         """Apply the exact real-model VJP to the current weighted residual."""
 
-        vector = self.control_space.pack(model)
+        vector = _control_vector(self.control_space, model)
         self._evaluate(vector)
         if self._cache_weighted_residual is None:
             raise RuntimeError("weighted data residual cache was not populated")
@@ -235,8 +284,8 @@ class ControlLeastSquaresProblem:
     ) -> np.ndarray:
         """Apply the unweighted complex receiver-data Jacobian."""
 
-        vector = self.control_space.pack(model)
-        tangent = self.control_space.pack(direction)
+        vector = _control_vector(self.control_space, model)
+        tangent = _control_vector(self.control_space, direction)
         if self.jvp_callback is None:
             values = self._complex_jacobian(vector) @ tangent
             return values.reshape(self.observed.shape)
@@ -261,7 +310,7 @@ class ControlLeastSquaresProblem:
     ) -> np.ndarray:
         """Apply the unweighted transpose under the real/complex pairing."""
 
-        vector = self.control_space.pack(model)
+        vector = _control_vector(self.control_space, model)
         values = np.asarray(dual, dtype=np.complex128)
         if values.shape != self.observed.shape:
             raise ValueError(
@@ -289,8 +338,8 @@ class ControlLeastSquaresProblem:
     ) -> np.ndarray:
         """Apply ``J.T W**2 J + R.T R`` without forming a normal matrix."""
 
-        vector = self.control_space.pack(model)
-        tangent = self.control_space.pack(direction)
+        vector = _control_vector(self.control_space, model)
+        tangent = _control_vector(self.control_space, direction)
         self._evaluate(vector)
         incremental_data = self.data_jvp(vector, tangent)
         result = self.data_vjp(
@@ -316,7 +365,7 @@ class ControlLeastSquaresProblem:
     ) -> dict[str, Any]:
         """Check the native JVP/VJP under the real-control pairing."""
 
-        vector = self.control_space.pack(model)
+        vector = _control_vector(self.control_space, model)
         rng = np.random.default_rng(seed)
         if direction is None:
             direction = rng.standard_normal(self.control_space.size)
@@ -347,8 +396,8 @@ class ControlLeastSquaresProblem:
         return gradient_taylor_test(
             self.objective,
             self.gradient,
-            self.control_space.pack(model),
-            self.control_space.pack(direction),
+            _control_vector(self.control_space, model),
+            _control_vector(self.control_space, direction),
             steps=steps,
             symmetric=symmetric,
             minimum_order=minimum_order,
@@ -365,7 +414,7 @@ class ControlLeastSquaresProblem:
     ) -> None:
         """Record one accepted iterate from a non-SciPy optimizer."""
 
-        vector = self.control_space.pack(model)
+        vector = _control_vector(self.control_space, model)
         gradient_vector = _real_array(gradient, name="gradient").reshape(-1)
         if gradient_vector.size != self.control_space.size:
             raise ValueError("gradient size does not match the control space")
@@ -503,15 +552,14 @@ class ControlObjectiveProblem:
 
     def __init__(
         self,
-        control_space: ControlSpace,
+        control_space: ControlSpaceLike,
         *,
         value_gradient: Callable[[np.ndarray], tuple[float, Any]],
         regularization: Optional[QuadraticRegularization] = None,
         history: Optional[OptimizationHistory] = None,
         history_metrics: Optional[dict[str, Any]] = None,
     ):
-        if not isinstance(control_space, ControlSpace):
-            raise TypeError("control objective requires a ControlSpace")
+        control_space = _require_control_space(control_space, "control objective")
         if not callable(value_gradient):
             raise TypeError("value_gradient must be callable")
         if regularization is not None:
@@ -533,7 +581,7 @@ class ControlObjectiveProblem:
     def objective(self, model: Union[Sequence[float], np.ndarray]) -> float:
         """Return the complete scalar objective, reusing a fused evaluation."""
 
-        self._evaluate(self.control_space.pack(model))
+        self._evaluate(_control_vector(self.control_space, model))
         if self._cache_loss is None:
             raise RuntimeError("control objective cache was not populated")
         return self._cache_loss.total
@@ -541,7 +589,7 @@ class ControlObjectiveProblem:
     def gradient(self, model: Union[Sequence[float], np.ndarray]) -> np.ndarray:
         """Return the exact real control gradient from the same evaluation."""
 
-        self._evaluate(self.control_space.pack(model))
+        self._evaluate(_control_vector(self.control_space, model))
         if self._cache_gradient is None:
             raise RuntimeError("control gradient cache was not populated")
         return np.array(self._cache_gradient, copy=True)
@@ -549,7 +597,7 @@ class ControlObjectiveProblem:
     def loss(self, model: Union[Sequence[float], np.ndarray]) -> LossTerms:
         """Return separately recorded data and regularization losses."""
 
-        self._evaluate(self.control_space.pack(model))
+        self._evaluate(_control_vector(self.control_space, model))
         if self._cache_loss is None:
             raise RuntimeError("control objective cache was not populated")
         return self._cache_loss
@@ -565,7 +613,7 @@ class ControlObjectiveProblem:
     ) -> None:
         """Persist one accepted optimizer state without reevaluating Sauce."""
 
-        vector = self.control_space.pack(model)
+        vector = _control_vector(self.control_space, model)
         self._evaluate(vector)
         gradient_vector = _real_array(gradient, name="gradient").reshape(-1)
         if gradient_vector.size != self.control_space.size:

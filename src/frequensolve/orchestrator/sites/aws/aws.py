@@ -38,8 +38,15 @@ except ModuleNotFoundError as exc:
         error=exc,
     ) from exc
 
-from frequensolve.orchestrator.sites.base import BaseSite, JobStatus, RunHandle
+from frequensolve.orchestrator.sites.base import (
+    POSTPROCESS_ARTIFACT_ROLES,
+    BaseSite,
+    JobStatus,
+    RunHandle,
+    _result_relative_paths,
+)
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
+from frequensolve.orchestrator.sites.remote_catalog import validate_remote_task_catalog
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
@@ -51,7 +58,7 @@ from frequensolve.simulation.artifact_contract import (
     operation_result_path,
 )
 from frequensolve.simulation.artifact_transfer import fetch_artifact_payloads
-from frequensolve.simulation.jobs import BaseJob, ImagingJob, SkipPolicy
+from frequensolve.simulation.jobs import BaseJob, SkipPolicy
 from frequensolve.simulation.task_index import TaskIndex
 from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.setup_logger import init_logger
@@ -264,7 +271,28 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         2. Authenticates with cached credentials (or prompts for login)
         3. Fetches your infrastructure details (S3 bucket, etc.)
         4. Ready to submit simulations and upload files!
+
+    Background checkpoints (``supports_background_reuse``) are not supported:
+    each batch worker stages inputs only from local files and uploads its
+    results under a fresh prefix, and checkpoint HDF5 files are never
+    transferred by default, so a later worker cannot read a producer's
+    checkpoints.
     """
+
+    supports_background_reuse = False
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Validate ``relative_paths``; AWS keeps no reusable result files.
+
+        Uploaded results are immutable per run, so there is nothing to
+        remove; see :meth:`BaseSite.remove_result_files` for path rules.
+        """
+
+        if _result_relative_paths(relative_paths):
+            logger.debug(
+                "AWSSite keeps no reusable result files; nothing removed for %s",
+                getattr(job, "name", job),
+            )
 
     def __init__(
         self,
@@ -1087,6 +1115,13 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         Raises:
             RuntimeError: If job submission fails.
         """
+        if bool(kwargs.pop("postprocess_only", False)) or bool(
+            getattr(job, "postprocess_only", False)
+        ):
+            raise NotImplementedError(
+                "Managed Cloud execution cannot run a postprocess-only submission "
+                f"({type(job).__name__}); run it on a local or HPC site"
+            )
         if "sizing_policy" in kwargs:
             return self.submit_automatically(job, **kwargs)
         unsupported = kwargs.keys() - {
@@ -1344,7 +1379,7 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
             raise ValueError("Use the authored job to submit another Cloud run")
         authored = Path(job._result_path).resolve()
         authored.relative_to(Path(job.project_path).resolve())
-        if isinstance(job, ImagingJob):
+        if callable(getattr(job, "load_images", None)):
             try:
                 Path(job.save_path).resolve().relative_to(authored)
             except ValueError as exc:
@@ -1450,7 +1485,7 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
             result._frozen_task_fingerprints = getattr(
                 result, "staged_task_fingerprints", result.staged_artifact_fingerprints
             )("AWSSite")
-        if isinstance(result, ImagingJob):
+        if callable(getattr(result, "load_images", None)):
             relative = Path(result.save_path).resolve().relative_to(authored)
             result.save_path = result._result_path / relative
         return result
@@ -1598,7 +1633,11 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
                     operations=("pack",),
                 )
                 project = Path(path).resolve() if path is not None else job.project_path
-                db = TraceDataset.from_job(job, upscale, project_path=project)
+                db = (
+                    job.traces.open(upscale=upscale, project_path=project)
+                    if getattr(job, "workflow", None) == "transient"
+                    else TraceDataset.from_job(job, upscale, project_path=project)
+                )
                 db_map[job.name] = db
 
             except Exception as e:
@@ -1637,6 +1676,20 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         for item in jobs:
             item = self._result_job(item)
             try:
+                if getattr(item, "workflow", None) == "transient":
+                    if upscale != 1:
+                        raise ValueError(
+                            "Transient output uses native samples; upscale must be 1"
+                        )
+                    self.fetch_artifacts(
+                        item,
+                        requests=(ArtifactRequest(role="sampled_wavefield"),),
+                        include_defaults=False,
+                        project_path=path,
+                        operations=("transient",),
+                    )
+                    db_map[item.name] = item.wavefields.open(project_path=path)
+                    continue
                 wavefield_outputs = item.wavefield_trace_outputs
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
@@ -1676,11 +1729,20 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         self.fetch_artifact_catalog(job)
         return job._result_path / "_fs_run"
 
-    def fetch_image(self, job: ImagingJob) -> Any:
-        """Fetch the declared aggregate image and its exact dependencies."""
+    def fetch_image(self, job: Any) -> Any:
+        """Fetch the committed ``image`` artifacts and open them.
+
+        Args:
+            job: :class:`~frequensolve.imaging.ImageKernelJob`.
+
+        Returns:
+            :class:`~frequensolve.imaging.ImageSet` for the job.
+        """
+        if not callable(getattr(job, "load_images", None)):
+            raise TypeError(
+                f"{type(job).__name__} has no images; expected an ImageKernelJob"
+            )
         job = self._result_job(job)
-        if not isinstance(job, ImagingJob):
-            raise TypeError("fetch_image expects an ImagingJob")
         try:
             job.save_path.resolve().relative_to(job.project_path.resolve())
         except ValueError as exc:
@@ -1703,24 +1765,16 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         job = self._result_job(job)
 
         requires_postprocess = getattr(job, "requires_postprocess", None)
-        if (
-            callable(requires_postprocess)
-            and requires_postprocess()
-            and not isinstance(job, ImagingJob)
-        ):
+        if callable(requires_postprocess) and requires_postprocess():
             return self.fetch_postprocess(job, requests=requests)
 
+        # The packed trace manifest lives only in the pack operation result.
         self.fetch_artifacts(
-            job,
-            requests=requests,
-            include_defaults=True,
-            operations=("smooth",) if isinstance(job, ImagingJob) else (),
+            job, requests=requests, include_defaults=True, operations=("pack",)
         )
         if hasattr(job, "result_manifest_file"):
             return job.results
         traces = job.traces.open()
-        if isinstance(job, ImagingJob):
-            job.load_images()
         if getattr(job.outputs, "wavefields", None):
             return {"traces": traces, "wavefields": job.wavefields.open()}
         return traces
@@ -2180,7 +2234,15 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         """Fetch authoritative task metadata and named operation results."""
         job = self._result_job(job)
 
-        tasks = tuple(range(1, job.n_tasks + 1))
+        modal = getattr(job, "n_modes", None) is not None
+        transient = getattr(job, "workflow", None) == "transient" and not modal
+        tasks = () if transient else tuple(range(1, job.n_tasks + 1))
+        if modal:
+            operations = tuple(
+                operation for operation in operations if operation != "transient"
+            )
+        if transient:
+            operations = (*operations, "transient")
         requested_operations = tuple(dict.fromkeys(operations))
         local_root = self._local_result_path(job, project_path)
         prefix = self._s3_result_prefix(job)
@@ -2201,26 +2263,27 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
             prefix=".fs-catalog-", dir=local_root.parent
         ) as temporary:
             stage = Path(temporary)
-            self._download_s3_files(
-                prefix,
-                stage,
-                (index_path,),
-                missing_ok=True,
-            )
             use_index = False
-            try:
-                catalog: Union[TaskIndex, ArtifactCatalog] = TaskIndex.read(stage)
-                self._validate_remote_catalog(job, catalog, tasks)
-                use_index = True
-            except (ArtifactContractError, OSError, RuntimeError):
+            if tasks:
                 self._download_s3_files(
                     prefix,
                     stage,
-                    result_paths,
+                    (index_path,),
                     missing_ok=True,
                 )
-                catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
-                self._validate_remote_catalog(job, catalog, tasks)
+                try:
+                    catalog: Union[TaskIndex, ArtifactCatalog] = TaskIndex.read(stage)
+                    self._validate_remote_catalog(job, catalog, tasks)
+                    use_index = True
+                except (ArtifactContractError, OSError, RuntimeError):
+                    self._download_s3_files(
+                        prefix,
+                        stage,
+                        result_paths,
+                        missing_ok=True,
+                    )
+                    catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
+                    self._validate_remote_catalog(job, catalog, tasks)
 
             if operation_paths:
                 self._download_s3_files(
@@ -2288,36 +2351,9 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
     ) -> None:
         """Require exact task partitions and current staged provenance."""
 
-        fingerprints = getattr(
-            job, "staged_task_fingerprints", job.staged_artifact_fingerprints
-        )(self.__class__.__name__)
-        if fingerprints is None:
-            raise RuntimeError(
-                "Remote staged provenance is missing; restage the job before fetching"
-            )
-        for task in tasks:
-            frequency = complex(job.f_list[task - 1])
-            if isinstance(catalog, TaskIndex):
-                current = catalog.is_task_current(
-                    task,
-                    frequency=frequency,
-                    fingerprints=fingerprints,
-                )
-            else:
-                result = catalog.results.get(task)
-                current = bool(
-                    result is not None
-                    and result.successful
-                    and result.partition.frequency == frequency
-                    and all(
-                        result.fingerprints.get(key) == value
-                        for key, value in fingerprints.items()
-                    )
-                )
-            if not current:
-                raise RuntimeError(
-                    f"Remote task {task} does not match the current staged job"
-                )
+        validate_remote_task_catalog(
+            job, catalog, tasks, site_name=self.__class__.__name__
+        )
 
     def _validate_remote_operation(self, job: BaseJob, result: OperationResult) -> None:
         """Require a successful operation from the current staged generation."""
@@ -2382,10 +2418,7 @@ class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
         fetched = self.fetch_artifacts(
             job,
             requests=(
-                *(
-                    ArtifactRequest(role=role)
-                    for role in ("gradient", "objective", "focus_objective")
-                ),
+                *(ArtifactRequest(role=role) for role in POSTPROCESS_ARTIFACT_ROLES),
                 *requests,
             ),
             include_defaults=False,

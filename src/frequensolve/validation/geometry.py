@@ -10,8 +10,9 @@ import numpy as np
 import xarray as xr
 
 from frequensolve.geometry.frame import Axis, CoordinateSystem, CoordinateValue
-from frequensolve.mesh.mesh_generators import BaseMeshGenerator
+from frequensolve.mesh.mesh_generators import BaseMeshGenerator, HexMeshGenerator
 from frequensolve.mesh.mesh_manager import MeshManager
+from frequensolve.model.layered import LayeredModel
 from frequensolve.model.property import canonical_property_name
 from frequensolve.seismic.receivers import CoordsArray, CoordsFromFile
 from frequensolve.units import is_quantity, unit_expression, ureg
@@ -47,6 +48,7 @@ class _ValidationContext:
     systems: dict[str, CoordinateSystem]
     domain: Optional[_DomainBounds] = None
     allow_unverified_remote_files: bool = False
+    workflow: Optional[str] = None
 
 
 def _build_context(
@@ -661,6 +663,7 @@ def _validate_units(
 
 def _infer_domain_bounds(ctx: _ValidationContext) -> Optional[_DomainBounds]:
     mesh = getattr(ctx.simulation, "mesh", None)
+    model = getattr(ctx.simulation, "model", None)
     generator = None
     if isinstance(mesh, MeshManager):
         generator = mesh.mesh
@@ -669,9 +672,26 @@ def _infer_domain_bounds(ctx: _ValidationContext) -> Optional[_DomainBounds]:
     if generator is not None:
         domain = _domain_from_mesh_generator(generator, ctx)
         if domain is not None:
+            if (
+                isinstance(generator, HexMeshGenerator)
+                and isinstance(model, LayeredModel)
+                and not generator.clip_to_envelope
+                and generator.system in {None, "global"}
+            ):
+                # Layered meshing follows exposed horizons, including a
+                # seabed above the nominal water top after water pinches out.
+                # The generator's nominal box is not a vertical clipping box.
+                try:
+                    z0, z1 = model.z_limits_in(domain.units)
+                except ValueError:
+                    # Lazy file-backed horizons cannot supply extrema. Keep
+                    # checking horizontal bounds without mistaking the nominal
+                    # vertical box for a verified surface envelope.
+                    z0, z1 = -np.inf, np.inf
+                domain.lower[-1] = z0
+                domain.upper[-1] = z1
             return domain
 
-    model = getattr(ctx.simulation, "model", None)
     if model is not None and hasattr(model, "_mesh_bounds"):
         try:
             lower, upper, units = model._mesh_bounds()

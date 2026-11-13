@@ -1,0 +1,11 @@
+{
+  "schema": "fs-proximal-result-1",
+  "regularizer": "tv",
+  "solution": {"file": "proximal.h5", "dataset": "/solution"},
+  "value": 12.75,
+  "iterations": 31,
+  "residuals": {"primal": 0.0002, "dual": 0.0001},
+  "tolerances": {"primal": 0.001, "dual": 0.001},
+  "converged": true,
+  "nonconvergence_policy": "fail"
+}

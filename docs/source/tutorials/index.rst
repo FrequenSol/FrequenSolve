@@ -260,8 +260,9 @@ Output Tutorials
      - ``visual`` plus a configured site.
      - :download:`02_paraview_vtk.ipynb <../../../tutorials/06_outputs/02_paraview_vtk.ipynb>`
    * - Imaging
-     - :term:`RTM` imaging jobs, :term:`FWI`-gradient image requests, image
-       grids, and ``ImageDatabase`` reads.
+     - :term:`Control blocks <control block>`, observed data, misfit,
+       ``ImagingProblem`` linearizations and operators, :term:`RTM`,
+       sensitivity kernels, and a staged :term:`FWI` with checkpoints.
      - Configured site; cloud or HPC recommended for larger runs.
      - :download:`03_imaging.ipynb <../../../tutorials/06_outputs/03_imaging.ipynb>`
 
@@ -294,4 +295,5 @@ Related User Guide Pages
 - :doc:`../user_guide/mesh_generation_adaptivity`
 - :doc:`../user_guide/surveys_sources_receivers`
 - :doc:`../user_guide/traces_paraview_outputs`
+- :doc:`../user_guide/imaging`
 - :doc:`../glossary`

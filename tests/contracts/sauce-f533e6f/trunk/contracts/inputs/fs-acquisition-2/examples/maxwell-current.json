@@ -1,0 +1,32 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "electric_current",
+    "sources": [
+      {
+        "name": "transmitter",
+        "coordinates": {
+          "value": [
+            100,
+            200,
+            300
+          ],
+          "units": "m"
+        }
+      }
+    ],
+    "defaults": {
+      "direction": [
+        0,
+        0,
+        1
+      ],
+      "amplitude": {
+        "value": 1,
+        "units": "A*m"
+      }
+    }
+  },
+  "receiver_groups": []
+}

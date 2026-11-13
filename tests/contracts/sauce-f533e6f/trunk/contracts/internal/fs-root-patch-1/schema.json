@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/internal/fs-root-patch-1/schema.json",
+  "title": "fs-root-patch-1",
+  "x-fs-contract": "fs-root-patch-1",
+  "x-fs-visibility": "internal",
+  "x-fs-docs": false,
+  "type": "object",
+  "required": [
+    "schema",
+    "parent_fingerprint",
+    "roots"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-root-patch-1"
+    },
+    "parent_fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{16}$"
+    },
+    "roots": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "uniqueItems": true,
+      "minItems": 1
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/fragments/fs-receiver-expression.schema.json",
+  "title": "Receiver expression",
+  "description": "A linear wavefield expression with typed material coefficients. Symmetric tensor intermediates use Mandel packing.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "name"
+      ],
+      "properties": {
+        "kind": {
+          "const": "field"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "packing": {
+          "enum": [
+            "scalar",
+            "stress",
+            "strain"
+          ],
+          "default": "scalar"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "coefficient",
+        "child"
+      ],
+      "properties": {
+        "kind": {
+          "const": "scale"
+        },
+        "coefficient": {
+          "$ref": "fs-material-coefficient.schema.json"
+        },
+        "child": {
+          "$ref": "#"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "args"
+      ],
+      "properties": {
+        "kind": {
+          "const": "add"
+        },
+        "args": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "args"
+      ],
+      "properties": {
+        "kind": {
+          "const": "sub"
+        },
+        "args": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "child",
+        "index"
+      ],
+      "properties": {
+        "kind": {
+          "const": "select"
+        },
+        "child": {
+          "$ref": "#"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "factor": {
+          "type": "number",
+          "default": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

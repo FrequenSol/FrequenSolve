@@ -1,11 +1,14 @@
 """Simulation authoring containers and solver-contract serialization."""
 
 import copy
+import hashlib
 import json
 import logging
+import pickle
+import types
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
+from pathlib import Path, PurePath
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Tuple, Union
 
 import numpy as np
 
@@ -47,6 +50,66 @@ __all__ = [
     "BaseSimulation",
     "SeismicSimulation",
 ]
+
+
+class _NoIdentity(Exception):
+    """A payload object whose pickle need not determine its JSON."""
+
+
+class _IdentityPickler(pickle.Pickler):
+    """Pickle a JSON-like payload, rejecting objects that may encode otherwise.
+
+    Exact JSON types never reach ``reducer_override``; paths and NumPy scalars,
+    with the classes and constructors their reductions name, pickle their
+    whole value. Any other object makes the payload unidentified.
+    """
+
+    _VALUES = (type, types.BuiltinFunctionType, PurePath, np.generic, np.dtype)
+
+    def reducer_override(self, obj: Any) -> Any:
+        if isinstance(obj, self._VALUES):
+            return NotImplemented
+        raise _NoIdentity
+
+
+class _Digest:
+    """Write-only file object hashing what it receives."""
+
+    def __init__(self) -> None:
+        self.hash = hashlib.sha256()
+
+    def write(self, data: Any) -> None:
+        self.hash.update(data)
+
+
+def _payload_identity(payload: Any, options: Any) -> Optional[str]:
+    """Return a SHA-256 identifying a payload and its JSON options, or ``None``.
+
+    Equal identities imply equal JSON documents. Pickling streams into the
+    hash in C, so identifying ``n`` inline coefficients costs a fraction of
+    encoding them as indented JSON.
+    """
+
+    digest = _Digest()
+    try:
+        _IdentityPickler(digest, protocol=5).dump((payload, options))
+    except Exception:
+        return None
+    return digest.hash.hexdigest()
+
+
+def _file_status(path: Path) -> Optional[Tuple[int, ...]]:
+    try:
+        status = path.stat()
+    except OSError:
+        return None
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
 
 
 @register_class
@@ -234,6 +297,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             axisymmetric=axisymmetric,
             dimension=self.dimension,
         )
+        self._validate_azimuthal_mode()
         if self.project_path is None:
             raise ValueError(
                 "When initializing a simulation, you now must either call project.new_simulation() "
@@ -292,6 +356,7 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
             physics=physics,
             dimension=dimension,
             axisymmetric=axisymmetric,
+            azimuthal_mode=data.pop("azimuthal_mode", None),
             project_path=project_path,
         )
 
@@ -384,91 +449,6 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         sim_copy._file = file.parent.parent / name / name
         sim_copy.relocate(self.project_path)
         return sim_copy
-
-    def fwi(
-        self,
-        observed,
-        frequencies=None,
-        parameters=None,
-        grid=None,
-        site=None,
-        **kwargs,
-    ):
-        """Create an FWI problem bound to this simulation.
-
-        The returned object exposes PyLops-compatible Jacobian and adjoint
-        operators. The adjoint is the inverse-problem transpose, not a true
-        inverse solve.
-
-        Args:
-            observed: Observed data used by the inverse problem.
-            frequencies: Optional modeled frequencies.
-            parameters: Optional model parameters to invert.
-            grid: Optional inversion grid.
-            site: Optional execution site.
-            **kwargs: Additional FWI problem options.
-        """
-
-        from frequensolve.simulation.jobs.fwi import FWIProblem
-
-        return FWIProblem(
-            simulation=self,
-            observed=observed,
-            frequencies=frequencies,
-            parameters=parameters,
-            grid=grid,
-            site=site,
-            **kwargs,
-        )
-
-    def imaging_job(
-        self,
-        observed=None,
-        frequencies=None,
-        parameters=None,
-        grid=None,
-        fields=None,
-        condition=None,
-        images=None,
-        **kwargs,
-    ):
-        """Create an imaging job using natural parameter/field specifications.
-
-        Args:
-            observed: Optional observed data used by the imaging condition. When
-                omitted, the solver uses zero data for sensitivity kernels.
-            frequencies: Optional modeled frequencies.
-            parameters: Optional image parameters.
-            grid: Optional imaging grid.
-            fields: Optional field selections.
-            condition: Optional imaging condition.
-            images: Optional explicit image outputs.
-            **kwargs: Additional imaging job options.
-        """
-
-        from frequensolve.simulation.jobs.fwi import build_imaging_job
-
-        return build_imaging_job(
-            self,
-            observed=observed,
-            frequencies=frequencies,
-            parameters=parameters,
-            grid=grid,
-            fields=fields,
-            condition=condition,
-            images=images,
-            **kwargs,
-        )
-
-    def imaging(self, *args, **kwargs):
-        """Create an imaging job using the legacy method name.
-
-        ``imaging_job`` is the clearer public spelling, but keeping this alias
-        avoids breaking existing scripts and documentation that use
-        ``simulation.imaging(...)``.
-        """
-
-        return self.imaging_job(*args, **kwargs)
 
     def add_coordinate_system(
         self, system: Union[CoordinateSystem, Mapping[str, Any]]
@@ -566,7 +546,9 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         """
 
         self._synchronize_gravity_surface_loadings()
-        ctx = ctx or self.export_context()
+        ctx = copy.copy(ctx or self.export_context())
+        ctx.physics = self.physics
+        ctx.dimension = self.dimension
         if getattr(ctx, "default_length_units", None) is None:
             ctx.default_length_units = self.units.defaults.get("length")
         payload = super().to_fs(ctx)
@@ -700,6 +682,11 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
     def save(self, **json_kwargs) -> Path:
         """Write the simulation JSON file under this simulation's project path.
 
+        Every job saves its simulation before it runs. When the serialized
+        content equals what this object last wrote to that file and the file
+        is unchanged since, nothing is written again: inline control
+        coefficients make the JSON grow with the number of controls.
+
         Args:
             **json_kwargs: Keyword arguments forwarded to ``json.dump``.
 
@@ -718,6 +705,14 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
         indent = json_kwargs.pop("indent", 3)
         ctx = self.export_context()
         payload = self.to_fs(ctx)
+        identity = _payload_identity(payload, (indent, sorted(json_kwargs.items())))
+        if identity is not None and getattr(self, "_saved_identity", None) == (
+            identity,
+            file,
+            _file_status(file),
+        ):
+            return file
+        self._saved_identity = None
         atomic_write_json(
             file,
             payload,
@@ -741,6 +736,8 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
                     ctx.store.path,
                     reclaimed / (1024**3),
                 )
+        if identity is not None:
+            self._saved_identity = (identity, file, _file_status(file))
         return file
 
     def check(self) -> bool:
@@ -864,6 +861,9 @@ class SeismicSimulation(ExtraFieldsMixin, BaseSimulation):
                 if not path.is_absolute():
                     reference.file = target_project_path / path
         for group in self.acquisition.receiver_groups:
+            filters = getattr(group.device, "filters", None)
+            if filters is not None:
+                filters.resolve(target_project_path)
             coords = getattr(group, "coordinates", None)
             if isinstance(coords, CoordsFromFile):
                 coords.file = coords._contextual_file(

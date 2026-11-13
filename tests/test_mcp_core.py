@@ -311,6 +311,13 @@ def test_validation_explanations_and_fixed_resources_are_json_compatible():
         "constant": 10.0,
         "finite": True,
     }
+    guidance = catalog.authoring_rules.solver.tolerance_guidance
+    assert guidance
+    assert contracts["numerical_tolerance_guidance"] == guidance
+    assert (
+        resource_payload("authoring-rules")["entries"]["solver"]["tolerance_guidance"]
+        == guidance
+    )
 
     for name in (
         "identity",

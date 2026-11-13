@@ -1,0 +1,39 @@
+{
+  "fingerprints": {
+    "acquisition": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "model": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "objective_terms": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "observations": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "preprocessing": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source_signature": "none"
+  },
+  "frequency_hz": 4.0,
+  "laplace_damping_hz": 0.0,
+  "runtime": {
+    "n_terms": 1
+  },
+  "schema": "fs-objective-linearization-4",
+  "state_fingerprint": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "task": 1,
+  "terms": [
+    {
+      "cache": {
+        "file": "state_1_cache.h5",
+        "group": "/terms/0"
+      },
+      "effective_weight_mass": 1.0,
+      "id": "surface",
+      "layout_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "receiver_group": "surface",
+      "receiver_layout": "dense",
+      "reduction": "weighted_mean",
+      "runtime": {
+        "cache_fingerprint": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "n_components": 1,
+        "n_inactive": 0,
+        "n_rhs": 2
+      },
+      "weight": 1.0
+    }
+  ]
+}

@@ -27,3 +27,9 @@ alternative and its parameterized/hat/B-spline/mesh control definitions from
 extension verifies the public `ParameterizedProperty` serializer without
 adopting unrelated newer material representations. The producer reader is
 `trunk/src/Model/Fields/parameterized.sm.f90`.
+
+On 2026-11-05 `trunk/contracts/inputs/fs-acquisition-2/schema.json` and
+`trunk/contracts/fragments/fs-common-defs.schema.json` were refreshed verbatim
+from Sauce `rez` `ea58e6eaf66a814936831e2b1992451dbcd9084d`, matching the
+`sauce-f533e6f` mirror (adds `higher_frequency_derivative_datasets` and the
+`convolutionFilters` definition the acquisition schema references).

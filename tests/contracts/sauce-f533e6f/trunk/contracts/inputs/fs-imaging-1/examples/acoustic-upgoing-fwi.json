@@ -1,0 +1,39 @@
+{
+  "schema": "fs-imaging-1",
+  "name": "upgoing_vp_gradient",
+  "data_path": "data/observed",
+  "save_path": "results/imaging",
+  "grid": {
+    "system": "global",
+    "dims": ["x", "z"],
+    "x0": [0.0, 0.0],
+    "x1": [4.0, 2.0],
+    "n": [401, 201],
+    "units": "km"
+  },
+  "misfit": {
+    "objective": {
+      "kind": "l2"
+    },
+    "receiver_groups": [
+      {
+        "name": "receivers",
+        "observed": "shots/observed/receivers",
+        "simulated": "shots/simulated/receivers",
+        "projection": {
+          "kind": "up_down",
+          "pressure_component": "pressure",
+          "normal_velocity_component": "velocity_z",
+          "impedance": 1500000.0
+        }
+      }
+    ]
+  },
+  "images": [
+    {
+      "name": "vp",
+      "IC": "fwi:acoustic_up_down",
+      "property": "vp"
+    }
+  ]
+}

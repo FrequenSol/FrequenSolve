@@ -17,6 +17,7 @@ import numpy as np
 import xarray as xr
 from numpy.typing import ArrayLike
 
+from frequensolve.model.implicit_geometry import ImplicitSurface, RBFSurface
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.util.named_list import NamedList
 
@@ -24,10 +25,12 @@ from ._utils import _convert_units, _property_units
 from .borehole import (
     Borehole,
     BoreholeAnnularPadding,
+    BoreholeGrading,
     BoreholeLayer,
     BoreholePart,
     BoreholePlug,
     BoreholeSurface,
+    _coerce_borehole_grading,
 )
 from .surfaces import Fracture, Layer, SimpleSurface
 
@@ -264,6 +267,7 @@ class LayeredAuthoringMixin:
         annular_padding: Optional[
             Union[BoreholeAnnularPadding, Mapping[str, Any]]
         ] = None,
+        grading: Optional[Union[BoreholeGrading, Mapping[str, Any]]] = None,
         **kwargs,
     ) -> Borehole:
         """Add a vertical borehole and any declared material subdomains.
@@ -318,6 +322,13 @@ class LayeredAuthoringMixin:
             top = extent.get("top")
             bottom = extent.get("bottom")
         p_enrich = kwargs.pop("p_enrich", None)
+        borehole_adapt = kwargs.pop("adapt", None)
+        grading_extra = {
+            key: kwargs.pop(key)
+            for key in ("nearfield", "near_h0", "near_growth")
+            if key in kwargs
+        }
+        grading = _coerce_borehole_grading(grading, grading_extra)
         if kwargs:
             unexpected = ", ".join(sorted(kwargs))
             warnings.warn(
@@ -491,9 +502,19 @@ class LayeredAuthoringMixin:
             plugs=borehole_plugs,
             model=self,
             annular_padding=annular_padding_obj,
+            grading=grading,
+            **({"adapt": borehole_adapt} if borehole_adapt is not None else {}),
             **({"p_enrich": p_enrich} if p_enrich is not None else {}),
             **kwargs,
         )
+        for index, spec in enumerate(layers or []):
+            if isinstance(spec, BoreholeLayer) and spec.interface is not None:
+                wall = borehole.surfaces[borehole._outer_surface_index(index)]
+                if wall.interface is not None:
+                    raise ValueError(
+                        "Specify the interface on the layer or its outer surface"
+                    )
+                wall.interface = spec.interface
         self.boreholes.append(borehole)
         return borehole
 
@@ -514,9 +535,11 @@ class LayeredAuthoringMixin:
         property_units: Optional[Any] = None,
         property_system: Optional[str] = None,
         subdomain_name: Optional[str] = None,
+        fracture_model: str = "volumetric",
+        constitutive: Optional[Mapping[str, float]] = None,
         **kwargs,
     ) -> Fracture:
-        """Add a curve-based fracture opened by the layered mesh generator.
+        """Add a fracture represented as an opened volume or a closed interface.
 
         ``gap`` is the fracture aperture as a one-dimensional curve, usually an
         ``xarray.DataArray`` over the horizontal coordinate. ``depth`` locates
@@ -548,6 +571,11 @@ class LayeredAuthoringMixin:
             property_units: Default units for fracture material properties.
             property_system: Coordinate-system name for fracture material
                 property grids.
+            fracture_model: ``volumetric`` (default), ``fluid_filled``,
+                ``linear_slip``, ``lower_dimensional_fluid`` (acoustic waves),
+                ``lower_dimensional_viscous_fluid`` (viscous acoustic flow).
+                Reduced selectors
+                support Cartesian 2D/3D and axisymmetric 2D meshes.
             subdomain_name: Optional name for the generated material subdomain.
             **kwargs: Extra serialized fracture fields preserved on export.
 
@@ -583,6 +611,8 @@ class LayeredAuthoringMixin:
             property_units=property_units,
             property_system=property_system,
             subdomain_name=subdomain_name,
+            fracture_model=fracture_model,
+            constitutive=constitutive,
             **kwargs,
         )
         self += fracture
@@ -654,9 +684,19 @@ class LayeredAuthoringMixin:
             other._model = self
             self.boreholes.append(other)
             self._borehole_names.add(other.name)
+        elif isinstance(other, (RBFSurface, ImplicitSurface)):
+            # Implicit surfaces live beside the ordered graph surfaces; they
+            # never bound layers or count as interfaces.
+            self.add_implicit_surface(other)
         else:
             raise ValueError(f"Cannot add {type(other)} to LayeredModel")
         return self
+
+    def _reserved_surface_names(self) -> set:
+        names = super()._reserved_surface_names()
+        names.update(surface.name for surface in self.surfaces)
+        names.update(self._surface_names)
+        return names
 
     def _truncate_inplace(
         self,

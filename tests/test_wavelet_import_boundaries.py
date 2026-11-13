@@ -18,7 +18,7 @@ times = np.linspace(0, 1, 101)
 GaussianWindow(sigma=0.2).get(times, len(times))
 assert 'scipy.stats' in sys.modules
 wavelet = KlauderWavelet(f=[5, 15])
-wavelet._generate(times, None)
+wavelet.evaluate(times)
 assert 'scipy.signal' in sys.modules
 result = Wavelet._make_causal(wavelet.signal)
 assert result.size == times.size // 2 + 1
@@ -45,7 +45,7 @@ def test_klauder_wavelet_retains_scipy_sweep_autocorrelation(frequencies):
 
     times = np.linspace(0, 1, 101)
     wavelet = KlauderWavelet(f=frequencies, scale=2.0)
-    wavelet._generate(times, None)
+    wavelet.evaluate(times)
     sweep = chirp(times, f0=frequencies[0], t1=1.0, f1=frequencies[1], method="linear")
     expected = np.roll(
         correlate(sweep, sweep, mode="same", method="auto"), -len(times) // 2

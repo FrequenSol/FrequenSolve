@@ -10,11 +10,12 @@ pytest.importorskip("boto3")
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import ClientError
 
+from frequensolve.imaging import ImageKernelJob
 from frequensolve.orchestrator.sites.aws.aws import AWSSite
-from frequensolve.orchestrator.sites.base import JobStatus
+from frequensolve.orchestrator.sites.base import POSTPROCESS_ARTIFACT_ROLES, JobStatus
 from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
 from frequensolve.simulation.artifact_contract import ArtifactRecord, ArtifactRequest
-from frequensolve.simulation.jobs import BaseJob, ImagingJob
+from frequensolve.simulation.jobs import BaseJob
 from frequensolve.simulation.outputs import JobOutputs
 
 
@@ -261,7 +262,7 @@ def test_fetch_image_downloads_only_the_aggregate_image(tmp_path):
     site._s3_result_prefix = lambda job: (
         f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
     )
-    job = object.__new__(ImagingJob)
+    job = object.__new__(ImageKernelJob)
     job.simulation = SimpleNamespace(project_path=project)
     job.save_path = image.parent
     job.load_images = lambda: "image reader"
@@ -291,13 +292,23 @@ def test_fetch_image_rejects_paths_outside_the_project(tmp_path):
     )
     site.config = SimpleNamespace(s3_bucket="bucket")
 
-    job = object.__new__(ImagingJob)
-    job.name = "rtm"
-    job.simulation = SimpleNamespace(project_path=project_path, name="model")
-    job.save_path = tmp_path / "other" / "imaging"
+    job = SimpleNamespace(
+        name="rtm",
+        project_path=project_path,
+        simulation=SimpleNamespace(project_path=project_path, name="model"),
+        save_path=tmp_path / "other" / "imaging",
+        load_images=lambda: None,
+    )
 
     with pytest.raises(ValueError, match="outside project root"):
         site.fetch_image(job)
+
+
+def test_fetch_image_rejects_jobs_without_images():
+    site = make_site(FakeS3Client({}))
+
+    with pytest.raises(TypeError, match="ImageKernelJob"):
+        site.fetch_image(SimpleNamespace(name="forward"))
 
 
 @pytest.mark.parametrize(
@@ -332,10 +343,13 @@ def test_fetch_image_normalizes_missing_output_after_credential_refresh(
     site.cognito_auth = object()
     site._refresh_s3_credentials = lambda: None
 
-    job = object.__new__(ImagingJob)
-    job.name = "rtm"
-    job.simulation = SimpleNamespace(project_path=project_path, name="model")
-    job.save_path = project_path / "jobs" / "model" / "rtm" / "results" / "imaging"
+    job = SimpleNamespace(
+        name="rtm",
+        project_path=project_path,
+        simulation=SimpleNamespace(project_path=project_path, name="model"),
+        save_path=project_path / "jobs" / "model" / "rtm" / "results" / "imaging",
+        load_images=lambda: None,
+    )
 
     site.fetch_artifacts = lambda *_args, **_kwargs: site._download_s3_files(
         "project/results", tmp_path / "downloads", ("opaque/image.h5",)
@@ -592,10 +606,12 @@ def test_fetch_outputs_downloads_complete_configured_artifact_set():
         "traces": "trace-data",
         "wavefields": "wave-data",
     }
-    assert calls == [{"requests": (), "include_defaults": True, "operations": ()}]
+    assert calls == [
+        {"requests": (), "include_defaults": True, "operations": ("pack",)}
+    ]
 
 
-def test_fetch_outputs_downloads_aggregate_image_for_imaging_job(monkeypatch):
+def test_fetch_outputs_fetches_postprocess_roles_for_postprocessed_jobs():
     site = object.__new__(AWSSite)
     site._result_job = lambda job: job
     site._snapshot_run_job = lambda job, run_id: job
@@ -603,20 +619,26 @@ def test_fetch_outputs_downloads_aggregate_image_for_imaging_job(monkeypatch):
         f"{job.project_path.name}/jobs/{job.simulation.name}/{job.name}/results"
     )
     calls = []
-    site.fetch_artifacts = lambda job, **kwargs: calls.append(kwargs)
-    job = object.__new__(ImagingJob)
-    job.outputs = SimpleNamespace(wavefields=[])
-    job.load_images = lambda: calls.append("image")
-    monkeypatch.setattr(
-        ImagingJob,
-        "traces",
-        property(lambda self: SimpleNamespace(open=lambda: "trace-data")),
+    fetched = [Path("/project/results/imaging/image.h5")]
+    site.fetch_artifacts = lambda job, **kwargs: calls.append(kwargs) or fetched
+    job = SimpleNamespace(
+        outputs=SimpleNamespace(wavefields=[]),
+        requires_postprocess=lambda: True,
+        traces=SimpleNamespace(open=lambda: "trace-data"),
     )
-    assert site.fetch_outputs(job) == "trace-data"
+    assert site.fetch_outputs(job) == fetched
     assert calls == [
-        {"requests": (), "include_defaults": True, "operations": ("smooth",)},
-        "image",
+        {
+            "requests": tuple(
+                ArtifactRequest(role=role) for role in POSTPROCESS_ARTIFACT_ROLES
+            ),
+            "include_defaults": False,
+            "operations": ("smooth",),
+        }
     ]
+    assert {"image", "gradient", "objective", "state"} <= set(
+        POSTPROCESS_ARTIFACT_ROLES
+    )
 
 
 def test_aws_run_handle_honors_submit_time_fetch_after_success():
@@ -937,11 +959,9 @@ def test_fetch_outputs_preserves_control_postprocess_with_exact_catalog(tmp_path
     job = SimpleNamespace(requires_postprocess=lambda: True)
     assert site.fetch_outputs(job) == [gradient]
     assert calls[0]["operations"] == ("smooth",)
-    assert {request.role for request in calls[0]["requests"]} == {
-        "gradient",
-        "objective",
-        "focus_objective",
-    }
+    assert {request.role for request in calls[0]["requests"]} == set(
+        POSTPROCESS_ARTIFACT_ROLES
+    )
     site.fetch_artifacts = lambda *args, **kwargs: []
     with pytest.raises(FileNotFoundError, match="No postprocess artifact"):
         site.fetch_outputs(job)
@@ -950,6 +970,7 @@ def test_fetch_outputs_preserves_control_postprocess_with_exact_catalog(tmp_path
 def result_job(project_path, run_id="simulation-1"):
     job = object.__new__(BaseJob)
     job.name = "job-a"
+    job.simulation_overrides = {}
     job.simulation = SimpleNamespace(
         name="simulation-a",
         project_path=project_path,
@@ -1287,12 +1308,14 @@ def test_imaging_results_keep_each_run_separate(tmp_path, monkeypatch):
     )
     site.config = SimpleNamespace(s3_bucket="bucket")
     site._emit = lambda *_: None
-    job = object.__new__(ImagingJob)
+    job = object.__new__(ImageKernelJob)
     job.__dict__.update(result_job(tmp_path / "project-a").__dict__)
     job.save_path = job._result_path / "imaging"
     result_api(site, job)
     monkeypatch.setattr(
-        ImagingJob, "load_images", lambda selected: selected.image_file().read_text()
+        ImageKernelJob,
+        "load_images",
+        lambda selected: selected.image_file().read_text(),
     )
     first = site._make_run_handle(job, "simulation-1")._make_result(
         JobStatus(state="completed", return_code=0)
@@ -1570,21 +1593,19 @@ def test_native_cloud_result_reads_traces_and_fetches_declared_metadata_and_vtk(
 
 def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
     from frequensolve.geometry.grids import CartesianGrid
-    from frequensolve.simulation.jobs.fwi import build_imaging_job
     from frequensolve.simulation.simulation import SeismicSimulation
 
     simulation = SeismicSimulation(
         name="model", physics="elastic", dimension=2, project_path=tmp_path
     )
     grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[2.0, 1.0])
-    job = build_imaging_job(
+    job = ImageKernelJob(
+        "rtm",
         simulation,
-        frequencies=[5.0],
+        [5.0],
         grid=grid,
-        parameters=["Vp"],
+        images={"vp": "FWI:Vp"},
         weights=[1.0],
-        regularization={"type": "TV", "schedule": [0.1]},
-        interpretation={"units": ["m/s"]},
     )
     site = make_site(FakeS3Client({}))
     first = site._make_run_handle(job, "simulation-1")
@@ -1592,8 +1613,6 @@ def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
     job.grid.n[0] = 4
     job.grid.x1[0] = 3.0
     job.weights[0] = 2.0
-    job.regularization["schedule"][0] = 0.9
-    job.kwargs["interpretation"]["units"][0] = "km/s"
     job.images.clear()
     second = site._make_run_handle(job, "simulation-2")
 
@@ -1601,11 +1620,8 @@ def test_real_imaging_run_preserves_grid_and_fwi_metadata(tmp_path):
         assert run.job.grid.shape == (2, 3)
         assert run.job.grid.x1 == [2.0, 1.0]
         assert run.job.weights == [1.0]
-        assert run.job.regularization["schedule"] == [0.1]
-        assert run.job.kwargs["interpretation"]["units"] == ["m/s"]
         assert run.job.images
     assert second.job.grid.shape == (2, 4)
-    assert second.job.regularization["schedule"] == [0.9]
     assert second.job.images == {}
     assert first.job.grid is not second.job.grid
     assert job.save_path == job._result_path / "imaging"
@@ -1703,20 +1719,20 @@ def test_upload_rejects_missing_local_path_before_any_provider_call(tmp_path, me
 
 
 def test_observed_cloud_job_uses_its_accepted_run_without_changing_authoring(tmp_path):
-    from frequensolve.simulation.jobs.fwi import _observed_data_path
+    from frequensolve.imaging.data import _job_trace_stem
 
     job = result_job(tmp_path / "project-a")
     authored = job._result_path
     job.outputs.traces.path = "nested/traces"
     first = AWSSite._snapshot_run_job(job, "simulation-1")
     job._cloud_result_binding = first._cloud_result_binding
-    assert _observed_data_path(job) == authored / "runs/simulation-1/nested/traces"
+    assert _job_trace_stem(job) == authored / "runs/simulation-1/nested/traces"
     assert job._result_path == authored
     second = AWSSite._snapshot_run_job(job, "simulation-2")
     job._job_id = "simulation-2"
     job._cloud_result_binding = second._cloud_result_binding
-    assert _observed_data_path(job) == authored / "runs/simulation-2/nested/traces"
-    assert _observed_data_path(first) == authored / "runs/simulation-1/nested/traces"
+    assert _job_trace_stem(job) == authored / "runs/simulation-2/nested/traces"
+    assert _job_trace_stem(first) == authored / "runs/simulation-1/nested/traces"
     assert job._result_path == authored
 
 
@@ -1833,3 +1849,54 @@ def test_attached_run_logs_keep_the_requested_simulation(tmp_path):
     assert (selected / "planner.log").read_text() == "saved failure\n"
     assert site.graphql_client.calls[0][0] == "retained-failed-simulation"
     assert job._job_id == "simulation-1"
+
+
+def test_transient_fetch_uses_operation_without_frequency_tasks(tmp_path):
+    fingerprints = {k: "sha256:" + "a" * 64 for k in ("job", "simulation", "outputs")}
+    prefix = "project/jobs/simulation/job/results"
+    operation = {
+        "schema": "fs-operation-result-1",
+        "operation": {"name": "transient", "generation": "time-1"},
+        "fingerprints": fingerprints,
+        "status": {"state": "success", "code": 0},
+        "artifacts": [
+            {
+                "id": "field/step_000000000001",
+                "role": "sampled_wavefield",
+                "representation": "hdf5_shard",
+                "schema": "fs-time-step-1",
+                "path": "field/step_000000000001.h5",
+                "retention": "durable",
+                "bytes": 5,
+            }
+        ],
+    }
+    client = FakeS3Client(
+        {
+            f"{prefix}/_fs_run/operations/transient/result.json": json.dumps(operation),
+            f"{prefix}/field/step_000000000001.h5": "field",
+        }
+    )
+    job = SimpleNamespace(
+        workflow="transient",
+        n_tasks=1,
+        project_path=tmp_path / "project",
+        _result_path=tmp_path / prefix,
+        name="job",
+        simulation=SimpleNamespace(name="simulation"),
+        staged_artifact_fingerprints=lambda site: fingerprints,
+    )
+    site = make_site(client)
+    site._result_job = lambda selected: selected
+    site._s3_result_prefix = lambda selected: prefix
+    fetched = site.fetch_artifacts(
+        job,
+        requests=(ArtifactRequest(role="sampled_wavefield"),),
+        include_defaults=False,
+    )
+    assert fetched == [job._result_path / "field/step_000000000001.h5"]
+    assert [d["Key"] for d in client.downloads] == [
+        f"{prefix}/_fs_run/operations/transient/result.json",
+        f"{prefix}/field/step_000000000001.h5",
+    ]
+    assert not client.paginate_calls

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/outputs/fs-proximal-result-1/schema.json",
+  "title": "FS Proximal Result v1",
+  "x-fs-contract": "fs-proximal-result-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "type": "object",
+  "required": ["schema", "regularizer", "solution", "value", "iterations", "residuals", "tolerances", "converged"],
+  "properties": {
+    "schema": {"const": "fs-proximal-result-1"},
+    "regularizer": {"enum": ["tv", "tgv"]},
+    "solution": {
+      "type": "object",
+      "required": ["file", "dataset"],
+      "properties": {"file": {"type": "string"}, "dataset": {"type": "string"}},
+      "additionalProperties": false
+    },
+    "value": {"type": "number", "minimum": 0},
+    "iterations": {"type": "integer", "minimum": 0},
+    "residuals": {
+      "type": "object",
+      "required": ["primal", "dual"],
+      "properties": {"primal": {"type": "number", "minimum": 0}, "dual": {"type": "number", "minimum": 0}},
+      "additionalProperties": false
+    },
+    "tolerances": {
+      "type": "object",
+      "required": ["primal", "dual"],
+      "properties": {"primal": {"type": "number", "minimum": 0}, "dual": {"type": "number", "minimum": 0}},
+      "additionalProperties": false
+    },
+    "converged": {"type": "boolean"},
+    "nonconvergence_policy": {"enum": ["fail", "return_best"]}
+  },
+  "additionalProperties": false
+}

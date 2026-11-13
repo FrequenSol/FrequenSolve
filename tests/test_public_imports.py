@@ -137,6 +137,31 @@ if 'frequensolve.seismic._legacy_sources' in sys.modules:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def test_star_import_without_visual_extra_defers_colormap_error_until_use():
+    code = """
+import importlib.abc
+import sys
+
+class NoMatplotlib(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'matplotlib' or fullname.startswith('matplotlib.'):
+            raise ModuleNotFoundError('matplotlib is not installed', name=fullname)
+
+sys.meta_path.insert(0, NoMatplotlib())
+from frequensolve import *
+assert Project is not None
+assert TimeIntegration(0, 1, dt=0.01, f_max=20) is not None
+for operation in (lambda: BuGrOr(0.5), lambda: BuGrOr.N, lambda: get_colormap('BuGrOr')):
+    try:
+        operation()
+    except ImportError as error:
+        assert 'frequensolve[visual]' in str(error)
+    else:
+        raise AssertionError('using a colormap must require its optional dependency')
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_top_level_import_does_not_load_optional_backends():
     code = """
 import sys
@@ -188,7 +213,7 @@ def test_top_level_authoring_exports_are_available():
         "SourceEncoding",
         "EncodedSource",
         "DistributedSource",
-        "PreprocessHook",
+        "Preprocess",
         "EncodedReceiver",
         "ReceiverArray",
         "ReceiverWeightTable",
@@ -212,7 +237,10 @@ def test_top_level_authoring_exports_are_available():
         "info",
         "output_property",
         "BaseJob",
-        "TimeReversalFocusJob",
+        "ControlGradientJob",
+        "ImageKernelJob",
+        "ImagingProblem",
+        "Misfit",
         "FrequencyDomainJob",
         "TimeDomainJob",
         "RunFailedError",
@@ -343,9 +371,9 @@ def test_public_package_imports_smoke():
         "frequensolve.simulation.discretization",
         "frequensolve.simulation.jobs",
         "frequensolve.simulation.jobs.base",
-        "frequensolve.simulation.jobs.fwi",
-        "frequensolve.simulation.jobs.imaging",
         "frequensolve.simulation.jobs.forward",
+        "frequensolve.imaging",
+        "frequensolve.imaging.jobs",
         "frequensolve.simulation.outputs",
         "frequensolve.simulation.solver",
         "frequensolve.util",
@@ -397,10 +425,11 @@ def test_simulation_settings_accept_immutable_mapping_payloads():
     assert solver.to_fs() == {
         "solve_on": "final",
         "max_iter": 300,
-        "tolerance": 1.0e-4,
         "precision": "double",
         "custom_option": True,
     }
+    assert solver.tolerance is None
+    assert fs.SolverConfig(tolerance=3e-4).to_fs()["tolerance"] == 3e-4
     assert patch.grid == 2
     assert patch.domain == [7]
 

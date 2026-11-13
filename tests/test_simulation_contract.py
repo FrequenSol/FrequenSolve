@@ -72,3 +72,20 @@ def test_parameterized_property_matches_adopted_material_contract(kind):
     payload["parameterized"]["control"]["kind"] = "unsupported"
     with pytest.raises(ValidationError):
         validator.validate(payload)
+
+
+@pytest.mark.parametrize("policy", ["wavefield", "material_intersections"])
+def test_material_assembly_quadrature_contract(policy):
+    from frequensolve import Discretization
+
+    payload = Discretization(material_quadrature=policy).to_fs()
+    validator = _sauce_simulation_validator().evolve(
+        schema={
+            "$ref": json.loads(SIMULATION_SCHEMA.read_text())["$id"]
+            + "#/properties/Discretization"
+        }
+    )
+    validator.validate(payload)
+    assert Discretization.from_fs(payload).to_fs() == payload
+    with pytest.raises(ValidationError):
+        validator.validate({"material_quadrature": "tensor_points"})

@@ -19,7 +19,6 @@ from typing import Any, Mapping, Optional, Union
 
 from frequensolve._physics_components import allowed_components_for_physics
 from frequensolve._property_names import canonical_property_name
-from frequensolve._version import get_versions
 from frequensolve.solver import (
     SolverCompatibilityManifest,
     load_solver_compatibility,
@@ -236,9 +235,10 @@ class SolverAuthoringRules:
     precision_values: tuple[str, ...]
     default_solve_on: str
     default_max_iter: int
-    default_tolerance: float
+    default_tolerance: Optional[float]
     default_precision: str
     additional_fields_status: str
+    tolerance_guidance: str = ""
 
 
 @dataclass(frozen=True)
@@ -582,7 +582,9 @@ class SimulationKnowledgeCatalog:
 
         loaded_compatibility = compatibility or load_solver_compatibility()
         preferred = loaded_compatibility.preferred_solver
-        installed_version = package_version or get_versions()["version"]
+        from frequensolve import __version__
+
+        installed_version = package_version or __version__
         if not isinstance(installed_version, str) or not installed_version.strip():
             raise CatalogValidationError("package_version must be a non-empty string")
 
@@ -1039,6 +1041,7 @@ def _solver_rules(value: object, path: str) -> SolverAuthoringRules:
             "defaults",
             "additional_fields_status",
         },
+        optional={"tolerance_guidance"},
         path=path,
     )
     defaults = _mapping(data["defaults"], f"{path}.defaults")
@@ -1048,6 +1051,11 @@ def _solver_rules(value: object, path: str) -> SolverAuthoringRules:
         path=f"{path}.defaults",
     )
     return SolverAuthoringRules(
+        tolerance_guidance=(
+            _string(data["tolerance_guidance"], f"{path}.tolerance_guidance")
+            if "tolerance_guidance" in data
+            else ""
+        ),
         solve_on_values=_string_tuple(
             data["solve_on_values"], f"{path}.solve_on_values"
         ),
@@ -1056,7 +1064,11 @@ def _solver_rules(value: object, path: str) -> SolverAuthoringRules:
         ),
         default_solve_on=_string(defaults["solve_on"], f"{path}.defaults.solve_on"),
         default_max_iter=_integer(defaults["max_iter"], f"{path}.defaults.max_iter"),
-        default_tolerance=_number(defaults["tolerance"], f"{path}.defaults.tolerance"),
+        default_tolerance=(
+            None
+            if defaults["tolerance"] is None
+            else _number(defaults["tolerance"], f"{path}.defaults.tolerance")
+        ),
         default_precision=_string(defaults["precision"], f"{path}.defaults.precision"),
         additional_fields_status=_string(
             data["additional_fields_status"], f"{path}.additional_fields_status"
@@ -2265,7 +2277,7 @@ def _validate_authoring_rules(
     if (
         solver.default_solve_on != "final"
         or solver.default_max_iter != 300
-        or solver.default_tolerance != 1.0e-4
+        or solver.default_tolerance is not None
         or solver.default_precision != "single"
     ):
         raise CatalogValidationError("default solver settings are invalid")

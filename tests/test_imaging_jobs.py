@@ -1,0 +1,3210 @@
+import json
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
+
+from frequensolve.geometry.grids import CartesianGrid
+from frequensolve.imaging._artifacts import ControlVectorFile, SmoothingConfig
+from frequensolve.imaging.jobs import (
+    ControlGradientJob,
+    FWIOperatorJob,
+    ImageKernelJob,
+    ImageSpec,
+    SmoothJob,
+)
+from frequensolve.mesh.mesh_generators import HexMeshGenerator
+from frequensolve.mesh.mesh_manager import MeshManager
+from frequensolve.seismic.acquisition import Acquisition
+from frequensolve.seismic.receivers import ReceiverComponent, ReceiverNode
+from frequensolve.simulation.jobs import BaseJob
+from frequensolve.simulation.simulation import SeismicSimulation
+
+CONTRACT_ROOT = (
+    Path(__file__).parent / "contracts" / "sauce-f533e6f" / "trunk" / "contracts"
+)
+JOB_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-job-1" / "schema.json"
+JOB_EXAMPLES = CONTRACT_ROOT / "inputs" / "fs-job-1" / "examples"
+BACKGROUND_EXAMPLES = CONTRACT_ROOT / "outputs" / "fs-background-state-2" / "examples"
+
+
+def _job_validator() -> Draft202012Validator:
+    def retrieve(uri):
+        # Contracts referenced by fs-job-1 but not pinned here (fs-file-ref-1,
+        # fs-ray-tracing-1, ...) match nothing, which keeps every oneOf branch
+        # they appear in disjoint.
+        return Resource.from_contents(
+            {"$schema": "https://json-schema.org/draft/2020-12/schema", "not": {}}
+        )
+
+    registry = Registry(retrieve=retrieve)
+    for schema_file in CONTRACT_ROOT.rglob("*.json"):
+        if "examples" in schema_file.parts:
+            continue
+        contents = json.loads(schema_file.read_text())
+        if "$id" in contents:
+            registry = registry.with_resource(
+                contents["$id"], Resource.from_contents(contents)
+            )
+    return Draft202012Validator(json.loads(JOB_SCHEMA.read_text()), registry=registry)
+
+
+VALIDATOR = _job_validator()
+
+
+def _assert_valid(payload):
+    """Validate a job payload; ``result_path`` is added by the site at staging."""
+
+    candidate = json.loads(
+        json.dumps({**payload, "result_path": "results/job"}, default=str)
+    )
+    errors = sorted(
+        VALIDATOR.iter_errors(candidate), key=lambda error: list(error.path)
+    )
+    assert not errors, "\n".join(
+        f"{list(error.absolute_path)}: {error.message}" for error in errors
+    )
+    return candidate
+
+
+def _shape(value):
+    """Reduce absolute paths to basenames so payloads compare with the examples."""
+
+    if isinstance(value, dict):
+        return {key: _shape(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_shape(item) for item in value]
+    if isinstance(value, str) and ("/" in value) and not value.startswith("sha256"):
+        return Path(value).name
+    return value
+
+
+def _example(name):
+    return json.loads((JOB_EXAMPLES / name).read_text())
+
+
+def _saved_simulation(tmp_path, name="controlled"):
+    simulation = SeismicSimulation(
+        name=name, physics="acoustic", dimension=2, project_path=tmp_path
+    )
+    simulation.save()
+    return simulation
+
+
+def test_background_checkpoint_roundtrip_and_recursive_staging(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "capture",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["vp"],
+        state="state.json",
+        background="background.json",
+    )
+    loaded = BaseJob.load(linearize.save())
+    assert loaded.background == linearize.background
+    _assert_valid(loaded.to_fs())
+    manifest = linearize.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    shard = manifest.with_name("rank_0.json")
+    field = manifest.with_name("field.h5")
+    field.write_bytes(b"native-checkpoint-fixture")
+    shard.write_text(
+        json.dumps(
+            {"schema": "fs-background-shard-1", "shards": {"0": {"file": field.name}}}
+        )
+    )
+    manifest.write_text(
+        json.dumps(
+            {"schema": "fs-background-state-1", "shards": {"0": {"file": shard.name}}}
+        )
+    )
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction-fixture")
+    action = FWIOperatorJob(
+        "reuse",
+        sim,
+        [3.0],
+        action="normal",
+        active=["vp"],
+        state=state,
+        direction=direction,
+        covector="normal.h5",
+        background=manifest,
+    )
+    loaded = BaseJob.load(action.save())
+    assert loaded.background == manifest
+    pairs = loaded.remote_input_files("/remote/project")
+    local = {Path(pair[0]) for pair in pairs}
+    assert {manifest, shard, field} <= local
+    # A cache already resident on the execution site need not be downloaded.
+    field.unlink()
+    pairs = loaded.remote_input_files("/remote/project")
+    assert {manifest, shard} <= {Path(pair[0]) for pair in pairs}
+
+
+@pytest.mark.parametrize("layout", ["rank", "shared"])
+def test_version2_background_layout_roundtrip_and_staging(tmp_path, layout):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "capture",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["vp"],
+        state="state.json",
+        background="background.json",
+        background_layout=layout,
+    )
+    loaded = BaseJob.load(linearize.save())
+    assert loaded.background_layout == layout
+    assert _assert_valid(loaded.to_fs())["fwi_operator"]["background_layout"] == layout
+    # Sauce's published manifest names one file per rank or one shared file.
+    example = BACKGROUND_EXAMPLES / f"{layout}.json"
+    payload = json.loads(example.read_text())
+    manifest = linearize.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(example.read_text())
+    files = [manifest.parent / entry["file"] for entry in payload.get("shards", [])]
+    files = files or [manifest.parent / payload["file"]]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"native-checkpoint-fixture")
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction-fixture")
+    action = FWIOperatorJob(
+        "reuse",
+        sim,
+        [3.0],
+        action="normal",
+        active=["vp"],
+        state=state,
+        direction=direction,
+        covector="normal.h5",
+        background=manifest,
+    )
+    pairs = BaseJob.load(action.save()).remote_input_files("/remote/project")
+    assert {manifest, *files} <= {Path(pair[0]) for pair in pairs}
+
+
+def test_background_layout_requires_a_linearize_capture(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    options = dict(action="linearize", active=["vp"], state="state.json")
+    with pytest.raises(ValueError, match="'rank' or 'shared', not 'striped'"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [3.0],
+            background="background.json",
+            background_layout="striped",
+            **options,
+        )
+    with pytest.raises(ValueError, match="requires a linearize background"):
+        FWIOperatorJob("bad", sim, [3.0], background_layout="shared", **options)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {
+            "kernel_derivative": {
+                "axis": "fourier",
+                "order": 1,
+                "residual": "derivative",
+            }
+        },
+        {"source_controls": {"location_method": "analytic"}},
+    ],
+)
+def test_background_rejects_unsupported_actions(tmp_path, extra):
+    with pytest.raises(ValueError, match="background reuse"):
+        FWIOperatorJob(
+            "bad",
+            _saved_simulation(tmp_path),
+            [3.0],
+            action="linearize",
+            background="background.json",
+            **extra,
+        )
+
+
+def _elastic_simulation(tmp_path):
+    sim = SeismicSimulation(
+        name="smooth", physics="elastic", dimension=2, project_path=tmp_path
+    )
+    sim.model.x_limits = [0.0, 1.0]
+    sim.model.z_limits = [0.0, 1.0]
+    sim.mesh = MeshManager(
+        HexMeshGenerator(l_bound=[0.0, 0.0], u_bound=[1.0, 1.0], n=[1, 1])
+    )
+    acq = Acquisition()
+    acq.add_sources(kind="vector", coords=np.array([[0.5, 0.1]]), direction=[0.0, 1.0])
+    device = ReceiverNode(
+        name="geophone", components=[ReceiverComponent(name="vz", field="velocity")]
+    )
+    acq.add_receiver_group(
+        name="surface", device=device, coords=np.array([[0.0, 0.0], [1.0, 0.0]])
+    )
+    sim.acquisition = acq
+    sim.save()
+    return sim
+
+
+def _round_trip(job):
+    loaded = BaseJob.load(job.save())
+    assert type(loaded) is type(job)
+    before = job.to_fs()
+    after = loaded.to_fs()
+    before.pop("artifact_contract", None)
+    after.pop("artifact_contract", None)
+    assert json.loads(json.dumps(after, default=str)) == json.loads(
+        json.dumps(before, default=str)
+    )
+    return loaded
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"probes": 32, "seed": 17}, {"probes": 4, "source_samples": 16, "seed": 7}],
+)
+def test_receiver_diagonal_contract(tmp_path, options):
+    job = FWIOperatorJob(
+        "probes",
+        _saved_simulation(tmp_path),
+        [1.0, 2.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+        covector="gradient.h5",
+        receiver_diagonal=options,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["receiver_diagonal"].get("probes") == options.get(
+        "probes"
+    )
+    assert job.diagonal_file(2).name == "receiver_diagonal_2.h5"
+    _round_trip(job)
+
+
+def test_receiver_blocks_contract_and_round_trip(tmp_path):
+    job = FWIOperatorJob(
+        "blocks",
+        _saved_simulation(tmp_path),
+        [1.0, 2.0],
+        action="linearize",
+        active=["model.vp", "model.rho"],
+        state="state.json",
+        covector="gradient.h5",
+        receiver_diagonal={
+            "probes": 4,
+            "source_samples": 16,
+            "blocks": {"controls": ["model.vp", "rho"]},
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["receiver_diagonal"]["blocks"]["controls"] == [
+        "vp",
+        "rho",
+    ]
+    assert job.receiver_blocks_file(2).name == "receiver_blocks_2.h5"
+    loaded = _round_trip(job)
+    assert loaded.receiver_diagonal == job.receiver_diagonal
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"probes": 0},
+        {"probes": 1.5},
+        {"probes": True},
+        {"seed": 2**40},
+        {"wrong": 1},
+        {"source_samples": 0},
+        {"source_samples": 1.5},
+        {"source_samples": True},
+    ],
+)
+def test_receiver_diagonal_rejects_invalid_options(tmp_path, options):
+    with pytest.raises(ValueError):
+        FWIOperatorJob(
+            "probes",
+            _saved_simulation(tmp_path),
+            [1.0],
+            action="linearize",
+            state="state.json",
+            active=["model.vp"],
+            receiver_diagonal=options,
+        )
+
+
+def test_wri_diagonal_contract(tmp_path):
+    job = FWIOperatorJob(
+        "wri_diagonal",
+        _saved_simulation(tmp_path),
+        [1.0],
+        action="wri",
+        covector="gradient.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0, "diagonal": "diagonal.h5"},
+    )
+    _assert_valid(job.to_fs())
+    assert job.diagonal_file(1).name == "diagonal_1.h5"
+    _round_trip(job)
+
+
+# ---------------------------------------------------------------------------
+# pinned examples validate with the test validator
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name", sorted(p.name for p in JOB_EXAMPLES.glob("fwi-operator-*.json"))
+)
+def test_pinned_fwi_operator_examples_validate(name):
+    _assert_valid(_example(name))
+
+
+# ---------------------------------------------------------------------------
+# FWIOperatorJob
+# ---------------------------------------------------------------------------
+
+
+def test_fwi_linearize_matches_pinned_example_shape(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    job = FWIOperatorJob(
+        "fwi_linearize",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["model.acoustic_vp"],
+        state="state.json",
+        covector="gradient.h5",
+        control_active=["vp"],
+    )
+    payload = _assert_valid(job.to_fs())
+
+    example = _example("fwi-operator-linearize.json")
+    expected = dict(example["fwi_operator"])
+    expected.pop("model_gradient")  # false is the default; not emitted
+    expected.pop("cache_receiver_state")  # true is the default; not emitted
+    assert _shape(payload["fwi_operator"]) == expected
+    assert payload["control_sensitivities"] == {
+        **example["control_sensitivities"],
+        "quadrature": "auto",
+    }
+    assert payload["Imaging"] == {}
+    assert payload["workflow"] == "fwi_operator"
+    assert "Image" not in payload
+
+    assert (
+        job.state
+        == tmp_path / "jobs" / "controlled" / "fwi_linearize" / "results" / "state.json"
+    )
+    assert job.state_file(1).name == "state_1.json"
+    assert job.covector_file(2).name == "gradient_2.h5"
+    assert job.covector_file(raw=True).name == "gradient_raw.h5"
+    assert not job.requires_postprocess()
+    loaded = _round_trip(job)
+    assert loaded.active == ["model.acoustic_vp"]
+    assert loaded.control_active == ["vp"]
+    assert loaded.action == "linearize"
+
+
+def test_fwi_jvp_matches_pinned_joint_controls_example(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    job = FWIOperatorJob(
+        "fwi_linearize",
+        sim,
+        [4.0],
+        action="jvp",
+        active=["source.2.mechanism", "model.acoustic_vp", "source.1.position"],
+        state="state_1.json",
+        objective_vector="jvp.json",
+        direction="direction.h5",
+        manifest="controls.json",
+    )
+    payload = _assert_valid(job.to_fs())
+    assert (
+        _shape(payload["fwi_operator"])
+        == _example("fwi-operator-joint-controls.json")["fwi_operator"]
+    )
+    assert job.direction == tmp_path / "direction.h5"
+    assert job.objective_vector_file(1).name == "jvp_1.json"
+    assert job.manifest_file().name == "controls.json"
+    # one task: exact export and input paths
+    assert job.manifest_file(1).name == "controls.json"
+    (tmp_path / "direction_1.h5").write_bytes(b"")
+    assert job.task_input(job.direction, 1) == tmp_path / "direction.h5"
+    loaded = _round_trip(job)
+    assert loaded.active == [
+        "source.2.mechanism",
+        "model.acoustic_vp",
+        "source.1.position",
+    ]
+
+
+def test_fwi_vjp_normal_and_calibrate_payloads(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    vjp = FWIOperatorJob(
+        "vjp",
+        sim,
+        [4.0, 6.0],
+        action="vjp",
+        active=["vp"],
+        state="state.json",
+        objective_vector="dual.json",
+        covector="cov.h5",
+        objective="report.json",
+        control_state="baseline.h5",
+        state_output="resolved.h5",
+    )
+    payload = _assert_valid(vjp.to_fs())
+    op = payload["fwi_operator"]
+    assert op["action"] == "vjp"
+    assert op["controls"]["active"] == ["model.vp"]
+    assert Path(op["controls"]["state"]) == tmp_path / "baseline.h5"
+    assert Path(op["controls"]["state_output"]).name == "resolved.h5"
+    assert Path(op["objective_vector"]) == tmp_path / "dual.json"
+    # Sauce writes fs-objective-report-1 beside the state shard, not at objective
+    assert vjp.report_file(2).name == "state_2_report.json"
+    assert vjp.report_file().name == "state_report.json"
+    assert vjp.state_output_file().name == "resolved.h5"
+    # several tasks: exports are task-suffixed, inputs resolve per task
+    assert vjp.state_output_file(2).name == "resolved_2.h5"
+    assert vjp.task_input(vjp.objective_vector, 2) == tmp_path / "dual.json"
+    (tmp_path / "dual_2.json").write_text("{}")
+    assert vjp.task_input(vjp.objective_vector, 2) == tmp_path / "dual_2.json"
+    assert vjp.task_input(vjp.objective_vector, 1) == tmp_path / "dual.json"
+    _round_trip(vjp)
+
+    normal = FWIOperatorJob(
+        "normal",
+        sim,
+        [4.0],
+        action="normal",
+        active=["vp"],
+        state="state.json",
+        direction="d.h5",
+        covector="c.h5",
+        cache_receiver_state=False,
+    )
+    payload = _assert_valid(normal.to_fs())
+    assert payload["fwi_operator"]["cache_receiver_state"] is False
+    _round_trip(normal)
+
+    calibrate = FWIOperatorJob(
+        "calibrate",
+        sim,
+        [4.0],
+        action="calibrate",
+        balance="balance.json",
+        misfit={
+            "objective_terms": [
+                {
+                    "id": "waveform",
+                    "receiver_group": "surface",
+                    "normalization": {"scale": {"kind": "observed_rms"}},
+                }
+            ]
+        },
+    )
+    payload = _assert_valid(calibrate.to_fs())
+    assert payload["fwi_operator"] == {
+        "action": "calibrate",
+        "balance": str(calibrate.balance),
+    }
+    assert payload["Imaging"]["misfit"]["objective_terms"][0]["id"] == "waveform"
+    assert "controls" not in payload["fwi_operator"]
+    assert calibrate.balance_file(1).name == "balance_1.json"
+    loaded = _round_trip(calibrate)
+    assert loaded.misfit == calibrate.misfit
+
+
+@pytest.mark.parametrize("gram", ["frozen", "total"])
+def test_windowed_wri_round_trip(tmp_path, gram):
+    job = FWIOperatorJob(
+        "windowed_wri",
+        _saved_simulation(tmp_path),
+        [1.0 - 0.2j, 3.0 - 0.2j],
+        action="wri",
+        covector="g.h5",
+        wri={"penalty": 10.0},
+        gram_derivative=gram,
+        kernel_derivative={
+            "axis": "fourier",
+            "residual": "window",
+            "window": [0, 0, 0, 0, 1],
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["kernel_derivative"]["window"] == [0, 0, 0, 0, 1]
+    _round_trip(job)
+
+
+@pytest.mark.parametrize("options", [{"formulation": "original"}, {"diagonal": "d.h5"}])
+def test_windowed_wri_rejects_unmatched_formulation_and_curvature(tmp_path, options):
+    with pytest.raises(ValueError, match="WRI"):
+        FWIOperatorJob(
+            "invalid_wri",
+            _saved_simulation(tmp_path),
+            [3.0],
+            action="wri",
+            covector="g.h5",
+            wri={"penalty": 10.0, **options},
+            kernel_derivative={"residual": "derivative", "order": 4},
+        )
+
+
+def test_fwi_wri_payloads_match_pinned_examples(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    wri = FWIOperatorJob(
+        "wri_wavefield_update",
+        sim,
+        [4.0],
+        action="wri",
+        covector="wri_gradient.h5",
+        objective="wri_objective.h5",
+        wri={"penalty": 10.0, "data_scale": "auto", "receiver_group": "surface"},
+        gram_derivative="total",
+        control_active=["vp"],
+    )
+    payload = _assert_valid(wri.to_fs())
+    example = _example("fwi-operator-wri.json")
+    assert _shape(payload["fwi_operator"]) == example["fwi_operator"]
+    assert payload["control_sensitivities"] == {
+        **example["control_sensitivities"],
+        "quadrature": "auto",
+    }
+    _round_trip(wri)
+
+    calibration = FWIOperatorJob(
+        "observed_energy",
+        sim,
+        [4.0],
+        action="wri",
+        objective="scale.h5",
+        wri={"penalty": 10.0, "normalization_only": True},
+    )
+    _assert_valid(calibration.to_fs())
+    _round_trip(calibration)
+    for divisor in ("observed_energy", "none", 1e-15):
+        calibrated = FWIOperatorJob(
+            "normalized_wri",
+            sim,
+            [4.0],
+            action="wri",
+            covector="g.h5",
+            objective="objective.h5",
+            wri={"penalty": 10.0, "objective_normalization": divisor},
+        )
+        _assert_valid(calibrated.to_fs())
+        _round_trip(calibrated)
+
+    schur = FWIOperatorJob(
+        "wri_schur_normal",
+        sim,
+        [4.0],
+        action="wri",
+        covector="wri_normal.h5",
+        direction="direction.h5",
+        objective="wri_objective.h5",
+        wri={
+            "penalty": 10.0,
+            "data_scale": "auto",
+            "receiver_group": "surface",
+            "curvature": "joint_schur",
+        },
+        gram_derivative="frozen",
+        control_active=["vp"],
+    )
+    payload = _assert_valid(schur.to_fs())
+    example = _example("fwi-operator-wri-normal.json")
+    assert _shape(payload["fwi_operator"]) == example["fwi_operator"]
+    assert payload["control_sensitivities"] == {
+        **example["control_sensitivities"],
+        "quadrature": "auto",
+    }
+    loaded = _round_trip(schur)
+    assert loaded.direction == tmp_path / "direction.h5"
+    assert loaded.covector.name == "wri_normal.h5"
+
+    groups = FWIOperatorJob(
+        "wri_groups",
+        sim,
+        [4.0],
+        action="wri",
+        covector="g.h5",
+        wri={"penalty": 10.0, "receiver_groups": ["pressure", "motion"]},
+    )
+    payload = _assert_valid(groups.to_fs())
+    assert payload["control_sensitivities"] == {"quadrature": "auto"}
+
+
+@pytest.mark.parametrize("formulation", [None, "centered", "original"])
+def test_wri_formulation_round_trip(tmp_path, formulation):
+    options = {"penalty": 10.0}
+    if formulation is not None:
+        options["formulation"] = formulation
+    job = FWIOperatorJob(
+        "wri",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="wri",
+        covector="g.h5",
+        wri=options,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["wri"].get("formulation", "centered") == (
+        formulation or "centered"
+    )
+    assert _round_trip(job).wri == job.wri
+
+
+@pytest.mark.parametrize("formulation", ["condensed", "", None, False, {}])
+def test_wri_rejects_invalid_formulation(tmp_path, formulation):
+    with pytest.raises(ValueError, match="formulation must be centered or original"):
+        FWIOperatorJob(
+            "wri",
+            _saved_simulation(tmp_path),
+            [4.0],
+            action="wri",
+            covector="g.h5",
+            wri={"penalty": 10.0, "formulation": formulation},
+        )
+
+
+def test_fwi_extension_payloads_match_pinned_examples(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "lag_extension",
+        sim,
+        [3.0 + 0j],
+        action="linearize",
+        active=[],
+        state="extension_state.json",
+        extension={
+            "fields": [
+                {
+                    "control": "acoustic_vp",
+                    "lags": {
+                        "count": 3,
+                        "origin": -10.0,
+                        "spacing": 10.0,
+                        "units": "ms",
+                    },
+                }
+            ],
+            "manifest": "extension_space.json",
+        },
+    )
+    payload = _assert_valid(linearize.to_fs())
+    example = _example("fwi-operator-extension.json")
+    assert _shape(payload["fwi_operator"]) == example["fwi_operator"]
+    assert payload["f_list"] == [[3.0, 0.0]]
+    assert linearize.extension_manifest_file().name == "extension_space.json"
+    _round_trip(linearize)
+
+    solve = FWIOperatorJob(
+        "offset_extension_inner",
+        sim,
+        [3.0],
+        action="solve",
+        active=["model.acoustic_vp"],
+        state="extension_state_1.json",
+        model_gradient=True,
+        covector="background_gradient.h5",
+        extension={
+            "fields": [
+                {
+                    "control": "acoustic_vp",
+                    "offsets": {
+                        "half_offsets": [[-25.0, 0.0], [0.0, 0.0], [25.0, 0.0]],
+                        "units": "m",
+                    },
+                }
+            ],
+            "solver": {
+                "damping": 0.1,
+                "offset_penalty": 1.0,
+                "offset_scale": {"value": 25.0, "units": "m"},
+                "relative_tolerance": 1e-6,
+                "max_iterations": 100,
+                "require_convergence": True,
+                "solution": "extension_taps.h5",
+                "report": "inner_solve.json",
+            },
+        },
+    )
+    payload = _assert_valid(solve.to_fs())
+    example = _example("fwi-operator-extension-solve.json")
+    assert _shape(payload["fwi_operator"]) == example["fwi_operator"]
+    assert solve.extension_solution_file(1).name == "extension_taps_1.h5"
+    assert solve.extension_report_file(1).name == "inner_solve_1.json"
+    assert solve.extension_solution_file().parent == solve._result_path
+    loaded = _round_trip(solve)
+    assert loaded.model_gradient is True
+    assert loaded.extension["solver"]["offset_scale"] == {"value": 25.0, "units": "m"}
+
+    reduced = FWIOperatorJob(
+        "time_lag_reduced_normal",
+        sim,
+        [3.0],
+        action="solve",
+        active=["model.acoustic_vp"],
+        state="extension_state_1.json",
+        covector="physical_reduced_normal.h5",
+        direction="physical_direction.h5",
+        reduced_normal={"relative_tolerance": 1e-7, "max_iterations": 100},
+        extension={
+            "fields": [
+                {
+                    "control": "acoustic_vp",
+                    "lags": {
+                        "count": 5,
+                        "origin": -20.0,
+                        "spacing": 10.0,
+                        "units": "ms",
+                    },
+                }
+            ],
+            "solver": {
+                "damping": 0.1,
+                "relative_tolerance": 1e-6,
+                "max_iterations": 100,
+                "require_convergence": True,
+                "solution": "extension_taps.h5",
+                "report": "inner_solve.json",
+                "lag_penalty": 1.0,
+                "lag_scale": {"value": 20.0, "units": "ms"},
+            },
+        },
+    )
+    payload = _assert_valid(reduced.to_fs())
+    example = _example("fwi-operator-reduced-normal.json")
+    assert _shape(payload["fwi_operator"]) == example["fwi_operator"]
+    _round_trip(reduced)
+
+    ext_jvp = FWIOperatorJob(
+        "ext_jvp",
+        sim,
+        [3.0],
+        action="jvp",
+        active=[],
+        state="s.json",
+        objective_vector="jvp.json",
+        extension={
+            "fields": [
+                {
+                    "control": "vp",
+                    "lags": {"count": 2, "origin": 0.0, "spacing": 5.0, "units": "ms"},
+                }
+            ],
+            "direction": "taps.h5",
+        },
+    )
+    payload = _assert_valid(ext_jvp.to_fs())
+    assert (
+        Path(payload["fwi_operator"]["extension"]["direction"]) == tmp_path / "taps.h5"
+    )
+    _round_trip(ext_jvp)
+
+
+def test_fwi_reflectivity_and_source_controls_match_pinned_examples(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    reflectivity = FWIOperatorJob(
+        "joint-impedance-reflectivity",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["model.acoustic_vp", "reflectivity.ip"],
+        state="extension_state.json",
+        covector="joint_gradient.h5",
+        reflectivity={
+            "parameterization": "vp_ip",
+            "fields": [{"name": "ip", "layer": 2, "axis": 2, "basis": "acoustic_vp"}],
+        },
+    )
+    payload = _assert_valid(reflectivity.to_fs())
+    assert (
+        _shape(payload["fwi_operator"])
+        == _example("fwi-operator-reflectivity.json")["fwi_operator"]
+    )
+    _round_trip(reflectivity)
+
+    sources = FWIOperatorJob(
+        "fwi_linearize",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["source.1.position", "source.1.mechanism"],
+        state="source_state.json",
+        covector="gradient.h5",
+        source_controls={"location_method": "local_fd4", "reference_step": 0.0001},
+    )
+    payload = _assert_valid(sources.to_fs())
+    example = _example("fwi-operator-source-controls.json")["fwi_operator"]
+    example.pop("cache_receiver_state")
+    assert _shape(payload["fwi_operator"]) == example
+    _round_trip(sources)
+
+
+def test_fwi_kernel_derivative_emits_both_imaging_keys(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    job = FWIOperatorJob(
+        "kernel",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["vp"],
+        state="s.json",
+        covector="c.h5",
+        misfit={"objective": {"kind": "l2"}},
+        kernel_derivative={
+            "order": 2,
+            "axis": "laplace",
+            "residual": "window",
+            "window": [0.0, 0.0, 1.0],
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["kernel_derivative"] == {
+        "order": 2,
+        "axis": "laplace",
+        "residual": "window",
+        "window": [0.0, 0.0, 1.0],
+    }
+    assert (
+        payload["Image"]
+        == payload["Imaging"]
+        == {"misfit": {"objective": {"kind": "l2"}}}
+    )
+    loaded = _round_trip(job)
+    assert loaded.kernel_derivative == job.kernel_derivative
+    with pytest.raises(ValueError, match="residual"):
+        FWIOperatorJob(
+            "k",
+            sim,
+            [4.0],
+            action="linearize",
+            active=["vp"],
+            state="s.json",
+            kernel_derivative={"order": 1},
+        )
+    with pytest.raises(ValueError, match="not allowed"):
+        FWIOperatorJob(
+            "k",
+            sim,
+            [4.0],
+            action="linearize",
+            active=["vp"],
+            state="s.json",
+            kernel_derivative={"residual": "jet"},
+        )
+
+
+@pytest.mark.parametrize("action", ["jvp", "normal"])
+def test_fwi_total_source_higher_order_tangents_need_phase(tmp_path, action):
+    sim = _saved_simulation(tmp_path)
+    kernel = {
+        "axis": "fourier",
+        "residual": "window",
+        "window": [0.0, 0.0, 0.0, 1.0],
+        "source_derivative": "total",
+    }
+    outputs = (
+        {"objective_vector": "vector.json"}
+        if action == "jvp"
+        else {"covector": "normal.h5"}
+    )
+
+    def job(kind):
+        return FWIOperatorJob(
+            action,
+            sim,
+            [13.0],
+            action=action,
+            active=["vs"],
+            state="s.json",
+            direction="d.h5",
+            misfit={"comparison": {"kind": kind, "source_derivative": "total"}},
+            kernel_derivative=kernel,
+            **outputs,
+        )
+
+    # A windowed phase mixes its total-source planes from frozen ones at any order.
+    assert job("phase_derivative").kernel_derivative["source_derivative"] == "total"
+    assert job("wavenumber").kernel_derivative["source_derivative"] == "total"
+    with pytest.raises(ValueError, match="waveform series require a frozen source"):
+        job("waveform")
+
+
+def test_fwi_smoothing_binds_the_smooth_postprocess_to_covector_parts(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    job = FWIOperatorJob(
+        "smoothed",
+        sim,
+        [2.0, 4.0],
+        action="linearize",
+        active=["model.vp", "model.rho"],
+        state="s.json",
+        covector="gradient.h5",
+        weights=[0.25, 0.75],
+        smoothing=SmoothingConfig(kind="tv", wavelength_fraction=0.2),
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["control_sensitivities"] == {
+        "quadrature": "auto",
+        "active": ["vp", "rho"],
+        "gradient": str(job.covector),
+        "Smoothing": {
+            "type": "tv",
+            "lambda": 0.2,
+            "derivative_order": 1,
+            "epsilon": 1e-3,
+            "iterations": 5,
+            "input_role": "dual",
+        },
+        "weights": [0.25, 0.75],
+    }
+    assert job.requires_postprocess()
+    assert job.postprocess_file(1) == job.covector_file(1)
+    assert job.postprocess_fetch_files() == [job.covector_file(raw=True), job.covector]
+    assert not job.needs_postprocess()
+    job.covector.parent.mkdir(parents=True)
+    job.covector_file(1).touch()
+    job.covector_file(2).touch()
+    assert job.postprocess_part_outputs_exist()
+    assert job.needs_postprocess()
+    job.covector.touch()
+    assert not job.needs_postprocess()
+    loaded = _round_trip(job)
+    assert loaded.smoothing == job.smoothing
+    assert loaded.weights == [0.25, 0.75]
+
+    with pytest.raises(ValueError, match="model.\\* blocks"):
+        FWIOperatorJob(
+            "s",
+            sim,
+            [2.0],
+            action="linearize",
+            active=["source.1.position"],
+            state="s.json",
+            covector="c.h5",
+            smoothing={"type": "tv"},
+        )
+
+
+def test_fwi_support_keys_are_emitted_under_controls_only_when_set(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    plain = FWIOperatorJob(
+        "lin", sim, [2.0], action="linearize", active=["model.vp"], state="s.json"
+    )
+    plain_payload = _assert_valid(plain.to_fs())
+    assert "min_support" not in plain_payload["fwi_operator"]["controls"]
+    assert "support_measure" not in plain_payload["fwi_operator"]["controls"]
+
+    job = FWIOperatorJob(
+        "lin",
+        sim,
+        [2.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="c.h5",
+        state_output="state.h5",
+        min_support=0.05,
+        support_measure=True,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["controls"] == {
+        "active": ["model.vp"],
+        "state_output": str(job.state_output),
+        "min_support": 0.05,
+        "support_measure": True,
+    }
+    assert job._input_fingerprint_payload() == plain._input_fingerprint_payload()
+    loaded = _round_trip(job)
+    assert loaded.min_support == 0.05
+    assert loaded.support_measure is True
+
+    threshold_only = FWIOperatorJob(
+        "vjp",
+        sim,
+        [2.0],
+        action="vjp",
+        active=["model.vp"],
+        state="s.json",
+        covector="c.h5",
+        objective_vector="dual.h5",
+        min_support=0.0,
+    )
+    controls = _assert_valid(threshold_only.to_fs())["fwi_operator"]["controls"]
+    assert controls["min_support"] == 0.0
+    assert "support_measure" not in controls
+
+    with pytest.raises(ValueError, match="non-negative"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [2.0],
+            action="linearize",
+            active=[],
+            state="s.json",
+            min_support=-1.0,
+        )
+    with pytest.raises(TypeError, match="must be a number"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [2.0],
+            action="linearize",
+            active=[],
+            state="s.json",
+            min_support=True,
+        )
+    with pytest.raises(ValueError, match="fwi_operator.controls"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [2.0],
+            action="calibrate",
+            balance="b.json",
+            support_measure=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {"action": "jvp", "active": ["vp"], "state": "s", "objective_vector": "o"},
+            "requires a direction",
+        ),
+        (
+            {"action": "jvp", "active": ["vp"], "state": "s", "direction": "d"},
+            "objective_vector output",
+        ),
+        (
+            {
+                "action": "jvp",
+                "active": [],
+                "state": "s",
+                "direction": "d",
+                "objective_vector": "o",
+            },
+            "nonempty active",
+        ),
+        (
+            {
+                "action": "jvp",
+                "active": ["vp"],
+                "state": "s",
+                "direction": "d",
+                "objective_vector": "o",
+                "covector": "c",
+            },
+            "does not write a covector",
+        ),
+        (
+            {"action": "vjp", "active": ["vp"], "state": "s", "objective_vector": "o"},
+            "covector output",
+        ),
+        (
+            {"action": "vjp", "active": ["vp"], "state": "s", "covector": "c"},
+            "objective_vector input",
+        ),
+        (
+            {
+                "action": "vjp",
+                "active": ["vp"],
+                "state": "s",
+                "covector": "c",
+                "objective_vector": "o",
+                "direction": "d",
+            },
+            "does not take a direction",
+        ),
+        (
+            {"action": "normal", "active": ["vp"], "state": "s", "direction": "d"},
+            "direction and covector",
+        ),
+        (
+            {"action": "normal", "active": ["vp"], "state": "s", "covector": "c"},
+            "direction and covector",
+        ),
+        (
+            {"action": "linearize", "active": ["vp"], "state": "s", "direction": "d"},
+            "does not take a direction",
+        ),
+        ({"action": "linearize", "active": ["vp"]}, "requires a state"),
+        ({"action": "linearize", "state": "s"}, "requires active"),
+        ({"action": "calibrate"}, "balance"),
+        (
+            {"action": "calibrate", "balance": "b", "active": ["vp"]},
+            "not accepted by action",
+        ),
+        (
+            {"action": "calibrate", "balance": "b", "smoothing": {"type": "tv"}},
+            "control sensitivities",
+        ),
+        ({"action": "wri", "covector": "c"}, "wri options"),
+        ({"action": "wri", "covector": "c", "wri": {"data_scale": "auto"}}, "penalty"),
+        ({"action": "wri", "covector": "c", "wri": {"penalty": 0.0}}, "positive"),
+        ({"action": "wri", "wri": {"penalty": 1.0}}, "model_covector"),
+        (
+            {
+                "action": "wri",
+                "covector": "c",
+                "wri": {"penalty": 1.0, "curvature": "joint_schur"},
+            },
+            "model_direction",
+        ),
+        (
+            {
+                "action": "wri",
+                "covector": "c",
+                "direction": "d",
+                "wri": {"penalty": 1.0, "diagonal": "diagonal.h5"},
+            },
+            "direction excludes",
+        ),
+        (
+            {"action": "wri", "covector": "c", "state": "s", "wri": {"penalty": 1.0}},
+            "not accepted by action",
+        ),
+        (
+            {
+                "action": "wri",
+                "covector": "c",
+                "wri": {
+                    "penalty": 1.0,
+                    "receiver_group": "a",
+                    "receiver_groups": ["b"],
+                },
+            },
+            "mutually exclusive",
+        ),
+        ({"action": "solve", "active": [], "state": "s"}, "requires an extension"),
+        (
+            {
+                "action": "solve",
+                "active": [],
+                "state": "s",
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ]
+                },
+            },
+            "extension.solver",
+        ),
+        (
+            {
+                "action": "solve",
+                "active": [],
+                "state": "s",
+                "covector": "c",
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ],
+                    "solver": {"damping": 1, "solution": "t", "report": "r"},
+                },
+            },
+            "model_gradient or reduced_normal",
+        ),
+        (
+            {
+                "action": "solve",
+                "active": ["vp"],
+                "state": "s",
+                "covector": "c",
+                "reduced_normal": {},
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ],
+                    "solver": {"damping": 1, "solution": "t", "report": "r"},
+                },
+            },
+            "physical control direction",
+        ),
+        (
+            {
+                "action": "solve",
+                "active": ["vp"],
+                "state": "s",
+                "covector": "c",
+                "direction": "d",
+                "model_gradient": True,
+                "reduced_normal": {},
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ],
+                    "solver": {"damping": 1, "solution": "t", "report": "r"},
+                },
+            },
+            "not both",
+        ),
+        (
+            {
+                "action": "solve",
+                "active": ["vp"],
+                "state": "s",
+                "covector": "c",
+                "model_gradient": True,
+                "objective_vector": "o",
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ],
+                    "solver": {"damping": 1, "solution": "t", "report": "r"},
+                },
+            },
+            "observed-data target",
+        ),
+        (
+            {"action": "linearize", "active": [], "state": "s", "reduced_normal": {}},
+            "requires a model extension",
+        ),
+        (
+            {"action": "linearize", "active": [], "state": "s", "model_gradient": True},
+            "action = solve",
+        ),
+        (
+            {
+                "action": "linearize",
+                "active": [],
+                "state": "s",
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ]
+                },
+                "reflectivity": {
+                    "parameterization": "vp_ip",
+                    "fields": [{"name": "ip", "layer": 1, "axis": 2, "basis": "vp"}],
+                },
+            },
+            "mutually exclusive",
+        ),
+        (
+            {
+                "action": "linearize",
+                "active": [],
+                "state": "s",
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ]
+                },
+                "control_active": ["vp"],
+            },
+            "control_sensitivities",
+        ),
+        (
+            {
+                "action": "linearize",
+                "active": [],
+                "state": "s",
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ]
+                },
+                "covector": "c",
+            },
+            "extension.covector",
+        ),
+        (
+            {
+                "action": "linearize",
+                "active": [],
+                "state": "s",
+                "extension": {"fields": [{"control": "vp"}]},
+            },
+            "exactly one of lags or offsets",
+        ),
+        (
+            {
+                "action": "linearize",
+                "active": [],
+                "state": "s",
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ],
+                    "solver": {
+                        "damping": 1,
+                        "solution": "t",
+                        "report": "r",
+                        "lag_penalty": 1.0,
+                    },
+                },
+            },
+            "lag_scale",
+        ),
+        (
+            {
+                "action": "linearize",
+                "active": ["vp"],
+                "state": "s",
+                "reflectivity": {
+                    "parameterization": "vp_ip",
+                    "fields": [{"name": "ip", "layer": 1, "axis": 3, "basis": "vp"}],
+                },
+            },
+            "axis",
+        ),
+        (
+            {
+                "action": "linearize",
+                "active": ["vp"],
+                "state": "s",
+                "reflectivity": {
+                    "parameterization": "vp_ip",
+                    "fields": [{"name": "ip", "layer": 1, "axis": 2}],
+                },
+            },
+            "exactly one of basis or control",
+        ),
+        (
+            {
+                "action": "solve",
+                "active": [],
+                "state": "s",
+                "source_controls": {},
+                "extension": {
+                    "fields": [
+                        {
+                            "control": "vp",
+                            "lags": {
+                                "count": 1,
+                                "origin": 0,
+                                "spacing": 1,
+                                "units": "s",
+                            },
+                        }
+                    ],
+                    "solver": {"damping": 1, "solution": "t", "report": "r"},
+                },
+            },
+            "source_controls",
+        ),
+        ({"action": "linearize", "active": ["vp", "model.vp"], "state": "s"}, "unique"),
+        ({"action": "warp"}, "action must be one of"),
+    ],
+)
+def test_fwi_operator_action_validation(tmp_path, kwargs, message):
+    sim = _saved_simulation(tmp_path)
+    with pytest.raises(ValueError, match=message):
+        FWIOperatorJob("bad", sim, [4.0], **kwargs)
+
+
+def test_fwi_fingerprints_hash_direction_and_baseline_contents(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    direction = ControlVectorFile(
+        {"model.vp": [1.0, 0.0]},
+        state_fingerprint="s",
+        control_registry_fingerprint="r",
+    ).write(tmp_path / "direction.h5")
+    baseline = tmp_path / "baseline.h5"
+    baseline.write_bytes(b"one")
+    job = FWIOperatorJob(
+        "jvp",
+        sim,
+        [4.0],
+        action="jvp",
+        active=["vp"],
+        state="state.json",
+        direction=direction,
+        objective_vector="jvp.json",
+        control_state=baseline,
+    )
+    reference = job.fingerprint()
+    task_reference = job.task_fingerprint(1)
+    payload = job._input_fingerprint_payload()
+    assert set(payload) == {"direction", "control_state"}
+
+    ControlVectorFile(
+        {"model.vp": [0.0, 1.0]},
+        state_fingerprint="s",
+        control_registry_fingerprint="r",
+    ).write(direction)
+    assert job.fingerprint() != reference
+    assert job.task_fingerprint(1) != task_reference
+    changed = job.fingerprint()
+    baseline.write_bytes(b"two")
+    assert job.fingerprint() != changed
+
+    # The fwi_operator and Imaging blocks participate in the job fingerprint.
+    same = FWIOperatorJob(
+        "jvp",
+        sim,
+        [4.0],
+        action="jvp",
+        active=["vp"],
+        state="state.json",
+        direction=direction,
+        objective_vector="jvp.json",
+        control_state=baseline,
+    )
+    other = FWIOperatorJob(
+        "jvp",
+        sim,
+        [4.0],
+        action="jvp",
+        active=["vp"],
+        state="state.json",
+        direction=direction,
+        objective_vector="jvp.json",
+        control_state=baseline,
+        misfit={"objective": {"kind": "huber", "delta": 1.5}},
+    )
+    assert same.fingerprint() == job.fingerprint()
+    assert other.fingerprint() != job.fingerprint()
+    assert "fwi_operator" in job.effective_output_request_payload()
+
+
+def test_fwi_vjp_fingerprint_hashes_per_task_objective_duals(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    dual = tmp_path / "dual.json"
+    job = FWIOperatorJob(
+        "vjp",
+        sim,
+        [4.0, 6.0],
+        action="vjp",
+        active=["vp"],
+        state="state.json",
+        objective_vector=dual,
+        covector="c.h5",
+    )
+    (tmp_path / "dual_1.json").write_text("{}")
+    (tmp_path / "dual_2.json").write_text("{}")
+    payload = job._input_fingerprint_payload()
+    assert set(payload["objective_vector"]) == {"1", "2"}
+    shared = tmp_path / "shared.json"
+    shared.write_text("{}")
+    job.objective_vector = shared
+    assert set(job._input_fingerprint_payload()["objective_vector"]) == {"shared"}
+
+
+# ---------------------------------------------------------------------------
+# ControlGradientJob
+# ---------------------------------------------------------------------------
+
+
+def test_control_gradient_exports_independent_spectral_orders(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    job = ControlGradientJob(
+        "orders",
+        sim,
+        [1.0 - 0.05j],
+        kind="rtm",
+        observed="observed.h5",
+        gradient="gradient.h5",
+        objective_file="objective.h5",
+        kernel_derivative={
+            "order": 4,
+            "residual": "derivative",
+            "export_lower_orders": True,
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    loaded = ControlGradientJob.from_fs(payload)
+    assert loaded.derivative_orders == (0, 1, 2, 3, 4)
+    assert loaded.trace_outputs.groups == [
+        "surface",
+        "surface_df",
+        "surface_d2f",
+        "surface_d3f",
+        "surface_d4f",
+    ]
+    assert any(
+        component.startswith("surface_d4f:")
+        for component in loaded.trace_outputs.components
+    )
+    assert loaded.gradient_file(derivative_order=4) == loaded.gradient_file()
+    assert loaded.gradient_file(2, derivative_order=0).name == "gradient_d0_2.h5"
+    assert loaded.objective_file(2, derivative_order=3).name == "objective_d3_2.h5"
+    assert (
+        loaded.gradient_file(raw=True, derivative_order=2).name == "gradient_d2_raw.h5"
+    )
+    assert len(loaded.postprocess_fetch_files()) == 15
+    assert not loaded.postprocess_output_exists()
+    assert not loaded.postprocess_part_outputs_exist()
+    for order in loaded.derivative_orders:
+        for path in (
+            loaded.gradient_file(derivative_order=order),
+            loaded.objective_file(derivative_order=order),
+            loaded.gradient_file(1, derivative_order=order),
+            loaded.objective_file(1, derivative_order=order),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+    assert loaded.postprocess_output_exists()
+    assert loaded.postprocess_part_outputs_exist()
+    loaded.gradient_file(1, derivative_order=2).unlink()
+    assert not loaded.postprocess_part_outputs_exist()
+    with pytest.raises(ValueError, match="not exported"):
+        loaded.gradient_file(derivative_order=5)
+    with pytest.raises(ValueError, match="ControlGradientJob"):
+        FWIOperatorJob(
+            "bad_orders",
+            sim,
+            [1.0],
+            action="linearize",
+            covector="gradient.h5",
+            kernel_derivative=job.kernel_derivative,
+        )
+
+
+def test_control_gradient_spectral_receiver_diagonals(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    job = ControlGradientJob(
+        "probes",
+        sim,
+        [1 - 0.1j, 2 - 0.1j],
+        kind="rtm",
+        observed="observed.h5",
+        gradient="gradient.h5",
+        kernel_derivative={
+            "order": 4,
+            "residual": "derivative",
+            "export_lower_orders": True,
+        },
+        receiver_diagonal={"probes": 16, "seed": 7},
+        weights=[0.3, 0.7],
+    )
+    payload = _assert_valid(job.to_fs())
+    loaded = ControlGradientJob.from_fs(payload)
+    assert loaded.receiver_diagonal == job.receiver_diagonal
+    assert (
+        loaded.diagonal_file(2, derivative_order=3).name == "receiver_diagonal_d3_2.h5"
+    )
+    assert loaded.diagonal_file(derivative_order=4) == loaded.diagonal_file()
+    assert len(loaded.postprocess_fetch_files()) == 15
+    for order in loaded.derivative_orders:
+        for path in (
+            loaded.gradient_file(derivative_order=order),
+            loaded.diagonal_file(derivative_order=order),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        for task in (1, 2):
+            loaded.gradient_file(task, derivative_order=order).touch()
+            loaded.diagonal_file(task, derivative_order=order).touch()
+    assert (
+        loaded.postprocess_output_exists() and loaded.postprocess_part_outputs_exist()
+    )
+    loaded.diagonal_file(2, derivative_order=1).unlink()
+    assert not loaded.postprocess_part_outputs_exist()
+    loaded.diagonal_file(derivative_order=2).unlink()
+    assert not loaded.postprocess_output_exists()
+    with pytest.raises(ValueError, match="not exported"):
+        loaded.diagonal_file(derivative_order=5)
+    operator = FWIOperatorJob(
+        "linearize",
+        sim,
+        [1 - 0.1j],
+        action="linearize",
+        covector="g.h5",
+        active=["model.vp"],
+        state="state.json",
+        kernel_derivative={"order": 4, "residual": "derivative"},
+        receiver_diagonal={},
+    )
+    _assert_valid(operator.to_fs())
+    with pytest.raises(ValueError, match="h5 extension"):
+        ControlGradientJob(
+            "bad_diagonal",
+            sim,
+            [1],
+            kind="rtm",
+            observed="data.h5",
+            gradient="g.h5",
+            kernel_derivative={"order": 4, "residual": "derivative"},
+            receiver_diagonal={"output": "diagonal.txt"},
+        )
+
+
+@pytest.mark.parametrize(
+    "kernel", [None, {"order": 4, "residual": "window", "window": [1, 0, 0, 0, 1]}]
+)
+def test_spectral_receiver_diagonal_rejects_unsupported_residual(tmp_path, kernel):
+    with pytest.raises(ValueError, match="spectral derivative"):
+        ControlGradientJob(
+            "bad",
+            _elastic_simulation(tmp_path),
+            [1],
+            kind="rtm",
+            observed="data.h5",
+            gradient="g.h5",
+            kernel_derivative=kernel,
+            receiver_diagonal={},
+        )
+
+
+def test_control_gradient_rtm_serializes_and_round_trips(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    observed = tmp_path / "observed.h5"
+    gradient = tmp_path / "controls" / "gradient.h5"
+    raw = tmp_path / "controls" / "exact.h5"
+    job = ControlGradientJob(
+        "rtm",
+        sim,
+        [3.0 - 0.5j, 5.0],
+        kind="rtm",
+        observed={"seabed": observed},
+        gradient=gradient,
+        objective_file="objective.h5",
+        current="current.h5",
+        active=["salt_boundary_rbf", "sediment_sp"],
+        source_taper={"d0": 20.0, "d1": 40.0, "units": "m"},
+        spatial_window={
+            "axis": "X",
+            "minimum": 250.0,
+            "maximum": 750.0,
+            "taper": 50.0,
+            "units": "m",
+        },
+        weights=[0.25, 0.75],
+        raw_gradient=raw,
+        smoothing=SmoothingConfig(
+            kind="tv", wavelength_fraction=0.2, epsilon=1e-2, iterations=7
+        ),
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["workflow"] == "rtm"
+    assert payload["f_list"] == [[3.0, -0.5], [5.0, 0.0]]
+    assert payload["control_sensitivities"] == {
+        "quadrature": "auto",
+        "gradient": str(gradient),
+        "objective": str(job.objective_file()),
+        "active": ["salt_boundary_rbf", "sediment_sp"],
+        "source_taper": {"d0": 20.0, "d1": 40.0, "units": "m"},
+        "spatial_window": {
+            "axis": "x",
+            "minimum": 250.0,
+            "maximum": 750.0,
+            "taper": 50.0,
+            "units": "m",
+        },
+        "current": str(tmp_path / "current.h5"),
+        "weights": [0.25, 0.75],
+        "Smoothing": {
+            "type": "tv",
+            "lambda": 0.2,
+            "derivative_order": 1,
+            "epsilon": 1e-2,
+            "iterations": 7,
+            "input_role": "dual",
+        },
+        "raw_gradient": str(raw),
+    }
+    assert payload["Imaging"]["misfit"] == {
+        "objective": {"kind": "l2"},
+        "preprocess": {"include_defaults": False, "hooks": []},
+        "receiver_groups": [{"name": "seabed", "observed": str(observed)}],
+    }
+    assert "Image" not in payload and "focus" not in payload
+    assert job.gradient_file(2) == gradient.with_name("gradient_2.h5")
+    assert job.gradient_file(raw=True) == raw
+    assert job.objective_file(1) == job._result_path / "objective_1.h5"
+    assert job.postprocess_fetch_files() == [raw, gradient, job.objective_file()]
+    assert job.requires_postprocess()
+    assert job.trace_outputs.groups == []
+
+    loaded = _round_trip(job)
+    assert loaded.kind == "rtm"
+    assert loaded.observed == {"seabed": observed}
+    assert loaded.active == ["salt_boundary_rbf", "sediment_sp"]
+    assert loaded.smoothing == job.smoothing
+    assert loaded.weights == [0.25, 0.75]
+    job.objective_file().parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(job.objective_file(), "w") as h5:
+        h5.create_dataset("value", data=7.5)
+    assert loaded.objective_value == 7.5
+
+
+def test_control_gradient_rtm_default_gradient_lives_in_results_and_uses_all_groups(
+    tmp_path,
+):
+    sim = _elastic_simulation(tmp_path)
+    job = ControlGradientJob(
+        "rtm", sim, [3.0], kind="rtm", observed="observed", gradient="gradient.h5"
+    )
+    assert job.gradient == job._result_path / "gradient.h5"
+    assert job.observed == {"surface": tmp_path / "observed"}
+    payload = _assert_valid(job.to_fs())
+    assert payload["Imaging"]["misfit"]["receiver_groups"] == [
+        {"name": "surface", "observed": str(tmp_path / "observed")}
+    ]
+    assert job.gradient_file(raw=True).name == "gradient_raw.h5"
+
+
+def test_control_gradient_rtm_uses_misfit_objects_and_kernel_derivatives(tmp_path):
+    sim = _saved_simulation(tmp_path)
+
+    class Misfit:
+        def to_fs(self, ctx=None, *, project_relative=False):
+            return {
+                "objective_terms": [
+                    {
+                        "id": "waveform",
+                        "receiver_group": "surface",
+                        "weight": 0.5,
+                        "normalization": {"scale": {"kind": "observed_rms"}},
+                    }
+                ],
+                "receiver_groups": [
+                    {"name": "surface", "observed_source_basis": "source_geometry"}
+                ],
+            }
+
+    job = ControlGradientJob(
+        "kernel",
+        sim,
+        [2.5],
+        kind="rtm",
+        observed="observed.h5",
+        gradient="g.h5",
+        misfit=Misfit(),
+        kernel_derivative={"order": 4, "axis": "fourier", "residual": "jet"},
+    )
+    payload = _assert_valid(job.to_fs())
+    misfit = payload["Imaging"]["misfit"]
+    assert misfit["objective_terms"][0]["weight"] == 0.5
+    assert misfit["receiver_groups"] == [
+        {
+            "name": "surface",
+            "observed_source_basis": "source_geometry",
+            "observed": str(tmp_path / "observed.h5"),
+        }
+    ]
+    assert misfit["preprocess"] == {"include_defaults": False, "hooks": []}
+    assert payload["Image"] == payload["Imaging"]
+    assert payload["kernel_derivative"] == {
+        "order": 4,
+        "axis": "fourier",
+        "residual": "jet",
+    }
+    loaded = _round_trip(job)
+    assert loaded.kernel_derivative == job.kernel_derivative
+
+
+def test_control_gradient_born_serializes_incremental_traces(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    direction = tmp_path / "controls" / "direction.h5"
+    job = ControlGradientJob(
+        "born",
+        sim,
+        [8.0 - 0.1j],
+        kind="born",
+        direction=direction,
+        current="current.h5",
+        active=["vp"],
+        spatial_window={"axis": "z", "minimum": 0.0, "maximum": 1.0},
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["workflow"] == "born"
+    assert payload["control_sensitivities"] == {
+        "quadrature": "auto",
+        "direction": str(direction),
+        "active": ["vp"],
+        "spatial_window": {
+            "axis": "z",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "taper": 0.0,
+            "units": "m",
+        },
+        "current": str(tmp_path / "current.h5"),
+    }
+    assert "Imaging" not in payload
+    assert job.trace_outputs.groups == ["surface_inc"]
+    assert job.trace_outputs.components == ["surface_inc:vz"]
+    assert not job.requires_postprocess()
+    with pytest.raises(ValueError, match="do not write a gradient"):
+        job.gradient_file()
+    loaded = _round_trip(job)
+    assert loaded.direction == direction
+    assert loaded.observed is None
+
+
+def test_control_gradient_spectral_born_writes_series_planes(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    direction = tmp_path / "controls" / "direction.h5"
+    window = {"axis": "fourier", "residual": "window", "window": [1.0, 0.0, 20.0]}
+    job = ControlGradientJob(
+        "born",
+        sim,
+        [8.0 - 0.1j],
+        kind="born",
+        direction=direction,
+        kernel_derivative=window,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["workflow"] == "born"
+    assert payload["kernel_derivative"] == window
+    assert payload["control_sensitivities"]["direction"] == str(direction)
+    assert "Imaging" not in payload and "Image" not in payload
+    # Born planes with a nonzero series weight: orders zero and two of the window.
+    assert job.trace_outputs.groups == ["surface_inc", "surface_inc_d2f"]
+    assert job.trace_outputs.components == ["surface_inc:vz", "surface_inc_d2f:vz"]
+    assert not job.requires_postprocess()
+    assert _round_trip(job).kernel_derivative == window
+
+    derivative = ControlGradientJob(
+        "born_ds",
+        sim,
+        [8.0 - 0.1j],
+        kind="born",
+        direction=direction,
+        kernel_derivative={"axis": "laplace", "residual": "derivative", "order": 1},
+    )
+    assert derivative.trace_outputs.groups == ["surface_inc_ds"]
+
+
+def test_control_gradient_spectral_lsrtm_gradient(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    kernel = {"axis": "fourier", "residual": "derivative", "order": 3}
+    job = ControlGradientJob(
+        "lsrtm",
+        sim,
+        [2.5],
+        kind="lsrtm_gradient",
+        direction="direction.h5",
+        observed="observed.h5",
+        gradient="g.h5",
+        objective_file="objective.h5",
+        kernel_derivative=kernel,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["workflow"] == "lsrtm_gradient"
+    sensitivities = payload["control_sensitivities"]
+    assert Path(sensitivities["direction"]).name == "direction.h5"
+    assert Path(sensitivities["gradient"]).name == "g.h5"
+    assert Path(sensitivities["objective"]).name == "objective.h5"
+    assert payload["Image"] == payload["Imaging"]
+    assert payload["kernel_derivative"] == kernel
+    assert job.requires_postprocess()
+    assert job.derivative_orders == (3,)
+    # Base order zero is always sampled; the series order carries the Born plane.
+    assert job.trace_outputs.groups == ["surface", "surface_d3f", "surface_inc_d3f"]
+    assert job.trace_outputs.components == [
+        "surface:vz",
+        "surface_d3f:vz",
+        "surface_inc_d3f:vz",
+    ]
+    loaded = _round_trip(job)
+    assert loaded.kind == "lsrtm_gradient"
+    assert loaded.kernel_derivative == kernel
+    assert loaded.direction == job.direction
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+            },
+            "require kernel_derivative",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "observed": "o",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require a direction",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require observed data",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require a gradient output",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "jet", "order": 2},
+            },
+            "'jet' is not allowed here",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {"residual": "base"},
+            },
+            "'base' is not allowed here",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {
+                    "residual": "derivative",
+                    "export_lower_orders": True,
+                },
+            },
+            "export_lower_orders requires an rtm",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "gram_derivative": "total",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "frozen Gram",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {
+                    "residual": "derivative",
+                    "order": 2,
+                    "source_derivative": "total",
+                },
+            },
+            "support order one",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+                "misfit": {"comparison": {"kind": "phase_derivative"}},
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "waveform comparisons",
+        ),
+    ],
+)
+def test_control_gradient_spectral_born_validation(tmp_path, kwargs, message):
+    sim = _saved_simulation(tmp_path)
+    with pytest.raises(ValueError, match=message):
+        ControlGradientJob("bad", sim, [3.0], **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"kind": "rtm", "gradient": "g"}, "require observed data"),
+        ({"kind": "rtm", "observed": "o"}, "require a gradient"),
+        (
+            {"kind": "rtm", "observed": "o", "gradient": "g", "direction": "d"},
+            "do not take a direction",
+        ),
+        (
+            {
+                "kind": "rtm",
+                "observed": "o",
+                "gradient": "g",
+                "gram_derivative": "totla",
+            },
+            "gram_derivative",
+        ),
+        (
+            {
+                "kind": "rtm",
+                "observed": "o",
+                "gradient": "g",
+                "gram_derivative": "total",
+                "source_taper": {"d0": 1, "d1": 2},
+            },
+            "total Gram",
+        ),
+        (
+            {
+                "kind": "rtm",
+                "observed": "o",
+                "gradient": "g",
+                "gram_derivative": "total",
+                "misfit": {"comparison": {"kind": "phase_derivative"}},
+            },
+            "phase_derivative",
+        ),
+        ({"kind": "born"}, "require a direction"),
+        ({"kind": "born", "direction": "d", "gradient": "g"}, "do not take gradient"),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {"residual": "jet"},
+            },
+            "'jet' is not allowed here; choose one of derivative, window",
+        ),
+        (
+            {"kind": "rtm", "observed": "o", "gradient": "g", "active": ["a", "a"]},
+            "unique",
+        ),
+        (
+            {"kind": "rtm", "observed": "o", "gradient": "g", "weights": [1.0, 2.0]},
+            "one finite",
+        ),
+        (
+            {
+                "kind": "rtm",
+                "observed": "o",
+                "gradient": "g",
+                "spatial_window": {"axis": "q", "minimum": 0, "maximum": 1},
+            },
+            "axis",
+        ),
+        ({"kind": "adjoint"}, "kind must be one of"),
+    ],
+)
+def test_control_gradient_validation(tmp_path, kwargs, message):
+    sim = _saved_simulation(tmp_path)
+    with pytest.raises(ValueError, match=message):
+        ControlGradientJob("bad", sim, [3.0], **kwargs)
+
+
+def test_control_gradient_fingerprints_include_observed_and_direction(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    direction = ControlVectorFile({"sediment_sp": [1.0, 0.0]}, native=True).write(
+        tmp_path / "direction.h5"
+    )
+    observed = tmp_path / "observed"
+    observed.mkdir()
+    (observed / "trace.bin").write_bytes(b"first")
+    born = ControlGradientJob("born", sim, [3.0], kind="born", direction=direction)
+    rtm = ControlGradientJob(
+        "rtm", sim, [3.0], kind="rtm", observed={"seabed": observed}, gradient="g.h5"
+    )
+    born_reference = born.fingerprint()
+    rtm_reference = rtm.task_fingerprint(1)
+    ControlVectorFile({"sediment_sp": [0.0, 1.0]}, native=True).write(direction)
+    (observed / "trace.bin").write_bytes(b"second")
+    assert born.fingerprint() != born_reference
+    assert rtm.task_fingerprint(1) != rtm_reference
+    for job in (born, rtm):
+        loaded = BaseJob.load(job.save())
+        pairs = loaded.remote_input_files("/remote/project")
+        local = direction if job is born else observed
+        assert any(Path(pair[0]) == local for pair in pairs)
+
+
+# ---------------------------------------------------------------------------
+# ImageKernelJob
+# ---------------------------------------------------------------------------
+
+
+def test_image_kernel_rtm_serializes_imaging_block(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    observed = tmp_path / "observed" / "traces"
+    observed.mkdir(parents=True)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    job = ImageKernelJob(
+        "rtm",
+        sim,
+        [5.0, 7.0],
+        grid=grid,
+        images={
+            "vp": ImageSpec("fwi:elastic", "vp"),
+            "pressure": "pressure",
+            "shot": {"IC": "up_down", "sources": [1]},
+            "vs": ("fwi:elastic", "vs"),
+        },
+        observed=observed,
+        weights=[1.0, 0.5],
+        keep_forward=True,
+        field_retention="forward",
+        smoothing=SmoothingConfig(kind="tv", wavelength_fraction=0.3),
+        save_path=tmp_path / "images",
+        post_process=True,
+    )
+    payload = _assert_valid(job.to_fs())
+    imaging = payload["Imaging"]
+    assert payload["workflow"] == "rtm"
+    assert "Image" not in payload
+    assert imaging["schema"] == "fs-imaging-1"
+    assert imaging["data_path"] == str(observed)
+    assert imaging["save_path"] == str(tmp_path / "images")
+    assert (
+        imaging["grid"]["n"] == [3, 2] and imaging["grid"]["_type"] == "CartesianGrid"
+    )
+    assert imaging["images"] == [
+        {"name": "vp", "IC": "fwi:elastic", "property": "vp"},
+        {"name": "pressure", "IC": "pressure"},
+        {"name": "shot", "IC": "up_down", "sources": [1]},
+        {"name": "vs", "IC": "fwi:elastic", "property": "vs"},
+    ]
+    assert imaging["misfit"] == {
+        "objective": {"kind": "l2"},
+        "receiver_groups": [{"name": "surface", "observed": str(observed)}],
+    }
+    assert imaging["weights"] == [1.0, 0.5]
+    assert imaging["keep_forward"] is True and imaging["field_retention"] == "forward"
+    assert imaging["Smoothing"] == {
+        "type": "tv",
+        "lambda": 0.3,
+        "derivative_order": 1,
+        "epsilon": 1e-3,
+        "iterations": 5,
+        "illumination_normalization": "none",
+    }
+    assert imaging["post_process"] is True
+    assert "direction" not in imaging and "gauss_newton" not in imaging
+    assert job.trace_outputs.groups == ["surface"]
+    assert job.requires_postprocess()
+    loaded = _round_trip(job)
+    assert loaded.images == job.images
+    assert loaded.grid.n == [3, 2]
+    assert loaded.extra == {"post_process": True}
+    # Imaging.Smoothing reloads as its Sauce mapping; the emitted contract matches.
+    assert loaded._smoothing_payload() == job._smoothing_payload()
+
+
+def test_image_kernel_project_relative_export_and_zero_data(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    job = ImageKernelJob(
+        "kernel",
+        sim,
+        [5.0],
+        grid=grid,
+        images={"vp": ("fwi:elastic", "vp")},
+        smoothing={"type": "tikhonov", "lambda": 0.5},
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["Imaging"]["data_path"] is None
+    assert payload["Imaging"]["misfit"]["receiver_groups"] == [
+        {"name": "surface", "observed": None}
+    ]
+    assert payload["Imaging"]["Smoothing"] == {
+        "type": "tikhonov",
+        "lambda": 0.5,
+        "illumination_normalization": "none",
+    }
+    relative = job.to_fs(project_relative=True)
+    assert relative["Imaging"]["save_path"] == Path(
+        "jobs/smooth/kernel/results/imaging"
+    )
+    loaded = _round_trip(job)
+    assert loaded.observed is None
+    assert loaded.smoothing == {
+        "type": "tikhonov",
+        "lambda": 0.5,
+        "illumination_normalization": "none",
+    }
+
+
+def test_image_kernel_born_and_lsrtm_workflows(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    normal = ImageKernelJob(
+        "normal",
+        sim,
+        [5.0, 7.0],
+        grid=grid,
+        images={"dVp": ("fwi:elastic", "vp")},
+        workflow="born",
+        zero_direction=True,
+        gauss_newton=True,
+    )
+    payload = _assert_valid(normal.to_fs())
+    assert payload["workflow"] == "born"
+    assert payload["Imaging"]["zero_direction"] is True
+    assert payload["Imaging"]["gauss_newton"] is True
+    assert payload["Imaging"]["born_traces_only"] is False
+    assert normal.trace_outputs.groups == ["surface_inc"]
+    assert normal.trace_outputs.components == ["surface_inc:vz"]
+    assert normal._input_fingerprint_payload() == {"direction": {"kind": "zero"}}
+    _round_trip(normal)
+
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"cartesian")
+    observed = tmp_path / "observed"
+    observed.mkdir()
+    gradient = ImageKernelJob(
+        "gradient",
+        sim,
+        [5.0, 7.0],
+        grid=grid,
+        images={"dVp": ("fwi:elastic", "vp")},
+        workflow="lsrtm_gradient",
+        direction=direction,
+        observed=observed,
+    )
+    payload = _assert_valid(gradient.to_fs())
+    assert payload["workflow"] == "lsrtm_gradient"
+    assert payload["Imaging"]["direction"] == str(direction)
+    assert payload["Imaging"]["gauss_newton"] is True
+    assert "zero_direction" not in payload["Imaging"]
+    assert gradient.trace_outputs.groups == ["surface", "surface_inc"]
+    assert gradient.trace_outputs.components == ["surface:vz", "surface_inc:vz"]
+    reference = gradient.fingerprint()
+    direction.write_bytes(b"changed")
+    assert gradient.fingerprint() != reference
+    loaded = _round_trip(gradient)
+    assert loaded.direction == direction
+    assert loaded.gauss_newton is True
+
+    traces_only = ImageKernelJob(
+        "traces",
+        sim,
+        [5.0],
+        grid=grid,
+        images={"dVp": ("fwi:elastic", "vp")},
+        workflow="born",
+        direction=direction,
+        born_traces_only=True,
+    )
+    assert _assert_valid(traces_only.to_fs())["Imaging"]["born_traces_only"] is True
+
+
+@pytest.mark.parametrize("workflow", ["born", "lsrtm_gradient"])
+def test_image_kernel_rejects_cartesian_spectral_born(tmp_path, workflow):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    with pytest.raises(ValueError, match="ControlGradientJob"):
+        ImageKernelJob(
+            "bad",
+            sim,
+            [2.5],
+            grid=grid,
+            images={"vp": ("fwi:elastic", "vp")},
+            observed="o",
+            workflow=workflow,
+            zero_direction=True,
+            kernel_derivative={"residual": "window", "window": [1.0, 2.0]},
+        )
+
+
+def test_image_kernel_accepts_base_residual(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    job = ImageKernelJob(
+        "kernel",
+        sim,
+        [2.5],
+        grid=grid,
+        images={"vp": ("fwi:acoustic", "vp")},
+        kernel_derivative={"order": 2, "axis": "laplace", "residual": "base"},
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["kernel_derivative"]["residual"] == "base"
+    assert _round_trip(job).kernel_derivative == job.kernel_derivative
+
+
+def test_image_kernel_kernel_derivative_emits_image_and_imaging(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[161, 161], x0=[0, 0], x1=[10, 10], units="km")
+    job = ImageKernelJob(
+        "kernel",
+        sim,
+        [2.5],
+        grid=grid,
+        images={"vp": ("fwi:acoustic", "vp")},
+        observed="observed.h5",
+        field_retention="none",
+        kernel_derivative={"order": 4, "axis": "fourier", "residual": "derivative"},
+        preprocess={"include_defaults": False, "hooks": []},
+    )
+    payload = _assert_valid(job.to_fs())
+    example = _example("total-kernel-derivative.json")
+    assert payload["Image"] == payload["Imaging"]
+    assert payload["Image"]["images"] == example["Image"]["images"]
+    assert payload["Image"]["grid"]["n"] == example["Image"]["grid"]["n"]
+    assert payload["Image"]["preprocess"] == example["Image"]["preprocess"]
+    assert (
+        payload["kernel_derivative"]["order"] == example["kernel_derivative"]["order"]
+    )
+    _round_trip(job)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"workflow": "rtm", "direction": "d"}, "do not take a direction"),
+        ({"workflow": "rtm", "gauss_newton": True}, "Born workflows"),
+        ({"workflow": "born"}, "requires direction or zero_direction"),
+        (
+            {"workflow": "born", "direction": "d", "zero_direction": True},
+            "mutually exclusive",
+        ),
+        (
+            {"workflow": "lsrtm_gradient", "zero_direction": True},
+            "requires observed data",
+        ),
+        (
+            {
+                "workflow": "lsrtm_gradient",
+                "zero_direction": True,
+                "observed": "o",
+                "born_traces_only": True,
+            },
+            "trace-only",
+        ),
+        (
+            {
+                "workflow": "born",
+                "zero_direction": True,
+                "kernel_derivative": {"residual": "jet"},
+            },
+            "workflow = rtm",
+        ),
+        ({"workflow": "adjoint"}, "workflow must be one of"),
+        ({"images": {}}, "at least one image"),
+        ({"weights": [1.0, 2.0]}, "one finite"),
+        ({"field_retention": "some"}, "field_retention"),
+        ({"smoothing": SmoothingConfig(derivative_order=2)}, "first-order"),
+    ],
+)
+def test_image_kernel_validation(tmp_path, kwargs, message):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    options = {"grid": grid, "images": {"vp": ("fwi:elastic", "vp")}, **kwargs}
+    with pytest.raises(ValueError, match=message):
+        ImageKernelJob("bad", sim, [5.0], **options)
+
+
+def test_image_spec_normalizes_inputs():
+    assert ImageSpec.from_value("pressure") == ImageSpec("pressure")
+    assert ImageSpec.from_value(("fwi", "vp")) == ImageSpec("fwi", "vp")
+    assert ImageSpec.from_value(
+        {"IC": "fwi", "property": "vp", "sources": [2, 1]}
+    ).sources == [2, 1]
+    assert ImageSpec.from_value({"condition": "energy"}).to_fs("e") == {
+        "name": "e",
+        "IC": "energy",
+    }
+    with pytest.raises(ValueError, match="unique one-based"):
+        ImageSpec("fwi", sources=[0])
+    with pytest.raises(TypeError):
+        ImageSpec.from_value(3)
+
+
+# ---------------------------------------------------------------------------
+# SmoothJob
+# ---------------------------------------------------------------------------
+
+
+def test_smooth_job_wraps_control_gradient_parts(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    source = ControlGradientJob(
+        "rtm",
+        sim,
+        [2.0, 4.0],
+        kind="rtm",
+        observed="observed.h5",
+        gradient="gradient.h5",
+        active=["vp"],
+    )
+    smooth = SmoothJob(source, smoothing=SmoothingConfig(kind="tv"), weights=[1.0, 3.0])
+    payload = _assert_valid(smooth.to_fs())
+
+    assert smooth.name == "rtm_smooth"
+    assert smooth.workflow == "rtm"
+    assert smooth.postprocess_only is True
+    assert not smooth.supports_trace_packing
+    assert payload["_type"] == "SmoothJob"
+    assert payload["name"] == "rtm_smooth"
+    assert payload["f_list"] == [2.0, 4.0]
+    assert payload["control_sensitivities"] == {
+        "quadrature": "auto",
+        "gradient": str(source.gradient),
+        "active": ["vp"],
+        "Smoothing": SmoothingConfig(kind="tv").to_control_fs(),
+        "weights": [1.0, 3.0],
+    }
+    assert payload["smooth_source"]["_type"] == "ControlGradientJob"
+    assert "artifact_contract" not in payload["smooth_source"]
+    assert smooth.postprocess_file(1) == source.gradient_file(1)
+    assert smooth.postprocess_fetch_files() == source.postprocess_fetch_files()[:2]
+    assert smooth.requires_postprocess()
+    assert not smooth.postprocess_part_outputs_exist()
+    source.gradient.parent.mkdir(parents=True)
+    source.gradient_file(1).write_bytes(b"1")
+    source.gradient_file(2).write_bytes(b"2")
+    assert smooth.postprocess_part_outputs_exist()
+    assert smooth.needs_postprocess()
+    assert not smooth.is_run_current()
+    assert set(smooth._input_fingerprint_payload()["parts"]) == {"1", "2"}
+
+    loaded = _round_trip(smooth)
+    assert isinstance(loaded.source_job, ControlGradientJob)
+    assert loaded.source_job.gradient == source.gradient
+    assert loaded.weights == [1.0, 3.0]
+    assert loaded.smoothing == SmoothingConfig(kind="tv")
+    assert loaded.input_vector is None
+
+
+def test_smooth_job_wraps_fwi_covector_parts(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    source = FWIOperatorJob(
+        "lin",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="gradient.h5",
+        control_active=["vp"],
+    )
+    smooth = SmoothJob(source, smoothing={"type": "tikhonov", "lambda": 0.5})
+    payload = _assert_valid(smooth.to_fs())
+    assert payload["workflow"] == "fwi_operator"
+    assert payload["fwi_operator"] == source.to_fs()["fwi_operator"]
+    assert payload["control_sensitivities"]["gradient"] == str(source.covector)
+    assert payload["control_sensitivities"]["active"] == ["vp"]
+    assert payload["control_sensitivities"]["Smoothing"]["type"] == "tikhonov"
+    assert smooth.gradient_file(1) == source.covector_file(1)
+    assert smooth.gradient_file(raw=True) == source.covector_file(raw=True)
+    loaded = _round_trip(smooth)
+    assert isinstance(loaded.source_job, FWIOperatorJob)
+
+
+def test_smooth_job_wraps_cartesian_images(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    source = ImageKernelJob(
+        "rtm",
+        sim,
+        [5.0, 7.0],
+        grid=grid,
+        images={"vp": ("fwi:elastic", "vp")},
+        weights=[1.0, 1.0],
+    )
+    smooth = SmoothJob(
+        source,
+        smoothing=SmoothingConfig(kind="tgv", alpha1=1.0, alpha2=2.0),
+        weights=[2.0, 3.0],
+    )
+    payload = _assert_valid(smooth.to_fs())
+    assert (
+        payload["Imaging"]["Smoothing"]
+        == SmoothingConfig(kind="tgv", alpha1=1.0, alpha2=2.0).to_image_fs()
+    )
+    assert payload["Imaging"]["weights"] == [2.0, 3.0]
+    assert payload["smooth_source"]["Imaging"]["weights"] == [1.0, 1.0]
+    assert "control_sensitivities" not in payload
+    assert smooth.mode == "image"
+    assert smooth._input_fingerprint_payload() == {}
+    loaded = _round_trip(smooth)
+    assert isinstance(loaded.source_job, ImageKernelJob)
+    assert loaded.weights == [2.0, 3.0]
+    with pytest.raises(ValueError, match="control vectors only"):
+        SmoothJob(source, smoothing={"type": "tv"}, input_vector=tmp_path / "v.h5")
+
+
+def test_smooth_job_input_vector_uses_control_sensitivities_input(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    source = FWIOperatorJob(
+        "lin",
+        sim,
+        [2.0, 6.0 - 0.5j],
+        action="linearize",
+        active=["model.vp", "model.rho", "source.1.position"],
+        state="s.json",
+        covector="gradient.h5",
+    )
+    # A joint covector path is used in place; non-model blocks are left out
+    # of ``active`` and ignored by Sauce.
+    vector = ControlVectorFile(
+        {"model.vp": [1.0, 2.0], "model.rho": [3.0], "source.1.position": [4.0, 5.0]},
+        state_fingerprint="s",
+        control_registry_fingerprint="r",
+    ).write(tmp_path / "covector.h5")
+    smooth = SmoothJob(
+        source,
+        smoothing=SmoothingConfig(kind="tv"),
+        input_vector=vector,
+        gradient="smoothed.h5",
+    )
+    assert smooth.f_list == source.f_list
+    assert smooth.input_vector == vector
+    assert smooth.gradient == smooth._result_path / "smoothed.h5"
+    assert smooth.control_active == ["rho", "vp"]
+    assert not (smooth._result_path / "smoothed_1.h5").exists()
+    assert smooth.gradient_file() == smooth.gradient
+    assert smooth.gradient_file(raw=True) == smooth._result_path / "smoothed_raw.h5"
+    with pytest.raises(ValueError, match="no task parts"):
+        smooth.gradient_file(1)
+    assert smooth.postprocess_file() == smooth.gradient
+    assert smooth.postprocess_file(1) == vector
+    assert smooth.postprocess_file(2) == vector
+    assert smooth.postprocess_part_outputs_exist()
+    assert smooth.needs_postprocess()
+    assert smooth.postprocess_fetch_files() == [
+        smooth.gradient_file(raw=True),
+        smooth.gradient,
+    ]
+
+    payload = _assert_valid(smooth.to_fs())
+    assert payload["f_list"] == [[2.0, 0.0], [6.0, -0.5]]
+    assert payload["fwi_operator"]["controls"]["active"] == [
+        "model.vp",
+        "model.rho",
+        "source.1.position",
+    ]
+    assert payload["control_sensitivities"] == {
+        "input": str(vector),
+        "gradient": str(smooth.gradient),
+        "active": ["rho", "vp"],
+        "Smoothing": SmoothingConfig(kind="tv").to_control_fs(),
+    }
+    assert "smooth_input_vector" not in payload
+    assert smooth._input_fingerprint_payload()["input_vector"]["kind"] == "file"
+
+    loaded = _round_trip(smooth)
+    assert loaded.input_vector == vector
+    assert loaded.gradient == smooth.gradient
+    assert loaded.f_list == source.f_list
+    assert loaded.weights is None
+
+    # An in-memory vector is written once, natively, next to the gradient.
+    explicit = SmoothJob(
+        source,
+        smoothing={"type": "tv"},
+        name="custom",
+        input_vector=ControlVectorFile(
+            {"model.vp": [1.0, 2.0]},
+            state_fingerprint="s",
+            control_registry_fingerprint="r",
+        ),
+    )
+    assert explicit.name == "custom"
+    assert explicit.gradient == explicit._result_path / "smoothed.h5"
+    assert explicit.input_vector == explicit._result_path / "smoothed_input.h5"
+    native = ControlVectorFile.read(explicit.input_vector)
+    assert native.native is True
+    assert native.names == ("vp",)
+    np.testing.assert_array_equal(native["vp"], [1.0, 2.0])
+    explicit_payload = _assert_valid(explicit.to_fs())
+    assert explicit_payload["control_sensitivities"]["input"] == str(
+        explicit.input_vector
+    )
+    assert explicit_payload["control_sensitivities"]["active"] == ["vp"]
+    assert explicit.postprocess_part_outputs_exist()
+
+    with pytest.raises(ValueError, match="ignored when input_vector"):
+        SmoothJob(
+            source, smoothing={"type": "tv"}, input_vector=vector, weights=[1.0, 1.0]
+        )
+    with pytest.raises(ValueError, match="only used with input_vector"):
+        SmoothJob(source, smoothing={"type": "tv"}, gradient="g.h5")
+    with pytest.raises(ValueError, match="no model"):
+        SmoothJob(
+            source,
+            smoothing={"type": "tv"},
+            input_vector=ControlVectorFile(
+                {"source.1.position": [1.0, 2.0]},
+                state_fingerprint="s",
+                control_registry_fingerprint="r",
+            ),
+        )
+
+
+def test_smooth_job_rejects_sources_without_parts(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    born = ControlGradientJob("born", sim, [3.0], kind="born", direction="d.h5")
+    with pytest.raises(ValueError, match="no gradient parts"):
+        SmoothJob(born, smoothing={"type": "tv"})
+    calibrate = FWIOperatorJob("cal", sim, [3.0], action="calibrate", balance="b.json")
+    with pytest.raises(ValueError, match="no covector"):
+        SmoothJob(calibrate, smoothing={"type": "tv"})
+    with pytest.raises(TypeError, match="requires an"):
+        SmoothJob(object(), smoothing={"type": "tv"})
+
+
+@pytest.mark.parametrize("relative_tolerance", [None, 2e-5])
+@pytest.mark.parametrize("fractional_scales", [None, {"model.vp": 2.5}])
+def test_native_regularization_job_preserves_mesh_identity_and_round_trips(
+    tmp_path, relative_tolerance, fractional_scales
+):
+    from frequensolve.imaging.jobs import RegularizationJob
+
+    sim = _saved_simulation(tmp_path)
+    source = FWIOperatorJob(
+        "native",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="g.h5",
+    )
+    vector = ControlVectorFile(
+        {"model.vp": [1.0, 2.0]}, control_spaces={"model.vp": "mesh-basis"}
+    )
+    prepare = RegularizationJob(
+        source,
+        smoothing=SmoothingConfig(kind="tv", normalize_amplitude=True),
+        input_vector=vector,
+        operation="prepare",
+        fractional_scales=fractional_scales,
+        **(
+            {}
+            if relative_tolerance is None
+            else {"relative_tolerance": relative_tolerance}
+        ),
+    )
+    staged = ControlVectorFile.read(prepare.input_vector, native=True)
+    assert staged.control_spaces == {"vp": "mesh-basis"}
+    payload = _assert_valid(prepare.to_fs())
+    assert (
+        payload["control_sensitivities"]["Regularization"]["normalize_amplitude"]
+        is True
+    )
+    expected_tolerance = 1e-4 if relative_tolerance is None else relative_tolerance
+    assert (
+        payload["control_sensitivities"]["Regularization"]["relative_tolerance"]
+        == expected_tolerance
+    )
+    loaded = _round_trip(prepare)
+    assert loaded.fractional_scales == (
+        {} if fractional_scales is None else {"vp": 2.5}
+    )
+    assert (
+        payload["control_sensitivities"]["Regularization"].get("fractional_scales", {})
+        == loaded.fractional_scales
+    )
+    assert loaded.relative_tolerance == expected_tolerance
+    assert isinstance(loaded, RegularizationJob) and loaded.operation == "prepare"
+    assert loaded.context == prepare.context
+    assert loaded.postprocess_fetch_files() == prepare.postprocess_fetch_files()
+    prepare.context.write_text("{}")
+    for operation in ("gradient", "diagonal", "mass", "mass_inverse", "mass_diagonal"):
+        derivative = RegularizationJob(
+            source,
+            smoothing=SmoothingConfig(kind="tikhonov", alpha=0.1),
+            input_vector=vector,
+            operation=operation,
+            context=prepare.context,
+        )
+        _assert_valid(derivative.to_fs())
+        assert _round_trip(derivative).operation == operation
+    prox = RegularizationJob(
+        source,
+        smoothing=SmoothingConfig(kind="tv"),
+        input_vector=vector,
+        operation="proximal",
+        context=prepare.context,
+        metric=vector,
+        lower=vector,
+        upper=vector,
+    )
+    _assert_valid(prox.to_fs())
+    loaded = _round_trip(prox)
+    assert loaded.regularization_inputs == prox.regularization_inputs
+    for path in loaded.regularization_inputs.values():
+        assert ControlVectorFile.read(path, native=True).control_spaces == {
+            "vp": "mesh-basis"
+        }
+
+
+def test_staged_regularization_inputs_are_hashed_once_and_used_in_place(
+    tmp_path, monkeypatch
+):
+    from frequensolve.imaging.jobs import RegularizationJob
+
+    sim = _saved_simulation(tmp_path)
+    source = FWIOperatorJob(
+        "native",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="g.h5",
+    )
+    vector = ControlVectorFile(
+        {"model.vp": [1.0, 2.0]}, control_spaces={"model.vp": "mesh-basis"}
+    )
+    context = tmp_path / "context.json"
+    context.write_text("{}")
+    staged = {
+        label: RegularizationJob.stage_input(vector, tmp_path / "stage" / f"{label}.h5")
+        for label in ("metric", "lower", "upper")
+    }
+    # Published in Sauce's native layout; nothing but the final file remains.
+    assert sorted(p.name for p in (tmp_path / "stage").iterdir()) == [
+        "lower.h5",
+        "metric.h5",
+        "upper.h5",
+    ]
+    for path in staged.values():
+        assert ControlVectorFile.read(path, native=True).control_spaces == {
+            "vp": "mesh-basis"
+        }
+        assert RegularizationJob._is_staged(path)
+    hashed = []
+    fingerprint = RegularizationJob._path_content_fingerprint.__func__
+    monkeypatch.setattr(
+        RegularizationJob,
+        "_path_content_fingerprint",
+        classmethod(
+            lambda cls, path: hashed.append(Path(path)) or fingerprint(cls, path)
+        ),
+    )
+
+    def prox(index):
+        return RegularizationJob(
+            source,
+            smoothing=SmoothingConfig(kind="tv"),
+            input_vector=vector,
+            operation="proximal",
+            context=context,
+            name=f"prox{index}",
+            **staged,
+        )
+
+    jobs = [prox(index) for index in range(3)]
+    payloads = [job._input_fingerprint_payload() for job in jobs]
+    for job, payload in zip(jobs, payloads):
+        # Every job references the same files in place: one stable path each.
+        assert job.regularization_inputs == staged
+        request = job.to_fs()["control_sensitivities"]["Regularization"]
+        assert {label: request[label] for label in staged} == {
+            label: str(path) for label, path in staged.items()
+        }
+        assert {label: payload[label] for label in staged} == {
+            label: payloads[0][label] for label in staged
+        }
+    # The fingerprints recorded at staging serve every job: no staged file is
+    # hashed again, only each job's own input vector and context.
+    assert not set(hashed) & set(staged.values())
+    assert len(hashed) == 2 * len(jobs)
+    # A file changed after staging is no longer trusted and is hashed again.
+    ControlVectorFile(
+        {"vp": [3.0, 4.0]}, native=True, control_spaces={"vp": "mesh-basis"}
+    ).write(staged["lower"])
+    assert not RegularizationJob._is_staged(staged["lower"])
+    changed = prox(3)._input_fingerprint_payload()
+    assert changed["lower"] != payloads[0]["lower"]
+    assert changed["metric"] == payloads[0]["metric"]
+    assert staged["lower"] in hashed
+
+
+@pytest.mark.parametrize(
+    "curvature", ["metric_frozen", "exact_gn", "fixed_wavefield", "joint_schur"]
+)
+def test_coupled_wri_contract_export(tmp_path, curvature):
+    sim = SeismicSimulation(
+        name="coupled_wri", physics="coupled", dimension=2, project_path=tmp_path
+    )
+    sim.save()
+    job = FWIOperatorJob(
+        "coupled_wri",
+        sim,
+        [3.0 - 0.2j],
+        action="wri",
+        covector="normal.h5",
+        direction="direction.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0, "curvature": curvature},
+        gram_derivative="frozen",
+        control_active=["fluid_vp", "solid_vp"],
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["wri"]["curvature"] == curvature
+    assert payload["f_list"] == [[3.0, -0.2]]
+    assert _round_trip(job).wri["curvature"] == curvature
+
+
+@pytest.mark.parametrize(
+    "formulation, expected",
+    [("centered", "metric_frozen"), ("original", "joint_schur")],
+)
+def test_wri_default_curvature(tmp_path, formulation, expected):
+    job = FWIOperatorJob(
+        "default_curvature",
+        _saved_simulation(tmp_path),
+        [1.0],
+        action="wri",
+        covector="normal.h5",
+        direction="direction.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0, "formulation": formulation},
+    )
+    assert job.to_fs()["fwi_operator"]["wri"]["curvature"] == expected
+    assert _round_trip(job).wri["curvature"] == expected
+
+
+def test_original_wri_rejects_centered_curvature(tmp_path):
+    with pytest.raises(ValueError, match="requires formulation centered"):
+        FWIOperatorJob(
+            "invalid_curvature",
+            _saved_simulation(tmp_path),
+            [1.0],
+            action="wri",
+            covector="normal.h5",
+            direction="direction.h5",
+            objective="objective.h5",
+            wri={"penalty": 10.0, "formulation": "original", "curvature": "exact_gn"},
+        )
+
+
+@pytest.mark.parametrize(
+    "transfer,length,wavelengths,frequency",
+    [
+        ("nodal", 0.0, None, None),
+        ("l2", 0.0, None, None),
+        ("l2", 125.0, None, None),
+        ("l2", 0.0, 0.1, 3.0),
+        ("l2", 0.0, 0.2, None),
+    ],
+)
+def test_mesh_adaptation_job_preserves_accepted_basis_and_round_trips(
+    tmp_path, transfer, length, wavelengths, frequency
+):
+    from frequensolve.imaging.jobs import MeshAdaptationJob
+
+    source = FWIOperatorJob(
+        "mesh_source",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+        covector="g.h5",
+    )
+    vector = ControlVectorFile(
+        {"model.vp": [0.2, 0.3]}, control_spaces={"model.vp": "accepted-basis"}
+    )
+    job = MeshAdaptationJob(
+        source,
+        input_vector=vector,
+        property_spaces={
+            "vp": {
+                "artifact": str(tmp_path / "stage.h5"),
+                "frequency": 8.0,
+                "epw": [1.0, 2.0],
+            }
+        },
+        source_identity="accepted-state",
+        frequency=8.0,
+        transfer=transfer,
+        smoothing_length=length,
+        smoothing_wavelengths=wavelengths,
+        smoothing_frequency=frequency,
+    )
+    payload = _assert_valid(job.to_fs())
+    request = payload["control_sensitivities"]["MeshAdaptation"]
+    assert request["transfer"] == transfer
+    assert request["smoothing_length_m"] == length
+    assert request["averaging_wavelengths"] == 0.5
+    assert "Smoothing" not in payload["control_sensitivities"]
+    assert ControlVectorFile.read(job.input_vector).control_spaces == {
+        "vp": "accepted-basis"
+    }
+    loaded = _round_trip(job)
+    assert isinstance(loaded, MeshAdaptationJob)
+    assert loaded.property_spaces == job.property_spaces
+    if wavelengths is not None:
+        assert request["smoothing_wavelengths"] == wavelengths
+        assert request["smoothing_frequency_hz"] == (frequency or job.frequency)
+        assert loaded.smoothing_wavelengths == wavelengths
+        assert loaded.smoothing_frequency == (frequency or job.frequency)
+    assert loaded.transfer == transfer
+    assert loaded.smoothing_length == length
+    assert loaded.source_identity == job.source_identity
+    assert loaded.postprocess_fetch_files() == job.postprocess_fetch_files()
+
+
+@pytest.mark.parametrize(
+    "quadrature", ["auto", "wavefield", "material_intersections", "tensor_points"]
+)
+def test_sensitivity_quadrature_round_trip(tmp_path, quadrature):
+    job = FWIOperatorJob(
+        "quadrature",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+        covector="gradient.h5",
+        sensitivity_quadrature=quadrature,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["control_sensitivities"]["quadrature"] == quadrature
+    assert _round_trip(job).sensitivity_quadrature == quadrature
+
+
+@pytest.mark.parametrize("action", ["jvp", "normal", "solve"])
+@pytest.mark.parametrize("quadrature", ["material_intersections", "tensor_points"])
+def test_intersected_quadrature_rejects_non_pullbacks(tmp_path, action, quadrature):
+    with pytest.raises(ValueError, match="supports pullbacks"):
+        FWIOperatorJob(
+            "quadrature",
+            _saved_simulation(tmp_path),
+            [4.0],
+            action=action,
+            sensitivity_quadrature=quadrature,
+        )
+
+
+def test_sensitivity_quadrature_rejects_unknown_policy(tmp_path):
+    with pytest.raises(ValueError, match="sensitivity_quadrature"):
+        FWIOperatorJob(
+            "quadrature",
+            _saved_simulation(tmp_path),
+            [4.0],
+            action="linearize",
+            sensitivity_quadrature="unknown",
+        )
+
+
+@pytest.mark.parametrize("quadrature", ["material_intersections", "tensor_points"])
+def test_rtm_intersection_quadrature_round_trip(tmp_path, quadrature):
+    job = ControlGradientJob(
+        "quadrature",
+        _saved_simulation(tmp_path, quadrature),
+        [4.0],
+        kind="rtm",
+        observed="observed.h5",
+        gradient="gradient.h5",
+        sensitivity_quadrature=quadrature,
+    )
+    assert (
+        _assert_valid(job.to_fs())["control_sensitivities"]["quadrature"] == quadrature
+    )
+    assert _round_trip(job).sensitivity_quadrature == quadrature
+
+
+@pytest.mark.parametrize("quadrature", ["material_intersections", "tensor_points"])
+def test_born_rejects_intersection_pullback_policy(tmp_path, quadrature):
+    with pytest.raises(ValueError, match="requires an RTM pullback"):
+        ControlGradientJob(
+            "quadrature",
+            _saved_simulation(tmp_path, quadrature),
+            [4.0],
+            kind="born",
+            direction="direction.h5",
+            sensitivity_quadrature=quadrature,
+        )
+
+
+@pytest.mark.parametrize("quadrature", ["material_intersections", "tensor_points"])
+def test_intersected_wri_rejects_implicit_curvature(tmp_path, quadrature):
+    with pytest.raises(ValueError, match="does not support curvature"):
+        FWIOperatorJob(
+            "quadrature",
+            _saved_simulation(tmp_path, quadrature),
+            [4.0],
+            action="wri",
+            wri={"penalty": 1.0},
+            direction="direction.h5",
+            covector="gradient.h5",
+            sensitivity_quadrature=quadrature,
+        )
+
+
+def test_sensitivity_quadrature_defaults_to_auto(tmp_path):
+    job = FWIOperatorJob(
+        "default_quadrature",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+        covector="g.h5",
+    )
+    assert job.sensitivity_quadrature == "auto"
+    assert "control_sensitivities" not in _assert_valid(job.to_fs())
+    assert _round_trip(job).sensitivity_quadrature == "auto"
+
+
+def test_sensitivity_quadrature_defaults_keep_wri_curvature_discrete(tmp_path):
+    job = FWIOperatorJob(
+        "curvature_quadrature",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="wri",
+        covector="g.h5",
+        direction="direction.h5",
+        wri={"penalty": 10.0},
+    )
+    assert job.sensitivity_quadrature == "auto"
+    assert _assert_valid(job.to_fs())["control_sensitivities"]["quadrature"] == "auto"
+
+
+@pytest.mark.parametrize(
+    "quadrature", [None, "auto", "wavefield", "material_intersections", "tensor_points"]
+)
+@pytest.mark.parametrize("spectral", [False, True])
+def test_receiver_diagonal_quadrature_round_trip(tmp_path, quadrature, spectral):
+    options = {} if quadrature is None else {"sensitivity_quadrature": quadrature}
+    simulation = _saved_simulation(tmp_path)
+    if spectral:
+        job = ControlGradientJob(
+            "probe_quadrature",
+            simulation,
+            [4.0],
+            kind="rtm",
+            observed="observed.h5",
+            gradient="gradient.h5",
+            receiver_diagonal={},
+            kernel_derivative={
+                "axis": "fourier",
+                "residual": "derivative",
+                "order": 4,
+                "export_lower_orders": True,
+            },
+            **options,
+        )
+    else:
+        job = FWIOperatorJob(
+            "probe_quadrature",
+            simulation,
+            [4.0],
+            action="linearize",
+            active=["model.vp"],
+            state="state.json",
+            covector="gradient.h5",
+            receiver_diagonal={},
+            **options,
+        )
+    expected = quadrature or "auto"
+    assert job.sensitivity_quadrature == expected
+    payload = _assert_valid(job.to_fs())
+    if quadrature is not None:
+        assert payload["control_sensitivities"]["quadrature"] == expected
+    assert _round_trip(job).sensitivity_quadrature == expected
+
+
+@pytest.mark.parametrize("storage", ["auto", "memory", "disk"])
+def test_spectral_field_storage_roundtrip(tmp_path, storage):
+    from frequensolve.imaging.jobs import _kernel_derivative
+
+    request = {
+        "order": 3,
+        "residual": "derivative",
+        "field_storage": storage,
+        "field_memory_fraction": 0.75,
+    }
+    assert _kernel_derivative(request, residuals=("derivative",)) == request
+    job = FWIOperatorJob(
+        "spectral_storage",
+        _saved_simulation(tmp_path),
+        [1.0],
+        action="linearize",
+        covector="gradient.h5",
+        state="state.json",
+        active=["model.vp"],
+        kernel_derivative=request,
+    )
+    payload = job.to_fs()
+    _assert_valid(payload)
+    assert payload["kernel_derivative"] == request
+    assert _round_trip(job).kernel_derivative == request
+
+    with pytest.raises(ValueError, match="field_storage"):
+        _kernel_derivative(
+            {**request, "field_storage": "invalid"}, residuals=("derivative",)
+        )
+
+    for fraction in (-1, 1.01, float("nan"), float("inf"), True, "0.8"):
+        with pytest.raises(ValueError, match="field_memory_fraction"):
+            _kernel_derivative(
+                {**request, "field_memory_fraction": fraction},
+                residuals=("derivative",),
+            )

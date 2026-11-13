@@ -184,6 +184,12 @@ class TraceAccessor:
 
         return _receiver_group(self._trace)
 
+    def to_trace_store(self, file: str | Path, **kwargs: Any) -> Path:
+        """Write this time or frequency gather as a Sauce observed-data store."""
+        from frequensolve.seismic.trace_conversion import convert_traces
+
+        return convert_traces(self._trace, file, **kwargs)
+
     def to_segy(
         self,
         file: str | Path,

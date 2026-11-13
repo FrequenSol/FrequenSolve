@@ -41,6 +41,21 @@ Forward Jobs
    :show-inheritance:
    :noindex:
 
+Transient Jobs
+--------------
+
+.. automodule:: frequensolve.simulation.jobs.transient
+   :members:
+   :noindex:
+
+.. automodule:: frequensolve.simulation.time
+   :members:
+   :noindex:
+
+.. automodule:: frequensolve.seismic.transient
+   :members:
+   :noindex:
+
 Eikonal Jobs
 ------------
 
@@ -49,21 +64,7 @@ Eikonal Jobs
    :show-inheritance:
    :noindex:
 
-Imaging Jobs
-------------
-
-.. automodule:: frequensolve.simulation.jobs.imaging
-   :members:
-   :show-inheritance:
-   :noindex:
-
-FWI Jobs
---------
-
-.. automodule:: frequensolve.simulation.jobs.fwi
-   :members:
-   :show-inheritance:
-   :noindex:
+Imaging jobs live in :doc:`frequensolve.imaging`.
 
 Artifacts
 ---------
@@ -124,4 +125,11 @@ Simulation
 .. automodule:: frequensolve.simulation.simulation
    :members:
    :show-inheritance:
+   :noindex:
+
+Reservoir Models
+----------------
+
+.. automodule:: frequensolve.simulation.reservoir
+   :members:
    :noindex:

@@ -1,0 +1,74 @@
+{
+  "schema": "fs-imaging-1",
+  "name": "phase_slope_vp",
+  "data_path": "data/observed",
+  "save_path": "results/imaging",
+  "field_retention": "none",
+  "grid": {
+    "system": "global",
+    "dims": ["x", "z"],
+    "x0": [0.0, 0.0],
+    "x1": [4.0, 2.0],
+    "n": [401, 201],
+    "units": "km"
+  },
+  "misfit": {
+    "comparison": {
+      "kind": "phase_derivative",
+      "derivative_axis": "frequency",
+      "source_derivative": "frozen",
+      "relative_amplitude_floor": 0.01
+    },
+    "objective": {
+      "kind": "l2"
+    },
+    "receiver_groups": [
+      {
+        "name": "receivers",
+        "observed": {
+          "_type": "HDF5TraceStore",
+          "file": "observed.h5",
+          "dataset": "receivers"
+        },
+        "observed_derivatives": {
+          "df": {
+            "_type": "HDF5TraceStore",
+            "file": "observed_df.h5",
+            "dataset": "receivers"
+          }
+        },
+        "projection": {
+          "kind": "identity"
+        },
+        "preprocess": [
+          {
+            "schema": "fs-preprocess-hook-1",
+            "kind": "source_spectrum_correction",
+            "stage": "simulated",
+            "params": {
+              "scale": [[1.0, 0.0]],
+              "frequency_derivative": [[0.0, 0.0]]
+            }
+          },
+          {
+            "schema": "fs-preprocess-hook-1",
+            "kind": "frequency_weight",
+            "stage": "residual",
+            "params": {
+              "power": 1.0,
+              "f0": 1.0,
+              "amplitude": 1.0
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "images": [
+    {
+      "name": "vp",
+      "IC": "fwi:acoustic",
+      "property": "vp"
+    }
+  ]
+}

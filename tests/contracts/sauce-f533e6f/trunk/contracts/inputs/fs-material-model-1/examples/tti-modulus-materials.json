@@ -1,0 +1,21 @@
+{
+  "schema": "fs-material-model-1",
+  "units": "km",
+  "subdomains": [
+    {
+      "name": "tilted_solid",
+      "mesh_block_id": 1,
+      "physics": "elastic:tti",
+      "properties": {
+        "K": {"value": 12.0, "units": "GPa"},
+        "Ks": {"value": 4.5, "units": "GPa"},
+        "rho": {"value": 2.0, "units": "g/cc"},
+        "epsilon": 0.13,
+        "gamma": 0.08,
+        "delta": 0.06,
+        "theta": {"value": 0.24, "units": "rad"},
+        "phi": {"value": 0.17, "units": "rad"}
+      }
+    }
+  ]
+}

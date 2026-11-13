@@ -1,0 +1,62 @@
+{
+  "schema": "fs-acquisition-2",
+  "max_batch": 1,
+  "source_geometry": {
+    "_type": "Inline",
+    "domain": 0,
+    "kind": "vector",
+    "defaults": {
+      "direction": [
+        0.0,
+        1.0
+      ]
+    },
+    "sources": [
+      {
+        "name": "s001",
+        "coordinates": {
+          "value": [
+            0.0,
+            0.1
+          ],
+          "units": "km"
+        }
+      },
+      {
+        "name": "s002",
+        "coordinates": {
+          "value": [
+            0.1,
+            0.1
+          ],
+          "units": "km"
+        }
+      }
+    ]
+  },
+  "source_encoding": {
+    "_type": "Named",
+    "fields": [
+      {
+        "name": "distributed_001",
+        "terms": [
+          {
+            "source": "s001",
+            "coefficient": [
+              1.0,
+              0.0
+            ]
+          },
+          {
+            "source": "s002",
+            "coefficient": [
+              0.0,
+              1.0
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "receiver_groups": []
+}

@@ -1,0 +1,141 @@
+{
+  "schema": "fs-simulation-1",
+  "project_path": "project",
+  "physics": "coupled",
+  "dimension": 2,
+  "f0": 10.0,
+  "global_coordinate_system": {
+    "name": "global",
+    "type": "cartesian",
+    "origin": {
+      "value": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "units": "m"
+    },
+    "axis_alignment": {
+      "x": "east",
+      "y": "north",
+      "z": "down"
+    }
+  },
+  "Discretization": {
+    "method": "DPG",
+    "form_execution": "compiled",
+    "gram_reg": 1e-05,
+    "geom_tol": 1e-08
+  },
+  "Mesh": {
+    "max_nodes": 100000,
+    "adapt": {
+      "order": 2,
+      "aspect_limit": 3.0,
+      "scholte": {
+        "enabled": true,
+        "lower_bound": {
+          "value": 600.0,
+          "units": "m/s"
+        },
+        "normal": {
+          "grading": 3.0,
+          "thickness": 4.0,
+          "h0": 3.0,
+          "factor": 4.0
+        },
+        "tangential": {
+          "grading": 3.0,
+          "thickness": 4.0,
+          "factor": 1.05
+        }
+      }
+    },
+    "generator": {
+      "_type": "LayeredMeshGenerator",
+      "path": "mesh",
+      "l_bound": [
+        0.0,
+        0.0
+      ],
+      "u_bound": [
+        1.0,
+        1.0
+      ],
+      "element_size": [
+        0.0625,
+        0.0625
+      ],
+      "units": "km"
+    }
+  },
+  "Model": {
+    "x_limits": [
+      0.0,
+      1.0
+    ],
+    "z_limits": [
+      0.0,
+      1.0
+    ],
+    "units": "km"
+  },
+  "Solver": {
+    "gpu_operator_batch_mib": 4096,
+    "mode": "fast",
+    "grids": 3,
+    "refinements": [
+      "h",
+      "p"
+    ],
+    "gpu_backend": "none",
+    "forms_backend": "cpu",
+    "patch_precision": "fp32",
+    "cycle": {
+      "anchor": "fine",
+      "visits": [
+        1,
+        2
+      ]
+    },
+    "scale_macro": true,
+    "tolerance": 1e-05,
+    "acceptance_residual": 0.001,
+    "op_max_blocks": 1,
+    "op_min_block": 1,
+    "op_target_block": 0
+  },
+  "BCs": [],
+  "Acquisition": {
+    "source_geometry": {
+      "_type": "Inline",
+      "kind": "scalar",
+      "sources": [
+        {
+          "name": "source_001",
+          "coordinates": [
+            0.5,
+            0.1
+          ]
+        }
+      ]
+    }
+  },
+  "Outputs": {
+    "traces": {
+      "_type": "TraceOutput",
+      "path": "traces"
+    },
+    "receivers": {
+      "_type": "ReceiverOutput",
+      "path": "traces"
+    },
+    "ParaView": {
+      "name": "solution",
+      "path": "paraview",
+      "writer": {
+        "format": "vtu"
+      }
+    }
+  }
+}

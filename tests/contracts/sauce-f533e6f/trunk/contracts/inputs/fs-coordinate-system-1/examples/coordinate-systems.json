@@ -1,0 +1,52 @@
+{
+  "schema": "fs-coordinate-system-1",
+  "global_coordinate_system": {
+    "name": "global",
+    "type": "cartesian",
+    "origin": {
+      "value": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "units": "m"
+    },
+    "axis_alignment": {
+      "x": "east",
+      "y": "north",
+      "z": "down"
+    }
+  },
+  "coordinate_systems": [
+    {
+      "name": "borehole",
+      "type": "cylindrical",
+      "origin": {
+        "value": [
+          1200.0,
+          400.0,
+          0.0
+        ],
+        "units": "m"
+      },
+      "axis_alignment": {
+        "x": "east",
+        "y": "north",
+        "z": "down"
+      }
+    }
+  ],
+  "example_location": {
+    "system": "borehole",
+    "value": [
+      50.0,
+      1.5707963,
+      1200.0
+    ],
+    "units": [
+      "m",
+      "rad",
+      "m"
+    ]
+  }
+}

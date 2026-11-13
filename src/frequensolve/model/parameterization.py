@@ -4,21 +4,48 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from numpy.typing import ArrayLike
 
 from frequensolve.model.property import Property
-from frequensolve.units import unit_expression
+from frequensolve.units import is_quantity, unit_expression
 from frequensolve.util.mixins import ExportContext
 
 __all__ = [
     "BSplineControl",
+    "CONTROL_EXTRAPOLATIONS",
+    "CONTROL_TRANSFORMS",
     "HatControl",
+    "MeshControl",
+    "MeshPropertySpace",
     "ParameterizedProperty",
+    "TensorBSplineControl",
+    "TensorHatControl",
     "control_from_fs",
 ]
+
+#: Control compositions accepted by ``ParameterizedProperty.transform``.
+#: ``identity`` evaluates ``r + c``, ``log`` evaluates ``r exp(c)``,
+#: ``inverse`` evaluates ``1 / (1/r + c)`` and ``logit`` evaluates
+#: ``sigmoid(logit(r) + c)`` for a dimensionless reference in ``(0, 1)``.
+CONTROL_TRANSFORMS: Tuple[str, ...] = ("identity", "log", "inverse", "logit")
+
+#: Behaviour of a hat, B-spline or tensor control outside its knot span.
+#: ``zero`` leaves the reference property untouched there (no update, no
+#: sensitivity); ``hold`` clamps the evaluation coordinate into the span, so
+#: the end value, JVP and VJP hold outside it with zero spatial gradient.
+CONTROL_EXTRAPOLATIONS: Tuple[str, ...] = ("zero", "hold")
+
+
+def _validate_extrapolate(value: Any) -> str:
+    policy = str(value).strip().lower()
+    if policy not in CONTROL_EXTRAPOLATIONS:
+        raise ValueError(
+            f"control extrapolate must be one of {CONTROL_EXTRAPOLATIONS}, got {value!r}"
+        )
+    return policy
 
 
 def _coefficient_vector(values: ArrayLike, *, minimum: int) -> np.ndarray:
@@ -39,7 +66,13 @@ def _coefficient_vector(values: ArrayLike, *, minimum: int) -> np.ndarray:
 
 @dataclass
 class HatControl:
-    """Uniform one-dimensional nodal grid with piecewise-linear hat functions."""
+    """Uniform one-dimensional nodal grid with piecewise-linear hat functions.
+
+    ``extrapolate`` says what happens outside the first and last node:
+    ``"zero"`` (default) leaves the reference property there, ``"hold"``
+    continues the first or last coefficient outward (see
+    :data:`CONTROL_EXTRAPOLATIONS`).
+    """
 
     axis: str
     spacing: float
@@ -47,12 +80,14 @@ class HatControl:
     origin: float = 0.0
     coordinate_system: str = "global"
     units: Optional[str] = None
+    extrapolate: str = "zero"
     kind: str = field(default="hat", init=False)
 
     def __post_init__(self) -> None:
         self.axis = str(self.axis).strip()
         self.coordinate_system = str(self.coordinate_system).strip()
         self.units = None if self.units is None else str(self.units).strip()
+        self.extrapolate = _validate_extrapolate(self.extrapolate)
         self.origin = float(self.origin)
         self.spacing = float(self.spacing)
         self.coefficients = _coefficient_vector(self.coefficients, minimum=2)
@@ -97,6 +132,8 @@ class HatControl:
         }
         if self.units is not None:
             payload["units"] = self.units
+        if self.extrapolate != "zero":
+            payload["extrapolate"] = self.extrapolate
         return payload
 
     @classmethod
@@ -110,12 +147,18 @@ class HatControl:
             origin=data.get("origin", 0.0),
             coordinate_system=data.get("coordinate_system", "global"),
             units=data.get("units"),
+            extrapolate=data.get("extrapolate", "zero"),
         )
 
 
 @dataclass
 class BSplineControl:
-    """Arbitrary-degree one-dimensional B-spline property control."""
+    """Arbitrary-degree one-dimensional B-spline property control.
+
+    ``extrapolate`` says what happens outside the active knot interval:
+    ``"zero"`` (default) leaves the reference property there, ``"hold"``
+    continues the end values outward (see :data:`CONTROL_EXTRAPOLATIONS`).
+    """
 
     axis: str
     knots: ArrayLike
@@ -123,12 +166,14 @@ class BSplineControl:
     degree: int = 3
     coordinate_system: str = "global"
     units: Optional[str] = None
+    extrapolate: str = "zero"
     kind: str = field(default="bspline", init=False)
 
     def __post_init__(self) -> None:
         self.axis = str(self.axis).strip()
         self.coordinate_system = str(self.coordinate_system).strip()
         self.units = None if self.units is None else str(self.units).strip()
+        self.extrapolate = _validate_extrapolate(self.extrapolate)
         self.degree = int(self.degree)
         self.knots = np.asarray(self.knots, dtype=np.float64)
         if self.knots.ndim != 1 or self.knots.size < 2:
@@ -199,6 +244,8 @@ class BSplineControl:
         }
         if self.units is not None:
             payload["units"] = self.units
+        if self.extrapolate != "zero":
+            payload["extrapolate"] = self.extrapolate
         return payload
 
     @classmethod
@@ -212,21 +259,756 @@ class BSplineControl:
             degree=data.get("degree", 3),
             coordinate_system=data.get("coordinate_system", "global"),
             units=data.get("units"),
+            extrapolate=data.get("extrapolate", "zero"),
         )
 
 
-PropertyControl = Union[HatControl, BSplineControl]
+def _lattice_vector(
+    values: Any, *, name: str, count: int, dtype: Any = np.float64
+) -> np.ndarray:
+    """Return a finite one-dimensional per-axis lattice vector."""
+
+    array = np.asarray(values, dtype=dtype)
+    if array.ndim != 1 or array.size != count:
+        raise ValueError(
+            f"tensor hat {name} must list one value per lattice axis ({count})"
+        )
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"tensor hat {name} must be finite")
+    return np.array(array, copy=True)
+
+
+@dataclass
+class TensorHatControl:
+    """Tensor product of two or three uniform nodal hat axes.
+
+    The lattice is independent of the simulation mesh. Coefficients are stored
+    flat in the Sauce contract ordering: the first listed axis varies fastest
+    (``i = i_0 + n_0 * (i_1 + n_1 * i_2)``). ``coefficients`` may be supplied
+    either as that flat vector or as an array whose shape equals ``shape``; an
+    array is flattened with the same first-axis-fastest convention.
+
+    Updates vanish outside the closed lattice box, so zero boundary
+    coefficients give a continuous localized perturbation; with
+    ``extrapolate="hold"`` the lattice instead continues its boundary rows and
+    columns outward (each axis coordinate is clamped into the lattice span), so
+    a sparse lattice over part of a domain reaches the domain edges.
+
+    Args:
+        axes: Distinct axis names in coefficient storage order.
+        shape: Number of nodes per axis (at least two each).
+        origin: First node coordinate per axis.
+        spacing: Positive node spacing per axis.
+        coefficients: Flat coefficient vector of length ``prod(shape)`` or an
+            array with shape ``shape``.
+        coordinate_system: Coordinate system the axes belong to.
+        units: Optional length units shared by all axes; defaults to the
+            model coordinate units.
+        extrapolate: ``"zero"`` (default) or ``"hold"`` outside the lattice
+            span, applied along every axis (see :data:`CONTROL_EXTRAPOLATIONS`).
+    """
+
+    axes: Sequence[str]
+    shape: Sequence[int]
+    origin: Sequence[float]
+    spacing: Sequence[float]
+    coefficients: ArrayLike
+    coordinate_system: str = "global"
+    units: Optional[str] = None
+    extrapolate: str = "zero"
+    kind: str = field(default="tensor_hat", init=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.axes, str):
+            raise ValueError("tensor hat axes must be a sequence of axis names")
+        self.axes = tuple(str(axis).strip() for axis in self.axes)
+        self.coordinate_system = str(self.coordinate_system).strip()
+        self.units = None if self.units is None else str(self.units).strip()
+        self.extrapolate = _validate_extrapolate(self.extrapolate)
+        ndim = len(self.axes)
+        if ndim not in (2, 3):
+            raise ValueError("tensor hat control requires two or three axes")
+        if any(not axis for axis in self.axes):
+            raise ValueError("tensor hat axis names cannot be empty")
+        if len(set(self.axes)) != ndim:
+            raise ValueError("tensor hat axes must be distinct")
+        if not self.coordinate_system:
+            raise ValueError("tensor hat control requires a coordinate system")
+        if self.units == "":
+            raise ValueError("tensor hat control units cannot be empty")
+        shape = np.asarray(self.shape)
+        if shape.ndim != 1 or shape.size != ndim:
+            raise ValueError(
+                f"tensor hat shape must list one value per lattice axis ({ndim})"
+            )
+        if not np.issubdtype(shape.dtype, np.integer) or np.any(shape < 2):
+            raise ValueError("tensor hat shape must be integers of at least 2")
+        self.shape = tuple(int(n) for n in shape)
+        self.origin = _lattice_vector(self.origin, name="origin", count=ndim)
+        self.spacing = _lattice_vector(self.spacing, name="spacing", count=ndim)
+        if np.any(self.spacing <= 0.0):
+            raise ValueError("tensor hat spacing must be positive")
+        self.coefficients = self._flatten(self.coefficients)
+
+    def _flatten(self, values: ArrayLike) -> np.ndarray:
+        array = np.asarray(values)
+        if np.iscomplexobj(array):
+            raise ValueError("material control coefficients must be real-valued")
+        if array.ndim == len(self.shape) and array.ndim > 1:
+            if tuple(array.shape) != self.shape:
+                raise ValueError(
+                    f"tensor hat coefficient array shape {tuple(array.shape)} "
+                    f"does not match lattice shape {self.shape}"
+                )
+            array = np.asarray(array, dtype=np.float64).reshape(-1, order="F")
+        expected = int(np.prod(self.shape))
+        flat = _coefficient_vector(array, minimum=4)
+        if flat.size != expected:
+            raise ValueError(
+                f"tensor hat coefficient count {flat.size} must equal "
+                f"product(shape) = {expected}"
+            )
+        return flat
+
+    @property
+    def ndim(self) -> int:
+        """Return the number of lattice axes."""
+
+        return len(self.shape)
+
+    @property
+    def size(self) -> int:
+        """Return the number of ordered lattice coefficients."""
+
+        return int(np.asarray(self.coefficients).size)
+
+    @property
+    def axis_coordinates(self) -> List[np.ndarray]:
+        """Return the node coordinates along each lattice axis."""
+
+        return [
+            float(self.origin[k]) + float(self.spacing[k]) * np.arange(n, dtype=float)
+            for k, n in enumerate(self.shape)
+        ]
+
+    @property
+    def coordinates(self) -> np.ndarray:
+        """Return an ``(size, ndim)`` array of node coordinates.
+
+        Rows follow the flat coefficient ordering, so ``coordinates[i]`` is the
+        node owning ``coefficients[i]`` and the first axis varies fastest.
+        """
+
+        grids = np.meshgrid(*self.axis_coordinates, indexing="ij")
+        return np.stack([grid.reshape(-1, order="F") for grid in grids], axis=1)
+
+    @property
+    def grid(self) -> np.ndarray:
+        """Return the coefficients as an array with shape ``shape``.
+
+        ``grid[i_0, i_1, ...]`` is the coefficient at node ``(i_0, i_1, ...)``.
+        """
+
+        return np.asarray(self.coefficients).reshape(self.shape, order="F")
+
+    def with_coefficients(self, coefficients: ArrayLike) -> "TensorHatControl":
+        """Return a copy with a replacement flat or lattice-shaped vector."""
+
+        return replace(self, coefficients=coefficients)
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize this control using the Sauce material contract."""
+
+        payload: Dict[str, Any] = {
+            "kind": self.kind,
+            "coordinate_system": self.coordinate_system,
+            "axes": list(self.axes),
+            "shape": list(self.shape),
+            "origin": np.asarray(self.origin).tolist(),
+            "spacing": np.asarray(self.spacing).tolist(),
+            "coefficients": np.asarray(self.coefficients).tolist(),
+        }
+        if self.units is not None:
+            payload["units"] = self.units
+        if self.extrapolate != "zero":
+            payload["extrapolate"] = self.extrapolate
+        return payload
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "TensorHatControl":
+        """Deserialize a tensor hat control."""
+
+        return cls(
+            axes=data["axes"],
+            shape=data["shape"],
+            origin=data["origin"],
+            spacing=data["spacing"],
+            coefficients=data["coefficients"],
+            coordinate_system=data.get("coordinate_system", "global"),
+            units=data.get("units"),
+            extrapolate=data.get("extrapolate", "zero"),
+        )
+
+
+#: Largest per-axis degree the Sauce ``tensor_bspline`` contract accepts.
+_TENSOR_BSPLINE_MAX_DEGREE = 7
+
+
+def _tensor_degrees(values: Any, count: int) -> Tuple[int, ...]:
+    """Return one validated B-spline degree per tensor axis."""
+
+    array = np.asarray(values)
+    if array.ndim == 0:
+        array = np.full(count, array)
+    if array.ndim != 1 or array.size != count:
+        raise ValueError(
+            f"tensor B-spline degree must be one integer or one per axis ({count})"
+        )
+    if (
+        not np.issubdtype(array.dtype, np.integer)
+        or np.any(array < 1)
+        or np.any(array > _TENSOR_BSPLINE_MAX_DEGREE)
+    ):
+        raise ValueError(
+            "tensor B-spline degrees must be integers between 1 and "
+            f"{_TENSOR_BSPLINE_MAX_DEGREE}"
+        )
+    return tuple(int(value) for value in array)
+
+
+@dataclass
+class TensorBSplineControl:
+    """Tensor product of two or three one-dimensional B-spline axes.
+
+    Every axis has its own degree and full knot vector; its basis is the
+    standard B-spline basis of that knot vector, closed at the right end,
+    exactly as in :class:`BSplineControl`, and axis ``a`` carries
+    ``n_a = len(knots_a) - degree_a - 1`` coefficients. The control is
+    independent of the simulation mesh. Coefficients are stored flat in the
+    Sauce contract ordering with the first listed axis fastest
+    (``i = i_0 + n_0 * (i_1 + n_1 * i_2)``), like :class:`TensorHatControl`;
+    an array with shape ``shape`` is flattened with the same convention.
+
+    Degree one with open knots ``[x_0, x_0, x_1, ..., x_m, x_m]`` is the hat
+    basis on the nodes ``x_0 .. x_m``, so a degree-one tensor B-spline on
+    uniform nodes reproduces the equivalent :class:`TensorHatControl`;
+    :meth:`from_nodes` builds such open knot vectors from breakpoints. Updates
+    vanish outside the closed knot-span box; with ``extrapolate="hold"`` every
+    axis coordinate is clamped into its active knot interval, so the edge
+    values continue outward.
+
+    Args:
+        axes: Distinct axis names in coefficient storage order.
+        degree: Degree per axis (1 to 7), or one degree for every axis.
+        knots: Full nondecreasing knot vector per axis (multiplicity at most
+            ``degree + 1``, positive active interval, at least ``degree + 1``
+            coefficients).
+        coefficients: Flat coefficient vector of length ``prod(shape)`` or an
+            array with shape ``shape``.
+        coordinate_system: Coordinate system the axes belong to.
+        units: Optional length units shared by all knot vectors; defaults to
+            the model coordinate units.
+        extrapolate: ``"zero"`` (default) or ``"hold"`` outside the knot
+            spans, applied along every axis (see :data:`CONTROL_EXTRAPOLATIONS`).
+    """
+
+    axes: Sequence[str]
+    degree: Any
+    knots: Sequence[ArrayLike]
+    coefficients: ArrayLike
+    coordinate_system: str = "global"
+    units: Optional[str] = None
+    extrapolate: str = "zero"
+    kind: str = field(default="tensor_bspline", init=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.axes, str):
+            raise ValueError("tensor B-spline axes must be a sequence of axis names")
+        self.axes = tuple(str(axis).strip() for axis in self.axes)
+        self.coordinate_system = str(self.coordinate_system).strip()
+        self.units = None if self.units is None else str(self.units).strip()
+        self.extrapolate = _validate_extrapolate(self.extrapolate)
+        ndim = len(self.axes)
+        if ndim not in (2, 3):
+            raise ValueError("tensor B-spline control requires two or three axes")
+        if any(not axis for axis in self.axes):
+            raise ValueError("tensor B-spline axis names cannot be empty")
+        if len(set(self.axes)) != ndim:
+            raise ValueError("tensor B-spline axes must be distinct")
+        if not self.coordinate_system:
+            raise ValueError("tensor B-spline control requires a coordinate system")
+        if self.units == "":
+            raise ValueError("tensor B-spline control units cannot be empty")
+        self.degree = _tensor_degrees(self.degree, ndim)
+        if isinstance(self.knots, (str, bytes)) or len(self.knots) != ndim:
+            raise ValueError(
+                f"tensor B-spline knots must list one knot vector per axis ({ndim})"
+            )
+        knots: List[np.ndarray] = []
+        for axis, degree, values in zip(self.axes, self.degree, self.knots):
+            vector = np.asarray(values, dtype=np.float64)
+            try:
+                # The per-axis rules are exactly those of a 1-D B-spline map.
+                BSplineControl(
+                    axis=axis,
+                    knots=vector,
+                    degree=degree,
+                    coefficients=np.zeros(max(1, vector.size - degree - 1)),
+                )
+            except ValueError as exc:
+                raise ValueError(f"tensor B-spline axis {axis!r}: {exc}") from exc
+            knots.append(np.array(vector, copy=True))
+        self.knots = tuple(knots)
+        self.coefficients = self._flatten(self.coefficients)
+
+    def _flatten(self, values: ArrayLike) -> np.ndarray:
+        shape = self.shape
+        array = np.asarray(values)
+        if np.iscomplexobj(array):
+            raise ValueError("material control coefficients must be real-valued")
+        if array.ndim == len(shape) and array.ndim > 1:
+            if tuple(array.shape) != shape:
+                raise ValueError(
+                    f"tensor B-spline coefficient array shape {tuple(array.shape)} "
+                    f"does not match the coefficient shape {shape}"
+                )
+            array = np.asarray(array, dtype=np.float64).reshape(-1, order="F")
+        expected = int(np.prod(shape))
+        flat = _coefficient_vector(array, minimum=4)
+        if flat.size != expected:
+            raise ValueError(
+                f"tensor B-spline coefficient count {flat.size} must equal the "
+                f"product of len(knots) - degree - 1 over the axes = {expected}"
+            )
+        return flat
+
+    @classmethod
+    def from_nodes(
+        cls,
+        axes: Sequence[str],
+        nodes: Any,
+        degree: Any = 1,
+        coefficients: Optional[ArrayLike] = None,
+        *,
+        coordinate_system: str = "global",
+        units: Optional[str] = None,
+        extrapolate: str = "zero",
+    ) -> "TensorBSplineControl":
+        """Return a tensor B-spline with open knots on per-axis breakpoints.
+
+        Axis ``a`` with strictly increasing breakpoints ``b`` (at least two)
+        and degree ``p`` gets the open knot vector ``[b_0]*p + b + [b_last]*p``
+        and ``len(b) + p - 1`` coefficients; its first and last Greville
+        abscissae are the end breakpoints. Degree one is the hat basis on the
+        breakpoints.
+
+        Args:
+            axes: Distinct axis names in coefficient storage order.
+            nodes: Breakpoints per axis, as a sequence in ``axes`` order or a
+                mapping keyed by axis name.
+            degree: Degree per axis or one degree for every axis.
+            coefficients: Flat or shaped coefficients; zeros by default.
+            coordinate_system: Coordinate system the axes belong to.
+            units: Optional length units of the breakpoints.
+            extrapolate: ``"zero"`` or ``"hold"`` outside the spans.
+        """
+
+        if isinstance(axes, str):
+            raise ValueError("tensor B-spline axes must be a sequence of axis names")
+        axes = tuple(str(axis).strip() for axis in axes)
+        if isinstance(nodes, Mapping):
+            missing = [axis for axis in axes if axis not in nodes]
+            if missing or len(nodes) != len(axes):
+                raise ValueError(
+                    f"tensor B-spline nodes must list breakpoints for exactly the "
+                    f"axes {list(axes)}; got {list(nodes)}"
+                )
+            nodes = [nodes[axis] for axis in axes]
+        if isinstance(nodes, (str, bytes)) or len(nodes) != len(axes):
+            raise ValueError(
+                f"tensor B-spline nodes must list breakpoints per axis ({len(axes)})"
+            )
+        degrees = _tensor_degrees(degree, len(axes))
+        knots: List[np.ndarray] = []
+        for axis, p, values in zip(axes, degrees, nodes):
+            breaks = np.asarray(values, dtype=np.float64)
+            if breaks.ndim != 1 or breaks.size < 2:
+                raise ValueError(
+                    f"tensor B-spline breakpoints of axis {axis!r} must be a 1-D "
+                    "array of at least two values"
+                )
+            if not np.all(np.isfinite(breaks)) or np.any(np.diff(breaks) <= 0.0):
+                raise ValueError(
+                    f"tensor B-spline breakpoints of axis {axis!r} must be finite "
+                    "and strictly increasing"
+                )
+            knots.append(np.concatenate(([breaks[0]] * p, breaks, [breaks[-1]] * p)))
+        if coefficients is None:
+            coefficients = np.zeros(
+                int(np.prod([k.size - p - 1 for k, p in zip(knots, degrees)]))
+            )
+        return cls(
+            axes=axes,
+            degree=degrees,
+            knots=knots,
+            coefficients=coefficients,
+            coordinate_system=coordinate_system,
+            units=units,
+            extrapolate=extrapolate,
+        )
+
+    @property
+    def ndim(self) -> int:
+        """Return the number of tensor axes."""
+
+        return len(self.axes)
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        """Return the coefficient count per axis, ``len(knots) - degree - 1``."""
+
+        return tuple(
+            int(np.asarray(knots).size - degree - 1)
+            for knots, degree in zip(self.knots, self.degree)
+        )
+
+    @property
+    def size(self) -> int:
+        """Return the number of ordered tensor coefficients."""
+
+        return int(np.asarray(self.coefficients).size)
+
+    @property
+    def axis_controls(self) -> List[BSplineControl]:
+        """Return one zero-coefficient :class:`BSplineControl` per axis.
+
+        Each shares the tensor's coordinate system, units and extrapolation
+        policy, so it evaluates the one-dimensional factor of the basis.
+        """
+
+        return [
+            BSplineControl(
+                axis=axis,
+                knots=knots,
+                degree=degree,
+                coefficients=np.zeros(count),
+                coordinate_system=self.coordinate_system,
+                units=self.units,
+                extrapolate=self.extrapolate,
+            )
+            for axis, knots, degree, count in zip(
+                self.axes, self.knots, self.degree, self.shape
+            )
+        ]
+
+    @property
+    def axis_coordinates(self) -> List[np.ndarray]:
+        """Return the Greville abscissae of the coefficients along each axis."""
+
+        return [control.coordinates for control in self.axis_controls]
+
+    @property
+    def coordinates(self) -> np.ndarray:
+        """Return an ``(size, ndim)`` array of tensor Greville nodes.
+
+        Rows follow the flat coefficient ordering, so ``coordinates[i]`` is the
+        node owning ``coefficients[i]`` and the first axis varies fastest.
+        """
+
+        grids = np.meshgrid(*self.axis_coordinates, indexing="ij")
+        return np.stack([grid.reshape(-1, order="F") for grid in grids], axis=1)
+
+    @property
+    def grid(self) -> np.ndarray:
+        """Return the coefficients as an array with shape ``shape``.
+
+        ``grid[i_0, i_1, ...]`` is the coefficient of basis ``(i_0, i_1, ...)``.
+        """
+
+        return np.asarray(self.coefficients).reshape(self.shape, order="F")
+
+    def with_coefficients(self, coefficients: ArrayLike) -> "TensorBSplineControl":
+        """Return a copy with a replacement flat or tensor-shaped vector."""
+
+        return replace(self, coefficients=coefficients)
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize this control using the Sauce material contract."""
+
+        payload: Dict[str, Any] = {
+            "kind": self.kind,
+            "coordinate_system": self.coordinate_system,
+        }
+        if self.units is not None:
+            payload["units"] = self.units
+        if self.extrapolate != "zero":
+            payload["extrapolate"] = self.extrapolate
+        payload["axes"] = [
+            {"axis": axis, "degree": degree, "knots": np.asarray(knots).tolist()}
+            for axis, degree, knots in zip(self.axes, self.degree, self.knots)
+        ]
+        payload["coefficients"] = np.asarray(self.coefficients).tolist()
+        return payload
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "TensorBSplineControl":
+        """Deserialize a tensor B-spline control."""
+
+        axes = data["axes"]
+        if isinstance(axes, (str, bytes)) or not all(
+            isinstance(axis, Mapping) for axis in axes
+        ):
+            raise ValueError(
+                "tensor B-spline axes must be objects with axis, degree and knots"
+            )
+        return cls(
+            axes=[axis["axis"] for axis in axes],
+            degree=[axis["degree"] for axis in axes],
+            knots=[axis["knots"] for axis in axes],
+            coefficients=data["coefficients"],
+            coordinate_system=data.get("coordinate_system", "global"),
+            units=data.get("units"),
+            extrapolate=data.get("extrapolate", "zero"),
+        )
+
+
+@dataclass
+class MeshControl:
+    """First-order nodal controls on a named frozen mesh property space.
+
+    The control basis is generated by Sauce from the initial mesh the first
+    time the named space is used and frozen in the space's artifact (see
+    :class:`MeshPropertySpace` and ``Model.property_spaces``). Coefficients
+    start at zero and are carried in named control checkpoints, never inline,
+    so this object has no ``coefficients``; ``size`` and ``coordinates`` are
+    ``None`` until Sauce has written the artifact.
+
+    Args:
+        space: Name of the ``Model/property_spaces`` entry to use.
+    """
+
+    space: str
+    kind: str = field(default="mesh", init=False)
+
+    def __post_init__(self) -> None:
+        self.space = str(self.space).strip()
+        if not self.space:
+            raise ValueError("mesh control requires a property-space name")
+
+    @property
+    def size(self) -> None:
+        """Return ``None``; the coefficient count is fixed by the artifact."""
+
+        return None
+
+    @property
+    def coordinates(self) -> None:
+        """Return ``None``; nodal coordinates live in the space artifact."""
+
+        return None
+
+    @property
+    def coefficients(self) -> None:
+        """Return ``None``; mesh coefficients are read from checkpoints."""
+
+        return None
+
+    def with_coefficients(self, coefficients: ArrayLike) -> "MeshControl":
+        """Reject inline coefficients, which the contract does not accept."""
+
+        raise ValueError(
+            "mesh controls do not carry inline coefficients; use a control "
+            "checkpoint written against the property-space artifact"
+        )
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize this control using the Sauce material contract."""
+
+        return {"kind": self.kind, "space": self.space}
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "MeshControl":
+        """Deserialize a mesh control."""
+
+        return cls(space=data["space"])
+
+
+def _frequency_hz(value: Any) -> float:
+    """Return a positive frequency in hertz from a float, quantity or mapping."""
+
+    if isinstance(value, Mapping):
+        payload = dict(value)
+        unknown = set(payload) - {"value", "units"}
+        if unknown or "value" not in payload:
+            raise ValueError(
+                "property-space frequency mapping accepts only value and units"
+            )
+        units = payload.get("units")
+        value = payload["value"]
+        if units is not None:
+            from frequensolve.units import Q_
+
+            value = Q_(value, unit_expression(units))
+    if is_quantity(value):
+        try:
+            value = value.to("Hz").magnitude
+        except Exception as exc:
+            raise ValueError(
+                "property-space frequency units must be compatible with hertz"
+            ) from exc
+    frequency = float(value)
+    if not np.isfinite(frequency) or frequency <= 0.0:
+        raise ValueError("property-space frequency must be finite and positive")
+    return frequency
+
+
+@dataclass
+class MeshPropertySpace:
+    """Named material-control topology declared in ``Model/property_spaces``.
+
+    The space sizes a first-order nodal hierarchy from the initial geometry
+    and reference material state at ``frequency`` hertz with ``epw`` elements
+    per wavelength. Sauce freezes the topology and coefficient identifiers in
+    ``artifact`` on first use; later runs must reuse the same artifact or name
+    a new space. Solution frequency and solver refinement do not size it.
+
+    Args:
+        artifact: HDF5 artifact path (``.h5``) that freezes the space.
+        frequency: Control sizing frequency. Bare values are hertz; Pint
+            quantities and ``{"value", "units"}`` mappings are converted.
+        epw: Elements per wavelength, scalar or one value per spatial
+            dimension.
+    """
+
+    artifact: str
+    frequency: Any
+    epw: Any
+
+    def __post_init__(self) -> None:
+        self.artifact = str(self.artifact).strip()
+        if not self.artifact.endswith(".h5"):
+            raise ValueError("property-space artifact must be an .h5 path")
+        self.frequency = _frequency_hz(self.frequency)
+        epw = np.asarray(self.epw, dtype=np.float64)
+        if epw.ndim == 0:
+            self.epw = float(epw)
+            values = np.array([self.epw])
+        elif epw.ndim == 1 and epw.size in (2, 3):
+            self.epw = [float(v) for v in epw]
+            values = epw
+        else:
+            raise ValueError(
+                "property-space epw must be a scalar or one value per dimension"
+            )
+        if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError("property-space epw must be finite and positive")
+
+    def to_fs(self) -> Dict[str, Any]:
+        """Serialize this space using the Sauce material contract."""
+
+        return {
+            "artifact": self.artifact,
+            "frequency": self.frequency,
+            "epw": self.epw,
+        }
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "MeshPropertySpace":
+        """Deserialize a property-space declaration."""
+
+        return cls(
+            artifact=data["artifact"],
+            frequency=data["frequency"],
+            epw=data["epw"],
+        )
+
+    @staticmethod
+    def mapping_from_fs(
+        data: Optional[Mapping[str, Any]],
+    ) -> Dict[str, "MeshPropertySpace"]:
+        """Coerce a ``property_spaces`` mapping into named spaces."""
+
+        spaces: Dict[str, MeshPropertySpace] = {}
+        for name, value in dict(data or {}).items():
+            key = str(name).strip()
+            if not key or len(key) > 64:
+                raise ValueError("property-space names must be 1 to 64 characters long")
+            spaces[key] = (
+                value
+                if isinstance(value, MeshPropertySpace)
+                else MeshPropertySpace.from_fs(value)
+            )
+        return spaces
+
+
+PropertyControl = Union[
+    HatControl, BSplineControl, TensorHatControl, TensorBSplineControl, MeshControl
+]
+
+_CONTROL_KINDS = {
+    "hat": HatControl,
+    "bspline": BSplineControl,
+    "tensor_hat": TensorHatControl,
+    "tensor_bspline": TensorBSplineControl,
+    "mesh": MeshControl,
+}
 
 
 def control_from_fs(data: Mapping[str, Any]) -> PropertyControl:
     """Deserialize one supported sparse property-control map."""
 
     kind = str(data.get("kind", "bspline")).lower()
-    if kind == "hat":
-        return HatControl.from_fs(data)
-    if kind == "bspline":
-        return BSplineControl.from_fs(data)
-    raise ValueError(f"unsupported property-control kind {kind!r}")
+    control_class = _CONTROL_KINDS.get(kind)
+    if control_class is None:
+        raise ValueError(f"unsupported property-control kind {kind!r}")
+    return control_class.from_fs(data)
+
+
+def _is_dimensionless(units: Optional[str]) -> bool:
+    if units is None or units == "":
+        return True
+    try:
+        from frequensolve.units import ureg
+
+        return bool(ureg(units).dimensionless)
+    except Exception:
+        return False
+
+
+def _constant_reference_value(reference: Property) -> Optional[float]:
+    """Return the scalar value of a constant reference, else ``None``."""
+
+    try:
+        if not reference.is_constant:
+            return None
+        low, high = reference.extrema
+        low = float(np.asarray(low))
+        high = float(np.asarray(high))
+    except Exception:
+        return None
+    return low if low == high else None
+
+
+def _validate_transform(transform: str, reference: Property, units: Any) -> str:
+    transform = str(transform).lower().strip()
+    if transform not in CONTROL_TRANSFORMS:
+        choices = ", ".join(CONTROL_TRANSFORMS)
+        raise ValueError(f"parameterized property transform must be one of {choices}")
+    value = _constant_reference_value(reference)
+    if transform == "inverse" and value is not None and value <= 0.0:
+        raise ValueError(
+            "inverse transform requires a strictly positive reference property"
+        )
+    if transform == "logit":
+        if not _is_dimensionless(units):
+            raise ValueError(
+                "logit transform requires a dimensionless reference property"
+            )
+        if value is not None and not 0.0 < value < 1.0:
+            raise ValueError(
+                "logit transform requires a reference strictly between 0 and 1"
+            )
+    return transform
 
 
 class ParameterizedProperty(Property):
@@ -259,17 +1041,17 @@ class ParameterizedProperty(Property):
             raise ValueError("parameterized property requires a non-empty block id")
         if "/" in block_id or block_id in {".", ".."}:
             raise ValueError("parameterized property block id is not HDF5-safe")
-        transform = str(transform).lower()
-        if transform not in {"identity", "log"}:
-            raise ValueError("parameterized property transform must be identity or log")
+        self.darr = (
+            None  # A control field is materialized only at explicit coordinates.
+        )
         self.reference = reference
         self.id = block_id
         self.control = (
             control_from_fs(control) if isinstance(control, Mapping) else control
         )
-        if not isinstance(self.control, (HatControl, BSplineControl)):
+        if not isinstance(self.control, tuple(_CONTROL_KINDS.values())):
             raise TypeError("parameterized property requires a supported control map")
-        self.transform = transform
+        self.transform = _validate_transform(transform, reference, wrapper_units)
         self.extra = dict(extra)
 
     @property
@@ -279,10 +1061,151 @@ class ParameterizedProperty(Property):
         return False
 
     @property
-    def coefficients(self) -> np.ndarray:
-        """Return the ordered coefficient vector for the whole block."""
+    def coefficients(self) -> Optional[np.ndarray]:
+        """Return the ordered coefficient vector for the whole block.
 
-        return np.asarray(self.control.coefficients)
+        Mesh controls carry no inline coefficients and return ``None``.
+        """
+
+        coefficients = self.control.coefficients
+        return None if coefficients is None else np.asarray(coefficients)
+
+    def apply_control(self, reference_values: Any, context: Any) -> np.ndarray:
+        """Compose sampled reference values with controls in their own frame.
+
+        ``context`` is an EvaluationContext with coordinates in the control's
+        declared length units. Updates vanish outside the control support
+        unless the control holds its edge values (``extrapolate="hold"``).
+        Mesh controls require solver materialization and fail explicitly here.
+        """
+        from scipy.interpolate import RegularGridInterpolator
+        from scipy.special import expit
+
+        from frequensolve.model.representation import (
+            ControlRepresentation,
+            TensorControlRepresentation,
+        )
+
+        if isinstance(self.control, MeshControl):
+            raise NotImplementedError(
+                "mesh controls require solver-backed materialization"
+            )
+        if isinstance(self.control, TensorBSplineControl):
+            # Row-wise Khatri-Rao product of the per-axis B-spline maps.
+            update = TensorControlRepresentation(self.control).evaluate(
+                np.asarray(self.control.coefficients), context
+            )
+        elif isinstance(self.control, TensorHatControl):
+            points = np.column_stack(
+                [
+                    context.coordinate(axis, self.control.coordinate_system)
+                    for axis in self.control.axes
+                ]
+            )
+            if self.control.extrapolate == "hold":
+                # The solver clamps every axis coordinate into the lattice span.
+                for k, nodes in enumerate(self.control.axis_coordinates):
+                    points[:, k] = np.clip(points[:, k], nodes[0], nodes[-1])
+            update = RegularGridInterpolator(
+                self.control.axis_coordinates,
+                self.control.grid,
+                bounds_error=False,
+                fill_value=0.0,
+            )(points).reshape(context.shape)
+        else:
+            update = ControlRepresentation(self.control).evaluate(
+                np.asarray(self.control.coefficients).tolist(), context
+            )
+        reference = np.broadcast_to(
+            np.asarray(reference_values, dtype=float), context.shape
+        )
+        if self.transform == "identity":
+            values = reference + update
+        elif self.transform == "log":
+            values = reference * np.exp(update)
+        elif self.transform == "inverse":
+            if np.any(reference <= 0):
+                raise ValueError("inverse transform requires a positive reference")
+            denominator = 1.0 / reference + update
+            if np.any(denominator <= 0):
+                raise ValueError("inverse control crosses zero reciprocal value")
+            values = 1.0 / denominator
+        else:
+            if np.any((reference <= 0) | (reference >= 1)):
+                raise ValueError(
+                    "logit reference must lie strictly between zero and one"
+                )
+            values = expit(np.log(reference) - np.log1p(-reference) + update)
+            values = np.where(update == 0, reference, values)
+            if np.any((values <= 0) | (values >= 1)):
+                raise ValueError("logit update exceeds the representable open interval")
+        if not np.all(np.isfinite(values)):
+            raise ValueError("parameterized property evaluates to non-finite values")
+        return values
+
+    def evaluation_context(self, grid: Any) -> Any:
+        """Build a control context from an xarray grid in the declared frame."""
+        from frequensolve.model.representation import EvaluationContext
+        from frequensolve.units import ureg
+
+        if isinstance(self.control, MeshControl):
+            raise NotImplementedError(
+                "mesh controls require solver-backed materialization"
+            )
+        axes = (
+            self.control.axes
+            if isinstance(self.control, (TensorHatControl, TensorBSplineControl))
+            else (getattr(self.control, "axis", None),)
+        )
+        coordinates = {}
+        for axis in axes:
+            if axis not in grid.coords:
+                raise ValueError(f"control sampling grid has no axis {axis!r}")
+            coord = grid.coords[axis].broadcast_like(grid).transpose(*grid.dims)
+            values = np.asarray(coord.values, dtype=float)
+            source_units = coord.attrs.get("units", grid.attrs.get("units"))
+            if self.control.units is not None and source_units is not None:
+                values = (
+                    ureg.Quantity(values, source_units).to(self.control.units).magnitude
+                )
+            coordinates[axis] = values
+        return EvaluationContext(
+            coordinates,
+            coordinate_system=self.control.coordinate_system,
+            shape=grid.shape,
+            dims=grid.dims,
+        )
+
+    def get(self, grid: Any = None) -> Any:
+        """Materialize an inline control on a supplied xarray sampling grid.
+
+        Named control frames must already be resolved on the supplied grid;
+        LayeredModel sampling resolves them using the model coordinate systems.
+        """
+        import xarray as xr
+
+        if isinstance(self.control, MeshControl):
+            raise NotImplementedError(
+                "mesh controls require solver-backed materialization"
+            )
+        if grid is None:
+            raise ValueError(
+                "parameterized property sampling requires an explicit grid"
+            )
+        system = grid.attrs.get("coordinate_system", "global")
+        if system != self.control.coordinate_system:
+            raise ValueError(
+                f"sampling grid is in {system!r}, control is in {self.control.coordinate_system!r}"
+            )
+        values = self.apply_control(
+            self.reference.get(grid), self.evaluation_context(grid)
+        )
+        return xr.DataArray(
+            values,
+            dims=grid.dims,
+            coords=grid.coords,
+            attrs={"units": self.units} if self.units else {},
+        )
 
     def with_coefficients(self, coefficients: ArrayLike) -> "ParameterizedProperty":
         """Return a deep copy with replacement control coefficients."""

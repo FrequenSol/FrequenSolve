@@ -1,0 +1,19 @@
+{
+  "schema": "fs-simulation-1",
+  "project_path": "project",
+  "physics": "coupled",
+  "dimension": 2,
+  "Outputs": {
+    "ParaView": [
+      {
+        "_type": "ParaviewOutput",
+        "name": "decomposed_velocity",
+        "fields": [
+          "velocity",
+          "p_velocity",
+          "s_velocity"
+        ]
+      }
+    ]
+  }
+}

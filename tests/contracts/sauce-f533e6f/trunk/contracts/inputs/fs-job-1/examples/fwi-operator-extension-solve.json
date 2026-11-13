@@ -1,0 +1,62 @@
+{
+  "schema": "fs-job-1",
+  "workflow": "fwi_operator",
+  "simulation": "project/simulation.json",
+  "f_list": [
+    [
+      3.0,
+      0.0
+    ]
+  ],
+  "fwi_operator": {
+    "action": "solve",
+    "state": "extension_state_1.json",
+    "controls": {
+      "active": [
+        "model.acoustic_vp"
+      ]
+    },
+    "extension": {
+      "fields": [
+        {
+          "control": "acoustic_vp",
+          "offsets": {
+            "half_offsets": [
+              [
+                -25.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                25.0,
+                0.0
+              ]
+            ],
+            "units": "m"
+          }
+        }
+      ],
+      "solver": {
+        "damping": 0.1,
+        "offset_penalty": 1.0,
+        "offset_scale": {
+          "value": 25.0,
+          "units": "m"
+        },
+        "relative_tolerance": 1e-06,
+        "max_iterations": 100,
+        "require_convergence": true,
+        "solution": "extension_taps.h5",
+        "report": "inner_solve.json"
+      }
+    },
+    "model_gradient": true,
+    "covector": "background_gradient.h5"
+  },
+  "name": "offset_extension_inner",
+  "result_path": "results/offset_extension_inner",
+  "Imaging": {}
+}

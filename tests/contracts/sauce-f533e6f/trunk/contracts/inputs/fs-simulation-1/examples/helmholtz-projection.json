@@ -1,0 +1,28 @@
+{
+  "schema": "fs-simulation-1",
+  "project_path": "project",
+  "physics": "coupled2",
+  "dimension": 2,
+  "helmholtz_projection": {
+    "enabled": true,
+    "parts": [
+      "p",
+      "s"
+    ],
+    "s_projection": "solenoidal",
+    "gauge_penalty": 1e-10,
+    "sparse_rhs": true,
+    "sparse_rhs_tol": 1e-20
+  },
+  "Outputs": {
+    "ParaView": [
+      {
+        "_type": "ParaviewOutput",
+        "name": "decomposed_velocity",
+        "fields": [
+          "velocity"
+        ]
+      }
+    ]
+  }
+}

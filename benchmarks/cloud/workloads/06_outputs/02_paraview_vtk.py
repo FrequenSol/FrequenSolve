@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/02_paraview_vtk.ipynb
-Source SHA-256: 9ad8b26bc926c0e0c23eec3ab44b0751ee2812b5604b24fdc55bf799e3965ee9
+Source SHA-256: 446a3bf377b6946f4caf3ebe10de6269fc653f29bb8289aa2543cb76f19f3f2c
 """
 
 # %% source cell 4
@@ -110,6 +110,9 @@ result.raise_for_status()
 volume_files = result.output_files(base="pv_volume", suffix=".vtu", existing=True)
 interface_files = result.output_files(base="pv_interface", suffix=".vtu", existing=True)
 grid_files = result.output_files(base="pv_grid", suffix=".vtr", existing=True)
+assert volume_files, "Missing requested volume VTU output"
+assert interface_files, "Missing requested interface VTU output"
+assert grid_files, "Missing requested Cartesian-grid VTR output"
 {
     "volume": [str(path) for path in volume_files],
     "interface": [str(path) for path in interface_files],

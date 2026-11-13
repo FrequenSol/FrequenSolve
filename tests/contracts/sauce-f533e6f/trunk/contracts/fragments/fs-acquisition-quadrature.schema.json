@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/fragments/fs-acquisition-quadrature.schema.json",
+  "title": "Oriented acquisition quadrature",
+  "description": "Shared solver-expanded line and surface integration geometry. Vertices use common coordinate and length units; interpolation is straight in Cartesian space after conversion. Degenerate segments and triangles are rejected.",
+  "type": "object",
+  "required": [
+    "_type",
+    "vertices"
+  ],
+  "properties": {
+    "_type": {
+      "enum": [
+        "Polyline",
+        "TriangleSurface"
+      ]
+    },
+    "vertices": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 3,
+        "items": {
+          "type": "number"
+        }
+      }
+    },
+    "units": {
+      "$ref": "fs-common-defs.schema.json#/$defs/units"
+    },
+    "system": {
+      "type": "string",
+      "default": "global"
+    },
+    "order": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 40,
+      "default": 4
+    },
+    "closed": {
+      "type": "boolean",
+      "default": false,
+      "description": "Join the last vertex to the first; do not repeat the first vertex."
+    },
+    "triangles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 3,
+        "items": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "description": "Oriented triangles using one-based vertex indices."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "_type": {
+            "const": "TriangleSurface"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "triangles"
+        ],
+        "properties": {
+          "closed": false
+        }
+      },
+      "else": {
+        "properties": {
+          "triangles": false
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

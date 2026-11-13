@@ -1,0 +1,188 @@
+{
+  "schema": "fs-material-model-1",
+  "units": "km",
+  "x_limits": [
+    0.0,
+    1.0
+  ],
+  "z_limits": [
+    0.0,
+    1.0
+  ],
+  "subdomains": [
+    {
+      "name": "water",
+      "mesh_block_id": 1,
+      "physics": "acoustic",
+      "properties": {
+        "vp": 1.5,
+        "rho": {
+          "value": 1000.0,
+          "units": "kg/m^3"
+        }
+      }
+    },
+    {
+      "name": "fracture_fluid",
+      "mesh_block_id": 2,
+      "physics": "acoustic",
+      "properties": {
+        "vp": 1.48,
+        "rho": {
+          "value": 1.0,
+          "units": "g/cc"
+        }
+      }
+    },
+    {
+      "name": "background",
+      "mesh_block_id": 3,
+      "physics": "elastic:iso",
+      "properties": {
+        "vp": {
+          "file": "simulations/example/example.h5:inputs/model/subdomains/3/properties/vp",
+          "format": "hdf5",
+          "dataset": "inputs/model/subdomains/3/properties/vp",
+          "hash": "blake3:0123456789abcdef"
+        },
+        "vs": {
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "value": 0.5
+              },
+              {
+                "ref": "vp"
+              }
+            ]
+          },
+          "depends_on": [
+            "vp"
+          ]
+        },
+        "rho": {
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "value": 0.31
+              },
+              {
+                "op": "pow",
+                "args": [
+                  {
+                    "op": "magnitude",
+                    "arg": {
+                      "ref": "vp"
+                    },
+                    "units": "m/s"
+                  },
+                  {
+                    "value": 0.25
+                  }
+                ]
+              }
+            ]
+          },
+          "units": "g/cc",
+          "depends_on": [
+            "vp"
+          ]
+        },
+        "vadapt": {
+          "expr": {
+            "op": "add",
+            "args": [
+              {
+                "ref": "vs"
+              },
+              {
+                "value": 0.25,
+                "units": "km/s"
+              }
+            ]
+          },
+          "depends_on": [
+            "vs"
+          ]
+        },
+        "epw_mult": 1.5,
+        "hmin": {
+          "value": 0.025,
+          "units": "km"
+        },
+        "hmax": {
+          "value": 0.1,
+          "units": "km"
+        }
+      }
+    }
+  ],
+  "surfaces": [
+    {
+      "name": "top",
+      "adapt": {
+        "gravity_surface": {
+          "enabled": true,
+          "tangential": {
+            "thickness": 1.0,
+            "factor": 1.0
+          }
+        }
+      },
+      "depth": 0.0
+    },
+    {
+      "_type": "fracture",
+      "name": "fracture_a",
+      "mesh_block_id": 2,
+      "adapt": {
+        "krauklis": {
+          "normal": {
+            "grading": 2.0,
+            "thickness": 4.0,
+            "h0": 0.4
+          },
+          "tangential": {
+            "grading": 2.0,
+            "thickness": 4.0,
+            "factor": 2.0
+          }
+        }
+      },
+      "depth": {
+        "file": "simulations/example/example.h5:inputs/model/surfaces/fracture_a/depth",
+        "format": "hdf5",
+        "units": "km"
+      },
+      "gap": {
+        "dims": [
+          "x"
+        ],
+        "coords": {
+          "x": {
+            "data": [
+              0.0,
+              0.4,
+              0.6,
+              1.0
+            ],
+            "units": "km"
+          }
+        },
+        "data": [
+          0.0,
+          0.002,
+          0.002,
+          0.0
+        ],
+        "units": "km"
+      }
+    },
+    {
+      "name": "bottom",
+      "depth": 1.0
+    }
+  ]
+}

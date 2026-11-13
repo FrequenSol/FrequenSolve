@@ -8,7 +8,18 @@ from frequensolve.inversion import (
     gradient_taylor_test,
     real_adjoint_test,
 )
-from frequensolve.simulation.jobs.control_sensitivity import ControlBlock, ControlSpace
+
+
+class _ControlSpace:
+    """Minimal control space for the toolkit: ``size`` plus mapping ``pack``."""
+
+    def __init__(self, size):
+        self.size = size
+
+    def pack(self, values):
+        return np.concatenate(
+            [np.asarray(block, dtype=np.float64).ravel() for block in values.values()]
+        )
 
 
 def test_real_adjoint_test_uses_real_model_complex_data_pairing():
@@ -116,7 +127,7 @@ def test_derivative_checks_reject_complex_controls_and_unsorted_steps():
 
 
 def test_control_least_squares_exposes_native_dot_and_taylor_tests():
-    controls = ControlSpace([ControlBlock("vp", 3)])
+    controls = _ControlSpace(3)
     observed = np.asarray([0.25 - 0.5j, -0.75 + 0.1j])
     matrix = np.asarray([[1.0 + 0.5j, -0.25j, 0.75], [-0.5, 1.25 + 0.2j, 0.1j]])
 

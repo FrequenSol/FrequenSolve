@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/outputs/fs-objective-balance-1/schema.json",
+  "title": "FS Objective Balance v1",
+  "description": "Task-local component scales calibrated at a nominated FWI baseline.",
+  "x-fs-contract": "fs-objective-balance-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "type": "object",
+  "required": ["schema", "frequency_hz", "laplace_damping_hz", "terms", "fingerprints"],
+  "properties": {
+    "schema": {"const": "fs-objective-balance-1"},
+    "frequency_hz": {"type": "number"},
+    "laplace_damping_hz": {"type": "number", "minimum": 0},
+    "terms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "receiver_group", "compatibility_fingerprint", "components", "dimensions", "units", "scale", "effective_weight_mass"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "receiver_group": {"type": "string", "minLength": 1},
+          "compatibility_fingerprint": {"type": "string", "minLength": 1},
+          "components": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "dimensions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "units": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "scale": {"type": "array", "minItems": 1, "items": {"type": "number", "exclusiveMinimum": 0}},
+          "effective_weight_mass": {"type": "number", "exclusiveMinimum": 0},
+          "active_samples": {"type": "integer", "minimum": 1},
+          "statistics": {"type": "object", "additionalProperties": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "fingerprints": {
+      "type": "object",
+      "required": ["reference_model", "observations", "acquisition", "preprocessing", "comparisons"],
+      "properties": {
+        "reference_model": {"type": "string"},
+        "observations": {"type": "string"},
+        "acquisition": {"type": "string"},
+        "source_signature": {"type": "string"},
+        "preprocessing": {"type": "string"},
+        "comparisons": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "runtime": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

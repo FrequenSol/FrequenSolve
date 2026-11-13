@@ -1,0 +1,72 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "vector",
+    "sources": [
+      {
+        "name": "plate_a",
+        "coordinates": [
+          0.5,
+          0.0
+        ],
+        "direction": [
+          0,
+          1
+        ],
+        "amplitude": {
+          "value": 1000,
+          "units": "N"
+        },
+        "footprint": {
+          "surface": "plate_a",
+          "quadrature_order": 4
+        }
+      },
+      {
+        "name": "plate_b",
+        "coordinates": [
+          1.5,
+          0.0
+        ],
+        "direction": [
+          0,
+          1
+        ],
+        "amplitude": {
+          "value": 1000,
+          "units": "N"
+        },
+        "footprint": {
+          "surface": "plate_b"
+        }
+      }
+    ]
+  },
+  "source_encoding": {
+    "_type": "JsonDense",
+    "fields": [
+      {
+        "name": "in_phase",
+        "coefficients": [
+          1,
+          1
+        ]
+      },
+      {
+        "name": "opposed",
+        "coefficients": [
+          1,
+          -1
+        ]
+      }
+    ]
+  },
+  "source_signature": {
+    "file": "plate_signatures.h5",
+    "dataset": "q",
+    "frequencies_dataset": "frequency",
+    "source_ids_dataset": "source_ids",
+    "spectral_derivative": "frozen"
+  }
+}

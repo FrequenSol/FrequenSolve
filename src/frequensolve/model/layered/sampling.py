@@ -16,6 +16,7 @@ from numpy.typing import ArrayLike
 
 from frequensolve.geometry.frame import Axis
 from frequensolve.model.model import ModelSubdomain
+from frequensolve.model.parameterization import MeshControl, ParameterizedProperty
 from frequensolve.model.property import (
     Property,
     _coords_in_data_units,
@@ -673,7 +674,11 @@ class LayeredSamplingMixin:
                     axis,
                     units=values.attrs.get("units"),
                 )
-        return values.rename(axis.name)
+        values = values.rename(axis.name)
+        units = samples.coords[direction].attrs.get("units")
+        if units is not None:
+            values.attrs["units"] = units
+        return values
 
     def _surface_relative_coordinate(
         self, system: Any, samples: xr.DataArray, *, axis: Optional[Axis] = None
@@ -694,14 +699,22 @@ class LayeredSamplingMixin:
         surface_grid = self._property_sample_grid(surface.depth, samples)
         surface_depth = surface.depth.get(surface_grid).transpose(*samples.dims)
         z = self._physical_coord(samples, "z").broadcast_like(samples)
+        units = z.attrs.get("units")
+        surface_depth = _convert_dataarray_units(
+            surface_depth, _property_units(surface.depth), units
+        )
         positive = (
             axis.positive
             if axis is not None and axis.positive is not None
             else getattr(system, "normal", "up")
         )
         if str(positive or "up").strip().lower() == "down":
-            return z - surface_depth
-        return surface_depth - z
+            values = z - surface_depth
+        else:
+            values = surface_depth - z
+        if units is not None:
+            values.attrs["units"] = units
+        return values
 
     def _coordinate_system_samples(self, system: Any, samples: xr.DataArray):
         coords = {
@@ -973,6 +986,28 @@ class LayeredSamplingMixin:
     def _property_values_on_samples(
         self, prop: Property, samples: xr.DataArray
     ) -> xr.DataArray:
+        if isinstance(prop, ParameterizedProperty):
+            if isinstance(prop.control, MeshControl):
+                raise NotImplementedError(
+                    "mesh controls require solver-backed materialization"
+                )
+            reference = self._property_values_on_samples(prop.reference, samples)
+            system_name = prop.control.coordinate_system
+            coordinates = samples
+            if system_name != "global":
+                system = self._coordinate_system(system_name)
+                if system is None:
+                    raise ValueError(
+                        f"Control references unavailable coordinate system {system_name!r}"
+                    )
+                coordinates = self._coordinate_system_samples(system, samples)
+            values = prop.apply_control(reference, prop.evaluation_context(coordinates))
+            return xr.DataArray(
+                values,
+                dims=samples.dims,
+                coords=samples.coords,
+                attrs={"units": prop.units} if prop.units else {},
+            )
         system = self._property_coordinate_system(prop)
         if system is not None and getattr(system, "type", None) == "surface":
             return self._surface_relative_property_values(prop, system, samples)

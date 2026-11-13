@@ -1,9 +1,13 @@
-"""Solver release identity and compatibility checks.
+"""Solver release identity, compatibility and feature checks.
 
 FrequenSolve distributions carry the immutable preferred Solver release
 and the validation profile used for their release evidence.  This module loads
 that declaration, queries a configured solver without starting MPI or a job,
 and applies the requested ``warn``, ``strict``, or ``off`` policy.
+
+Job inputs that older solver builds would silently ignore or reject are gated
+on the backend's ``--capabilities-json`` operation catalog
+(:func:`query_local_solver_capabilities`).
 
 Importing this module never invokes a solver and never emits a warning.
 """
@@ -11,15 +15,30 @@ Importing this module never invokes a solver and never emits a warning.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import warnings
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Optional, Sequence, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 LEGACY_COMPATIBILITY_SCHEMA = "frequensolve-solver-compatibility/v1"
 COMPATIBILITY_SCHEMA = "frequensolve-solver-compatibility/v2"
@@ -32,28 +51,51 @@ FINAL_RELEASE_RE = re.compile(
     r"^v(?:0|[1-9][0-9]*)\." r"(?:0|[1-9][0-9]*)\." r"(?:0|[1-9][0-9]*)$"
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+CAPABILITIES_SCHEMA = "fs-solver-capabilities-2"
+#: Catalog operation of a backend that honours ``extrapolate: "hold"`` on hat,
+#: B-spline and tensor-hat control maps; older builds ignore the key and use
+#: zero extrapolation.
+CONTROL_EXTRAPOLATE_HOLD = "physics.control_map.extrapolate_hold"
+#: Catalog operation of a backend that accepts several directions in one
+#: ``kernel_derivative`` ``normal`` job; older builds reject such a job.
+KERNEL_DERIVATIVE_NORMAL_DIRECTIONS = "imaging.normal.kernel_derivative_directions"
+_CONTROL_MAP_KINDS = (None, "hat", "bspline", "tensor_hat", "tensor_bspline")
 
 CompatibilityPolicy = Literal["warn", "strict", "off"]
 CompatibilityStatus = Literal["compatible", "untested", "unknown", "off"]
 ValidationProfile = Literal["standard", "solver-backed"]
 
+# Each (executable, message) warning is emitted once per process.
+_EMITTED_WARNINGS: set = set()
+
 __all__ = [
+    "CAPABILITIES_SCHEMA",
     "COMPATIBILITY_SCHEMA",
+    "CONTROL_EXTRAPOLATE_HOLD",
     "IDENTITY_QUERY_TIMEOUT_SECONDS",
     "IDENTITY_SCHEMA",
+    "KERNEL_DERIVATIVE_NORMAL_DIRECTIONS",
     "POLICY_ENV_VAR",
+    "SolverCapabilities",
     "SolverCompatibility",
     "SolverCompatibilityError",
     "SolverCompatibilityManifest",
     "SolverCompatibilityWarning",
+    "SolverFeatureError",
     "SolverIdentity",
     "SolverIdentityQuery",
     "PreferredSolver",
     "check_solver_compatibility",
+    "held_control_maps",
     "load_solver_compatibility",
+    "query_local_solver_capabilities",
     "query_local_solver_identity",
+    "query_remote_solver_capabilities",
     "query_remote_solver_identity",
+    "require_held_control_support",
     "resolve_solver_policy",
+    "solver_backend_name",
+    "solver_backend_selection",
 ]
 
 
@@ -63,6 +105,10 @@ class SolverCompatibilityWarning(RuntimeWarning):
 
 class SolverCompatibilityError(RuntimeError):
     """Raised when the strict compatibility policy cannot confirm a pairing."""
+
+
+class SolverFeatureError(RuntimeError):
+    """Raised when a job needs a feature the configured solver does not list."""
 
 
 @dataclass(frozen=True)
@@ -545,8 +591,8 @@ def check_solver_compatibility(
 ) -> SolverCompatibility:
     """Check a configured solver against this package's preferred release.
 
-    ``warn`` (the default) emits :class:`SolverCompatibilityWarning` for
-    an unknown or untested pair. ``strict`` raises
+    ``warn`` (the default) emits :class:`SolverCompatibilityWarning` once per
+    process for each executable's unknown or untested pair. ``strict`` raises
     :class:`SolverCompatibilityError`. ``off`` performs no solver query.
     """
 
@@ -581,5 +627,278 @@ def check_solver_compatibility(
                 1,
             )
         )
-    warnings.warn(result.message, SolverCompatibilityWarning, stacklevel=2)
+    key = (str(executable), result.message)
+    if key not in _EMITTED_WARNINGS:
+        _EMITTED_WARNINGS.add(key)
+        warnings.warn(result.message, SolverCompatibilityWarning, stacklevel=2)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Backend feature catalog
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SolverCapabilities:
+    """Catalogued operations of the solver backend that runs a job.
+
+    ``operations`` holds the available operation IDs of the backend's
+    ``--capabilities-json`` catalog, or is ``None`` when the backend could not
+    be queried (``error`` says why). The catalog is partial: an operation it
+    does not list is treated as unsupported, which is what a build that
+    predates the operation reports.
+    """
+
+    backend: str
+    operations: Optional[FrozenSet[str]] = None
+    error: Optional[str] = None
+
+    def supports(self, operation: str) -> bool:
+        """Return whether the queried backend lists ``operation``."""
+
+        return self.operations is not None and operation in self.operations
+
+    def missing_reason(self, operation: str) -> str:
+        """Describe why :meth:`supports` is false for ``operation``."""
+
+        if self.operations is None:
+            return f"its capabilities could not be queried ({self.error})"
+        return f"{self.backend} --capabilities-json does not list {operation!r}"
+
+
+def solver_backend_name(dimension: Any, precision: str = "single") -> str:
+    """Return the ``fs{2,3}d[_s]`` backend the dispatcher runs a simulation on.
+
+    Like ``FS_seismic``, a fractional dimension (2.5) selects its integer part
+    and single precision appends ``_s``.
+    """
+
+    value = float(dimension)
+    if not math.isfinite(value) or math.floor(value) not in (2, 3):
+        raise ValueError(f"unsupported solver dimension {dimension!r}")
+    if precision not in {"single", "double"}:
+        raise ValueError("Solver precision must be 'single' or 'double'")
+    return f"fs{int(math.floor(value))}d" + ("_s" if precision == "single" else "")
+
+
+def solver_backend_selection(simulation: Any) -> Dict[str, Any]:
+    """Return the ``dimension`` and ``precision`` that select a simulation's backend."""
+
+    solver = getattr(simulation, "solver", None)
+    return {
+        "dimension": getattr(simulation, "dimension", 2),
+        "precision": str(getattr(solver, "precision", None) or "single"),
+    }
+
+
+def _capability_catalog(output: str) -> Tuple[bool, FrozenSet[str]]:
+    """Return ``(dispatcher, available operation IDs)`` of one capability report."""
+
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid capability JSON: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("capability JSON must be an object")
+    if payload.get("scope") == "dispatcher" or payload.get("backend_query_required"):
+        return True, frozenset()
+    catalog = payload.get("catalog")
+    # Version 1 reports and builds before the catalog list no operations.
+    entries = catalog.get("capabilities") if isinstance(catalog, Mapping) else None
+    return False, frozenset(
+        entry["id"]
+        for entry in entries or ()
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("id"), str)
+        and entry.get("available", True) is True
+    )
+
+
+def query_local_solver_capabilities(
+    executable: Union[str, Path],
+    *,
+    dimension: Any = 2,
+    precision: str = "single",
+    environment: Optional[Mapping[str, str]] = None,
+    timeout: float = IDENTITY_QUERY_TIMEOUT_SECONDS,
+) -> SolverCapabilities:
+    """Query the backend a simulation of ``dimension``/``precision`` runs on.
+
+    A dispatcher (``FS_seismic``) reports no catalog of its own, so the backend
+    it routes to is queried as the dispatcher finds it: in ``FS_SOLVER_PATH``
+    of the solver environment, else beside the dispatcher.
+    """
+
+    lookup = environment if environment is not None else os.environ
+
+    def report(path: str) -> Tuple[bool, FrozenSet[str]]:
+        completed = subprocess.run(
+            [path, "--capabilities-json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=dict(environment) if environment is not None else None,
+            timeout=timeout,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise ValueError(
+                f"{path} --capabilities-json exited with {completed.returncode}"
+                + (f": {detail}" if detail else "")
+            )
+        return _capability_catalog(completed.stdout)
+
+    backend = str(executable)
+    try:
+        dispatcher, operations = report(backend)
+        if dispatcher:
+            located = shutil.which(backend, path=lookup.get("PATH")) or backend
+            directory = lookup.get("FS_SOLVER_PATH") or os.path.dirname(
+                os.path.abspath(located)
+            )
+            backend = os.path.join(directory, solver_backend_name(dimension, precision))
+            dispatcher, operations = report(backend)
+            if dispatcher:
+                raise ValueError(f"{backend} reports a dispatcher scope")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        return SolverCapabilities(backend, None, str(exc))
+    return SolverCapabilities(backend, operations)
+
+
+def query_remote_solver_capabilities(
+    executable: Union[str, Path],
+    run_command: Callable[[str], str],
+    *,
+    dimension: Any = 2,
+    precision: str = "single",
+    setup_commands: Sequence[str] = (),
+) -> SolverCapabilities:
+    """Query a remote backend's catalog in one login-node round trip.
+
+    The dispatcher's routed backend (``FS_SOLVER_PATH`` after
+    ``setup_commands``, else the dispatcher's directory) is reported as well
+    and used when the configured executable is a dispatcher.
+    """
+
+    begin = "frequensolve-solver-capabilities-begin"
+    routed = "frequensolve-solver-capabilities-backend"
+    success = "frequensolve-solver-capabilities-ok"
+    solver = shlex.quote(str(executable))
+    backend = str(executable)
+    try:
+        name = solver_backend_name(dimension, precision)
+        command = "\n".join(
+            [
+                "set -e",
+                *setup_commands,
+                f"printf '%s\\n' {begin}",
+                f"{solver} --capabilities-json",
+                f"printf '%s\\n' {routed}",
+                "frequensolve_backend="
+                f'"${{FS_SOLVER_PATH:-$(dirname "$(command -v {solver})")}}/{name}"',
+                'if [ -x "$frequensolve_backend" ]; then '
+                "printf '%s\\n' \"$frequensolve_backend\"; "
+                '"$frequensolve_backend" --capabilities-json; fi',
+                f"printf '%s\\n' {success}",
+            ]
+        )
+        lines = run_command(command).strip().splitlines()
+        if not lines or lines[-1] != success or begin not in lines:
+            raise ValueError("remote capability query did not complete successfully")
+        start = len(lines) - 1 - lines[::-1].index(begin)
+        middle = start + lines[start:].index(routed)
+        dispatcher, operations = _capability_catalog(
+            "\n".join(lines[start + 1 : middle])
+        )
+        if dispatcher:
+            routed_lines = lines[middle + 1 : -1]
+            if not routed_lines:
+                raise ValueError(f"dispatcher backend {name} was not found")
+            backend = routed_lines[0]
+            dispatcher, operations = _capability_catalog("\n".join(routed_lines[1:]))
+            if dispatcher:
+                raise ValueError(f"{backend} reports a dispatcher scope")
+    except Exception as exc:
+        return SolverCapabilities(backend, None, str(exc))
+    return SolverCapabilities(backend, operations)
+
+
+def held_control_maps(payload: Any, location: str = "") -> List[str]:
+    """Return the JSON locations of control maps that use ``extrapolate: "hold"``.
+
+    Hat, B-spline (the default kind), tensor-hat and tensor-B-spline maps are recognized
+    wherever they appear: material ``parameterized`` controls, independent
+    reflectivity maps and implicit-surface controls.
+    """
+
+    found: List[str] = []
+    if isinstance(payload, Mapping):
+        policy = payload.get("extrapolate")
+        if (
+            isinstance(policy, str)
+            and policy.strip().lower() == "hold"
+            and payload.get("kind") in _CONTROL_MAP_KINDS
+        ):
+            found.append(location or "/")
+        for key, value in payload.items():
+            found.extend(held_control_maps(value, f"{location}/{key}"))
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            found.extend(held_control_maps(value, f"{location}/{index}"))
+    return found
+
+
+# Held-control locations per JSON file, reused while the file is unchanged.
+_HELD_CONTROL_SCANS: Dict[str, Tuple[Tuple[int, int], Tuple[str, ...]]] = {}
+
+
+def _held_controls_in_file(path: Path) -> Tuple[str, ...]:
+    try:
+        status = path.stat()
+    except OSError:
+        return ()
+    key = str(path.resolve())
+    marker = (status.st_mtime_ns, status.st_size)
+    cached = _HELD_CONTROL_SCANS.get(key)
+    if cached is not None and cached[0] == marker:
+        return cached[1]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    found = tuple(held_control_maps(payload))
+    _HELD_CONTROL_SCANS[key] = (marker, found)
+    return found
+
+
+def require_held_control_support(
+    files: Iterable[Union[str, Path]],
+    capabilities: Callable[[], Optional[SolverCapabilities]],
+) -> None:
+    """Reject saved job files with held control maps the solver would ignore.
+
+    ``capabilities`` is called only when a held map is present; ``None``
+    (a site that cannot report its backend, or checking turned off) accepts.
+    """
+
+    held = [
+        f"{Path(path).name}:{location}"
+        for path in files
+        for location in _held_controls_in_file(Path(path))
+    ]
+    if not held:
+        return
+    report = capabilities()
+    if report is None or report.supports(CONTROL_EXTRAPOLATE_HOLD):
+        return
+    shown = ", ".join(held[:3]) + (
+        f" and {len(held) - 3} more" if len(held) > 3 else ""
+    )
+    reason = report.missing_reason(CONTROL_EXTRAPOLATE_HOLD)
+    raise SolverFeatureError(
+        f"Control maps use extrapolate='hold' ({shown}), but the configured "
+        f"solver does not advertise it: {reason}. Solver builds without it "
+        "silently apply zero extrapolation; update the solver or use "
+        "extrapolate='zero'."
+    )

@@ -533,10 +533,10 @@ def test_cancel_job_reconciles_race_once(initial_status, final_status):
 
 @pytest.mark.parametrize("location", ["project-images", "outside-project"])
 def test_invalid_imaging_path_is_rejected_before_remote_admission(tmp_path, location):
-    from frequensolve.simulation.jobs import ImagingJob
+    from frequensolve.imaging import ImageKernelJob
 
     site = make_graphql_site()
-    job = object.__new__(ImagingJob)
+    job = object.__new__(ImageKernelJob)
     job.__dict__.update(FakeJob().__dict__)
     job.name = "demo-job"
     job.simulation.project_path = tmp_path / "project-a"

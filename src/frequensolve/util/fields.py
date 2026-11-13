@@ -23,6 +23,9 @@ def canonical_field(field: str) -> str:
         Canonical solver-facing field name.
     """
 
+    prefix, separator, name = field.rpartition(":")
+    if name == "strain-rate" or name.startswith("strain-rate_"):
+        field = prefix + separator + name.replace("strain-rate", "strain_rate", 1)
     return FIELD_ALIASES.get(field, field)
 
 

@@ -1,0 +1,383 @@
+{
+  "schema": "fs-reservoir-model-1",
+  "name": "wag-channel-baffle",
+  "description": "Isothermal methane/butane/decane gas or WAG flood of a channelized 1200 m x 240 m section with an inclined sealing baffle.",
+  "temperature": {"value": 360, "units": "K"},
+  "gravity": {"value": 9.81, "units": "m/s^2"},
+  "fluid": {
+    "components": [
+      {
+        "name": "methane",
+        "critical_temperature": 190.564,
+        "critical_pressure": 4599200.0,
+        "acentric_factor": 0.01142,
+        "molecular_weight": 0.016043,
+        "critical_volume": 9.86e-05
+      },
+      {
+        "name": "butane",
+        "critical_temperature": 425.125,
+        "critical_pressure": 3796000.0,
+        "acentric_factor": 0.2002,
+        "molecular_weight": 0.05812,
+        "critical_volume": 0.000255
+      },
+      {
+        "name": "decane",
+        "critical_temperature": 617.7,
+        "critical_pressure": 2103000.0,
+        "acentric_factor": 0.4884,
+        "molecular_weight": 0.142286,
+        "critical_volume": 0.000617
+      }
+    ],
+    "binary_interaction": [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+    "equation_of_state": {"model": "peng_robinson", "flash_tolerance": 1e-08, "flash_maximum_iterations": 20000},
+    "viscosity": {"model": "lohrenz_bray_clark"},
+    "water": {
+      "model": "slightly_compressible",
+      "reference_pressure": {"value": 12000000.0, "units": "Pa"},
+      "reference_density": {"value": 1000, "units": "kg/m^3"},
+      "compressibility": {"value": 4e-10, "units": "1/Pa"},
+      "viscosity": {"value": 0.001, "units": "Pa*s"}
+    }
+  },
+  "rock": {
+    "model": "compressible",
+    "reference_pressure": {"value": 12000000.0, "units": "Pa"},
+    "reference_porosity": 0.22,
+    "compressibility": {"value": 8e-10, "units": "1/Pa"}
+  },
+  "relative_permeability": {
+    "model": "corey_stone2",
+    "connate_water": 0.18,
+    "residual_oil_water": 0.12,
+    "residual_oil_gas": 0.08,
+    "critical_gas": 0.01,
+    "water_endpoint": 0.45,
+    "gas_endpoint": 0.65
+  },
+  "Model": {
+    "schema": "fs-material-model-1",
+    "subdomains": [
+      {
+        "name": "reservoir",
+        "mesh_block_id": 1,
+        "physics": "reservoir:compositional",
+        "properties": {
+          "kappa": {
+            "units": "m^2",
+            "symbols": {
+              "x": {"kind": "coordinate", "system": "global", "axis": "x", "units": "m"},
+              "z": {"kind": "coordinate", "system": "global", "axis": "z", "units": "m"}
+            },
+            "expr": {
+              "op": "mul",
+              "args": [
+                {"value": 9.869233e-16},
+                {
+                  "op": "exp",
+                  "arg": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "add",
+                                "args": [
+                                  {"op": "log", "arg": {"value": 500}},
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {"op": "log", "arg": {"value": 8}},
+                                      {
+                                        "op": "exp",
+                                        "arg": {
+                                          "op": "neg",
+                                          "arg": {
+                                            "op": "pow",
+                                            "args": [
+                                              {
+                                                "op": "div",
+                                                "args": [
+                                                  {
+                                                    "op": "sub",
+                                                    "args": [
+                                                      {"var": "z"},
+                                                      {
+                                                        "op": "add",
+                                                        "args": [
+                                                          {"value": 85},
+                                                          {
+                                                            "op": "mul",
+                                                            "args": [
+                                                              {"value": 45},
+                                                              {
+                                                                "op": "sin",
+                                                                "arg": {
+                                                                  "op": "div",
+                                                                  "args": [
+                                                                    {
+                                                                      "op": "mul",
+                                                                      "args": [
+                                                                        {"value": 3.141592653589793},
+                                                                        {"var": "x"}
+                                                                      ]
+                                                                    },
+                                                                    {"value": 1200}
+                                                                  ]
+                                                                }
+                                                              }
+                                                            ]
+                                                          }
+                                                        ]
+                                                      }
+                                                    ]
+                                                  },
+                                                  {"value": 18}
+                                                ]
+                                              },
+                                              {"value": 2}
+                                            ]
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {"value": 5},
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "mul",
+                                        "args": [
+                                          {
+                                            "op": "exp",
+                                            "arg": {
+                                              "op": "neg",
+                                              "arg": {
+                                                "op": "pow",
+                                                "args": [
+                                                  {
+                                                    "op": "div",
+                                                    "args": [
+                                                      {
+                                                        "op": "sub",
+                                                        "args": [
+                                                          {
+                                                            "op": "sub",
+                                                            "args": [
+                                                              {"var": "z"},
+                                                              {
+                                                                "op": "mul",
+                                                                "args": [
+                                                                  {"value": 0.055},
+                                                                  {
+                                                                    "op": "sub",
+                                                                    "args": [{"var": "x"}, {"value": 600}]
+                                                                  }
+                                                                ]
+                                                              }
+                                                            ]
+                                                          },
+                                                          {"value": 151}
+                                                        ]
+                                                      },
+                                                      {"value": 7}
+                                                    ]
+                                                  },
+                                                  {"value": 4}
+                                                ]
+                                              }
+                                            }
+                                          },
+                                          {
+                                            "op": "add",
+                                            "args": [
+                                              {"value": 0.5},
+                                              {
+                                                "op": "mul",
+                                                "args": [
+                                                  {"value": 0.5},
+                                                  {
+                                                    "op": "tanh",
+                                                    "arg": {
+                                                      "op": "div",
+                                                      "args": [
+                                                        {"op": "sub", "args": [{"var": "x"}, {"value": 330}]},
+                                                        {"value": 20}
+                                                      ]
+                                                    }
+                                                  }
+                                                ]
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {"value": 0.5},
+                                          {
+                                            "op": "mul",
+                                            "args": [
+                                              {"value": 0.5},
+                                              {
+                                                "op": "tanh",
+                                                "arg": {
+                                                  "op": "div",
+                                                  "args": [
+                                                    {"op": "sub", "args": [{"var": "x"}, {"value": 845}]},
+                                                    {"value": 20}
+                                                  ]
+                                                }
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {"value": 0.65},
+                              {
+                                "op": "sin",
+                                "arg": {
+                                  "op": "div",
+                                  "args": [
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {"var": "z"},
+                                        {
+                                          "op": "mul",
+                                          "args": [
+                                            {"value": 0.055},
+                                            {"op": "sub", "args": [{"var": "x"}, {"value": 600}]}
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {"value": 16}
+                                  ]
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              {"value": 0.2},
+                              {"op": "cos", "arg": {"op": "div", "args": [{"var": "x"}, {"value": 65}]}}
+                            ]
+                          },
+                          {"op": "cos", "arg": {"op": "div", "args": [{"var": "z"}, {"value": 19}]}}
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  },
+  "domain": {
+    "length": {"value": 1200, "units": "m"},
+    "height": {"value": 240, "units": "m"},
+    "root_elements": [12, 6],
+    "degree": 2
+  },
+  "wells": [
+    {
+      "name": "injector",
+      "type": "injector",
+      "location": {"value": [90, 90], "units": "m"},
+      "completion": {"kind": "gaussian", "radius": {"value": [18, 28], "units": "m"}},
+      "refinement_radius": {"value": [70, 65], "units": "m"}
+    },
+    {
+      "name": "producer",
+      "type": "producer",
+      "location": {"value": [1100, 105], "units": "m"},
+      "completion": {"kind": "gaussian", "radius": {"value": [18, 35], "units": "m"}},
+      "refinement_radius": {"value": [70, 70], "units": "m"}
+    }
+  ],
+  "injection_streams": [
+    {
+      "name": "gas",
+      "phase": "hydrocarbon",
+      "pressure": {"value": 12000000.0, "units": "Pa"},
+      "composition": [0.97, 0.025, 0.005]
+    },
+    {"name": "water", "phase": "water"}
+  ],
+  "schedule": {
+    "phases": [
+      {
+        "name": "injection",
+        "duration": {"value": 720, "units": "day"},
+        "rate": {"value": 60.75616438356165, "units": "m^2/day"},
+        "stream": "gas",
+        "alternation": {"stream": "water", "start": {"value": 180, "units": "day"}, "period": {"value": 90, "units": "day"}}
+      },
+      {"name": "shut_in", "duration": {"value": 60, "units": "day"}, "rate": 0}
+    ]
+  },
+  "initial_state": {
+    "datum_elevation": {"value": 120, "units": "m"},
+    "datum_pressure": {"value": 12000000.0, "units": "Pa"},
+    "hydrostatic_density": {"value": 700, "units": "kg/m^3"},
+    "water_saturation": 0.18,
+    "composition": [0.15, 0.15, 0.7]
+  },
+  "numerics": {
+    "pressure_scale": {"value": 10000000.0, "units": "Pa"},
+    "amount_scale": [1000, 10000, 10000, 10000],
+    "time_stepping": {
+      "initial_step": {"value": 0.1, "units": "day"},
+      "maximum_step": {"value": 2, "units": "day"},
+      "growth_factor": 1.4
+    },
+    "adaptation": {
+      "interval": {"value": 0.5, "units": "day"},
+      "maximum_level": 3,
+      "front_threshold": 0.05,
+      "coarsening_threshold": 0.01,
+      "well_level": 4,
+      "geology_level": 3,
+      "geology_log_contrast": 1.2
+    },
+    "output": {"interval": {"value": 1, "units": "day"}},
+    "stabilization": {
+      "facet_minimum": {"value": 0.02, "units": "m/day"},
+      "facet_speed_factor": 2,
+      "diffusion_coefficient": 0.8,
+      "curvature_gain": 4
+    }
+  }
+}

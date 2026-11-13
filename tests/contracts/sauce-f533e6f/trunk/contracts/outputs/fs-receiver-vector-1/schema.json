@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fs-receiver-vector-1",
+  "type": "object",
+  "required": ["schema", "role", "frequency_hz", "receiver_group", "channel", "state_fingerprint", "source_state", "source_state_sha256", "partition", "value_convention", "physics", "dimension", "geometry", "modeling_mode", "control_kind", "source_mode", "units", "source_derivative", "candidate_fingerprint", "acquisition_fingerprint", "observation_fingerprint", "preprocessing_fingerprint", "control_registry_fingerprint", "resolved_context_fingerprint", "payload_precision", "n_rows", "shards"],
+  "properties": {
+    "schema": {"const": "fs-receiver-vector-1"},
+    "role": {"enum": ["tangent", "dual"]},
+    "frequency_hz": {"type": "number", "exclusiveMinimum": 0},
+    "receiver_group": {"type": "string", "minLength": 1},
+    "channel": {"enum": ["base", "base_df"]},
+    "state_fingerprint": {"type": "string", "minLength": 1},
+    "source_state": {"type": "string", "minLength": 1},
+    "source_state_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "partition": {
+      "type": "object", "required": ["n_ranks", "compatibility"],
+      "properties": {
+        "n_ranks": {"type": "integer", "minimum": 1},
+        "compatibility": {"const": "same_mesh_partition"}
+      },
+      "additionalProperties": false
+    },
+      "value_convention": {"const": "physical_receiver"},
+      "physics": {"enum": ["acoustic", "elastic", "coupled"]},
+      "dimension": {"enum": [2, 3]},
+      "geometry": {"enum": ["cartesian", "sparse"]},
+      "modeling_mode": {"const": "full_dimension"},
+      "control_kind": {"const": "material_only"},
+      "source_mode": {"const": "physical_shot"},
+      "units": {"type": "string", "minLength": 1},
+      "source_derivative": {"enum": ["total", "frozen", "none"]},
+      "candidate_fingerprint": {"type": "string", "minLength": 1},
+      "acquisition_fingerprint": {"type": "string", "minLength": 1},
+      "observation_fingerprint": {"type": "string", "minLength": 1},
+      "preprocessing_fingerprint": {"type": "string", "minLength": 1},
+      "control_registry_fingerprint": {"type": "string", "minLength": 1},
+      "resolved_context_fingerprint": {"type": "string", "minLength": 1},
+      "payload_precision": {"const": "complex128"},
+      "n_rows": {"type": "integer", "minimum": 0},
+      "shards": {
+        "type": "array", "minItems": 1,
+        "items": {
+          "type": "object", "required": ["file", "sha256", "rank"],
+          "properties": {
+            "file": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "rank": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+  "additionalProperties": false
+}

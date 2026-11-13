@@ -1,0 +1,29 @@
+{
+  "schema": "fs-job-1",
+  "name": "acoustic_modes",
+  "project_path": "project",
+  "workflow": "modal",
+  "simulation": "sim.json",
+  "result_path": "results/acoustic_modes",
+  "f_list": [
+    10.0
+  ],
+  "Modal": {
+    "center": [
+      10.0,
+      0.0
+    ],
+    "real_radius": 2.0,
+    "imag_radius": 1.0,
+    "first_probe": 1,
+    "probe_count": 16,
+    "rhs_batch_size": 8,
+    "quadrature_order": 16,
+    "rank_tolerance": 1e-10,
+    "max_modes": 0,
+    "max_refinements": 2,
+    "verification_tolerance": 1e-4,
+    "residual_tolerance": 1e-4,
+    "require_operator_residual": false
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schema": "fs-material-model-1",
+  "_type": "LayeredModel",
+  "units": "km",
+  "x_limits": [0.0, 1.0],
+  "ordering": "top_down",
+  "subdomains": [
+    {
+      "name": "water",
+      "mesh_block_id": 1,
+      "physics": "acoustic",
+      "properties": {"vp": 1.5, "rho": {"value": 1.0, "units": "g/cc"}}
+    },
+    {
+      "name": "sediment",
+      "mesh_block_id": 2,
+      "physics": "acoustic",
+      "properties": {"vp": 1.9, "rho": {"value": 2.0, "units": "g/cc"}}
+    },
+    {
+      "name": "basement",
+      "mesh_block_id": 3,
+      "physics": "acoustic",
+      "properties": {
+        "vp": {
+          "blend": {
+            "surface": "salt",
+            "width": 0.6,
+            "inside": {"value": 2.4},
+            "outside": {"value": 2.0}
+          }
+        },
+        "rho": {"value": 2.2, "units": "g/cc"}
+      }
+    }
+  ],
+  "surfaces": [
+    {
+      "_type": "rbf_level_set",
+      "name": "salt",
+      "support_radius": 0.3,
+      "bias": 0.1,
+      "centers": [[0.45, 0.39], [0.58, 0.39]],
+      "coefficients": [-0.4, -0.3],
+      "control": {"id": "salt_rbf", "maximum_displacement": 0.05, "feasibility_band": 0.2}
+    },
+    {"name": "top", "interface": true, "depth": 0.0},
+    {"name": "seabed", "interface": true, "depth": 0.05},
+    {"name": "basement_top", "interface": true, "depth": 0.25},
+    {"name": "bottom", "interface": true, "depth": 0.5}
+  ]
+}

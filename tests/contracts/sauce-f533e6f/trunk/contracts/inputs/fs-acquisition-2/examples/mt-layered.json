@@ -1,0 +1,89 @@
+{
+  "schema": "fs-acquisition-2",
+  "max_batch": 2,
+  "impedance_sources": {
+    "_type": "MTLayered",
+    "background": {
+      "surface_m": 0,
+      "layers": [
+        {
+          "resistivity_ohm_m": 100
+        }
+      ]
+    },
+    "waves": [
+      {
+        "rhs": 1,
+        "source": "north",
+        "electric": [
+          1,
+          0,
+          0
+        ]
+      },
+      {
+        "rhs": 2,
+        "source": "east",
+        "electric": [
+          0,
+          0,
+          -1
+        ]
+      }
+    ]
+  },
+  "receiver_groups": [
+    {
+      "name": "mt",
+      "post_process": true,
+      "device": {
+        "_type": "ReceiverNode",
+        "name": "mt_station",
+        "components": [
+          {
+            "name": "e1",
+            "field": "electric_x"
+          },
+          {
+            "name": "e2",
+            "field": "electric_y"
+          },
+          {
+            "name": "e3",
+            "field": "electric_z"
+          },
+          {
+            "name": "h1",
+            "field": "magnetic_x"
+          },
+          {
+            "name": "h2",
+            "field": "magnetic_y"
+          },
+          {
+            "name": "h3",
+            "field": "magnetic_z"
+          }
+        ]
+      },
+      "coordinates": {
+        "_type": "CoordsArray",
+        "value": [
+          [
+            10,
+            0
+          ],
+          [
+            20,
+            0
+          ],
+          [
+            30,
+            0
+          ]
+        ],
+        "units": "km"
+      }
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "scalar",
+    "sources": [
+      {
+        "name": "pressure",
+        "coordinates": {
+          "value": [0.25, 0.05],
+          "units": "km"
+        }
+      },
+      {
+        "name": "vertical_force",
+        "kind": "vector",
+        "coordinates": {
+          "value": [0.5, 0.1],
+          "units": "km"
+        },
+        "direction": [0.0, 1.0]
+      },
+      {
+        "name": "moment_tensor",
+        "kind": "tensor",
+        "coordinates": {
+          "value": [0.75, 0.2],
+          "units": "km"
+        },
+        "direction": [1.0, 1.0, 0.0]
+      }
+    ]
+  },
+  "receiver_groups": []
+}

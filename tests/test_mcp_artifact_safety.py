@@ -434,8 +434,8 @@ def test_invalid_time_domain_sweep_fails_before_deserialization(
         {"schema": "fs-simulation-1", "_type": "UnknownSimulation"},
         {
             "schema": "fs-job-1",
-            "_type": "ImagingJob",
-            "workflow": "imaging",
+            "_type": "ImageKernelJob",
+            "workflow": "rtm",
         },
     ],
 )

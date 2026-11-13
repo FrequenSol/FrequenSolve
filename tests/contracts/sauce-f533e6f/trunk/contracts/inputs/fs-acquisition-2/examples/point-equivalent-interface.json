@@ -1,0 +1,36 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "scalar",
+    "domain": 99,
+    "sources": [
+      {
+        "name": "equivalent_point",
+        "coordinates": [0.5, 0.5]
+      }
+    ]
+  },
+  "equivalent_sources": {
+    "surface": {
+      "kind": "adaptive_box",
+      "half_width": {
+        "value": 0.0125,
+        "units": "km"
+      },
+      "enrichment_order": 4,
+      "loading": "huygens"
+    },
+    "incident_field": {
+      "kind": "point_source",
+      "rhs": 1,
+      "source": {
+        "origin": [0.5, 0.5],
+        "amplitude": 1.0,
+        "phase": 0.0,
+        "n0": 1.0
+      }
+    }
+  },
+  "receiver_groups": []
+}

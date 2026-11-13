@@ -1,0 +1,54 @@
+{
+  "schema": "fs-acquisition-2",
+  "impedance_sources": {
+    "_type": "PoroelasticPlaneWave",
+    "frequency_hz": 10.0,
+    "medium": {
+      "drained_bulk": 8000000000.0,
+      "drained_shear": 5000000000.0,
+      "grain_bulk": 36000000000.0,
+      "fluid_bulk": 2200000000.0,
+      "porosity": 0.25,
+      "solid_density": 2650.0,
+      "fluid_density": 1000.0,
+      "viscosity": 0.001,
+      "permeability": 1e-08,
+      "tortuosity": 2.0
+    },
+    "waves": [
+      {
+        "rhs": 1,
+        "mode": "fast_p",
+        "direction": [
+          1.0,
+          0.0
+        ],
+        "origin": {
+          "value": [
+            0.0,
+            0.0
+          ],
+          "units": "m"
+        },
+        "amplitude": 1.0
+      },
+      {
+        "rhs": 2,
+        "mode": "slow_p",
+        "direction": [
+          1.0,
+          0.0
+        ],
+        "origin": {
+          "value": [
+            0.0,
+            0.0
+          ],
+          "units": "m"
+        },
+        "amplitude": 1.0
+      }
+    ]
+  },
+  "receiver_groups": []
+}

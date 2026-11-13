@@ -1,0 +1,20 @@
+{
+  "schema": "fs-material-model-1",
+  "subdomains": [
+    {
+      "name": "fluid", "mesh_block_id": 1, "physics": "elastic:viscous_fluid",
+      "properties": {
+        "K": {"value": 2.2e9, "units": "Pa"},
+        "rho": {"value": 1000, "units": "kg/m^3"},
+        "viscosity": {"value": 0.001, "units": "Pa*s"},
+        "bulk_viscosity": {"value": 0.0025, "units": "Pa*s"},
+        "vadapt": {"value": 0.01, "units": "m/s"},
+        "hmax": {"value": 1e-6, "units": "m"}
+      }
+    },
+    {
+      "name": "solid", "mesh_block_id": 2, "physics": "elastic:iso",
+      "properties": {"vp": 5.9, "vs": 3.2, "rho": 7.8}
+    }
+  ]
+}

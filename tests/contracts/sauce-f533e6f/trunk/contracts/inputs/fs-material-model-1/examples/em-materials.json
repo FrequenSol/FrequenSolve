@@ -1,0 +1,56 @@
+{
+  "schema": "fs-material-model-1",
+  "subdomains": [
+    {
+      "name": "cold-plasma",
+      "mesh_block_id": 1,
+      "physics": "em:plasma",
+      "properties": {
+        "electron_density": {
+          "value": 1.0e18,
+          "units": "1/m^3"
+        },
+        "mag_z": {
+          "value": 2.5,
+          "units": "T"
+        }
+      }
+    },
+    {
+      "name": "conductive-earth",
+      "mesh_block_id": 2,
+      "physics": "em:geophysics",
+      "properties": {
+        "conductivity": {
+          "value": 0.01,
+          "units": "S/m"
+        },
+        "permittivity": {
+          "value": 8.8541878188e-12,
+          "units": "F/m"
+        },
+        "permeability": {
+          "value": 1.2566370614359173e-6,
+          "units": "H/m"
+        }
+      }
+    },
+    {
+      "name": "resistive-earth",
+      "mesh_block_id": 3,
+      "physics": "em:geophysics",
+      "properties": {
+        "resistivity": {
+          "value": 100.0,
+          "units": "Ohm*m"
+        }
+      }
+    },
+    {
+      "name": "vacuum",
+      "mesh_block_id": 4,
+      "physics": "em:vacuum",
+      "properties": {}
+    }
+  ]
+}

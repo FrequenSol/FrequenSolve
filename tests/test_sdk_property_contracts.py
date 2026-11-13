@@ -263,6 +263,15 @@ def test_trace_output_safe_relative_path_roundtrips(selection):
     assert JobOutputs.from_fs(payload).to_fs() == payload
 
 
+def test_trace_output_keep_history_roundtrips_and_is_omitted_by_default():
+    assert "keep_history" not in TraceOutput().to_fs()
+    payload = JobOutputs(traces=TraceOutput(keep_history=True)).to_fs()
+    assert payload["traces"]["keep_history"] is True
+    assert JobOutputs.from_fs(payload).to_fs() == payload
+    with pytest.raises(TypeError, match="keep_history"):
+        TraceOutput(keep_history="yes")
+
+
 @given(path=UNSAFE_PATHS)
 def test_trace_output_rejects_paths_outside_result_directory(path):
     with pytest.raises(ValueError, match="safe relative path"):

@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 07_performance/01_performance.ipynb
-Source SHA-256: d01d231b1c49372d1c06511cc5bf100f04fa9ec5d62a1f50bc684ddfcfe5ca66
+Source SHA-256: 5c8d2833b142e4f953efda459f79d7d438ab4dada482183b19b28ce9ff6d14a4
 """
 
 # %% source cell 3
@@ -81,7 +81,7 @@ def build_performance_simulation(*, name, path, n_sources=64, receiver_count=201
 
 # %% source cell 7
 project_path = Path("./scratch/tutorials/performance")
-(project, sim) = build_performance_simulation(
+project, sim = build_performance_simulation(
     name="performance_baseline", path=project_path, n_sources=64
 )
 model = sim.model
@@ -104,7 +104,7 @@ fd_job += fs.VtkOutput.domain(
     sources=[1],
     show_pml=True,
 )
-fd_result = site.submit(fd_job).wait()
+fd_result = site.submit(fd_job, fetch=True).wait()
 fd_timing_job = _fetch_timing_metadata(site, fd_result)
 fd_timing_job.print_frequency_summary()
 fd_timing_job.task_timings()
@@ -121,7 +121,7 @@ mesh_screenshot.parent.mkdir(parents=True, exist_ok=True)
 time_job = fs.TimeDomainJob(
     name="time_sweep", simulation=sim, f_min=0.0, f_max=28.0, T_max=0.9
 )
-time_result = site.submit(time_job).wait()
+time_result = site.submit(time_job, fetch=True).wait()
 time_timing_job = _fetch_timing_metadata(site, time_result)
 time_timing_job.print_frequency_summary()
 
@@ -148,7 +148,7 @@ source_counts = [1, 8, 16, 32, 64, 96, 128]
 batch_site = fs.Site()
 batch_rows = []
 for n_source_case in source_counts:
-    (_, batch_sim) = build_performance_simulation(
+    _, batch_sim = build_performance_simulation(
         name=f"sources_{n_source_case:03d}",
         path=project_path,
         n_sources=n_source_case,
@@ -157,7 +157,7 @@ for n_source_case in source_counts:
     batch_job = fs.FrequencyDomainJob(
         name=f"sources_{n_source_case:03d}", simulation=batch_sim, f_list=[12.0]
     )
-    batch_result = batch_site.submit(batch_job).wait()
+    batch_result = batch_site.submit(batch_job, fetch=True).wait()
     batch_timing_job = _fetch_timing_metadata(batch_site, batch_result)
     summary = batch_timing_job.print_frequency_summary()
     timings = batch_timing_job.task_timings()

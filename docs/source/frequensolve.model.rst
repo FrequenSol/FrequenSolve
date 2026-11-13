@@ -33,6 +33,22 @@ Dispersion
    :show-inheritance:
    :noindex:
 
+Control Parameterizations
+-------------------------
+
+.. automodule:: frequensolve.model.parameterization
+   :members:
+   :show-inheritance:
+   :noindex:
+
+Implicit Geometry
+-----------------
+
+.. automodule:: frequensolve.model.implicit_geometry
+   :members:
+   :show-inheritance:
+   :noindex:
+
 Layered Model
 -------------
 

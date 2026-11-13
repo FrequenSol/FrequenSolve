@@ -374,7 +374,7 @@ class Project:
             dimension (int | float | str): The simulation dimension, accepting
                 2D, 2.5D, and 3D forms.
             **kwargs: Simulation options. Recognized keys include
-                ``axisymmetric``, ``units``, ``unit_config``, and
+                ``axisymmetric``, ``azimuthal_mode``, ``units``, ``unit_config``, and
                 ``default_units``; remaining keys are passed through as
                 simulation ``extra`` fields.
 
@@ -441,6 +441,7 @@ class Project:
             physics=physics,
             dimension=dimension,
             axisymmetric=options["axisymmetric"],
+            azimuthal_mode=options["azimuthal_mode"],
             project_path=self.path,
             extra=options["extra"],
         )
@@ -630,6 +631,9 @@ class Project:
             return
 
         remote = self._remote_project_root(site)
+        claim = getattr(site, "_claim_remote_project", None)
+        if callable(claim):
+            claim(self.path)
         project_file = self.path / f"{self.name}.json"
         if project_file.exists():
             site.put(project_file, remote / f"{self.name}.json")
@@ -802,10 +806,16 @@ class Project:
         layout_payload = {**payload, "project_path": str(path_roots[0])}
         layout = JobLayout.from_payload(layout_payload, job_file=input_file)
         target_layout = layout.with_project(target_project)
-        payload["simulation"] = cls._project_relative_or_absolute(
-            target_layout.simulation_file,
-            target_project,
-        )
+        if isinstance(payload["simulation"], Mapping):
+            reference = dict(payload["simulation"])
+            reference.pop("relative_path", None)
+            reference["absolute_path"] = str(target_layout.simulation_file)
+            payload["simulation"] = reference
+        else:
+            payload["simulation"] = cls._project_relative_or_absolute(
+                target_layout.simulation_file,
+                target_project,
+            )
         payload["result_path"] = cls._project_relative_or_absolute(
             target_layout.result_dir,
             target_project,
@@ -927,10 +937,18 @@ class Project:
         )
 
     def _remote_project_root(self, site: _fs.BaseSite) -> Path:
+        return self.remote_root_for(site, Path(self.path))
+
+    @staticmethod
+    def remote_root_for(site: _fs.BaseSite, project_path: Path) -> Path:
+        """Return where ``site`` keeps the project rooted at ``project_path``."""
+
         site_class = site.__class__
         if site_class.__name__ == "AWSSite" and ".aws" in site_class.__module__:
             resolver = getattr(site, "project_storage_key", None)
-            return site.work_dir / (resolver(self.path) if resolver else self.path.name)
+            return site.work_dir / (
+                resolver(project_path) if resolver else project_path.name
+            )
         return site.work_dir
 
     def _job_files(
@@ -1103,6 +1121,7 @@ class Project:
         options = dict(kwargs)
         extra = dict(options.pop("extra", {}) or {})
         axisymmetric = options.pop("axisymmetric", False)
+        azimuthal_mode = options.pop("azimuthal_mode", None)
         default_units = options.pop("default_units", None)
         units = options.pop("units", None)
         unit_config = options.pop("unit_config", None)
@@ -1120,6 +1139,7 @@ class Project:
         extra.update(options)
         return {
             "axisymmetric": axisymmetric,
+            "azimuthal_mode": azimuthal_mode,
             "default_units": default_units,
             "unit_config": unit_config,
             "extra": extra,

@@ -2395,3 +2395,80 @@ def test_layered_model_rejects_deprecated_frame_kwargs():
             system="surface_depth",
             coordinate_system="other",
         )
+
+
+def test_layered_model_tube_reduction_roundtrips_cased_boreholes():
+    model = LayeredModel(
+        dimension=3,
+        x_limits=[0.0, 1.0],
+        y_limits=[0.0, 1.0],
+        borehole_reduction="tube",
+    )
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+    for name, x in (("source", 0.25), ("receiver", 0.75)):
+        model.add_borehole(
+            name=name,
+            x=x,
+            y=0.5,
+            surfaces=[
+                BoreholeSurface("fluid_wall", r=0.025),
+                BoreholeSurface("casing_wall", r=0.035),
+            ],
+            layers=[
+                {
+                    "name": "fluid",
+                    "outer_surface": "fluid_wall",
+                    "physics": "acoustic",
+                    "properties": {"Vp": 1.5},
+                },
+                {
+                    "name": "casing",
+                    "outer_surface": "casing_wall",
+                    "physics": "elastic",
+                    "properties": {"Vp": 5.5},
+                },
+            ],
+        )
+    payload = model.to_fs()
+    assert payload["reduced_borehole"] == {"reduction": "tube"}
+    assert len(payload["boreholes"]) == 2
+    restored = LayeredModel.from_fs(payload)
+    assert restored.borehole_reduction == "tube"
+    assert "reduced_borehole" not in restored.extra
+    assert restored.to_fs() == payload
+    model.borehole_reduction = None
+    assert "reduced_borehole" not in model.to_fs()
+
+
+@pytest.mark.parametrize(
+    "dimension, reduction, message",
+    [(2, "tube", "requires a 3D"), (3, "invalid", "must be")],
+)
+def test_layered_model_rejects_invalid_borehole_reduction(
+    dimension, reduction, message
+):
+    with pytest.raises(ValueError, match=message):
+        LayeredModel(
+            dimension=dimension,
+            x_limits=[0.0, 1.0],
+            y_limits=[0.0, 1.0] if dimension == 3 else None,
+            borehole_reduction=reduction,
+        )
+
+
+def test_layered_model_tube_reduction_requires_resolved_casing_on_export():
+    model = LayeredModel(
+        dimension=3, x_limits=[0.0, 1.0], y_limits=[0.0, 1.0], borehole_reduction="tube"
+    )
+    model.add_surface(name="top", depth=0.0)
+    model.add_layer(name="formation", mesh_block_id=1, properties={"Vp": 2.2})
+    model.add_surface(name="bottom", depth=0.5)
+    with pytest.raises(ValueError, match="requires cased boreholes"):
+        model.to_fs()
+    model.add_borehole(
+        name="uncased", x=0.5, y=0.5, parts=[{"mesh_block_id": 1, "r": 0.035}]
+    )
+    with pytest.raises(ValueError, match="resolved casing"):
+        model.to_fs()

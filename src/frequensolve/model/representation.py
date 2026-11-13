@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from itertools import product
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
-import scipy as _scipy
 from numpy.typing import NDArray
+from scipy.sparse import csr_matrix
 
 from frequensolve.geometry.grids import CartesianGrid
-from frequensolve.model.parameterization import BSplineControl, HatControl
+from frequensolve.model.parameterization import (
+    BSplineControl,
+    HatControl,
+    TensorBSplineControl,
+    TensorHatControl,
+)
 from frequensolve.util.mixins import ExportContext
 
 __all__ = [
@@ -20,7 +24,7 @@ __all__ = [
     "ControlRepresentation",
     "EvaluationContext",
     "FieldRepresentation",
-    "VariationalSmoothing",
+    "TensorControlRepresentation",
 ]
 
 
@@ -108,202 +112,6 @@ class EvaluationContext:
             ) from error
 
 
-@dataclass(frozen=True)
-class VariationalSmoothing:
-    """Representation-independent variational smoothing configuration."""
-
-    kind: str = "tikhonov"
-    wavelength_fraction: float = 1.0
-    alpha: Optional[float] = None
-    alpha1: Optional[float] = None
-    alpha2: Optional[float] = None
-    tgv_ratio: float = 1.0
-    reference_wavelength: Optional[float] = None
-    derivative_order: int = 1
-    epsilon: float = 1.0e-3
-    iterations: int = 5
-    input_role: str = "dual"
-    normalize_amplitude: Optional[bool] = None
-    illumination_normalization: str = "none"
-
-    def __post_init__(self) -> None:
-        kind = str(self.kind).strip().lower()
-        if kind == "l2":
-            kind = "tikhonov"
-        if kind not in {"none", "tikhonov", "tv", "tgv"}:
-            raise ValueError(f"unsupported smoothing kind {self.kind!r}")
-        wavelength_fraction = float(self.wavelength_fraction)
-        alpha = None if self.alpha is None else float(self.alpha)
-        alpha1 = None if self.alpha1 is None else float(self.alpha1)
-        alpha2 = None if self.alpha2 is None else float(self.alpha2)
-        tgv_ratio = float(self.tgv_ratio)
-        reference_wavelength = (
-            None
-            if self.reference_wavelength is None
-            else float(self.reference_wavelength)
-        )
-        epsilon = float(self.epsilon)
-        derivative_order = int(self.derivative_order)
-        iterations = int(self.iterations)
-        input_role = str(self.input_role).strip().lower()
-        normalize_amplitude = self.normalize_amplitude
-        illumination_normalization = (
-            str(self.illumination_normalization).strip().lower()
-        )
-        if not np.isfinite(wavelength_fraction) or wavelength_fraction < 0.0:
-            raise ValueError(
-                "smoothing wavelength fraction must be finite and nonnegative"
-            )
-        if alpha is not None and (not np.isfinite(alpha) or alpha < 0.0):
-            raise ValueError("smoothing alpha must be finite and nonnegative")
-        for name, value in (("alpha1", alpha1), ("alpha2", alpha2)):
-            if value is not None and (not np.isfinite(value) or value < 0.0):
-                raise ValueError(f"smoothing {name} must be finite and nonnegative")
-        if (alpha1 is None) != (alpha2 is None):
-            raise ValueError("TGV alpha1 and alpha2 must be supplied together")
-        if alpha1 is not None and (alpha1 == 0.0) != (alpha2 == 0.0):
-            raise ValueError("TGV alpha1 and alpha2 must both be positive or both zero")
-        if not np.isfinite(tgv_ratio) or tgv_ratio <= 0.0:
-            raise ValueError("TGV ratio must be finite and positive")
-        if kind == "tgv" and alpha is not None:
-            raise ValueError("TGV smoothing uses alpha1 and alpha2 rather than alpha")
-        if kind != "tgv" and alpha1 is not None:
-            raise ValueError("alpha1 and alpha2 are only valid for TGV smoothing")
-        if reference_wavelength is not None and (
-            not np.isfinite(reference_wavelength) or reference_wavelength <= 0.0
-        ):
-            raise ValueError(
-                "smoothing reference wavelength must be finite and positive"
-            )
-        if not np.isfinite(epsilon) or epsilon <= 0.0:
-            raise ValueError("smoothing epsilon must be finite and positive")
-        if derivative_order not in {1, 2}:
-            raise ValueError("smoothing derivative order must be one or two")
-        if iterations < 1:
-            raise ValueError("smoothing iterations must be positive")
-        if input_role not in {"dual", "primal"}:
-            raise ValueError("smoothing input role must be 'dual' or 'primal'")
-        if normalize_amplitude is not None and not isinstance(
-            normalize_amplitude, (bool, np.bool_)
-        ):
-            raise ValueError("smoothing amplitude normalization must be boolean")
-        illumination_normalization = {
-            "linear": "source",
-            "nonlinear": "cross",
-        }.get(illumination_normalization, illumination_normalization)
-        if illumination_normalization not in {"none", "source", "cross"}:
-            raise ValueError(
-                "illumination normalization must be 'none', 'source' (linear), "
-                "or 'cross' (nonlinear)"
-            )
-        object.__setattr__(self, "kind", kind)
-        object.__setattr__(self, "wavelength_fraction", wavelength_fraction)
-        object.__setattr__(self, "alpha", alpha)
-        object.__setattr__(self, "alpha1", alpha1)
-        object.__setattr__(self, "alpha2", alpha2)
-        object.__setattr__(self, "tgv_ratio", tgv_ratio)
-        object.__setattr__(self, "reference_wavelength", reference_wavelength)
-        object.__setattr__(self, "epsilon", epsilon)
-        object.__setattr__(self, "derivative_order", derivative_order)
-        object.__setattr__(self, "iterations", iterations)
-        object.__setattr__(self, "input_role", input_role)
-        object.__setattr__(
-            self,
-            "normalize_amplitude",
-            None if normalize_amplitude is None else bool(normalize_amplitude),
-        )
-        object.__setattr__(
-            self, "illumination_normalization", illumination_normalization
-        )
-
-    def amplitude_normalization_enabled(self) -> bool:
-        """Return whether nonlinear smoothing uses a dimensionless input block."""
-
-        if self.normalize_amplitude is not None:
-            return self.normalize_amplitude
-        if self.kind == "tgv":
-            return self.alpha1 is None
-        return self.alpha is None
-
-    def resolved_alpha(self) -> float:
-        """Return the direct variational coefficient for local application."""
-
-        if self.alpha is not None:
-            return self.alpha
-        if self.reference_wavelength is None:
-            raise ValueError(
-                "local control smoothing requires alpha or reference_wavelength; "
-                "Sauce --smooth can derive wavelength from the material model"
-            )
-        length = self.wavelength_fraction * self.reference_wavelength / (2.0 * np.pi)
-        return length ** (2 * self.derivative_order)
-
-    def resolved_tgv_weights(self) -> tuple[float, float]:
-        """Return the first- and second-order TGV weights."""
-
-        if self.alpha1 is not None and self.alpha2 is not None:
-            return self.alpha1, self.alpha2
-        if self.reference_wavelength is None:
-            raise ValueError(
-                "local TGV smoothing requires alpha1/alpha2 or "
-                "reference_wavelength; Sauce --smooth can derive wavelength "
-                "from the material model"
-            )
-        length = self.wavelength_fraction * self.reference_wavelength / (2.0 * np.pi)
-        return length, self.tgv_ratio * length * length
-
-    def to_fs(self, *, include_illumination: bool = True) -> dict[str, Any]:
-        """Serialize the common smoothing contract consumed by Sauce."""
-
-        payload = {
-            "type": self.kind,
-            "lambda": self.wavelength_fraction,
-            "derivative_order": self.derivative_order,
-            "epsilon": self.epsilon,
-            "iterations": self.iterations,
-            "input_role": self.input_role,
-        }
-        if self.alpha is not None:
-            payload["alpha"] = self.alpha
-        if self.alpha1 is not None and self.alpha2 is not None:
-            payload["alpha1"] = self.alpha1
-            payload["alpha2"] = self.alpha2
-        if self.kind == "tgv" and self.tgv_ratio != 1.0:
-            payload["tgv_ratio"] = self.tgv_ratio
-        if self.reference_wavelength is not None:
-            payload["reference_wavelength"] = self.reference_wavelength
-        if self.normalize_amplitude is not None:
-            payload["normalize_amplitude"] = self.normalize_amplitude
-        if include_illumination:
-            payload["illumination_normalization"] = self.illumination_normalization
-        return payload
-
-    @classmethod
-    def from_value(
-        cls, value: Optional["VariationalSmoothing | Mapping[str, Any]"]
-    ) -> Optional["VariationalSmoothing"]:
-        """Normalize an optional authored smoothing value."""
-
-        if value is None or isinstance(value, VariationalSmoothing):
-            return value
-        payload = dict(value)
-        if "type" in payload and "kind" not in payload:
-            payload["kind"] = payload.pop("type")
-        if "lambda" in payload and "wavelength_fraction" not in payload:
-            payload["wavelength_fraction"] = payload.pop("lambda")
-        if "strength" in payload:
-            payload.setdefault("alpha", payload.pop("strength"))
-        if (
-            "normalize_illumination" in payload
-            and "illumination_normalization" not in payload
-        ):
-            payload["illumination_normalization"] = (
-                "cross" if payload.pop("normalize_illumination") else "none"
-            )
-        payload.pop("normalize_coordinate", None)
-        return cls(**payload)
-
-
 class FieldRepresentation(ABC):
     """A finite-dimensional field with explicit evaluation and pullback maps."""
 
@@ -315,12 +123,12 @@ class FieldRepresentation(ABC):
     @abstractmethod
     def sampling_operator(
         self, context: EvaluationContext, *, derivative_order: int = 0
-    ) -> _scipy.sparse.csr_matrix:
+    ) -> csr_matrix:
         """Return the sparse coefficient-to-sample operator."""
 
     def evaluate(
         self,
-        coefficients: Sequence[float],
+        coefficients: Sequence[float] | np.ndarray,
         context: EvaluationContext,
         *,
         derivative_order: int = 0,
@@ -393,7 +201,7 @@ class FieldRepresentation(ABC):
     def transfer_to(
         self,
         target: "FieldRepresentation",
-        coefficients: Sequence[float],
+        coefficients: Sequence[float] | np.ndarray,
         context: EvaluationContext,
         *,
         weights: Optional[Any] = None,
@@ -407,7 +215,7 @@ class FieldRepresentation(ABC):
             samples, context, weights=weights, damping=damping, tolerance=tolerance
         )
 
-    def _vector(self, values: Sequence[float], name: str) -> np.ndarray:
+    def _vector(self, values: Sequence[float] | np.ndarray, name: str) -> np.ndarray:
         vector = np.asarray(values)
         if np.iscomplexobj(vector):
             raise ValueError(f"{name} must be real-valued")
@@ -435,6 +243,8 @@ class ControlRepresentation(FieldRepresentation):
             self.knots = np.array(control.knots, copy=True)
         self.axis = control.axis
         self.coordinate_system = control.coordinate_system
+        #: ``hold`` clamps coordinates into the knot span like the solver does.
+        self.hold = getattr(control, "extrapolate", "zero") == "hold"
 
     @property
     def size(self) -> int:
@@ -450,7 +260,7 @@ class ControlRepresentation(FieldRepresentation):
 
     def sampling_operator(
         self, context: EvaluationContext, *, derivative_order: int = 0
-    ) -> _scipy.sparse.csr_matrix:
+    ) -> csr_matrix:
         """Build the sparse local B-spline evaluation operator."""
 
         from scipy.interpolate import BSpline
@@ -464,10 +274,20 @@ class ControlRepresentation(FieldRepresentation):
                 f"degree-{self.degree} controls do not have classical "
                 f"derivative order {derivative_order}"
             )
-        coordinates = context.coordinate(self.axis, self.coordinate_system)
+        coordinates = np.asarray(context.coordinate(self.axis, self.coordinate_system))
         lower = self.knots[self.degree]
         upper = self.knots[self.size]
-        active = (coordinates >= lower) & (coordinates <= upper)
+        inside = (coordinates >= lower) & (coordinates <= upper)
+        if self.hold:
+            # Edge-held extrapolation: evaluate the nearest end of the span, and
+            # as the clamped coordinate map is constant there, its derivatives
+            # vanish outside the span.
+            active = np.isfinite(coordinates)
+            if derivative_order > 0:
+                active &= inside
+            coordinates = np.clip(coordinates, lower, upper)
+        else:
+            active = inside
         if not np.any(active):
             return csr_matrix((context.size, self.size), dtype=np.float64)
         rows = np.flatnonzero(active)
@@ -487,6 +307,128 @@ class ControlRepresentation(FieldRepresentation):
             (coo.data, (rows[coo.row], coo.col)),
             shape=(context.size, self.size),
         )
+
+
+def _row_khatri_rao(operators: Sequence[csr_matrix], rows: int) -> csr_matrix:
+    """Return the row-wise Khatri-Rao product of per-axis sampling operators.
+
+    Row ``r`` of the product is the Kronecker product of the factors' rows
+    ``r`` with the first factor's column varying fastest, so the flat column
+    index is ``i_0 + n_0 * (i_1 + n_1 * i_2)`` (the Sauce tensor ordering).
+    """
+
+    result: Optional[csr_matrix] = None
+    stride = 1
+    for factor in operators:
+        op = factor.tocsr()
+        if result is None:
+            result = op
+        else:
+            prev = result.tocsr()
+            prev_rows = np.repeat(np.arange(rows), np.diff(prev.indptr))
+            repeats = np.diff(op.indptr)[prev_rows]
+            prev_index = np.repeat(np.arange(prev.nnz), repeats)
+            starts = np.repeat(op.indptr[prev_rows], repeats)
+            offsets = np.arange(prev_index.size) - np.repeat(
+                np.cumsum(repeats) - repeats, repeats
+            )
+            op_index = starts + offsets
+            result = csr_matrix(
+                (
+                    prev.data[prev_index] * op.data[op_index],
+                    (
+                        prev_rows[prev_index],
+                        prev.indices[prev_index] + stride * op.indices[op_index],
+                    ),
+                ),
+                shape=(rows, stride * op.shape[1]),
+            )
+        stride *= op.shape[1]
+    if result is None:
+        raise ValueError("a tensor sampling operator needs at least one axis")
+    return result
+
+
+class TensorControlRepresentation(FieldRepresentation):
+    """Tensor-product hat/B-spline control evaluation and transfer map.
+
+    Accepts a :class:`~frequensolve.model.parameterization.TensorHatControl`
+    (uniform hat axes) or a
+    :class:`~frequensolve.model.parameterization.TensorBSplineControl`
+    (one B-spline basis per axis). The sampling operator is the row-wise
+    Khatri-Rao product of the per-axis :class:`ControlRepresentation`
+    operators with the first axis fastest; each axis clamps its own coordinate
+    into its span when the control holds its edge values.
+    """
+
+    def __init__(self, control: TensorHatControl | TensorBSplineControl):
+        if isinstance(control, TensorHatControl):
+            axis_controls: Sequence[HatControl | BSplineControl] = [
+                HatControl(
+                    axis=axis,
+                    spacing=float(control.spacing[k]),
+                    origin=float(control.origin[k]),
+                    coefficients=np.zeros(control.shape[k]),
+                    coordinate_system=control.coordinate_system,
+                    units=control.units,
+                    extrapolate=control.extrapolate,
+                )
+                for k, axis in enumerate(control.axes)
+            ]
+        elif isinstance(control, TensorBSplineControl):
+            axis_controls = control.axis_controls
+        else:
+            raise TypeError(
+                "tensor control representation requires a tensor-hat or tensor "
+                "B-spline control"
+            )
+        self.control = control
+        self.axes = tuple(control.axes)
+        self.coordinate_system = control.coordinate_system
+        #: One-dimensional factor maps in coefficient storage order.
+        self.axes_1d = [ControlRepresentation(axis) for axis in axis_controls]
+        self.hold = control.extrapolate == "hold"
+
+    @property
+    def size(self) -> int:
+        """Return the number of tensor coefficients."""
+
+        return self.control.size
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Return the coefficient count per axis."""
+
+        return tuple(rep.size for rep in self.axes_1d)
+
+    def sampling_operator(
+        self, context: EvaluationContext, *, derivative_order: Any = 0
+    ) -> csr_matrix:
+        """Build the sparse tensor evaluation operator.
+
+        ``derivative_order`` is ``0`` for values or one order per axis for a
+        mixed partial derivative (``(1, 0)`` differentiates along the first
+        axis); each order is limited as in :class:`ControlRepresentation`.
+        """
+
+        if np.ndim(derivative_order) == 0:
+            if int(derivative_order) != 0:
+                raise ValueError(
+                    "tensor derivative orders must be given per axis, e.g. (1, 0)"
+                )
+            orders = (0,) * len(self.axes_1d)
+        else:
+            orders = tuple(int(order) for order in derivative_order)
+            if len(orders) != len(self.axes_1d):
+                raise ValueError(
+                    f"tensor derivative orders need one value per axis "
+                    f"({len(self.axes_1d)})"
+                )
+        operators = [
+            rep.sampling_operator(context, derivative_order=order)
+            for rep, order in zip(self.axes_1d, orders)
+        ]
+        return _row_khatri_rao(operators, context.size)
 
 
 class CartesianGridRepresentation(FieldRepresentation):
@@ -517,7 +459,7 @@ class CartesianGridRepresentation(FieldRepresentation):
 
     def sampling_operator(
         self, context: EvaluationContext, *, derivative_order: int = 0
-    ) -> _scipy.sparse.csr_matrix:
+    ) -> csr_matrix:
         """Build the multilinear grid sampling operator and its transpose pair."""
 
         from scipy.sparse import csr_matrix

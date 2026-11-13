@@ -1,0 +1,25 @@
+{
+  "schema": "fs-job-1",
+  "name": "fwi_linearize",
+  "workflow": "fwi_operator",
+  "simulation": "simulation.json",
+  "result_path": "results/fwi_linearize",
+  "Imaging": {},
+  "f_list": [
+    4.0
+  ],
+  "fwi_operator": {
+    "action": "jvp",
+    "state": "state_1.json",
+    "objective_vector": "jvp.json",
+    "controls": {
+      "active": [
+        "source.2.mechanism",
+        "model.acoustic_vp",
+        "source.1.position"
+      ],
+      "manifest": "controls.json"
+    },
+    "direction": "direction.h5"
+  }
+}

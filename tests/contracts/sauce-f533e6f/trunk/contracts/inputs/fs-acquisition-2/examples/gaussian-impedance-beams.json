@@ -1,0 +1,50 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "scalar",
+    "domain": 99,
+    "sources": [
+      {
+        "name": "beam_60",
+        "coordinates": [0.0, 0.5]
+      },
+      {
+        "name": "beam_90",
+        "coordinates": [0.0, 0.5]
+      }
+    ]
+  },
+  "impedance_sources": {
+    "_type": "GaussianBeam",
+    "beams": [
+      {
+        "rhs": 1,
+          "source": {
+            "origin": [0.0, 0.5],
+            "theta": 30.0,
+            "width": {
+            "value": 0.075,
+            "units": "km"
+          },
+          "amplitude": 1.0,
+          "n0": 1.0
+        }
+      },
+      {
+        "rhs": 2,
+          "source": {
+            "origin": [0.0, 0.5],
+            "theta": 0.0,
+            "width": {
+            "value": 0.075,
+            "units": "km"
+          },
+          "amplitude": 1.0,
+          "n0": 1.0
+        }
+      }
+    ]
+  },
+  "receiver_groups": []
+}

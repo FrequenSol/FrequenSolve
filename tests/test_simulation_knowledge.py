@@ -92,7 +92,12 @@ def test_packaged_catalog_matches_its_json_schema():
     jsonschema.validate(payload, schema)
 
 
-def test_catalog_exposes_exact_installed_release_identities():
+def test_catalog_exposes_exact_installed_release_identities(monkeypatch):
+    # Editable source may change after package import. Runtime identities must
+    # retain the public version even if Versioneer now reports another checkout.
+    monkeypatch.setattr(
+        "frequensolve._version.get_versions", lambda: {"version": "0+changed"}
+    )
     catalog = fs.load_simulation_knowledge()
     compatibility = fs.load_solver_compatibility()
 
@@ -271,9 +276,9 @@ def test_authoring_rules_match_public_boundaries_and_numerics():
     assert fs.SolverConfig().to_fs() == {
         "solve_on": solver_rules.default_solve_on,
         "max_iter": solver_rules.default_max_iter,
-        "tolerance": solver_rules.default_tolerance,
         "precision": solver_rules.default_precision,
     }
+    assert fs.SolverConfig().tolerance is solver_rules.default_tolerance is None
     for solve_on in solver_rules.solve_on_values:
         assert fs.SolverConfig(solve_on=solve_on).to_fs()["solve_on"] == solve_on
     for precision in solver_rules.precision_values:

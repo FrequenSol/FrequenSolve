@@ -1,0 +1,16 @@
+{
+  "schema": "fs-units-1",
+  "disable_scaling": false,
+  "f0": 10.0,
+  "length_scale": 2.0,
+  "time_scale": 0.2,
+  "mass_scale": 8.0,
+  "Units": {
+    "defaults": {
+      "length": "km",
+      "velocity": "km/s",
+      "pressure": "GPa",
+      "moment": "kN*km"
+    }
+  }
+}

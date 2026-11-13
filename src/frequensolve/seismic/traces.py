@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 
 import numpy as np
 
+from frequensolve.seismic.spectra import TransferFunction
 from frequensolve.seismic.trace_store import TraceStore, TraceSummary
 from frequensolve.seismic.wavelet import Wavelet
 from frequensolve.simulation.jobs.artifacts import TraceManifest
@@ -309,6 +310,12 @@ class TraceDataset:
         frequencies = TraceStore._read_trace_frequencies(path)
         laplace = TraceStore._read_trace_laplace_values(path)
         groups = TraceStore.discover_trace_groups(path)
+        from frequensolve.seismic.trace_pack import TracePackManifest
+
+        pack = TracePackManifest.from_file(path)
+        if pack is not None:
+            frequencies = [entry.frequency.real for entry in pack.entries]
+            laplace = [entry.frequency.imag for entry in pack.entries]
         manifest = TraceManifest(
             files=[path],
             frequencies={
@@ -320,6 +327,7 @@ class TraceDataset:
             result_path=path.parent,
             output_path=path.parent,
             project_path=path.parent,
+            pack=pack,
         )
         return cls.from_manifest(manifest, upscale=upscale)
 
@@ -456,6 +464,19 @@ class TraceDataset:
             cache_dir=cache_dir or self._default_cache_dir(),
         )
 
+    def export_packed(self, path: Path) -> Path:
+        """Export selected native packed traces to a new standalone HDF5 file.
+
+        Unlike the reader's consolidation cache, this physically combines all
+        selected segments for consumers that require one native trace file.
+        Existing destinations and incompatible survey layouts are rejected.
+        """
+        from frequensolve.seismic.trace_export import export_packed
+
+        return export_packed(
+            self.metadata["packed_entries"], path, groups=self.manifest.groups
+        )
+
     def times(self, upscale: Optional[int] = None) -> np.ndarray:
         """Return reconstructed time samples for this dataset.
 
@@ -554,7 +575,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int = 1,
-        wavelet: Optional[Wavelet] = None,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         **kwargs,
     ):
         """Read one frequency-domain gather.
@@ -574,7 +595,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         laplace_compensation: str = "auto",
@@ -624,7 +645,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,
@@ -646,7 +667,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int = 1,
-        wavelet: Optional[Wavelet] = None,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         **kwargs,
     ):
         """Alias for ``frequency_domain``."""
@@ -664,7 +685,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         laplace_compensation: str = "auto",
@@ -696,7 +717,7 @@ class TraceDataset:
         group: str,
         component: str,
         source: int,
-        wavelet: Wavelet,
+        wavelet: Optional[Wavelet | TransferFunction] = None,
         upscale: int = 1,
         T_max: Optional[float] = None,
         **kwargs,

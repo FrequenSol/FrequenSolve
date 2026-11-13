@@ -1,0 +1,36 @@
+{
+  "schema": "fs-implicit-geometry-1",
+  "surfaces": [
+    {
+      "_type": "plane",
+      "p0": [0.0, 0.0, 0.0],
+      "n": [0.0, 0.0, 1.0]
+    },
+    {
+      "_type": "abs",
+      "id": 1
+    },
+    {
+      "_type": "offset",
+      "id": 2,
+      "delta": -0.005
+    },
+    {
+      "_type": "capsule",
+      "a": [-0.01, 0.0, 0.0],
+      "b": [0.01, 0.0, 0.0],
+      "r": 0.002
+    },
+    {
+      "_type": "repeat",
+      "id": 4,
+      "period": [0.03, 0.03, 0.0],
+      "shift": [0.0, 0.0, 0.0]
+    },
+    {
+      "_type": "difference",
+      "a": 3,
+      "b": 5
+    }
+  ]
+}

@@ -164,7 +164,7 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ steps.resolve-token.outputs.token }}
-          DOCKER_WORKFLOW_COMMIT: 6c7ffe8c60ae544060cbe7a4c046bb6b05f87729
+          DOCKER_WORKFLOW_COMMIT: 52393841faf6662ca85a7d8a976031fdc4625f07
         run: |
           set -euo pipefail
           docker_main="$(
@@ -198,7 +198,7 @@ jobs:
           DOWNSTREAM_REPO: FrequenSol/FrequenSolveDockerImage
           DOWNSTREAM_WORKFLOW: cicd-workflow.yml
           DOWNSTREAM_REF: main
-          DOCKER_WORKFLOW_COMMIT: 6c7ffe8c60ae544060cbe7a4c046bb6b05f87729
+          DOCKER_WORKFLOW_COMMIT: 52393841faf6662ca85a7d8a976031fdc4625f07
           FS_SOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.solver_release }}
           FS_MUMPS_COMMIT: ${{ steps.resolve.outputs.fs_mumps_commit }}
           FREQUENSOLVE_COMMIT: ${{ needs.prepare-evidence.outputs.target_sha }}
@@ -375,7 +375,7 @@ jobs:
           DOWNSTREAM_REPO: FrequenSol/FrequenSolveDockerImage
           DOWNSTREAM_WORKFLOW: cicd-workflow.yml
           DOWNSTREAM_REF: main
-          DOCKER_WORKFLOW_COMMIT: 6c7ffe8c60ae544060cbe7a4c046bb6b05f87729
+          DOCKER_WORKFLOW_COMMIT: 52393841faf6662ca85a7d8a976031fdc4625f07
           RUN_ID: ${{ steps.dispatch.outputs.run_id }}
           REQUEST_ID: ${{ steps.dispatch.outputs.request_id }}
           DISPATCH_ACTOR: ${{ steps.dispatch.outputs.actor }}
@@ -416,7 +416,7 @@ jobs:
           FS_SOLVER_RELEASE: ${{ needs.prepare-evidence.outputs.solver_release }}
           FS_SOLVER_EXPECTED_COMMIT: ${{ needs.prepare-evidence.outputs.solver_commit }}
           FS_MUMPS_COMMIT: ${{ steps.resolve.outputs.fs_mumps_commit }}
-          DOCKER_WORKFLOW_COMMIT: 6c7ffe8c60ae544060cbe7a4c046bb6b05f87729
+          DOCKER_WORKFLOW_COMMIT: 52393841faf6662ca85a7d8a976031fdc4625f07
           DOCKER_EVIDENCE_RUN_ID: ${{ steps.dispatch.outputs.run_id }}
           DOCKER_REQUEST_ID: ${{ steps.dispatch.outputs.request_id }}
         run: |
@@ -601,7 +601,7 @@ jobs:
           else
           test "$DOCKER_REF" = "$TARGET_SHA"
           test "$DOCKER_COMMIT" = "$TARGET_SHA"
-          test "$DOCKER_WORKFLOW_COMMIT" = 6c7ffe8c60ae544060cbe7a4c046bb6b05f87729
+          test "$DOCKER_WORKFLOW_COMMIT" = 52393841faf6662ca85a7d8a976031fdc4625f07
           test "$DOCKER_MARKER" = "not cloud and not hpc and not interactive"
           test "$DOCKER_STATUS" = passed
           test "$DOCKER_ARTIFACT" = frequensolve-test-evidence
@@ -655,7 +655,7 @@ jobs:
             --arg ciRunUrl "$CI_RUN_URL" \
             --arg ciWorkflow ".github/workflows/cicd-workflow.yml" \
             --arg ciRequiredJob "Required CI" \
-            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@6c7ffe8c60ae544060cbe7a4c046bb6b05f87729" \
+            --arg dockerWorkflow "FrequenSol/FrequenSolveDockerImage/.github/workflows/cicd-workflow.yml@52393841faf6662ca85a7d8a976031fdc4625f07" \
             --arg dockerWorkflowCommit "$DOCKER_WORKFLOW_COMMIT" \
             --argjson dockerCallerRunId "$GITHUB_RUN_ID" \
             --arg dockerCallerRunUrl "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \

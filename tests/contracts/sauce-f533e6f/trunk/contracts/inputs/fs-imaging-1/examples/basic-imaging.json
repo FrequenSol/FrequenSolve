@@ -1,0 +1,71 @@
+{
+  "schema": "fs-imaging-1",
+  "name": "vp_image",
+  "data_path": "data/observed",
+  "save_path": "results/imaging",
+  "post_process": true,
+  "keep_forward": false,
+  "keep_adjoint": false,
+  "keep_unstacked": false,
+  "sync_local_shards": false,
+  "grid": {
+    "system": "global",
+    "dims": [
+      "x",
+      "z"
+    ],
+    "x0": [
+      0.0,
+      0.0
+    ],
+    "x1": [
+      4.0,
+      2.0
+    ],
+    "n": [
+      401,
+      201
+    ],
+    "units": "km"
+  },
+  "misfit": {
+    "objective": {
+      "kind": "huber",
+      "delta": 1.5
+    },
+    "preprocess": {
+      "include_defaults": true,
+      "hooks": [
+        {
+          "schema": "fs-preprocess-hook-1",
+          "name": "variable_projected_source",
+          "kind": "source_scalar_fit",
+          "stage": "trace_pair",
+          "params": {
+            "norm": "inherit",
+            "max_iterations": 30,
+            "relative_tolerance": 1e-08
+          }
+        }
+      ]
+    },
+    "receiver_groups": [
+      {
+        "name": "receivers",
+        "observed": "shots/observed/receivers",
+        "simulated": "shots/simulated/receivers"
+      }
+    ]
+  },
+  "images": [
+    {
+      "name": "vp",
+      "IC": "fwi",
+      "property": "vp"
+    },
+    {
+      "name": "reflectivity",
+      "IC": "up_down"
+    }
+  ]
+}

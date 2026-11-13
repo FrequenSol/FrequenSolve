@@ -1,0 +1,24 @@
+{
+  "schema": "fs-material-model-1",
+  "subdomains": [
+    {
+      "name": "solid",
+      "mesh_block_id": 1,
+      "physics": "thermal",
+      "properties": {
+        "thermal_conductivity": {
+          "value": 2.0,
+          "units": "W/m/K"
+        },
+        "heat_capacity": {
+          "value": 4.0,
+          "units": "J/m^3/K"
+        },
+        "heat_source": {
+          "value": 8.0,
+          "units": "W/m^3"
+        }
+      }
+    }
+  ]
+}

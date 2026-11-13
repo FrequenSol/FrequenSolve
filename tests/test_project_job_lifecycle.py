@@ -21,7 +21,6 @@ from frequensolve.simulation.artifact_contract import ArtifactRecord, task_resul
 from frequensolve.simulation.jobs import (
     BaseJob,
     FrequencyDomainJob,
-    ImagingJob,
     JobLayout,
     TimeDomainJob,
 )
@@ -49,6 +48,32 @@ def _project_with_trace_simulation(tmp_path):
     sim = project.new_simulation(name="simple", physics="acoustic", dimension=2)
     sim.mesh = MeshManager(HexMeshGenerator(l_bound=[0, 0], u_bound=[1, 1], n=[1, 1]))
     return project, sim
+
+
+@pytest.mark.parametrize("frequencies", [[3], [3, 7.5], [3 - 0.5j]])
+@pytest.mark.parametrize("grading", [{}, {"adapt_sources": 0, "adapt_receivers": 2}])
+def test_saved_job_reload_preserves_exact_input_fingerprints(
+    tmp_path, frequencies, grading
+):
+    _, simulation = _project_with_trace_simulation(tmp_path)
+    simulation.mesh.set_adapt(elems_per_wave=0.5, order=2, **grading)
+    job = FrequencyDomainJob("stable", simulation, frequencies)
+    job.save()
+    _commit_task_result(job, 1)
+    fingerprints = job._artifact_contract_fingerprints()
+    simulation_bytes = simulation._file.read_bytes()
+    job_bytes = job.job_file.read_bytes()
+
+    restored = FrequencyDomainJob.load(job.job_file)
+    restored.save()
+
+    assert restored.simulation._file.read_bytes() == simulation_bytes
+    assert restored.job_file.read_bytes() == job_bytes
+    assert restored._artifact_contract_fingerprints() == fingerprints
+    assert restored.plan_tasks()["strict_current_tasks"] == [1]
+    restored.simulation.mesh.adapt.order += 1
+    restored.save()
+    assert restored.plan_tasks()["strict_current_tasks"] == []
 
 
 def _commit_task_result(
@@ -192,7 +217,7 @@ def test_generic_load_infers_trace_store(tmp_path):
 
 def test_successful_run_result_opens_images_through_its_site():
     expected = object()
-    job = object.__new__(ImagingJob)
+    job = SimpleNamespace(load_images=lambda: None)
     site = SimpleNamespace(fetch_image=lambda requested: expected)
     result = RunResult(
         job=job,
@@ -1500,3 +1525,22 @@ def test_job_loading_preserves_generic_pathlike_inputs(tmp_path, loader, path_ki
     loaded = loader(source)
     assert loaded.job_file == job_file
     assert loaded.f_list == [1.0]
+
+
+def test_rebuilt_job_save_keeps_committed_tasks_current(tmp_path):
+    """A fresh job object must save the exact bytes Sauce fingerprinted."""
+
+    project, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0, 12.0])
+    job.save()
+    job.save()
+    committed_bytes = job._file.read_bytes()
+    _commit_task_result(job, 1)
+    _commit_task_result(job, 2)
+    assert job.current_tasks() == [1, 2]
+
+    rebuilt = FrequencyDomainJob(name="freq", simulation=sim, f_list=[10.0, 12.0])
+    rebuilt.save()
+
+    assert rebuilt._file.read_bytes() == committed_bytes
+    assert rebuilt.current_tasks() == [1, 2]

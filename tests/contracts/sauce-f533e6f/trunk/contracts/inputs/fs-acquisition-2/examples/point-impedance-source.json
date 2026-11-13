@@ -1,0 +1,32 @@
+{
+  "schema": "fs-acquisition-2",
+  "source_geometry": {
+    "_type": "Inline",
+    "kind": "scalar",
+    "domain": 99,
+    "sources": [
+      {
+        "name": "cut_point_launch",
+        "coordinates": [0.5, 0.5]
+      }
+    ]
+  },
+  "impedance_sources": {
+    "_type": "PointSource",
+    "points": [
+      {
+        "rhs": 1,
+        "source": {
+          "origin": {
+            "value": [0.5, 0.5],
+            "units": "km"
+          },
+          "amplitude": 1.0,
+          "phase": 0.0,
+          "n0": 1.0
+        }
+      }
+    ]
+  },
+  "receiver_groups": []
+}

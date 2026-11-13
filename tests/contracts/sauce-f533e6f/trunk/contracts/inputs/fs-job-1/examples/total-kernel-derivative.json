@@ -1,0 +1,62 @@
+{
+  "schema": "fs-job-1",
+  "name": "vp_total_spectral_kernel",
+  "project_path": "project",
+  "simulation": "sim.json",
+  "workflow": "rtm",
+  "f_list": [
+    2.5
+  ],
+  "kernel_derivative": {
+    "order": 4,
+    "axis": "fourier"
+  },
+  "result_path": "results/total_kernel",
+  "Image": {
+    "schema": "fs-imaging-1",
+    "name": "kernel",
+    "field_retention": "none",
+    "preprocess": {
+      "include_defaults": false,
+      "hooks": []
+    },
+    "grid": {
+      "system": "global",
+      "dims": [
+        "x",
+        "z"
+      ],
+      "n": [
+        161,
+        161
+      ],
+      "x0": [
+        0,
+        0
+      ],
+      "x1": [
+        10,
+        10
+      ],
+      "units": "km"
+    },
+    "misfit": {
+      "objective": {
+        "kind": "l2"
+      },
+      "receiver_groups": [
+        {
+          "name": "surface",
+          "observed": "observed.h5"
+        }
+      ]
+    },
+    "images": [
+      {
+        "name": "vp",
+        "IC": "fwi:acoustic",
+        "property": "vp"
+      }
+    ]
+  }
+}

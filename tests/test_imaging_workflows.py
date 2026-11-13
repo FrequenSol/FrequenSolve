@@ -1,0 +1,2223 @@
+"""Workflow tests on the solver-free fake site (linear surrogate)."""
+
+import dataclasses
+import json
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from frequensolve import imaging as im
+from frequensolve.geometry.grids import CartesianGrid
+from frequensolve.imaging import (
+    ControlSpace,
+    ControlState,
+    ControlVector,
+    DepthProfile,
+    ImageSet,
+    ImagingProblem,
+    Misfit,
+    SourceParameters,
+)
+from frequensolve.imaging._backend import background_checkpoint_files
+from frequensolve.imaging.results import FWIResult, StageResult
+from frequensolve.imaging.workflows import (
+    FWI,
+    LBFGS,
+    LSRTM,
+    FWIIteration,
+    NewtonCG,
+    Stage,
+    block_curvatures,
+    curvature_scaling,
+    rms_step_limit,
+    rtm,
+    sensitivity_kernel,
+    sensitivity_kernel_job,
+)
+from frequensolve.inversion import (
+    ContinuationSchedule,
+    ContinuationStage,
+    InexactNewtonIteration,
+    OptimizationCheckpoint,
+    OptimizationHistory,
+)
+from frequensolve.inversion.optimization import _shares_arrays
+from tests.imaging_fakes import FakeImagingSite, layered_simulation
+from tests.test_imaging_jobs import _assert_valid
+
+pytestmark = pytest.mark.unit
+
+FREQUENCIES = [4.0, 6.0]
+BASE_VP = 1900.0
+TIGHT = dict(gradient_tolerance=1e-10, objective_tolerance=0.0, step_tolerance=0.0)
+EXACT = dict(initial_forcing=1e-8, minimum_forcing=1e-8, maximum_forcing=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# fixtures and helpers
+# ---------------------------------------------------------------------------
+
+
+class _TrackedDiagonal(im.Diagonal):
+    """The real :class:`im.Diagonal` recording its bound instances and updates."""
+
+    bound: list = []
+
+    def bind(self, space):
+        bound = super().bind(space)
+        bound.updates = []
+        update = bound.update
+
+        def tracked(linearization, regularization=None):
+            bound.updates.append(linearization)
+            update(linearization, regularization=regularization)
+
+        bound.update = tracked
+        self.bound.append(bound)
+        return bound
+
+
+def _space(limits=None):
+    return ControlSpace(
+        vp=DepthProfile("vp", "sediment", count=5, limits=limits),
+        rho=DepthProfile("rho", "sediment", count=3),
+    )
+
+
+def _problem(tmp_path, fake, *, name="fwi", subdir="project", **kwargs):
+    sim = layered_simulation(tmp_path / subdir)
+    observed = tmp_path / "observed.h5"
+    if not observed.exists():
+        # control-gradient jobs fingerprint their observed inputs
+        observed.write_bytes(b"observed")
+    options = dict(
+        controls=_space(),
+        observed={"surface": observed},
+        frequencies=FREQUENCIES,
+        site=fake,
+        name=name,
+        cache_capacity=4,
+    )
+    options.update(kwargs)
+    return ImagingProblem(sim, **options)
+
+
+def _surrogate(fake, problem, frequencies=None, active=None):
+    """Return ``(J, d)`` of the surrogate for a view of ``problem``."""
+
+    view = problem.restrict(frequencies=frequencies, active=active)
+    lin = view.linearize(gradient=False)
+    surrogate = fake.linearizations[lin.state_fingerprint]
+    return surrogate.J, surrogate.d
+
+
+def _least_squares(J, d, alpha=0.0, *, R=None, weights=None):
+    """Regularized real least-squares solution of the surrogate.
+
+    ``argmin 0.5 ||J m - d||_W^2 + 0.5 alpha ||m||^2 + 0.5 ||R m||^2`` via the
+    dense normal equations ``(Re(J^H W J) + alpha I + R^T R) m = Re(J^H W d)``.
+    ``weights`` is the per-row diagonal of ``W`` (default: unit).
+    """
+
+    W = np.ones(J.shape[0]) if weights is None else np.asarray(weights, float)
+    normal = np.real(J.conj().T @ (W[:, None] * J)) + alpha * np.eye(J.shape[1])
+    if R is not None:
+        normal = normal + R.T @ R
+    return np.linalg.solve(normal, np.real(J.conj().T @ (W * d)))
+
+
+def _regularization_matrix(regularization, space):
+    """Return the dense ``R`` of a quadratic regularization bound to ``space``."""
+
+    return regularization.bind(space).operator().matrix.toarray()
+
+
+def _row_weights(fake, problem, weights):
+    """Expand per-frequency ``weights`` to the surrogate's data rows."""
+
+    lin = problem.linearize(gradient=False)
+    surrogate = fake.linearizations[lin.state_fingerprint]
+    rows = np.ones(surrogate.J.shape[0])
+    for weight, frequency in zip(weights, FREQUENCIES):
+        rows[surrogate.rows(frequency)] = weight
+    return rows
+
+
+def _linearize_count(fake):
+    return sum(1 for s in fake.submissions if s["action"] == "linearize")
+
+
+@pytest.fixture
+def fake():
+    return FakeImagingSite(seed=11)
+
+
+@pytest.fixture
+def problem(tmp_path, fake):
+    return _problem(tmp_path, fake)
+
+
+# ---------------------------------------------------------------------------
+# stages
+# ---------------------------------------------------------------------------
+
+
+def test_stage_constructors_and_validation():
+    stages = Stage.bands([[3.0], [3.0, 5.0], [5.0, 8.0]], [10, 10, 15], active="vp")
+    assert [s.frequencies for s in stages] == [(3.0,), (3.0, 5.0), (5.0, 8.0)]
+    assert [s.iterations for s in stages] == [10, 10, 15]
+    assert all(s.active == ("vp",) for s in stages)
+    assert [s.iterations for s in Stage.bands([[3.0], [5.0]], 4)] == [4, 4]
+    assert [s.label(i) for i, s in enumerate(stages)] == [
+        "stage_01",
+        "stage_02",
+        "stage_03",
+    ]
+
+    laplace = Stage.frequency_laplace_bands(
+        [
+            {
+                "name": "low",
+                "frequencies_hz": [3.0, 4.0],
+                "laplace_damping_hz": [1.0, 0.0],
+            }
+        ],
+        iterations=[2, 3],
+        active=["vp"],
+    )
+    assert [s.name for s in laplace] == ["low__laplace_00", "low__laplace_01"]
+    assert laplace[0].frequencies == (complex(3.0, -1.0), complex(4.0, -1.0))
+    assert laplace[1].frequencies == (3.0, 4.0)
+    assert laplace[0].metadata["continuation_band"] == "low"
+    assert [s.iterations for s in laplace] == [2, 3]
+    continuation = laplace[0].to_continuation_stage(0)
+    assert isinstance(continuation, ContinuationStage)
+    assert continuation.max_iterations == 2 and continuation.metadata["active"] == [
+        "vp"
+    ]
+
+    schedule = ContinuationSchedule.joint_frequency_laplace(
+        [[3.0], [3.0, 5.0]], [0.5, 0.0], max_iterations=[4, None]
+    )
+    with pytest.raises(ValueError, match="no iteration budget"):
+        Stage.from_schedule(schedule)
+    wrapped = Stage.from_schedule(schedule, iterations=[None, 6])
+    assert [s.iterations for s in wrapped] == [4, 6]
+    assert wrapped[1].name == "stage_02"
+
+    a = Stage([3.0], 2, active="vp", name="src")
+    b = Stage([3.0], 2, active="rho")
+    alternated = Stage.alternate([a, b], rounds=2)
+    assert [s.name for s in alternated] == ["src_r1", None, "src_r2", None]
+    assert [s.metadata["round"] for s in alternated] == [1, 1, 2, 2]
+
+    huber = Stage([3.0], 1, loss="huber")
+    assert huber.loss.kind == "huber"
+    with pytest.raises(ValueError, match="either loss or misfit"):
+        Stage([3.0], 1, loss="huber", misfit=Misfit.l2())
+    with pytest.raises(ValueError, match="positive"):
+        Stage([3.0], 0)
+    with pytest.raises(ValueError, match="weights"):
+        Stage([3.0, 4.0], 1, weights=[1.0])
+    with pytest.raises(ValueError, match="unique"):
+        Stage([3.0, 3.0], 1)
+
+
+def test_stage_view_restricts_and_overrides_the_problem(problem, fake):
+    stage = Stage([6.0], 3, active=["vp"], loss="huber", weights=[2.0])
+    view = stage.view(problem)
+
+    assert view.frequencies == [6.0] and view.space.blocks == ("model.vp",)
+    assert view.misfit.loss.kind == "huber" and problem.misfit.loss.kind == "l2"
+    assert view.weights == (2.0,) and problem.weights is None
+    plan = view.dry_run()
+    assert plan["job"]["Imaging"]["misfit"]["objective_terms"][0]["objective"] == {
+        "kind": "huber",
+        "delta": 1.5,
+    }
+    assert plan["job"]["control_sensitivities"]["weights"] == [2.0]
+    assert "weights" not in view.linearize(gradient=False).job.to_fs().get(
+        "control_sensitivities", {}
+    )
+    assert (
+        view.linearize().fingerprint
+        != problem.restrict(frequencies=[6.0], active=["vp"]).linearize().fingerprint
+    )
+
+    # weights scale value, gradient and normal on the objective side
+    weighted = problem.restrict(weights=[1.0, 0.5])
+    lin = weighted.linearize()
+    plain = problem.linearize()
+    J, d = _surrogate(fake, problem)
+    rows4 = fake.linearizations[lin.state_fingerprint].rows(4.0)
+    rows6 = fake.linearizations[lin.state_fingerprint].rows(6.0)
+    residual = J @ np.zeros(8) - d
+    expected = 0.5 * np.vdot(residual[rows4], residual[rows4]).real + 0.25 * (
+        np.vdot(residual[rows6], residual[rows6]).real
+    )
+    assert lin.value == pytest.approx(expected)
+    assert plain.value == pytest.approx(0.5 * np.vdot(residual, residual).real)
+    np.testing.assert_allclose(
+        lin.gradient.values,
+        np.real(J[rows4].conj().T @ residual[rows4])
+        + 0.5 * np.real(J[rows6].conj().T @ residual[rows6]),
+    )
+    assert weighted.check(taylor=False)["passed"]
+    assert weighted.restrict(frequencies=[6.0]).weights == (0.5,)
+    with pytest.raises(ValueError, match="either misfit or loss"):
+        problem.restrict(misfit=Misfit.l2(), loss="huber")
+    with pytest.raises(ValueError, match="support"):
+        problem.restrict(support="never")
+
+
+# ---------------------------------------------------------------------------
+# optimizers
+# ---------------------------------------------------------------------------
+
+
+class _Quadratic:
+    """Nonnegative quadratic ``0.5 (x - s)^T A (x - s)`` with ``A s = b``."""
+
+    def __init__(self, A, b):
+        self.A, self.b = A, b
+        self.offset = 0.5 * float(b @ np.linalg.solve(A, b))
+
+    def value(self, x):
+        return 0.5 * float(x @ self.A @ x) - float(self.b @ x) + self.offset
+
+    def gradient(self, x):
+        return self.A @ x - self.b
+
+    def hessian_action(self, x, dx):
+        return self.A @ dx
+
+
+@pytest.mark.parametrize("config", [LBFGS, NewtonCG])
+def test_optimizer_configs_forward_absolute_relative_tolerances(config):
+    optimizer = config(
+        grad_abs_tol=0.02,
+        grad_rel_tole=0.17,
+        obj_abs_tol=0.01,
+        obj_rel_tol=0.04,
+    )
+    options = optimizer.options()
+    assert options.grad_abs_tol == 0.02
+    assert options.grad_rel_tole == 0.17
+    assert options.obj_abs_tol == 0.01
+    assert options.obj_rel_tol == 0.04
+    quadratic = _Quadratic(np.eye(1), np.zeros(1))
+    result = optimizer.solve(quadratic, [2.0], initial_objective=12.0)
+    # The restored threshold is 2.06, not 0.36 from the current F=2.
+    assert result.success and result.iterations == 0
+
+
+def test_optimizer_configs_wrap_the_generic_minimizers_with_scaling_and_step_limit():
+    rng = np.random.default_rng(3)
+    root = rng.standard_normal((6, 6))
+    A = root @ root.T + np.diag([100.0, 100.0, 100.0, 1.0, 1.0, 1.0])
+    b = rng.standard_normal(6)
+    solution = np.linalg.solve(A, b)
+    quadratic = _Quadratic(A, b)
+
+    lbfgs = LBFGS(memory=5, **TIGHT)
+    assert lbfgs.options(7).history_size == 5 and lbfgs.options(7).max_iterations == 7
+    result = lbfgs.solve(quadratic, np.zeros(6), max_iterations=200)
+    np.testing.assert_allclose(result.model, solution, atol=1e-6)
+
+    newton = NewtonCG(max_cg_iterations=6, **EXACT)
+    assert newton.options().max_cg_iterations == 6
+    result = newton.solve(quadratic, np.zeros(6), max_iterations=5)
+    np.testing.assert_allclose(result.model, solution, atol=1e-8)
+    assert result.iterations <= 2
+
+    # diagonal change of variables leaves the minimizer invariant
+    scale = 1.0 / np.sqrt(np.diag(A))
+    scaled = lbfgs.solve(quadratic, np.zeros(6), scaling=scale, max_iterations=200)
+    np.testing.assert_allclose(scaled.model, solution, atol=1e-6)
+    np.testing.assert_allclose(scaled.gradient, A @ scaled.model - b, atol=1e-8)
+
+    # an RMS step cap limits every accepted block update
+    slices = (slice(0, 3), slice(3, 6))
+    steps = []
+    capped = LBFGS(step_limit=0.05).solve(
+        quadratic,
+        np.zeros(6),
+        block_slices=slices,
+        max_iterations=3,
+        callback=lambda it: steps.append(it.step),
+    )
+    for step in steps[1:]:
+        for block in slices:
+            assert np.linalg.norm(step[block]) / np.sqrt(3) <= 0.05 + 1e-12
+    assert capped.iterations == 3
+    assert rms_step_limit(np.zeros(6), slices, 0.05) == np.inf
+    assert rms_step_limit(np.ones(6), slices, 0.05) == pytest.approx(0.05)
+
+    history = OptimizationHistory()
+    lbfgs.solve(quadratic, np.zeros(6), history=history, max_iterations=2)
+    assert history.iteration_count == 3  # initial point + two iterates
+    first_order = SimpleNamespace(value=quadratic.value, gradient=quadratic.gradient)
+    with pytest.raises(ValueError, match="hessian_action"):
+        NewtonCG().solve(first_order, np.zeros(6))
+
+
+class _Recording(_Quadratic):
+    """A user objective recording every array it receives."""
+
+    def __init__(self, A, b):
+        super().__init__(A, b)
+        self.arguments = []
+
+    def value(self, x):
+        self.arguments.append(x)
+        return super().value(x)
+
+    def gradient(self, x):
+        self.arguments.append(x)
+        return super().gradient(x)
+
+    def hessian_action(self, x, dx):
+        self.arguments += [x, dx]
+        return super().hessian_action(x, dx)
+
+
+class _SharedRecording(_Recording):
+    """The same objective declaring the SDK array contract."""
+
+    @_shares_arrays
+    def value(self, x):
+        return super().value(x)
+
+    @_shares_arrays
+    def gradient(self, x):
+        return super().gradient(x)
+
+    @_shares_arrays
+    def hessian_action(self, x, dx):
+        return super().hessian_action(x, dx)
+
+
+@pytest.mark.parametrize("config", [LBFGS, NewtonCG])
+@pytest.mark.parametrize("scaled", [False, True])
+def test_optimizer_configs_share_vectors_only_with_sdk_objectives(config, scaled):
+    rng = np.random.default_rng(5)
+    root = rng.standard_normal((6, 6))
+    A, b = root @ root.T + np.eye(6), rng.standard_normal(6)
+    scaling = np.linspace(0.5, 2.0, 6) if scaled else None
+    optimizer = config(**TIGHT)
+    user, sdk = _Recording(A, b), _SharedRecording(A, b)
+    expected = optimizer.solve(user, np.zeros(6), scaling=scaling, max_iterations=6)
+    result = optimizer.solve(sdk, np.zeros(6), scaling=scaling, max_iterations=6)
+    # Identical runs; only the copies differ.
+    assert result.iterations == expected.iterations > 1
+    np.testing.assert_array_equal(result.model, expected.model)
+    np.testing.assert_array_equal(result.gradient, expected.gradient)
+    # A user objective owns writable arrays; unscaled, an SDK objective is
+    # handed the optimizer's vectors read-only (scaled, new physical arrays).
+    assert all(x.flags.writeable for x in user.arguments)
+    assert all(x.flags.writeable == scaled for x in sdk.arguments)
+
+
+def test_stage_objective_reads_the_optimizer_vectors_in_place(tmp_path, monkeypatch):
+    from frequensolve.imaging.workflows import _StageObjective
+
+    problem = _problem(tmp_path, FakeImagingSite(seed=7))
+    objective = _StageObjective(problem, problem.space, None, None, {})
+    seen = []
+    evaluate = _StageObjective._evaluate
+    monkeypatch.setattr(
+        _StageObjective,
+        "_evaluate",
+        lambda self, x, **kw: seen.append(x) or evaluate(self, x, **kw),
+    )
+    LBFGS(max_iterations=3, **TIGHT).solve(objective, problem.space.zeros().values)
+    assert len(seen) > 3 and all(not x.flags.writeable for x in seen)
+    # Its gradients are new arrays: the caller may modify them.
+    gradient = objective.gradient(seen[-1])
+    gradient[:] = 0.0
+    assert np.any(objective.gradient(seen[-1]))
+
+
+def test_scaled_iteration_records_rescale_each_vector_on_first_read(monkeypatch):
+    import frequensolve.imaging.workflows as workflows
+
+    rng = np.random.default_rng(3)
+    root = rng.standard_normal((6, 6))
+    A, b = root @ root.T + np.eye(6), rng.standard_normal(6)
+    scale = np.linspace(0.5, 2.0, 6)
+    scaled, physical = [], []
+    minimize = workflows.minimize_lbfgs
+
+    def recording(*args, callback, **kwargs):
+        def both(it):
+            scaled.append(it)
+            callback(it)
+
+        return minimize(*args, callback=both, **kwargs)
+
+    monkeypatch.setattr(workflows, "minimize_lbfgs", recording)
+    LBFGS(**TIGHT).solve(
+        _Quadratic(A, b),
+        np.zeros(6),
+        scaling=scale,
+        max_iterations=4,
+        callback=physical.append,
+    )
+    assert len(physical) == len(scaled) == 5
+    vectors = ("model", "gradient", "linearization_gradient", "step", "raw_step")
+    # Reading one vector rescales only that one.
+    assert physical[0].model is not None
+    assert set(vectors) & set(vars(physical[0])) == {"model"}
+    for index, (record, source) in enumerate(zip(physical, scaled)):
+        assert isinstance(record, InexactNewtonIteration)
+        assert record.objective == source.objective
+        assert record.optimizer_state is source.optimizer_state
+        # Nothing is rescaled before a consumer reads it.
+        assert set(vectors) & set(vars(record)) == ({"model"} if index == 0 else set())
+        for name in vectors:
+            value = getattr(record, name)
+            assert getattr(record, name) is value and not value.flags.writeable
+            # The same values the eager physical record had.
+            factor = getattr(source, name)
+            np.testing.assert_array_equal(
+                value, factor / scale if "gradient" in name else scale * factor
+            )
+        with pytest.raises(ValueError, match="read-only"):
+            record.model[0] = 1.0
+    replaced = dataclasses.replace(physical[-1], step_length=2.0)
+    assert replaced.step_length == 2.0
+    np.testing.assert_array_equal(replaced.raw_step, physical[-1].raw_step)
+
+
+# ---------------------------------------------------------------------------
+# FWI
+# ---------------------------------------------------------------------------
+
+
+def _stages():
+    return [
+        Stage([4.0], 6, active=["vp"], name="low"),
+        Stage([4.0, 6.0], 40, active=["vp", "rho"], name="full"),
+    ]
+
+
+def _stage_losses(history, index):
+    return [
+        r.loss.total
+        for r in history.iterations
+        if r.metrics["stage_index"] == index and r.metrics["stage"]
+    ]
+
+
+def test_fwi_unlimited_lbfgs_resumes_beyond_nominal_stage_budget(
+    problem, fake, tmp_path
+):
+    J, d = _surrogate(fake, problem)
+    events = []
+
+    def interrupt(event):
+        events.append(event)
+        if event.stage_iteration == 2:
+            raise RuntimeError("planned interruption")
+
+    options = dict(
+        optimizer=LBFGS(until_converged=True, **TIGHT),
+        checkpoint=tmp_path / "unlimited.h5",
+        history=tmp_path / "unlimited.json",
+    )
+    stages = [Stage(tuple(problem.frequencies), iterations=1)]
+    with pytest.raises(RuntimeError, match="planned interruption"):
+        FWI(problem, stages, callback=interrupt, **options).run()
+    result = FWI(problem, stages, **options).run(resume=True)
+    assert result.stages[0].resumed
+    assert result.stages[0].stage_iteration > 2
+    assert "maximum" not in result.stages[0].message
+    np.testing.assert_allclose(result.state.values, _least_squares(J, d), atol=1e-5)
+
+
+def test_fwi_lbfgs_reduces_the_objective_and_converges_on_the_surrogate(
+    problem, fake, tmp_path
+):
+    J, d = _surrogate(fake, problem)
+    solution = _least_squares(J, d)
+    events = []
+    fwi = FWI(
+        problem,
+        _stages(),
+        optimizer=LBFGS(**TIGHT),
+        history=tmp_path / "history.json",
+        callback=events.append,
+    )
+
+    result = fwi.run()
+
+    assert isinstance(result, FWIResult) and len(result.stages) == 2
+    assert result.problem is problem and result.checkpoint is None
+    assert [s.name for s in result.stages] == ["low", "full"]
+    assert result.stages[0].active == ("model.vp",)
+    assert result.stages[1].active == ("model.vp", "model.rho")
+    assert result.stages[0].space.size == 5 and result.stages[1].space.size == 8
+    np.testing.assert_allclose(result.state.values, solution, atol=1e-5)
+    np.testing.assert_allclose(problem.vector().values, solution, atol=1e-5)
+    np.testing.assert_allclose(result.stages[1].vector.values, solution, atol=1e-5)
+    assert result.success and result.loss.regularization == 0.0
+    assert result.history.status == "converged"
+    assert (tmp_path / "history.json").is_file()
+    for index in (0, 1):
+        losses = _stage_losses(result.history, index)
+        assert len(losses) >= 2
+        assert np.all(np.diff(losses) <= 1e-12)
+    assert result.stages[1].final_loss.total < result.stages[1].initial_loss.total
+    assert result.stages[0].initial_loss.total > result.stages[0].final_loss.total
+    # the second stage started from the first stage's accepted vp
+    first_full = next(
+        r for r in result.history.iterations if r.metrics["stage_index"] == 1
+    )
+    assert first_full.metrics["stage"] == "full"
+    assert json.loads(first_full.metrics["frequencies"]) == [[4.0, 0.0], [6.0, 0.0]]
+    assert first_full.metrics["active"] == "model.vp,model.rho"
+    assert first_full.metrics["optimizer"] == "lbfgs"
+    assert all(isinstance(e, FWIIteration) for e in events)
+    assert events[-1].stage_index == 1 and events[-1].model.size == 8
+    assert events[0].iteration == 0 and events[0].stage_iteration == 0
+    # the result's simulation carries the inverted coefficients
+    installed = result.simulation
+    sediment = next(s for s in installed.model.subdomains if s.name == "sediment")
+    np.testing.assert_allclose(
+        sediment.properties["vp"].control.coefficients, solution[:5], atol=1e-5
+    )
+    assert result.vector().size == 8
+
+    saved = result.save(tmp_path / "result")
+    loaded = FWIResult.load(saved, problem)
+    np.testing.assert_allclose(loaded.state.values, result.state.values)
+    assert loaded.history.iteration_count == result.history.iteration_count
+    assert [s.to_fs() for s in loaded.stages] == [s.to_fs() for s in result.stages]
+    assert loaded.stages[1].vector is None and loaded.problem is problem
+    assert isinstance(loaded.stages[0], StageResult)
+
+
+def test_fwi_newton_cg_reaches_the_least_squares_solution_in_few_iterations(
+    problem, fake
+):
+    J, d = _surrogate(fake, problem)
+    solution = _least_squares(J, d)
+    fwi = FWI(
+        problem,
+        Stage(FREQUENCIES, 6, name="joint"),
+        optimizer=NewtonCG(max_cg_iterations=20, **EXACT),
+    )
+
+    result = fwi.run()
+
+    stage = result.stages[0]
+    assert stage.success and stage.iterations <= 3
+    np.testing.assert_allclose(result.state.values, solution, atol=1e-6)
+    losses = _stage_losses(result.history, 0)
+    assert np.all(np.diff(losses) <= 1e-12)
+    assert stage.metrics["optimizer"] == "newton_cg"
+    assert (
+        stage.metrics["cg_iterations"] >= 1 and stage.metrics["hessian_products"] >= 1
+    )
+    normal = [s for s in fake.submissions if s["action"] == "normal"]
+    assert normal  # Hessian actions ran Sauce's normal action
+
+
+def test_fwi_records_regularization_terms_and_solves_the_damped_problem(problem, fake):
+    J, d = _surrogate(fake, problem)
+    alpha = 5.0
+    damped = _least_squares(J, d, alpha)
+    ridge = im.Quadratic(np.eye(8), weight=alpha)
+    fwi = FWI(
+        problem,
+        Stage(FREQUENCIES, 5),
+        optimizer=NewtonCG(**EXACT),
+        regularization=ridge,
+    )
+
+    result = fwi.run()
+
+    np.testing.assert_allclose(result.state.values, damped, atol=1e-6)
+    final = result.stages[0].final_loss
+    assert final.regularization == pytest.approx(0.5 * alpha * float(damped @ damped))
+    assert final.data > 0.0 and final.total == final.data + final.regularization
+    evaluations = result.history.evaluations
+    assert all(r.loss.regularization >= 0.0 for r in evaluations)
+    assert evaluations[-1].metrics["regularization"] == "Quadratic"
+    # a stage-level regularization overrides the workflow regularization
+    override = FWI(
+        problem,
+        Stage(FREQUENCIES, 5, regularization=im.Tikhonov(0.0)),
+        optimizer=NewtonCG(**EXACT),
+        regularization=ridge,
+    ).run()
+    np.testing.assert_allclose(override.state.values, _least_squares(J, d), atol=1e-6)
+    assert override.stages[0].final_loss.regularization == 0.0
+    assert override.history.evaluations[-1].metrics["regularization"] == "Tikhonov"
+
+
+@pytest.mark.parametrize(
+    "optimizer, atol",
+    [(NewtonCG(max_cg_iterations=30, **TIGHT), 1e-6), (LBFGS(**TIGHT), 1e-3)],
+    ids=["newton_cg", "lbfgs"],
+)
+def test_fwi_native_tikhonov_uses_composite_objective(problem, fake, optimizer, atol):
+    J, d = _surrogate(fake, problem)
+    # The fake native callback has a diagonal energy with an exact solution.
+    alpha = 5.0e-2
+    R = np.sqrt(alpha) * np.eye(8)
+    expected = _least_squares(J, d, R=R)
+    stages = [Stage([4.0], 6, active=["vp"], name="low"), Stage(FREQUENCIES, 150)]
+    fwi = FWI(
+        problem,
+        stages,
+        optimizer=optimizer,
+        regularization=im.Tikhonov(alpha),
+        preconditioner=im.Diagonal(probe_count=4),
+    )
+
+    result = fwi.run()
+
+    assert len(result.stages) == 2 and result.success
+    np.testing.assert_allclose(result.state.values, expected, atol=atol)
+    final = result.stages[1].final_loss
+    assert final.regularization == pytest.approx(
+        0.5 * float(np.linalg.norm(R @ result.state.values) ** 2)
+    )
+    assert final.total == pytest.approx(
+        _least_squares_value(J, d, result.state.values) + final.regularization
+    )
+    assert result.history.evaluations[-1].metrics["regularization"] == "Tikhonov"
+    for index in (0, 1):
+        losses = _stage_losses(result.history, index)
+        assert len(losses) >= 2 and np.all(np.diff(losses) <= 1e-9)
+    assert result.stages[1].metrics["optimizer"] == optimizer.kind
+
+
+@pytest.mark.parametrize(
+    "optimizer, atol",
+    [(NewtonCG(max_cg_iterations=30, **EXACT), 1e-6), (LBFGS(**TIGHT), 1e-4)],
+    ids=["newton_cg", "lbfgs"],
+)
+def test_fwi_curvature_scaling_leaves_the_minimizer_invariant(
+    problem, fake, optimizer, atol
+):
+    J, d = _surrogate(fake, problem)
+    solution = _least_squares(J, d)
+    before = len(fake.submissions)
+    result = FWI(problem, _stages(), optimizer=optimizer, scaling="curvature").run()
+
+    np.testing.assert_allclose(result.state.values, solution, atol=atol)
+    assert result.success and result.stages[1].active == ("model.vp", "model.rho")
+    # one Rademacher JVP per block at every stage start
+    jvp = [s for s in fake.submissions[before:] if s["action"] == "jvp"]
+    assert len(jvp) >= 3
+
+
+def test_stage_weights_scale_the_objective_and_its_minimizer(problem, fake):
+    weights = [1.0, 0.25]
+    J, d = _surrogate(fake, problem)
+    rows = _row_weights(fake, problem, weights)
+    lin = fake.linearizations[problem.linearize(gradient=False).state_fingerprint]
+    residual = J @ np.zeros(8) - d
+    per_frequency = [
+        0.5 * float(np.vdot(residual[lin.rows(f)], residual[lin.rows(f)]).real)
+        for f in FREQUENCIES
+    ]
+    weighted = _least_squares(J, d, weights=rows)
+    assert not np.allclose(weighted, _least_squares(J, d), atol=1e-3)
+
+    result = FWI(
+        problem,
+        Stage(FREQUENCIES, 6, weights=weights),
+        optimizer=NewtonCG(max_cg_iterations=30, **EXACT),
+    ).run()
+
+    stage = result.stages[0]
+    assert stage.initial_loss.data == pytest.approx(
+        sum(w * value for w, value in zip(weights, per_frequency))
+    )
+    assert stage.initial_loss.data < sum(per_frequency)
+    np.testing.assert_allclose(result.state.values, weighted, atol=1e-6)
+    final = J @ result.state.values - d
+    assert stage.final_loss.data == pytest.approx(
+        0.5 * float(np.real(np.vdot(final, rows * final)))
+    )
+
+
+def test_fwi_respects_bounds_and_clips_iterates(tmp_path, fake):
+    unbounded = _problem(tmp_path, fake, subdir="free")
+    J, d = _surrogate(fake, unbounded)
+    solution = _least_squares(J, d)
+    limit = 0.5 * float(np.max(np.abs(solution[:5])))
+    # limits are physical values; the sediment vp baseline is 1900 m/s
+    bounded = _problem(
+        tmp_path,
+        fake,
+        subdir="bounded",
+        controls=_space(limits=(BASE_VP - limit, BASE_VP + limit)),
+    )
+    lower, upper = bounded.space.bounds
+    np.testing.assert_allclose(lower[:5], -limit, atol=1e-9)
+    np.testing.assert_allclose(upper[:5], limit, atol=1e-9)
+    limit = float(upper[0])
+    assert np.all(np.isinf(lower[5:])) and np.all(np.isinf(upper[5:]))
+    iterates = []
+    fwi = FWI(
+        bounded,
+        Stage(FREQUENCIES, 30),
+        optimizer=LBFGS(**TIGHT),
+        callback=lambda e: iterates.append(e.model.values),
+    )
+
+    result = fwi.run()
+
+    for model in iterates:
+        assert np.all(model[:5] <= limit + 1e-12) and np.all(
+            model[:5] >= -limit - 1e-12
+        )
+    vp = result.state.values[:5]
+    assert np.any(np.isclose(np.abs(vp), limit))
+    assert result.stages[0].final_loss.total > _least_squares_value(J, d, solution)
+    np.testing.assert_array_equal(
+        vp, ControlVector(result.state.values, bounded.space).clip().values[:5]
+    )
+
+
+def _least_squares_value(J, d, m):
+    residual = J @ m - d
+    return 0.5 * float(np.vdot(residual, residual).real)
+
+
+def test_fwi_step_limit_caps_the_block_rms_update(tmp_path, fake):
+    free = _problem(tmp_path, fake, subdir="free")
+    free_steps = []
+    FWI(
+        free,
+        Stage(FREQUENCIES, 1),
+        callback=lambda e: free_steps.append(e.diagnostics.step),
+    ).run()
+    free_rms = np.linalg.norm(free_steps[-1][:5]) / np.sqrt(5)
+    cap = 0.25 * free_rms
+
+    capped = _problem(tmp_path, fake, subdir="capped")
+    steps = []
+    result = FWI(
+        capped,
+        Stage(FREQUENCIES, 3),
+        step_limit=cap,
+        callback=lambda e: steps.append(e.diagnostics.step),
+    ).run()
+
+    assert result.stages[0].iterations == 3
+    for step in steps[1:]:
+        assert np.linalg.norm(step[:5]) / np.sqrt(5) <= cap + 1e-12
+        assert np.linalg.norm(step[5:]) / np.sqrt(3) <= cap + 1e-12
+    assert np.linalg.norm(steps[1]) < np.linalg.norm(free_steps[-1])
+
+
+def test_fwi_checkpoints_every_iteration_and_resumes_after_an_interruption(
+    tmp_path, fake
+):
+    class Interrupt(RuntimeError):
+        pass
+
+    def interrupt(event):
+        if event.stage_index == 0 and event.stage_iteration == 2:
+            raise Interrupt("simulated crash")
+
+    problem = _problem(tmp_path, fake, subdir="resume")
+    checkpoint = tmp_path / "run" / "fwi.ckpt.h5"
+    options = dict(
+        optimizer=LBFGS(**TIGHT),
+        checkpoint=checkpoint,
+        history=tmp_path / "run" / "history.json",
+    )
+    fwi = FWI(problem, _stages(), callback=interrupt, **options)
+    with pytest.raises(Interrupt):
+        fwi.run()
+
+    assert checkpoint.is_file() and fwi.state_path.is_file()
+    saved = OptimizationCheckpoint.load(checkpoint)
+    assert saved.metadata["stage_index"] == 0 and saved.metadata["stage_iteration"] == 2
+    assert saved.metadata["stage_completed"] is False
+    assert saved.metadata["active"] == "model.vp"
+    assert saved.metadata["control_ids"] == "model.vp,model.rho"
+    assert saved.model.size == 5
+    history = OptimizationHistory.load(tmp_path / "run" / "history.json")
+    assert history.status == "stopped" and "Interrupt" in history.message
+    initial_objective = history.iterations[0].loss.total
+    assert saved.metadata["initial_objective"] == initial_objective
+    assert initial_objective != saved.loss.total
+    interrupted_records = history.iteration_count
+    linearizations_before = _linearize_count(fake)
+
+    resumed_references = []
+
+    def record_reference(event):
+        if event.stage_index == 0:
+            resumed_references.append(
+                OptimizationCheckpoint.load(checkpoint).metadata["initial_objective"]
+            )
+
+    resumed = FWI(problem, _stages(), callback=record_reference, **options).run(
+        resume=True
+    )
+    assert resumed_references and all(
+        value == initial_objective for value in resumed_references
+    )
+
+    new_linearizations = _linearize_count(fake) - linearizations_before
+    assert resumed.history.status == "converged"
+    assert resumed.history.iteration_count > interrupted_records
+    assert resumed.stages[0].resumed and not resumed.stages[0].skipped
+    assert resumed.stages[0].stage_iteration == 6
+    assert resumed.stages[0].iterations == 4
+    assert not resumed.stages[1].resumed
+    J, d = _surrogate(fake, problem)
+    np.testing.assert_allclose(resumed.state.values, _least_squares(J, d), atol=1e-5)
+    final = OptimizationCheckpoint.load(checkpoint)
+    assert final.metadata["stage_index"] == 1 and final.metadata["stage_completed"]
+    assert resumed.checkpoint == checkpoint
+
+    # a fresh run of the same problem needs more linearizations than the resume
+    reference = FakeImagingSite(seed=11)
+    fresh = _problem(tmp_path, reference, subdir="fresh")
+    FWI(fresh, _stages(), optimizer=LBFGS(**TIGHT)).run()
+    assert new_linearizations < _linearize_count(reference)
+
+    # a completed run resumes to a no-op result
+    again = FWI(problem, _stages(), **options).run(resume=True)
+    assert all(s.skipped for s in again.stages)
+    assert again.stages[1].final_loss.total == pytest.approx(
+        resumed.stages[1].final_loss.total
+    )
+    np.testing.assert_allclose(again.state.values, resumed.state.values)
+
+
+def test_fwi_resume_rejects_a_mismatched_checkpoint(tmp_path, fake):
+    def interrupt(event):
+        if event.stage_iteration == 1:
+            raise KeyboardInterrupt
+
+    problem = _problem(tmp_path, fake, subdir="mismatch")
+    checkpoint = tmp_path / "fwi.ckpt.h5"
+    with pytest.raises(KeyboardInterrupt):
+        FWI(problem, _stages(), checkpoint=checkpoint, callback=interrupt).run()
+    assert checkpoint.is_file()
+
+    changed_active = [Stage([4.0], 6, active=["vp", "rho"]), _stages()[1]]
+    with pytest.raises(ValueError, match="activates"):
+        FWI(problem, changed_active, checkpoint=checkpoint).run()
+    changed_frequencies = [Stage([6.0], 6, active=["vp"]), _stages()[1]]
+    with pytest.raises(ValueError, match="frequencies"):
+        FWI(problem, changed_frequencies, checkpoint=checkpoint).run()
+
+    other = _problem(tmp_path, fake, subdir="other", name="other")
+    with pytest.raises(ValueError, match="belongs to problem"):
+        FWI(other, _stages(), checkpoint=checkpoint).run()
+    different_layout = _problem(
+        tmp_path,
+        fake,
+        subdir="layout",
+        controls=ControlSpace(
+            vp=DepthProfile("vp", "sediment", count=4),
+            rho=DepthProfile("rho", "sediment", count=3),
+        ),
+    )
+    with pytest.raises(ValueError, match="control sizes"):
+        FWI(different_layout, _stages(), checkpoint=checkpoint).run()
+    with pytest.raises(ValueError, match="identity"):
+        FWI(
+            _problem(tmp_path, fake, subdir="mismatch", misfit=Misfit.huber()),
+            _stages(),
+            checkpoint=checkpoint,
+        ).run()
+
+    # resume=False ignores the checkpoint and starts over
+    fresh = FWI(problem, _stages(), checkpoint=checkpoint).run(resume=False)
+    assert not fresh.stages[0].resumed and fresh.stages[0].stage_iteration <= 6
+
+
+def test_fwi_transition_refreshes_state_and_support_masks(tmp_path):
+    fake = FakeImagingSite(seed=5, support_masks={"model.vp": [1, 0, 1, 1, 0]})
+    problem = _problem(tmp_path, fake, min_support=0.05)
+    preconditioner = _TrackedDiagonal(probes="unit")
+    preconditioner.bound.clear()
+    fwi = FWI(
+        problem,
+        [
+            Stage([4.0], 3, active=["vp"]),
+            Stage(FREQUENCIES, 3, active=["vp", "rho"]),
+        ],
+        optimizer=LBFGS(preconditioner_refresh=2),
+        preconditioner=preconditioner,
+    )
+
+    result = fwi.run()
+
+    assert result.stages[0].space.size == 3 and result.stages[1].space.size == 6
+    assert result.stages[0].metrics["frozen_dofs"] == 2
+    np.testing.assert_array_equal(result.state.values[[1, 4]], 0.0)
+    assert np.all(result.state.values[[0, 2, 3]] != 0.0)
+    assert np.all(result.state.values[5:] != 0.0)
+    # stage two started from stage one's accepted vp
+    stage_one = result.stages[0].vector.values
+    first_full = next(
+        r for r in result.history.iterations if r.metrics["stage_index"] == 1
+    )
+    initial_full = result.stages[1].initial_loss.total
+    assert first_full.loss.total == pytest.approx(initial_full)
+    J, d = _surrogate(fake, problem, frequencies=[4.0], active=["vp"])
+    residual = J @ np.array([stage_one[0], 0.0, stage_one[1], stage_one[2], 0.0]) - d
+    assert result.stages[0].final_loss.data == pytest.approx(
+        0.5 * float(np.vdot(residual, residual).real)
+    )
+    # one bound preconditioner per stage, updated at the start and every 2 iterations
+    assert len(preconditioner.bound) == 2
+    assert len(preconditioner.bound[0].updates) == 2
+    assert preconditioner.bound[0].space.size == 3
+    assert preconditioner.bound[1].space.size == 6
+    # the unit probes reproduced the exact Gauss-Newton diagonal of the
+    # masked stage-one space at the refresh point
+    first = preconditioner.bound[0]
+    refreshed = first.updates[-1]
+    assert refreshed.space.size == 3 and refreshed is not first.updates[0]
+    J_masked = fake.linearizations[refreshed.state_fingerprint].J[:, [0, 2, 3]]
+    np.testing.assert_allclose(
+        first.estimate.data, np.sum(np.abs(J_masked) ** 2, axis=0), rtol=1e-8
+    )
+    assert first.estimate.probe_count == 3 and first.diagonal.shape == (3,)
+
+
+def test_fwi_solve_stage_and_scaling_options(problem, fake):
+    fwi = FWI(problem, _stages(), scaling="curvature")
+    stage = fwi.stages[0]
+
+    result = fwi.solve_stage(stage)
+
+    assert isinstance(result, StageResult) and result.name == "low"
+    assert result.iterations >= 1 and fwi.results == [result]
+    assert fwi.history is not None and fwi.history.iteration_count >= 2
+    np.testing.assert_allclose(problem.state.values[:5], result.vector.values)
+
+    lin = problem.restrict(frequencies=[4.0], active=["vp"]).linearize()
+    curvatures = block_curvatures(lin, seed=1)
+    J = fake.linearizations[lin.state_fingerprint].J
+    diagonal = np.real(np.einsum("ij,ij->j", J.conj(), J))
+    assert curvatures["model.vp"] == pytest.approx(float(np.mean(diagonal)), rel=0.6)
+    scale = curvature_scaling(curvatures, lin.space, max_ratio=10.0)
+    assert scale.shape == (5,) and np.allclose(
+        scale, 1.0 / np.sqrt(curvatures["model.vp"])
+    )
+    mapped = FWI(problem, [stage], scaling={"vp": 4.0}).solve_stage(stage)
+    assert mapped.success
+    with pytest.raises(ValueError, match="scaling"):
+        FWI(problem, [stage], scaling="diag")
+
+
+# ---------------------------------------------------------------------------
+# LSRTM, rtm
+# ---------------------------------------------------------------------------
+
+
+def test_lsrtm_cg_and_lsqr_recover_the_surrogate_image(problem, fake):
+    J, d = _surrogate(fake, problem)
+    solution = _least_squares(J, d)
+
+    cg = LSRTM(problem, iterations=60, method="cg", tolerance=1e-12)
+    image = cg.run()
+    assert isinstance(image, ControlVector) and image.space.equivalent(problem.space)
+    np.testing.assert_allclose(image.values, solution, atol=1e-6)
+    assert cg.info["method"] == "cg" and cg.info["converged"]
+
+    seen = []
+    lsqr = LSRTM(
+        problem, iterations=100, method="lsqr", tolerance=1e-12, callback=seen.append
+    )
+    image = lsqr.run()
+    np.testing.assert_allclose(image.values, solution, atol=1e-6)
+    assert lsqr.info["converged"] and seen and seen[0] is image
+
+    # damping and a quadratic regularization (operator rows) agree between the two solvers
+    damped = _least_squares(J, d, 2.0 + 3.0)
+    ridge = im.Quadratic(np.eye(8), weight=3.0)
+    cg_image = LSRTM(
+        problem,
+        iterations=80,
+        method="cg",
+        damping=2.0,
+        regularization=ridge,
+        tolerance=1e-12,
+    ).run()
+    lsqr_image = LSRTM(
+        problem,
+        iterations=200,
+        method="lsqr",
+        damping=2.0,
+        regularization=ridge,
+        tolerance=1e-12,
+    ).run()
+    np.testing.assert_allclose(cg_image.values, damped, atol=1e-6)
+    np.testing.assert_allclose(lsqr_image.values, damped, atol=1e-6)
+
+    # linearizing away from the origin images the update, not the model
+    v0 = problem.space.random(2)
+    update = LSRTM(problem, iterations=60, method="cg", tolerance=1e-12).run(v0)
+    np.testing.assert_allclose(update.values, solution - v0.values, atol=1e-6)
+    with pytest.raises(ValueError, match="method"):
+        LSRTM(problem, method="gmres")
+
+
+def test_lsrtm_with_tikhonov_matches_the_dense_regularized_solve(problem, fake):
+    J, d = _surrogate(fake, problem)
+    regularization = im.Tikhonov(0.1, order=2)
+    R = np.sqrt(regularization.alpha) * np.eye(problem.space.size)
+    assert R.shape == (8, 8)  # fake native callback is a diagonal quadratic
+    expected = _least_squares(J, d, R=R)
+    assert not np.allclose(expected, _least_squares(J, d), atol=1e-3)
+
+    cg = LSRTM(
+        problem,
+        iterations=250,
+        method="cg",
+        regularization=regularization,
+        tolerance=1e-7,
+    )
+    image = cg.run()
+    np.testing.assert_allclose(image.values, expected, atol=1e-6)
+    assert cg.info["converged"]
+    assert cg.info["method"] == "cg"
+    lsqr = LSRTM(
+        problem,
+        iterations=250,
+        method="lsqr",
+        regularization=regularization,
+        tolerance=1e-7,
+    )
+    np.testing.assert_allclose(lsqr.run().values, expected, atol=1e-6)
+
+    # TV takes the nonlinear composite path for either requested linear solver.
+    tv = im.TV(1.0e-2, epsilon=1.0e-2)
+    tv_image = LSRTM(
+        problem, iterations=250, method="cg", regularization=tv, tolerance=1e-7
+    )
+    x = tv_image.run().values
+    g = np.real(J.conj().T @ (J @ x - d))
+    active = np.abs(x) > 1e-6
+    np.testing.assert_allclose(g[active] + 0.1 * np.sign(x[active]), 0, atol=2e-6)
+    assert np.all(np.abs(g[~active]) <= 0.1 + 2e-6)
+    assert tv_image.info["method"] == "proximal_gradient"
+
+
+def test_lsrtm_receiver_pcg_includes_regularization_and_reuses_linearization(
+    problem, fake
+):
+    J, d = _surrogate(fake, problem)
+    lin = problem.linearize(
+        background=True, receiver_diagonal={"probes": 16, "seed": 7}
+    )
+    before = len(fake.submissions)
+    workflow = LSRTM(
+        problem,
+        method="cg",
+        iterations=30,
+        tolerance=1e-10,
+        preconditioner=im.Diagonal(probes="receiver", probe_count=16, seed=7),
+        regularization=im.Tikhonov(0.3),
+        damping=0.2,
+    )
+    image = workflow.run()
+    np.testing.assert_allclose(image.values, _least_squares(J, d, 0.5), atol=1e-6)
+    assert workflow.linearization is lin
+    assert workflow.info["converged"] and workflow.info["preconditioned"]
+    estimate = workflow.bound_preconditioner.estimate
+    np.testing.assert_allclose(estimate.data, np.sum(np.abs(J) ** 2, axis=0))
+    np.testing.assert_allclose(estimate.regularization, 0.5)
+    actions = [job for job in fake.jobs[before:] if isinstance(job, im.FWIOperatorJob)]
+    assert all(job.action != "linearize" for job in actions)
+    assert all(job.background is not None for job in actions)
+
+    replay = LSRTM(
+        problem, method="cg", iterations=30, tolerance=1e-10, reuse_background=False
+    )
+    before = len(fake.submissions)
+    replay.run()
+    actions = [job for job in fake.jobs[before:] if isinstance(job, im.FWIOperatorJob)]
+    assert actions and all(job.background is None for job in actions)
+    assert lin._reuse_background  # Replay does not mutate the shared cached view.
+
+
+def test_lsrtm_preconditioner_validation(problem):
+    with pytest.raises(ValueError, match="method='cg'"):
+        LSRTM(problem, preconditioner=im.Diagonal())
+    with pytest.raises(ValueError, match="positive"):
+        LSRTM(problem, tolerance=0)
+    with pytest.raises(ValueError, match="quadratic regularization"):
+        LSRTM(
+            problem,
+            method="cg",
+            preconditioner=im.Identity(),
+            regularization=im.TV(0.1),
+        ).run()
+
+
+def test_lsrtm_pcg_accelerates_without_changing_solution(problem):
+    from types import SimpleNamespace
+
+    from scipy.sparse.linalg import aslinearoperator
+
+    space = problem.linearize().space
+    diagonal = np.geomspace(1, 1e8, space.size)
+    lin = SimpleNamespace(
+        space=space,
+        normal=aslinearoperator(np.diag(diagonal)),
+        gradient=ControlVector(-diagonal, space),
+        receiver_diagonal=ControlVector(diagonal, space),
+    )
+    cg = LSRTM(problem, method="cg", iterations=100, tolerance=1e-12)
+    pcg = LSRTM(
+        problem,
+        method="cg",
+        iterations=100,
+        tolerance=1e-12,
+        preconditioner=im.Diagonal(
+            probes="receiver", relative_damping=0, maximum_inverse_ratio=1e12
+        ),
+    )
+    unconditioned = cg._run_cg(lin, space, None)
+    conditioned = pcg._run_cg(lin, space, None)
+    np.testing.assert_allclose(conditioned.values, np.ones(space.size), atol=1e-10)
+    np.testing.assert_allclose(conditioned.values, unconditioned.values, atol=1e-5)
+    assert pcg.info["iterations"] == 1 < cg.info["iterations"]
+
+
+class _CountingNormal:
+    """Matrix normal operator counting its products (one Sauce job each)."""
+
+    def __init__(self, matrix):
+        self.matrix = np.asarray(matrix, dtype=float)
+        self.products = 0
+
+    def __matmul__(self, x):
+        self.products += 1
+        return self.matrix @ np.asarray(x, dtype=float)
+
+
+def _stub_linearization(space, normal, gradient):
+    return SimpleNamespace(
+        space=space, normal=normal, gradient=ControlVector(gradient, space), value=0.0
+    )
+
+
+def _soft_threshold(v, t):
+    return np.sign(v) * np.maximum(np.abs(v) - t, 0.0)
+
+
+@pytest.mark.parametrize("method", ["lsqr", "cg"])
+def test_lsrtm_native_tikhonov_runs_cg_with_one_regularization_job_per_iteration(
+    problem, fake, method, monkeypatch
+):
+    from frequensolve.imaging import workflows
+
+    # Exercise the separate-job path, which remains the fallback when a bound
+    # regularization cannot be folded into the normal job.
+    monkeypatch.setattr(workflows, "_FUSE_NATIVE_REGULARIZATION", False)
+    J, d = _surrogate(fake, problem)
+    before = len(fake.jobs)
+    workflow = LSRTM(
+        problem, iterations=50, method=method, regularization=im.Tikhonov(0.1, order=2)
+    )
+    image = workflow.run()
+    np.testing.assert_allclose(
+        image.values, _least_squares(J, d, R=np.sqrt(0.1) * np.eye(8)), atol=1e-6
+    )
+    info = workflow.info
+    assert info["method"] == "cg" and info["requested_method"] == method
+    assert info["converged"] and info["status"] == 0
+    assert not info["fused_regularization"]
+    # Unfused: one normal and one native Hessian job per CG iteration, no final
+    # residual product, no gradient job at the zero image and no prox jobs (the
+    # former proximal route for lsqr took 105 normal + 105 gradient + 105 prox jobs).
+    iterations = info["iterations"]
+    assert info["jobs"] == {
+        "linearize": 1,
+        "regularization_prepare": 1,
+        "normal": iterations,
+        "regularization_gradient": iterations,
+    }
+    assert len(fake.jobs) - before == sum(info["jobs"].values())
+
+
+def test_lsrtm_native_tikhonov_rides_in_the_normal_job_when_supported(
+    problem, fake, monkeypatch
+):
+    from frequensolve.imaging import workflows
+
+    monkeypatch.setattr(workflows, "_FUSE_NATIVE_REGULARIZATION", True)
+    J, d = _surrogate(fake, problem)
+    lin = problem.linearize(background=True)
+    original = lin.apply_normal
+    seen = []
+
+    def apply_normal(dv, *, regularization=None):
+        seen.append(regularization)
+        out = original(dv)
+        # The fake's native Tikhonov Hessian is 0.1 * I (see imaging_fakes).
+        return ControlVector(out.values + 0.1 * dv.values, out.space)
+
+    lin.apply_normal = apply_normal
+    workflow = LSRTM(problem, iterations=50, regularization=im.Tikhonov(0.1, order=2))
+    image = workflow.run()
+    np.testing.assert_allclose(
+        image.values, _least_squares(J, d, R=np.sqrt(0.1) * np.eye(8)), atol=1e-6
+    )
+    assert workflow.linearization is lin and workflow.info["fused_regularization"]
+    assert workflow.info["jobs"] == {
+        "regularization_prepare": 1,
+        "normal": workflow.info["iterations"],
+    }
+    assert seen and all(term is not None and term.is_smooth for term in seen)
+
+
+def test_lsrtm_cg_converges_on_its_last_iteration_without_extra_products(problem):
+    space = problem.linearize().space
+    diagonal = np.repeat([1.0, 4.0, 9.0], [3, 3, space.size - 6])
+    normal = _CountingNormal(np.diag(diagonal))
+    workflow = LSRTM(problem, method="cg", iterations=3, tolerance=1e-10)
+    image = workflow._run_cg(_stub_linearization(space, normal, -diagonal), space, None)
+    # Three distinct eigenvalues: exact after the third and last allowed product.
+    np.testing.assert_allclose(image.values, 1.0, atol=1e-10)
+    assert workflow.info["converged"] and workflow.info["status"] == 0
+    assert workflow.info["iterations"] == normal.products == 3
+    assert workflow.info["residual_norm"] <= 1e-10 * workflow.info["rhs_norm"]
+
+
+def test_lsrtm_cg_stops_on_nonpositive_curvature_and_rejects_non_spd_metrics(problem):
+    space = problem.linearize().space
+    n = space.size
+    diagonal = np.linspace(1.0, 2.0, n)
+    diagonal[0] = -1.0
+    gradient = np.zeros(n)
+    gradient[0] = 1.0
+    normal = _CountingNormal(np.diag(diagonal))
+    workflow = LSRTM(problem, method="cg", iterations=10)
+    image = workflow._run_cg(_stub_linearization(space, normal, gradient), space, None)
+    assert workflow.info["status"] == -1 and not workflow.info["converged"]
+    assert "nonpositive curvature" in workflow.info["message"]
+    assert normal.products == 1 and not np.any(image.values)
+
+    for operator in (-np.eye(n), np.zeros((n, n))):
+        metric = LSRTM(problem, method="cg", preconditioner=im.FromOperator(operator))
+        lin = _stub_linearization(space, _CountingNormal(np.eye(n)), np.ones(n))
+        with pytest.raises(ValueError, match="not SPD"):
+            metric._run_cg(lin, space, None)
+
+
+def test_lsrtm_total_variation_is_independent_of_the_problem_scale(problem, fake):
+    J, d = _surrogate(fake, problem)
+    space = problem.linearize().space
+    H = np.real(J.conj().T @ J)
+    g0 = -np.real(J.conj().T @ d)
+    alpha = 0.1
+    exact = np.zeros(space.size)
+    step = 1.0 / np.linalg.eigvalsh(H).max()
+    for _ in range(20000):
+        exact = _soft_threshold(exact - step * (g0 + H @ exact), step * alpha)
+
+    class Native:
+        def __init__(self, scale):
+            self.scale = scale
+            self.proxes = 0
+
+        def value(self, v):
+            return self.scale * alpha * float(np.abs(v).sum())
+
+        def prox(self, v, tau, metric, box):
+            self.proxes += 1
+            return np.clip(_soft_threshold(v, tau * self.scale * alpha), *box)
+
+    runs = []
+    for scale in (1.0, 1e-3, 1e-5):
+        normal, native = _CountingNormal(scale * H), Native(scale)
+        workflow = LSRTM(problem, iterations=500)  # default relative tolerance 1e-4
+        image = workflow._run_proximal(
+            _stub_linearization(space, normal, scale * g0), space, None, native
+        )
+        error = np.linalg.norm(image.values - exact) / np.linalg.norm(exact)
+        runs.append((workflow.info, normal.products, native.proxes, error))
+    infos, products, proxes, errors = zip(*runs)
+    assert all(info["converged"] for info in infos)
+    assert len({info["iterations"] for info in infos}) == 1
+    assert len(set(products)) == 1 and len(set(proxes)) == 1
+    np.testing.assert_allclose(errors, errors[0], rtol=1e-3)
+    assert errors[0] < 2e-3
+    np.testing.assert_allclose(
+        [info["initial_step"] * scale for info, scale in zip(infos, (1, 1e-3, 1e-5))],
+        infos[0]["initial_step"],
+        rtol=1e-6,
+    )
+    # Two power iterations, then one normal product per trial (none at x = 0).
+    assert products[0] == 2 + infos[0]["objective_evaluations"] - 1
+    assert products[0] <= 2 + 1.6 * infos[0]["iterations"]
+
+
+def test_lsrtm_deletes_the_background_checkpoint_it_created(problem, fake):
+    workflow = LSRTM(problem, method="cg", iterations=10)
+    workflow.run()
+    job = workflow.linearization.job
+    assert job.background is None and workflow.info["background"]["enabled"]
+    names = {
+        name
+        for task in (1, 2)
+        for name in (
+            f"background_{task}.json",
+            f"background_{task}/generations/fake/rank_00000.h5",
+        )
+    }
+    assert fake.removed == [(job.name, tuple(sorted(names)))]
+    assert not any((job._result_path / name).exists() for name in names)
+    # The emptied <stem>/generations/<run>/ directories go with them.
+    assert not any((job._result_path / f"background_{t}").exists() for t in (1, 2))
+    assert workflow.info["background"]["released_bytes"] >= 2 * 4096
+    # The cached linearization stays usable, now without the checkpoint.
+    before = len(fake.jobs)
+    workflow.linearization.normal @ problem.space.random(3)
+    assert [job.background for job in fake.jobs[before:]] == [None]
+
+    # A checkpoint the run reused but did not create is left alone.
+    lin = problem.linearize(problem.space.random(5), background=True)
+    LSRTM(problem, method="cg", iterations=5).run(problem.space.random(5))
+    assert lin.job.background is not None and len(fake.removed) == 1
+
+
+@pytest.mark.parametrize("setting, layout", [(None, "rank"), ("shared", "shared")])
+def test_background_capture_takes_the_site_layout(tmp_path, setting, layout):
+    fake = FakeImagingSite(seed=11)
+    if setting is not None:
+        fake.background_layout = setting
+    problem = _problem(tmp_path, fake)
+
+    job = problem.linearize(background=True).job
+
+    # The job JSON the site ran carries the layout; the fake writes it.
+    saved = json.loads(job._file.read_text())
+    assert saved["fwi_operator"]["background_layout"] == layout
+    assert _assert_valid(job.to_fs())["fwi_operator"]["background_layout"] == layout
+    name = "fields.h5" if layout == "shared" else "rank_00000.h5"
+    assert background_checkpoint_files(job)[0] == sorted(
+        path
+        for task in (1, 2)
+        for path in (
+            f"background_{task}.json",
+            f"background_{task}/generations/fake/{name}",
+        )
+    )
+    # Linearizations without a capture name no layout.
+    plain = problem.linearize(problem.space.random(1)).job
+    assert "background_layout" not in plain.to_fs()["fwi_operator"]
+
+
+def test_lsrtm_keeps_background_on_request_until_cache_eviction(tmp_path, fake):
+    problem = _problem(tmp_path, fake, cache_capacity=1)
+    kept = LSRTM(problem, method="cg", iterations=5, keep_background=True)
+    kept.run()
+    job = kept.linearization.job
+    manifest = job.background_file(1)
+    assert manifest.is_file() and kept.info["background"]["released_bytes"] is None
+    problem.linearize(problem.space.random(2))  # evicts the kept linearization
+    assert job.background is None and not manifest.exists()
+    assert [name for name, _ in fake.removed] == [job.name]
+
+
+def test_lsrtm_background_requires_a_supporting_site(problem, fake, monkeypatch):
+    monkeypatch.setattr(fake, "supports_background_reuse", False)
+    workflow = LSRTM(problem, method="cg", iterations=5)
+    workflow.run()
+    background = workflow.info["background"]
+    assert background["requested"] and not background["enabled"]
+    assert "FakeImagingSite does not support background reuse" == background["reason"]
+    assert workflow.linearization.job.background is None
+    assert not fake.removed and background["released_bytes"] is None
+
+
+def test_lsrtm_reports_background_reuse_counters_and_misses(problem, monkeypatch):
+    from frequensolve.imaging import workflows
+
+    def counters(job):
+        if job.action == "linearize":
+            return None
+        return {"background_solves_reused": 2, "background_reuse_misses": 1}
+
+    monkeypatch.setattr(workflows, "_task_counters", counters)
+    workflow = LSRTM(problem, method="cg", iterations=3)
+    with pytest.warns(RuntimeWarning, match="missed 3 source batch"):
+        workflow.run()
+    background = workflow.info["background"]
+    assert workflow.info["jobs"]["normal"] == 3
+    assert background["reused_solves"] == 6 and background["misses"] == 3
+
+
+def test_task_counters_sum_the_committed_sauce_misc_counters(tmp_path):
+    from frequensolve.imaging.workflows import _task_counters
+    from frequensolve.simulation.artifact_contract import task_result_path
+
+    for task, (reused, missed) in enumerate([(3, 0), (1, 2)], start=1):
+        path = task_result_path(tmp_path, task)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-task-result-2",
+                    "partition": {
+                        "task": task,
+                        "task_count": 3,
+                        "frequency": {"real": 4.0 + task, "imag": 0.0},
+                    },
+                    "fingerprints": {
+                        key: "sha256:" + digit * 64
+                        for key, digit in (
+                            ("job", "1"),
+                            ("simulation", "2"),
+                            ("outputs", "3"),
+                        )
+                    },
+                    "status": {"state": "success", "code": 0},
+                    "artifacts": [],
+                    "misc": {
+                        "background_solves_reused": reused,
+                        "background_reuse_misses": missed,
+                        "other_counter": 7,
+                    },
+                }
+            )
+        )
+    job = SimpleNamespace(_result_path=tmp_path, n_tasks=3)  # task 3 not committed
+    assert _task_counters(job) == {
+        "background_solves_reused": 4,
+        "background_reuse_misses": 2,
+    }
+    missing = SimpleNamespace(_result_path=tmp_path / "x", n_tasks=1)
+    assert _task_counters(missing) is None
+
+
+def test_fwi_receiver_diagonal_preconditioner_requests_probes(problem, fake):
+    J, _ = _surrogate(fake, problem)
+    before = len(fake.jobs)
+    tracked = _TrackedDiagonal(probes="receiver", probe_count=4, seed=3)
+    tracked.bound.clear()
+    result = FWI(
+        problem,
+        Stage(FREQUENCIES, 4),
+        optimizer=LBFGS(preconditioner_refresh=2, **TIGHT),
+        preconditioner=tracked,
+    ).run()
+    assert result.history.iterations
+    linearizations = [
+        job for job in fake.jobs[before:] if getattr(job, "action", None) == "linearize"
+    ]
+    probed = [job for job in linearizations if job.receiver_diagonal is not None]
+    (bound,) = tracked.bound
+    # The stage start reuses its probed first linearization; each refresh adds one.
+    assert len(probed) == len(bound.updates) >= 2
+    assert all(lin.job.receiver_diagonal is not None for lin in bound.updates)
+    np.testing.assert_allclose(
+        bound.updates[0].receiver_diagonal.values,
+        np.sum(np.abs(J) ** 2, axis=0),
+        rtol=1e-10,
+    )
+
+
+def test_fwi_rejects_receiver_probes_for_patch_stages(problem):
+    import frequensolve as fs
+
+    patches = fs.PatchSet.around_sources(
+        shots_per_patch=1, max_offset=200 * fs.ureg.m, padding=300 * fs.ureg.m
+    )
+    with pytest.raises(ValueError, match="receiver probes"):
+        FWI(
+            problem,
+            Stage(FREQUENCIES, 2, patches=patches),
+            preconditioner=im.Diagonal(probes="receiver"),
+        )
+
+
+def test_rtm_returns_the_misfit_gradient(problem):
+    v = problem.space.random(4)
+    image = rtm(problem, v)
+    assert image is problem.gradient(v)
+    assert image.space.equivalent(problem.space)
+
+
+# ---------------------------------------------------------------------------
+# smoothing through the fake postprocess
+# ---------------------------------------------------------------------------
+
+
+def test_smooth_runs_the_smooth_job_as_a_fake_postprocess(problem, fake):
+    v = problem.space.random(3)
+    before = len(fake.submissions)
+
+    smoothed = im.smooth(
+        v, im.Smoothing(kind="tikhonov", wavelength_fraction=0.5), problem
+    )
+
+    assert isinstance(smoothed, ControlVector) and smoothed.space is problem.space
+    np.testing.assert_allclose(smoothed.values, v.values)  # identity smoothing
+    submission = fake.submissions[before:]
+    assert len(submission) == 1 and submission[0]["postprocess_only"]
+    assert submission[0]["job"].startswith("fwi_smooth_")
+    job = fake.jobs[-1]
+    assert isinstance(job, im.SmoothJob) and job.gradient_file(raw=True).is_file()
+    payload = job.to_fs()["control_sensitivities"]
+    assert payload["active"] == ["vp", "rho"] and payload["Smoothing"]["lambda"] == 0.5
+    # the linearize gradient smooths the same way
+    lin = problem.linearize()
+    again = im.smooth(lin.gradient, im.Smoothing(kind="tv"), problem)
+    np.testing.assert_allclose(again.values, lin.gradient.values)
+
+
+# ---------------------------------------------------------------------------
+# sensitivity kernels
+# ---------------------------------------------------------------------------
+
+
+def test_sensitivity_kernel_runs_on_the_fake_and_returns_an_image_set(problem, fake):
+    grid = CartesianGrid(n=[4, 3], x0=[0.0, 0.0], x1=[4000.0, 1500.0])
+
+    images = sensitivity_kernel(
+        problem, grid, properties=["vp", "rho"], weights=[1.0, 0.5], keep="adjoint"
+    )
+
+    assert isinstance(images, ImageSet)
+    assert images.shape == (3, 4) == grid.shape and images.parts == 2
+    np.testing.assert_array_equal(images.f_list, FREQUENCIES)
+    raw = images.raw
+    assert list(raw.data_vars) == ["vp", "rho"]
+    assert raw["vp"].dims == ("z", "x") and raw["vp"].shape == (3, 4)
+    np.testing.assert_allclose(raw["vp"].coords["x"], np.linspace(0.0, 4000.0, 4))
+    np.testing.assert_allclose(raw["rho"].coords["z"], np.linspace(0.0, 1500.0, 3))
+    parts = [images.read_images("raw", part=task) for task in (1, 2)]
+    for index, name in enumerate(("vp", "rho")):
+        for part, frequency in zip(parts, FREQUENCIES):
+            np.testing.assert_allclose(
+                part[name].values,
+                FakeImagingSite.image_values(grid, index, frequency).reshape(3, 4),
+            )
+        # the aggregate is the weighted stack of the parts
+        np.testing.assert_allclose(
+            raw[name].values, parts[0][name].values + 0.5 * parts[1][name].values
+        )
+    assert raw["rho"].values[0, 0] == pytest.approx(2.0 * (5.0 + 0.5 * 7.0))
+    submission = fake.submissions[-1]
+    assert submission["workflow"] == "rtm" and not submission["postprocess_only"]
+    job = fake.jobs[-1]
+    assert isinstance(job, im.ImageKernelJob)
+    assert job.image_output_exists() and job.postprocess_part_outputs_exist()
+    assert job.image_file() == images.image_file() == job.save_path / "image.h5"
+    assert job.image_file(2) == job.save_path / "image_2.h5"
+
+    # a single-frequency kernel at a moved point images the installed state
+    single = sensitivity_kernel(
+        problem, grid, frequencies=[6.0], v=problem.space.ones(), condition="up_down"
+    )
+    assert single.parts == 1 and list(single.raw.data_vars) == ["vp"]
+    np.testing.assert_array_equal(single.f_list, [6.0])
+    np.testing.assert_allclose(
+        single.raw["vp"].values,
+        FakeImagingSite.image_values(grid, 0, 6.0).reshape(3, 4),
+    )
+
+
+# ---------------------------------------------------------------------------
+# sensitivity kernels (payload level)
+# ---------------------------------------------------------------------------
+
+
+def test_sensitivity_kernel_job_builds_a_schema_valid_zero_data_kernel(problem, fake):
+    grid = CartesianGrid(n=[4, 3], x0=[0.0, 0.0], x1=[4000.0, 1500.0])
+
+    job = sensitivity_kernel_job(
+        problem, grid, properties=["vp", "rho"], frequencies=[6.0], keep="adjoint"
+    )
+
+    payload = _assert_valid(job.to_fs())
+    assert job.f_list == [6.0] and job.workflow == "rtm"
+    assert [image["IC"] for image in payload["Imaging"]["images"]] == [
+        "fwi:acoustic",
+        "fwi:acoustic",
+    ]
+    assert [image["property"] for image in payload["Imaging"]["images"]] == [
+        "vp",
+        "rho",
+    ]
+    assert payload["Imaging"]["misfit"]["receiver_groups"] == [
+        {"name": "surface", "projection": {"kind": "identity"}, "observed": None}
+    ]
+    assert payload["Imaging"]["data_path"] is None
+    for term in payload["Imaging"]["misfit"]["objective_terms"]:
+        assert term["normalization"]["scale"] == {"kind": "explicit", "value": 1.0}
+    assert job.field_retention == "adjoint" and job.observed is None
+    assert job.simulation is problem.simulation
+    plan = problem.backend.dry_run(job)
+    assert plan["workflow"] == "rtm" and plan["n_tasks"] == 1 and fake.submissions == []
+
+    with_data = sensitivity_kernel_job(
+        problem, grid, condition="up_down", observed=True, v=problem.space.ones()
+    )
+    payload = _assert_valid(with_data.to_fs())
+    assert payload["Imaging"]["images"][0]["IC"] == "up_down"
+    assert with_data.observed == {"surface": problem.observed_groups[0].observed}
+    assert with_data.simulation is not problem.simulation
+
+
+def _source_problem(tmp_path, fake):
+    """Problem over ``vp`` plus per-source signatures (the full bound space)."""
+
+    return _problem(
+        tmp_path,
+        fake,
+        name="src",
+        subdir="sources",
+        controls=ControlSpace(
+            vp=DepthProfile("vp", "sediment", count=5),
+            src=SourceParameters(signature=True),
+        ),
+    )
+
+
+def test_kernel_runs_on_a_problem_with_source_blocks(tmp_path, fake):
+    problem = _source_problem(tmp_path, fake)
+    assert problem.space.blocks == (
+        "model.vp",
+        "source.1.signature",
+        "source.2.signature",
+    )
+    grid = CartesianGrid(n=[4, 3], x0=[0.0, 0.0], x1=[4000.0, 1500.0])
+    update = problem.vector().values.copy()
+    update[:5] = np.linspace(0.1, 0.5, 5)
+
+    # kernels at the authored point and after a vp update (simulation_at)
+    images = sensitivity_kernel(problem, grid)
+    assert list(images.raw.data_vars) == ["vp"]
+    job = sensitivity_kernel_job(problem, grid, v=update)
+    sediment = next(s for s in job.simulation.model.subdomains if s.name == "sediment")
+    np.testing.assert_allclose(
+        sediment.properties["vp"].control.coefficients, update[:5]
+    )
+    moved = sensitivity_kernel(problem, grid, v=update)
+    assert list(moved.raw.data_vars) == ["vp"]
+
+    # a changed signature is authored into the kernel's simulation (q scales
+    # source 1's column of the made-explicit identity encoding)
+    signature = problem.vector().values.copy()
+    signature[5] = 0.5
+    job = sensitivity_kernel_job(problem, grid, v=signature)
+    np.testing.assert_allclose(
+        job.simulation.acquisition.source_encoding.weights, np.diag([0.5, 1.0])
+    )
+
+
+def test_fwi_result_simulation_installs_a_state_with_source_blocks(tmp_path, fake):
+    problem = _source_problem(tmp_path, fake)
+    update = problem.vector().values.copy()
+    update[:5] = 0.25
+    result = FWIResult(
+        state=problem.state_from(update),
+        history=OptimizationHistory(),
+        problem=problem,
+    )
+
+    sediment = next(
+        s for s in result.simulation.model.subdomains if s.name == "sediment"
+    )
+    np.testing.assert_allclose(sediment.properties["vp"].control.coefficients, 0.25)
+
+
+# ---------------------------------------------------------------------------
+# resolution changes between stages
+# ---------------------------------------------------------------------------
+
+
+FINE_VP = {"vp": DepthProfile("vp", "sediment", count=9)}
+
+
+def test_with_controls_transfers_the_state_block_wise(tmp_path, fake):
+    problem = _problem(tmp_path, fake, subdir="refine")
+    coarse_nodes = problem.full_space.block("vp").control.coordinates
+    coarse = problem.full_space.pack(
+        {"vp": np.array([0.3, -0.2, 0.5, 0.1, -0.4]), "rho": [0.2, 0.0, -0.1]}
+    )
+    problem.state = problem.state.with_update(problem.full_space, coarse)
+
+    fine = problem.with_controls(FINE_VP)
+
+    assert fine is not problem and fine.name == problem.name
+    assert fine.full_space.blocks == ("model.vp", "model.rho")
+    assert fine.full_space.sizes == {"model.vp": 9, "model.rho": 3}
+    assert fine.backend is problem.backend and fine.cache is problem.cache
+    assert fine.workdir == problem.workdir and fine.site is problem.site
+    assert fine.frequencies == problem.frequencies
+    assert fine.observed_groups == problem.observed_groups
+    assert fine.simulation is not problem.simulation
+    fine_nodes = fine.full_space.block("vp").control.coordinates
+    np.testing.assert_allclose(fine_nodes[::2], coarse_nodes)
+    # the coarse hat profile is exactly representable on the bisected nodes:
+    # shared nodes keep their values, midpoints interpolate linearly
+    vp = fine.state["vp"]
+    np.testing.assert_allclose(vp[::2], coarse["vp"], atol=1e-10)
+    np.testing.assert_allclose(
+        vp[1::2], 0.5 * (coarse["vp"][:-1] + coarse["vp"][1:]), atol=1e-10
+    )
+    np.testing.assert_array_equal(fine.state["rho"], coarse["rho"])  # copied
+    # the original problem is untouched
+    np.testing.assert_array_equal(problem.state.values, coarse.values)
+
+    # an affine field transfers exactly to any node set
+    affine = problem.state.with_update(
+        problem.full_space,
+        problem.full_space.pack({"vp": 0.4 + 2.0e-4 * coarse_nodes, "rho": [0, 0, 0]}),
+    )
+    odd = problem.with_controls(
+        {"vp": DepthProfile("vp", "sediment", count=7)}, state=affine
+    )
+    odd_nodes = odd.full_space.block("vp").control.coordinates
+    np.testing.assert_allclose(odd.state["vp"], 0.4 + 2.0e-4 * odd_nodes, atol=1e-10)
+    # a state already on the new layout is adopted as is
+    adopted = problem.with_controls(FINE_VP, state=fine.state)
+    np.testing.assert_array_equal(adopted.state.values, fine.state.values)
+    # a complete ControlSpace works too; the fine problem linearizes on its own
+    spaced = problem.with_controls(
+        ControlSpace(
+            vp=DepthProfile("vp", "sediment", count=9),
+            rho=DepthProfile("rho", "sediment", count=3),
+        )
+    )
+    np.testing.assert_allclose(spaced.state.values, fine.state.values)
+    lin = fine.linearize()
+    assert lin.space.size == 12 and lin.gradient.size == 12
+    assert lin.state_fingerprint != problem.linearize().state_fingerprint
+
+    with pytest.raises(KeyError, match="unknown block keys"):
+        problem.with_controls({"vs": DepthProfile("vs", "sediment", count=3)})
+    with pytest.raises(ValueError, match="cannot change the layout of interface"):
+        problem.with_controls({"rho": im.InterfaceParameters("salt_top")})
+    with pytest.raises(ValueError, match="neither the current nor the new layout"):
+        problem.with_controls(
+            FINE_VP,
+            state=ControlState(
+                ControlSpace(vp=DepthProfile("vp", "sediment", count=4)).bind(
+                    problem.simulation
+                ),
+                np.zeros(4),
+            ),
+        )
+
+
+def _refine_stages(fine=FINE_VP):
+    return [
+        Stage(FREQUENCIES, 6, active=["vp"], name="coarse"),
+        Stage(FREQUENCIES, 40, active=["vp"], name="fine", controls=fine),
+    ]
+
+
+def test_fwi_stage_controls_refine_the_profile_between_stages(tmp_path, fake):
+    problem = _problem(tmp_path, fake, subdir="stages")
+    fwi = FWI(problem, _refine_stages(), optimizer=LBFGS(**TIGHT))
+
+    result = fwi.run()
+
+    coarse, fine = result.stages
+    assert coarse.space.size == 5 and fine.space.size == 9
+    assert result.problem is fwi.final_problem and result.problem is not problem
+    assert result.problem.full_space.sizes == {"model.vp": 9, "model.rho": 3}
+    assert result.state.space.blocks == ("model.vp", "model.rho")
+    assert result.state.size == 12
+    assert result.vector().size == 12
+    # the fine stage starts from the coarse result transferred to 9 nodes
+    # (the base problem keeps the coarse stage's accepted state)
+    np.testing.assert_allclose(problem.state["vp"], coarse.vector.values)
+    check = problem.with_controls(FINE_VP)
+    np.testing.assert_allclose(check.state["vp"][::2], coarse.vector.values, atol=1e-10)
+    start = check.restrict(frequencies=FREQUENCIES, active=["vp"])
+    assert fine.initial_loss.data == pytest.approx(start.value())
+    # and decreases the objective on the fine layout
+    assert fine.final_loss.total < fine.initial_loss.total
+    losses = _stage_losses(result.history, 1)
+    assert len(losses) >= 2 and np.all(np.diff(losses) <= 1e-9)
+    J, d = _surrogate(fake, result.problem, active=["vp"])
+    np.testing.assert_allclose(
+        result.state["vp"], _least_squares(J, d), atol=1e-4
+    )  # the fine stage converged on its own surrogate
+    np.testing.assert_array_equal(result.state["rho"], 0.0)  # never active
+    assert result.simulation is not None  # simulation_at on the fine layout
+
+
+def test_fwi_resumes_inside_a_refined_stage(tmp_path, fake):
+    class Interrupt(RuntimeError):
+        pass
+
+    def interrupt(event):
+        if event.stage_index == 1 and event.stage_iteration == 2:
+            raise Interrupt("simulated crash")
+
+    problem = _problem(tmp_path, fake, subdir="refine_resume")
+    checkpoint = tmp_path / "refine" / "fwi.ckpt.h5"
+    options = dict(optimizer=LBFGS(**TIGHT), checkpoint=checkpoint)
+    with pytest.raises(Interrupt):
+        FWI(problem, _refine_stages(), callback=interrupt, **options).run()
+
+    saved = OptimizationCheckpoint.load(checkpoint)
+    assert saved.metadata["stage_index"] == 1 and saved.metadata["stage_iteration"] == 2
+    assert saved.metadata["control_ids"] == "model.vp,model.rho"
+    assert saved.metadata["control_sizes"] == "9,3"
+    assert saved.model.size == 9
+
+    # a different refinement is rejected
+    with pytest.raises(ValueError, match="control sizes"):
+        FWI(
+            problem,
+            _refine_stages({"vp": DepthProfile("vp", "sediment", count=7)}),
+            **options,
+        ).run()
+
+    resumed = FWI(problem, _refine_stages(), **options).run(resume=True)
+
+    assert resumed.stages[0].skipped and resumed.stages[1].resumed
+    assert resumed.stages[1].stage_iteration >= 3
+    assert resumed.state.size == 12
+    assert resumed.problem.full_space.sizes["model.vp"] == 9
+    J, d = _surrogate(fake, resumed.problem, active=["vp"])
+    np.testing.assert_allclose(resumed.state["vp"], _least_squares(J, d), atol=1e-4)
+    final = OptimizationCheckpoint.load(checkpoint)
+    assert (
+        final.metadata["stage_completed"] and final.metadata["control_sizes"] == "9,3"
+    )
+    # a completed run resumes to a no-op on the fine layout
+    again = FWI(problem, _refine_stages(), **options).run(resume=True)
+    assert all(s.skipped for s in again.stages)
+    np.testing.assert_allclose(again.state.values, resumed.state.values)
+
+
+def test_stage_controls_validation():
+    stage = Stage(FREQUENCIES, 2, controls=FINE_VP)
+    assert isinstance(stage.controls, dict) and stage.controls["vp"].count == 9
+    assert stage.to_continuation_stage().metadata["controls"] == ["vp"]
+    single = Stage(FREQUENCIES, 2, controls=DepthProfile("vp", "sediment", count=4))
+    assert isinstance(single.controls, ControlSpace)
+    with pytest.raises(TypeError, match="block specs"):
+        Stage(FREQUENCIES, 2, controls={"vp": 9})
+    with pytest.raises(ValueError, match="cannot be empty"):
+        Stage(FREQUENCIES, 2, controls={})
+    with pytest.raises(TypeError, match="ControlSpace"):
+        Stage(FREQUENCIES, 2, controls=[1, 2])
+
+
+def test_fwi_resume_keeps_the_mechanism_reference_scale(tmp_path):
+    """A resumed run reads its checkpoint in the same mechanism coordinates.
+
+    The first problem discovers its registry in a 6 Hz exploration view
+    (``s_ref = s(6 Hz)``); a fresh process would discover it over both
+    frequencies (``s(4 Hz)``) and read the checkpointed model in other units.
+    """
+
+    class Interrupt(RuntimeError):
+        pass
+
+    def interrupt(event):
+        if event.stage_index == 1 and event.stage_iteration == 1:
+            raise Interrupt("simulated crash")
+
+    def make(site, subdir="mechanism"):
+        return _problem(
+            tmp_path,
+            site,
+            subdir=subdir,
+            controls=ControlSpace(
+                vp=DepthProfile("vp", "sediment", count=5),
+                src=SourceParameters(mechanism=True, signature=False),
+            ),
+        )
+
+    def stages():
+        return [
+            Stage([4.0, 6.0], 2, active=["vp", "src"], name="joint"),
+            Stage([6.0], 4, active=["vp", "src"], name="high"),
+        ]
+
+    def fake():
+        return FakeImagingSite(seed=11, mechanism_reference_frequency=5.0)
+
+    site = fake()
+    problem = make(site)
+    problem.restrict(frequencies=[6.0]).value()  # exploration: s_ref = s(6 Hz)
+    checkpoint = tmp_path / "run" / "fwi.ckpt.h5"
+    options = dict(optimizer=LBFGS(**TIGHT), checkpoint=checkpoint)
+    with pytest.raises(Interrupt):
+        FWI(problem, stages(), callback=interrupt, **options).run()
+    s_ref = site.mechanism_scale(6.0)
+    names = ["source.1.mechanism", "source.2.mechanism"]
+    assert problem.mechanism_scaling == {name: s_ref for name in names}
+    saved = OptimizationCheckpoint.load(checkpoint)
+    assert json.loads(saved.metadata["mechanism_scaling"]) == {
+        name: s_ref for name in names
+    }
+    assert ControlState.load(
+        FWI(problem, stages(), **options).state_path,
+        problem.full_space.without_support(),
+    ).scaling == {name: s_ref for name in names}
+
+    # a fresh problem (new process) resumes in the 6 Hz stage with s_ref pinned
+    resumed_problem = make(fake())
+    resumed = FWI(resumed_problem, stages(), **options).run(resume=True)
+    assert resumed.stages[1].resumed and resumed.stages[1].stage_iteration == 4
+    assert resumed_problem.mechanism_scaling == {name: s_ref for name in names}
+
+    # a problem that already fixed another reference refuses the checkpoint
+    other = make(fake())
+    other.linearize(gradient=False)
+    assert other.mechanism_scaling != problem.mechanism_scaling
+    with pytest.raises(ValueError, match="mechanism reference scales"):
+        FWI(other, stages(), **options).run(resume=True)
+
+
+def test_with_controls_projects_same_count_basis_changes(tmp_path, fake):
+    problem = _problem(tmp_path, fake, subdir="same_count")
+    vector = problem.full_space.pack(
+        {"vp": [0.3, -0.2, 0.5, 0.1, -0.4], "rho": [0.2, 0, -0.1]}
+    )
+    problem.state = problem.state.with_update(vector)
+    spline = {"vp": DepthProfile.bspline("vp", "sediment", count=5)}
+    changed = problem.with_controls(spline)
+    expected = problem.full_space.transfer_to(changed.full_space, vector)
+    np.testing.assert_allclose(changed.state.values, expected.values, atol=1e-10)
+    assert not np.allclose(changed.state["vp"], vector["vp"])
+    # Explicit source-layout and target-layout states are both supported.
+    explicit = problem.with_controls(spline, state=problem.state)
+    adopted = problem.with_controls(spline, state=changed.state)
+    np.testing.assert_allclose(explicit.state.values, expected.values, atol=1e-10)
+    np.testing.assert_array_equal(adopted.state.values, changed.state.values)
+    # Equal total count cannot disguise different per-block counts.
+    repartitioned = problem.with_controls(
+        {
+            "vp": DepthProfile("vp", "sediment", count=4),
+            "rho": DepthProfile("rho", "sediment", count=4),
+        }
+    )
+    moved = problem.full_space.transfer_to(repartitioned.full_space, vector)
+    np.testing.assert_allclose(repartitioned.state.values, moved.values, atol=1e-10)
+    with pytest.raises(ValueError, match="different transform"):
+        problem.with_controls(
+            {"vp": DepthProfile("vp", "sediment", count=5, transform="log")}
+        )
+
+
+def test_spectral_stage_does_not_change_neighboring_waveform_stage(problem):
+    derivative = {
+        "axis": "fourier",
+        "residual": "derivative",
+        "order": 1,
+        "source_derivative": "total",
+    }
+    spectral = Stage([6.0], 3, kernel_derivative=derivative).view(problem)
+    waveform = Stage([6.0], 3).view(problem)
+    assert spectral.kernel_derivative["order"] == 1
+    assert spectral.kernel_derivative["residual"] == "derivative"
+    assert waveform.kernel_derivative is None
+    assert problem.kernel_derivative is None
+    assert spectral.identity() != waveform.identity()
+
+
+@pytest.mark.parametrize(
+    "method,length", [("bad", 0), ("l2", -1), ("l2", float("nan")), ("nodal", 1)]
+)
+def test_stage_rejects_invalid_mesh_transfer(method, length):
+    with pytest.raises(ValueError, match="mesh_"):
+        im.Stage(
+            [1.0],
+            iterations=1,
+            controls={},
+            mesh_transfer=method,
+            mesh_smoothing_length=length,
+        )
+
+
+def test_stage_rejects_unused_mesh_transfer():
+    with pytest.raises(ValueError, match="require stage controls"):
+        im.Stage([1.0], iterations=1, mesh_transfer="l2")
+
+
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("mode", ["legacy", "fixed", "wavelength"])
+def test_transfer_policy_reaches_native_adaptation(
+    tmp_path, fake, monkeypatch, staged, mode
+):
+    from frequensolve.imaging import _mesh_adaptation
+    from frequensolve.units import ureg as u
+
+    problem = _problem(tmp_path, fake, subdir="transfer_policy")
+    controls = {"vp": im.MeshParameters("vp", "layer_2", frequency=6.0, epw=2.0)}
+    options = (
+        {"mesh_transfer": "l2", "mesh_smoothing_length": 100.0}
+        if mode == "legacy"
+        else {"transfer": im.Transfer.l2(smooth=0.1 * u.km)}
+    )
+    expected = {"transfer": "l2", "smoothing_length": 100.0}
+    if mode == "wavelength":
+        options = {
+            "transfer": im.Transfer.l2(smooth_wavelengths=0.1, frequency=0.003 * u.kHz)
+        }
+        expected = {
+            "transfer": "l2",
+            "smoothing_length": 0.0,
+            "smoothing_wavelengths": 0.1,
+            "smoothing_frequency": 3.0,
+        }
+    received = {}
+
+    class ReachedNativeAdaptation(Exception):
+        pass
+
+    def adapt(problem, space, state, averaging, keys, **policy):
+        received.update(policy)
+        assert keys == {"vp"}
+        assert state.space.equivalent(problem.full_space)
+        raise ReachedNativeAdaptation
+
+    monkeypatch.setattr(_mesh_adaptation, "adapt_meshes", adapt)
+    with pytest.raises(ReachedNativeAdaptation):
+        if staged:
+            stage = im.Stage(FREQUENCIES, iterations=1, controls=controls, **options)
+            im.FWI(problem, stage)._problem_for(0)
+        else:
+            problem.with_controls(controls, **options)
+    assert received == expected
+
+
+def test_fwi_explicit_diagonal_scaling_preserves_solution(problem, fake):
+    J, d = _surrogate(fake, problem)
+    stage = Stage(frequencies=tuple(problem.frequencies), iterations=100)
+    scale = 1 / np.sqrt(np.sum(np.abs(J) ** 2, axis=0))
+    workflow = FWI(problem, [stage], scaling=scale, optimizer=LBFGS(**TIGHT))
+    np.testing.assert_allclose(workflow.scaling, scale)
+    result = workflow.run()
+    np.testing.assert_allclose(result.vector().values, _least_squares(J, d), atol=1e-4)
+    wrong = FWI(problem, [stage], scaling=np.ones(len(scale) + 1))
+    with pytest.raises(ValueError, match="active stage control space"):
+        wrong.run()
+
+
+@pytest.mark.parametrize("scale", [[1, 0], [1, -1], [1, np.nan], [[1, 2]]])
+def test_fwi_rejects_invalid_diagonal_scaling(problem, scale):
+    with pytest.raises(ValueError, match="scaling"):
+        FWI(problem, _stages(), scaling=scale)
+
+
+def test_diagonal_scaling_uses_same_native_proximal_metric():
+    diagonal = np.array([1.0, 10.0, 100.0])
+    target = np.array([2.0, -2.0, 0.01])
+    weight = 0.2
+    metrics = []
+
+    class Native:
+        def value(self, x):
+            return weight * np.abs(x).sum()
+
+        def prox(self, v, tau, metric, bounds):
+            metrics.append(metric.copy())
+            return np.clip(
+                np.sign(v) * np.maximum(abs(v) - tau * weight / metric, 0), *bounds
+            )
+
+    native = Native()
+
+    class Objective:
+        native_regularization = native
+
+        def smooth_value(self, x):
+            return 0.5 * np.sum(diagonal * (x - target) ** 2)
+
+        def value(self, x):
+            return self.smooth_value(x) + native.value(x)
+
+        def gradient(self, x):
+            return diagonal * (x - target)
+
+    seen = []
+    result = LBFGS(grad_rel_tole=1e-4, obj_rel_tol=0, step_tolerance=0).solve(
+        Objective(),
+        np.zeros(3),
+        scaling=1 / np.sqrt(diagonal),
+        max_iterations=10,
+        bounds=(np.full(3, -5.0), np.full(3, 5.0)),
+        callback=seen.append,
+    )
+    expected = np.sign(target) * np.maximum(abs(target) - weight / diagonal, 0)
+    np.testing.assert_allclose(result.x, expected, atol=1e-4)
+    assert metrics
+    for metric in metrics:
+        np.testing.assert_allclose(metric, diagonal)
+    np.testing.assert_allclose(seen[-1].gradient, diagonal * (seen[-1].model - target))
+
+
+def test_trial_values_defer_adjoints_without_changing_proximal_steps(problem):
+    from frequensolve.imaging.workflows import _StageObjective
+    from frequensolve.inversion import OptimizationHistory
+
+    space = problem.space
+    h = np.geomspace(1, 100, space.size)
+    target = np.linspace(-0.5, 0.7, space.size)
+    weight = 0.03
+
+    class Native:
+        def value(self, x):
+            x = x.values if isinstance(x, ControlVector) else x
+            return weight * np.abs(x).sum()
+
+        def prox(self, v, tau, metric, bounds):
+            return np.clip(
+                np.sign(v) * np.maximum(abs(v) - tau * weight / metric, 0), *bounds
+            )
+
+    class Eager(_StageObjective):
+        def _evaluate(self, x, *, gradient=False):
+            return super()._evaluate(x, gradient=True)
+
+    outputs = []
+    for cls in (_StageObjective, Eager):
+        calls = []
+
+        def linearize(v, *, gradient):
+            calls.append((v.values.copy(), gradient))
+            delta = v.values - target
+            return SimpleNamespace(
+                value=0.5 * float(h @ delta**2),
+                gradient=ControlVector(h * delta, space) if gradient else None,
+            )
+
+        history = OptimizationHistory()
+        objective = cls(SimpleNamespace(linearize=linearize), space, None, history, {})
+        objective.native_regularization = Native()
+        accepted = []
+        result = LBFGS(grad_rel_tole=1e-4, obj_rel_tol=0, step_tolerance=0).solve(
+            objective,
+            np.zeros(space.size),
+            max_iterations=6,
+            callback=accepted.append,
+            bounds=(np.full(space.size, -2.0), np.full(space.size, 2.0)),
+        )
+        outputs.append((result, accepted, calls, history, objective))
+    lazy, eager = outputs
+    np.testing.assert_array_equal(lazy[0].model, eager[0].model)
+    assert [s.step_length for s in lazy[1]] == [s.step_length for s in eager[1]]
+    assert [s.objective for s in lazy[1]] == [s.objective for s in eager[1]]
+    gradients = sum(want for _, want in lazy[2])
+    assert gradients == len(lazy[1]) + 1
+    assert gradients < sum(want for _, want in eager[2])
+    assert lazy[3].evaluation_count == eager[3].evaluation_count
+    assert any(r.gradient_norm is None for r in lazy[3].evaluations)
+    count = len(lazy[2])
+    lazy[4].gradient(lazy[0].model)
+    lazy[4].value(lazy[0].model)
+    assert len(lazy[2]) == count

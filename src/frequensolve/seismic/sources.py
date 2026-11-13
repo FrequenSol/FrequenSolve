@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from numbers import Number
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     Iterable,
@@ -32,6 +33,7 @@ from frequensolve.geometry.frame import (
     coordinate_value_to_fs,
     direction_to_fs,
 )
+from frequensolve.seismic.convolution import ConvolutionFilters
 from frequensolve.units import (
     is_quantity,
     unit_expression,
@@ -44,12 +46,16 @@ from frequensolve.util.mixins import (
     merge_extra,
 )
 
+if TYPE_CHECKING:
+    from frequensolve.seismic.receivers import ReceiverComponent
+
 __all__ = [
     "Source",
     "SourceGroup",
     "RuptureSource",
     "CompoundSource",
     "PointSource",
+    "GaussianSupport",
     "SourceGeometry",
     "SourceEncoding",
     "EncodedSource",
@@ -57,7 +63,16 @@ __all__ = [
 ]
 
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole"}
+_SOURCE_KINDS = {
+    "scalar",
+    "vector",
+    "tensor",
+    "monopole",
+    "dipole",
+    "volume_injection",
+    "pressure_monopole",
+    "isotropic_moment",
+}
 
 
 def _path_to_fs(path: Optional[Union[str, Path]], ctx: Optional[ExportContext]) -> str:
@@ -185,6 +200,12 @@ def _source_direction_from_fs(value: Any) -> Any:
     if set(payload).issubset(allowed) and has_axis != has_value:
         return payload
     return Direction.from_fs(payload)
+
+
+# Per-point basis fields the solver inherits from geometry defaults, as two groups.
+_SHAPE_KEYS = ("kind", "mechanism", "direction", "units")
+_SHAPE_TRIGGER_KEYS = ("kind", "mechanism", "direction")
+_STRENGTH_KEYS = ("amplitude", "moment_magnitude")
 
 
 def _source_basis_to_fs(value: Mapping[str, Any]) -> Dict[str, Any]:
@@ -406,6 +427,33 @@ def _coordinate_array(value: Any) -> np.ndarray:
     return result
 
 
+def _replace_leading_coordinates(value: Any, values: np.ndarray) -> Any:
+    """Return ``value`` with its leading components replaced by ``values``.
+
+    Units (a Pint quantity) and :class:`CoordinateValue` metadata are kept;
+    ``values`` are magnitudes in those units.
+    """
+
+    if isinstance(value, CoordinateValue):
+        return CoordinateValue(
+            _replace_leading_coordinates(value.value, values),
+            units=value.units,
+            system=value.system,
+            extra=copy.deepcopy(value.extra),
+        )
+    units = value.units if is_quantity(value) else None
+    magnitude = value.magnitude if units is not None else value
+    array = np.array(magnitude, dtype=np.float64).reshape(-1)
+    if values.size > array.size:
+        raise ValueError(
+            f"source point has {array.size} coordinates; got {values.size}"
+        )
+    array[: values.size] = values
+    if units is not None:
+        return ureg.Quantity(array, units)
+    return array.tolist()
+
+
 def _coordinate_array_with_metadata(
     value: Any,
 ) -> tuple[np.ndarray, Optional[Any], Optional[str]]:
@@ -469,6 +517,97 @@ def _source_coordinate_matrix(
     return np.asarray(rows, dtype=float), target_units, target_system
 
 
+def _acoustic_reciprocal_receiver(
+    kinds: Iterable[str | None], *, physics: str, name: str, units: str
+) -> ReceiverComponent:
+    """Define the ideal measurement paired with acoustic volume-rate monopoles."""
+    from frequensolve.seismic.receivers import ReceiverComponent
+    from frequensolve.units import ureg
+
+    if str(physics).strip().lower() != "acoustic":
+        raise ValueError(
+            "Reciprocal receiver definitions currently support acoustic volume_injection only"
+        )
+    if any(kind != "volume_injection" for kind in kinds):
+        raise ValueError(
+            "A pressure reciprocal receiver requires explicit volume_injection sources"
+        )
+    if not ureg.Unit(units).is_compatible_with(ureg.Pa):
+        raise ValueError("An acoustic reciprocal receiver requires pressure units")
+    return ReceiverComponent(name=name, field="pressure", units=units)
+
+
+@dataclass(frozen=True)
+class GaussianSupport:
+    """Compact isotropic Gaussian support, integrated and normalized by Sauce.
+
+    ``sigma`` is a physical length. The radial Gaussian tapers smoothly to zero
+    at one sigma; ``cutoff`` is fixed at 1. ``surface`` selects
+    a named exterior mesh surface; otherwise this is a volume source. The
+    authored amplitude is the total integrated strength, including when clipped.
+    Sampling resolves the source width by default; set ``tolerance`` explicitly
+    to request adaptive quadrature.
+    """
+
+    sigma: Any
+    cutoff: float = 1.0
+    boundary: str = "truncate_renormalize"
+    surface: Optional[str] = None
+    tolerance: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        sigma = value_and_units_to_fs(self.sigma)
+        if not isinstance(sigma, Mapping) or not sigma.get("units"):
+            raise ValueError("GaussianSupport.sigma requires a length with units")
+        value = np.asarray(
+            ureg.Quantity(sigma["value"], sigma["units"]).to("m").magnitude
+        )
+        if value.ndim != 0 or not np.isfinite(value) or value <= 0:
+            raise ValueError(
+                "GaussianSupport.sigma must be a finite positive scalar length"
+            )
+        if not np.isfinite(self.cutoff) or self.cutoff != 1:
+            raise ValueError("GaussianSupport.cutoff must be 1 (one-sigma support)")
+        if self.boundary not in {"truncate_renormalize", "reject"}:
+            raise ValueError(
+                "GaussianSupport.boundary must be truncate_renormalize or reject"
+            )
+        if self.tolerance is not None and (
+            not np.isfinite(self.tolerance) or not 1e-7 < self.tolerance <= 1e-2
+        ):
+            raise ValueError("GaussianSupport.tolerance must be > 1e-7 and <= 1e-2")
+        if self.surface is not None and (
+            not isinstance(self.surface, str) or not self.surface.strip()
+        ):
+            raise ValueError(
+                "GaussianSupport.surface must be a nonempty mesh surface name"
+            )
+
+        if self.surface is not None and self.boundary == "reject":
+            raise ValueError("Gaussian surface supports require truncate_renormalize")
+
+    def to_fs(self) -> Dict[str, Any]:
+        return {
+            "type": "gaussian",
+            "sigma": value_and_units_to_fs(self.sigma),
+            "cutoff": float(self.cutoff),
+            "boundary": self.boundary,
+            **(
+                {"tolerance": float(self.tolerance)}
+                if self.tolerance is not None
+                else {}
+            ),
+            **({"surface": self.surface} if self.surface is not None else {}),
+        }
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "GaussianSupport":
+        payload = dict(data)
+        if payload.pop("type", None) != "gaussian":
+            raise ValueError("Unsupported spatial source support")
+        return cls(**payload)
+
+
 @dataclass(init=False)
 class PointSource(ExtraFieldsMixin):
     """One physical source point in a source geometry catalog."""
@@ -480,6 +619,7 @@ class PointSource(ExtraFieldsMixin):
     domain: Optional[int] = None
     amplitude: Optional[Any] = None
     mechanism: Optional[Any] = None
+    support: Optional[GaussianSupport] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -494,6 +634,7 @@ class PointSource(ExtraFieldsMixin):
         domain: Optional[int] = None,
         amplitude: Optional[Any] = None,
         mechanism: Optional[Any] = None,
+        support: Optional[GaussianSupport] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
@@ -532,6 +673,13 @@ class PointSource(ExtraFieldsMixin):
         self.domain = None if domain is None else int(domain)
         self.amplitude = amplitude
         self.mechanism = mechanism
+        self.support = (
+            GaussianSupport.from_fs(support)
+            if isinstance(support, Mapping)
+            else support
+        )
+        if self.support is not None and not isinstance(self.support, GaussianSupport):
+            raise TypeError("support must be GaussianSupport")
         self._init_extra(extra_fields, **kwargs)
 
     @classmethod
@@ -552,7 +700,25 @@ class PointSource(ExtraFieldsMixin):
             domain=payload.pop("domain", None),
             amplitude=payload.pop("amplitude", None),
             mechanism=payload.pop("mechanism", None),
+            support=payload.pop("support", None),
             extra=payload,
+        )
+
+    def reciprocal_receiver(
+        self, *, physics: str, name: str = "p", units: str = "Pa"
+    ) -> ReceiverComponent:
+        """Return the ideal pressure component paired with explicit volume injection.
+
+        This defines the per-unit-source measurement, without copying source
+        strength, signatures, or instrument transfer functions. It does not
+        construct or execute a reciprocal survey.
+        """
+        if self.mechanism is not None:
+            raise ValueError(
+                "A volume_injection reciprocal receiver cannot use a moment/force mechanism"
+            )
+        return _acoustic_reciprocal_receiver(
+            [self.kind], physics=physics, name=name, units=units
         )
 
     def to_fs(
@@ -576,6 +742,10 @@ class PointSource(ExtraFieldsMixin):
                 else {}
             ),
         }
+        if self.support is not None:
+            if "footprint" in self.extra:
+                raise ValueError("Use support or footprint, not both")
+            payload["support"] = self.support.to_fs()
         return merge_extra(payload, self.extra, "PointSource")
 
 
@@ -735,6 +905,7 @@ class SourceGeometry(ExtraFieldsMixin):
         direction: Optional[Any] = None,
         amplitude: Optional[Any] = None,
         mechanism: Optional[Any] = None,
+        support: Optional[GaussianSupport] = None,
         defaults: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> "SourceGeometry":
@@ -795,7 +966,24 @@ class SourceGeometry(ExtraFieldsMixin):
             system=system,
             coordinate_extra=coordinate_extra,
         )
+        if support is not None:
+            if not isinstance(support, GaussianSupport):
+                raise TypeError("support must be GaussianSupport")
+            points = [geometry.point(i) for i in range(len(matrix))]
+            for point in points:
+                point.support = support
+            geometry._storage = _InlineSourceGeometry(sources=points)
         return geometry
+
+    @classmethod
+    def pressure_monopole(cls, coords: Any, **kwargs: Any) -> "SourceGeometry":
+        """Create acoustic monopoles whose wavelet directly forces the pressure equation.
+
+        Physical amplitudes use m^3/s^2 (default 1); a transient signature is
+        neither differentiated nor integrated. Acoustic scalar uses the same convention; isotropic_moment
+        and legacy monopole retain physical moment histories. Sources must lie in the fluid.
+        """
+        return cls.points(coords=coords, kind="pressure_monopole", **kwargs)
 
     @classmethod
     def inline(
@@ -911,6 +1099,31 @@ class SourceGeometry(ExtraFieldsMixin):
         if isinstance(self._storage, _HDF5SourceGeometry):
             return "HDF5"
         return "SPSFiles"
+
+    def reciprocal_receiver(
+        self, *, physics: str, name: str = "p", units: str = "Pa"
+    ) -> ReceiverComponent:
+        """Return the ideal pressure component for a volume-injection catalog.
+
+        Every inline kind override must also be volume_injection. External
+        catalogs use their declared kind. Geometry and source strengths are not
+        copied into this receiver component.
+        """
+        if self.defaults.get("mechanism") is not None:
+            raise ValueError(
+                "A volume_injection reciprocal receiver cannot use a moment/force mechanism"
+            )
+        kinds = [self.kind, self.defaults.get("kind", self.kind)]
+        if isinstance(self._storage, _InlineSourceGeometry):
+            for point in self._storage.sources:
+                if point.mechanism is not None:
+                    raise ValueError(
+                        "A volume_injection reciprocal receiver cannot use a moment/force mechanism"
+                    )
+                kinds.append(point.kind or self.kind)
+        return _acoustic_reciprocal_receiver(
+            kinds, physics=physics, name=name, units=units
+        )
 
     @property
     def sources(self) -> List[PointSource]:
@@ -1242,6 +1455,80 @@ class SourceGeometry(ExtraFieldsMixin):
             ),
         )
 
+    def set_point_coordinates(self, index: int, coordinates: Any) -> None:
+        """Replace the leading coordinate components of one inline point.
+
+        ``coordinates`` are magnitudes in the point's authored units and
+        coordinate system (the layout :meth:`coordinates` returns).  Trailing
+        components that are not given, the units, the coordinate system and
+        every other point attribute are kept.
+
+        Raises:
+            ValueError: For external (HDF5/SPS) geometry, non-finite values or
+                more components than the point has.
+            IndexError: If ``index`` is out of range.
+        """
+
+        if self.geometry_type != "Inline":
+            raise ValueError(
+                "Source coordinates can only be set on inline geometry; this "
+                f"geometry is stored as {self.geometry_type}"
+            )
+        count = int(self.point_count or 0)
+        if index < 0 or index >= count:
+            raise IndexError("source point index is out of range")
+        values = np.asarray(coordinates, dtype=np.float64).reshape(-1)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("source coordinates must be finite")
+        if isinstance(self._storage, _BulkSourceGeometry):
+            row = self._storage.coordinates[index]
+            if values.size > row.size:
+                raise ValueError(
+                    f"source point has {row.size} coordinates; got {values.size}"
+                )
+            self._storage.coordinates[index, : values.size] = values
+            return
+        source = self._storage.sources[index]  # type: ignore[union-attr]
+        source.coordinates = _replace_leading_coordinates(source.coordinates, values)
+
+    def fold_defaults_into_points(self) -> bool:
+        """Move geometry defaults onto each inline point and clear them.
+
+        Follows the solver's merge: a point keeps its own shape if it sets
+        ``kind``, ``mechanism`` or ``direction``, and its own strength if it
+        sets ``amplitude`` or ``moment_magnitude``; otherwise it inherits the
+        default. Returns ``False`` without changes when the defaults hold fields
+        outside the source basis.
+        """
+
+        if self.geometry_type != "Inline":
+            return False
+        if not self.defaults:
+            return True
+        if set(self.defaults) - set(_SHAPE_KEYS) - set(_STRENGTH_KEYS):
+            return False
+        defaults = _source_basis_to_fs(self.defaults)
+        points = []
+        for source in self.sources:
+            row = source.to_fs()
+            if not any(key in row for key in _SHAPE_TRIGGER_KEYS):
+                for key in _SHAPE_KEYS:
+                    row.pop(key, None)
+                    if key in defaults:
+                        row[key] = copy.deepcopy(defaults[key])
+            if not any(key in row for key in _STRENGTH_KEYS):
+                row.update(
+                    {
+                        key: copy.deepcopy(defaults[key])
+                        for key in _STRENGTH_KEYS
+                        if key in defaults
+                    }
+                )
+            points.append(PointSource.from_fs(row))
+        self._storage = _InlineSourceGeometry(points)
+        self.defaults = {}
+        return True
+
     def extend_inline(self, other: "SourceGeometry") -> None:
         """Append compatible inline geometry while preserving bulk arrays."""
 
@@ -1531,11 +1818,13 @@ class SourceEncoding(ExtraFieldsMixin):
     conjugate_coefficients: bool
     extra: Dict[str, Any]
     _storage: SourceEncodingStorage
+    filters: Optional[ConvolutionFilters]
 
     def __init__(
         self,
         *,
         encoding_type: str,
+        filters: Optional[ConvolutionFilters] = None,
         name: Optional[str] = None,
         fields: Optional[Iterable[EncodedSource]] = None,
         weights: Optional[Any] = None,
@@ -1550,6 +1839,11 @@ class SourceEncoding(ExtraFieldsMixin):
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
+        self.filters = filters
+        if isinstance(filters, Mapping):
+            self.filters = ConvolutionFilters.from_fs(filters)
+        if self.filters is not None and len(self.filters.shape) != 3:
+            raise ValueError("Source filters require (encoding, source, tap)")
         self.name = name
         normalized_type = str(encoding_type).strip().lower()
         field_objects = list(fields or [])
@@ -1993,6 +2287,20 @@ class SourceEncoding(ExtraFieldsMixin):
         )
 
     @classmethod
+    def filtered(
+        cls, taps: Any, *, dt: float, names: Optional[Iterable[str]] = None
+    ) -> "SourceEncoding":
+        """Encode sources with causal real FIRs (encoding, source, tap)."""
+        filters = ConvolutionFilters(taps, dt=dt)
+        if len(filters.shape) != 3:
+            raise ValueError("Source filters require (encoding, source, tap)")
+        return cls.dense(
+            np.any(filters.taps != 0, axis=-1).astype(float),
+            names=names,
+            filters=filters,
+        )
+
+    @classmethod
     def frequency_dense(
         cls,
         weights: Optional[Any] = None,
@@ -2119,6 +2427,7 @@ class SourceEncoding(ExtraFieldsMixin):
         )
         return cls(
             encoding_type=encoding_type,
+            filters=payload.pop("convolution", None),
             name=payload.pop("name", None),
             fields=fields,
             file=payload.pop("file", None),
@@ -2136,6 +2445,23 @@ class SourceEncoding(ExtraFieldsMixin):
         )
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        payload = self._to_fs_weights(ctx)
+        if self.filters is not None:
+            if self.filters.shape[:2] != (
+                self.field_count,
+                (
+                    self.weights.shape[-1]
+                    if self.weights is not None
+                    else self.filters.shape[1]
+                ),
+            ):
+                raise ValueError("Source filter dimensions differ from source encoding")
+            payload["convolution"] = self.filters.to_fs(
+                ctx, path="inputs/acquisition/source_encoding/convolution"
+            )
+        return payload
+
+    def _to_fs_weights(self, ctx: Any = None) -> Any:
         self.validate_dense_shape()
         store = getattr(ctx, "store", None) if ctx is not None else None
         if self.encoding_type == "FrequencyDense":
@@ -2286,6 +2612,8 @@ class SourceEncoding(ExtraFieldsMixin):
     def _resolve_project_reference(self, project_path: Path) -> None:
         """Resolve a loaded local coefficient reference without reading weights."""
 
+        if self.filters is not None:
+            self.filters.resolve(project_path)
         if not isinstance(self._storage, _HDF5SourceEncoding):
             return
         text = str(self._storage.file)
@@ -2468,6 +2796,57 @@ class SourceEncoding(ExtraFieldsMixin):
             dtype=float,
         )
 
+    def scaled_source(
+        self,
+        index: int,
+        factor: Any,
+        *,
+        source_name: Optional[str] = None,
+    ) -> "SourceEncoding":
+        """Return a copy whose weights on one physical source are scaled.
+
+        Implements the solver's per-source multiplier ``C = E diag(q)``
+        (``Acquisition/source_signature``) for one frequency-independent
+        complex ``factor``: every encoded field's coefficient on physical
+        source ``index`` (zero-based, source-geometry order) is multiplied by
+        ``factor``.  A conjugated encoding stores ``conj(factor)`` so the
+        effective coefficient is still multiplied by ``factor``.  Named
+        encodings address sources by name, so ``source_name`` is required
+        for them; a source no field references is left alone.
+
+        Raises:
+            ValueError: For HDF5-backed weights (stored externally) or a
+                Named encoding without ``source_name``.
+            IndexError: If ``index`` is outside the dense source axis.
+        """
+
+        value = complex(factor)
+        if not np.isfinite(value.real) or not np.isfinite(value.imag):
+            raise ValueError("source scale factor must be finite")
+        stored = value.conjugate() if self.conjugate_coefficients else value
+        encoding = copy.deepcopy(self)
+        storage = encoding._storage
+        if isinstance(storage, (_DenseSourceEncoding, _FrequencyDenseSourceEncoding)):
+            weights = np.array(storage.coefficients, dtype=np.complex128, copy=True)
+            if index < 0 or index >= weights.shape[-1]:
+                raise IndexError("source index is outside the encoding weights")
+            weights[..., index] *= stored
+            storage.coefficients = weights
+            return encoding
+        if isinstance(storage, _NamedSourceEncoding):
+            if source_name is None:
+                raise ValueError("Named source encodings need the source name")
+            for encoded in storage.fields:
+                if source_name in encoded.terms:
+                    encoded.terms[source_name] = (
+                        _complex_value(encoded.terms[source_name]) * stored
+                    )
+            return encoding
+        raise ValueError(
+            "HDF5 source-encoding weights are stored externally and cannot be "
+            "scaled in place"
+        )
+
     def conjugated(self) -> "SourceEncoding":
         """Return a lazy conjugated view without copying weight arrays."""
 
@@ -2485,7 +2864,13 @@ class SourceEncoding(ExtraFieldsMixin):
         encoding.conjugate_coefficients = not self.conjugate_coefficients
         return encoding
 
-    time_reversed = conjugated
+    def time_reversed(self) -> "SourceEncoding":
+        """Return harmonic time reversal; causal FIR reversal needs an explicit time origin."""
+        if self.filters is not None:
+            raise ValueError(
+                "Time reversal of causal convolution filters requires explicitly reversed taps and a time origin"
+            )
+        return self.conjugated()
 
 
 from frequensolve.seismic._legacy_source_types import (  # noqa: E402
