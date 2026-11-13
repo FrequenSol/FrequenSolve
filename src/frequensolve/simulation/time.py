@@ -215,10 +215,10 @@ class TimeIntegration:
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "end", end)
         if self.pml_frequency is not None:
-            frequency = _scalar_in_units(self.pml_frequency, "Hz", "pml_frequency")
-            if not math.isfinite(frequency) or frequency < 0:
+            pml_frequency = _scalar_in_units(self.pml_frequency, "Hz", "pml_frequency")
+            if not math.isfinite(pml_frequency) or pml_frequency < 0:
                 raise ValueError("pml_frequency must be finite and nonnegative")
-            object.__setattr__(self, "pml_frequency", frequency)
+            object.__setattr__(self, "pml_frequency", pml_frequency)
         duration = end - start
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError("TimeIntegration requires a finite end > start")
