@@ -331,13 +331,17 @@ class Acquisition(ExtraFieldsMixin):
         if self.source_signature is not None:
             if self.source_geometry is None:
                 raise ValueError("source_signature requires physical source_geometry")
-            payload["source_signature"] = (
-                self.source_signature.to_fs(
-                    ctx, source_count=self.source_geometry.point_count
+            if isinstance(self.source_signature, SourceSignature):
+                source_count = self.source_geometry.point_count
+                if source_count is None:
+                    raise ValueError(
+                        "Source signatures require a known positive int32 source count"
+                    )
+                payload["source_signature"] = self.source_signature.to_fs(
+                    ctx, source_count=source_count
                 )
-                if isinstance(self.source_signature, SourceSignature)
-                else copy.deepcopy(dict(self.source_signature))
-            )
+            else:
+                payload["source_signature"] = copy.deepcopy(dict(self.source_signature))
         if self.source_encoding is not None:
             payload["source_encoding"] = self.source_encoding.to_fs(ctx)
         if all_boundary_loadings:
