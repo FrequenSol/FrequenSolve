@@ -41,6 +41,21 @@ Forward Jobs
    :show-inheritance:
    :noindex:
 
+Transient Jobs
+--------------
+
+.. automodule:: frequensolve.simulation.jobs.transient
+   :members:
+   :noindex:
+
+.. automodule:: frequensolve.simulation.time
+   :members:
+   :noindex:
+
+.. automodule:: frequensolve.seismic.transient
+   :members:
+   :noindex:
+
 Eikonal Jobs
 ------------
 
@@ -110,4 +125,11 @@ Simulation
 .. automodule:: frequensolve.simulation.simulation
    :members:
    :show-inheritance:
+   :noindex:
+
+Reservoir Models
+----------------
+
+.. automodule:: frequensolve.simulation.reservoir
+   :members:
    :noindex:

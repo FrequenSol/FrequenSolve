@@ -1,0 +1,780 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/inputs/fs-reservoir-model-1/schema.json",
+  "title": "FS Reservoir Model v1",
+  "description": "Isothermal compositional reservoir model for the native 2D high-order HDG executor: fluid components and equation of state, water, rock and relative permeability laws, geology, root mesh, wells, injection schedule, initial state, and numerical controls.",
+  "x-fs-contract": "fs-reservoir-model-1",
+  "x-fs-visibility": "public",
+  "x-fs-status": "initial",
+  "x-fs-docs": true,
+  "type": "object",
+  "required": [
+    "schema",
+    "temperature",
+    "fluid",
+    "rock",
+    "relative_permeability",
+    "Model",
+    "domain",
+    "wells",
+    "injection_streams",
+    "schedule",
+    "initial_state"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-reservoir-model-1"
+    },
+    "name": {
+      "type": "string",
+      "description": "Diagnostic case name."
+    },
+    "description": {
+      "type": "string"
+    },
+    "temperature": {
+      "$ref": "#/$defs/scalarQuantity",
+      "description": "Uniform reservoir temperature; default unit K. Energy transport is not solved."
+    },
+    "gravity": {
+      "$ref": "#/$defs/positiveQuantity",
+      "default": 9.81,
+      "description": "Gravitational acceleration acting in -z; default unit m/s^2."
+    },
+    "fluid": {
+      "$ref": "#/$defs/fluid"
+    },
+    "rock": {
+      "$ref": "#/$defs/rock"
+    },
+    "relative_permeability": {
+      "$ref": "#/$defs/relativePermeability"
+    },
+    "Model": {
+      "$ref": "../fs-material-model-1/schema.json",
+      "description": "Spatial geology as an fs-material-model-1 document with exactly one `reservoir:compositional` subdomain whose `kappa` property supplies absolute permeability (scalar, file-backed, or expression)."
+    },
+    "domain": {
+      "$ref": "#/$defs/domain"
+    },
+    "wells": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "$ref": "#/$defs/well"
+      },
+      "description": "Rate wells. At least one injector and one producer are required."
+    },
+    "injection_streams": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/stream"
+      }
+    },
+    "schedule": {
+      "$ref": "#/$defs/schedule"
+    },
+    "initial_state": {
+      "$ref": "#/$defs/initialState"
+    },
+    "numerics": {
+      "$ref": "#/$defs/numerics"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "scalarQuantity": {
+      "description": "A number in the documented default unit, or a value/units object.",
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "units": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "positiveQuantity": {
+      "description": "A positive number in the documented default unit, or a value/units object with a positive value.",
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "units": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "nonnegativeQuantity": {
+      "description": "A nonnegative number in the documented default unit, or a value/units object.",
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "number",
+              "minimum": 0
+            },
+            "units": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "pointQuantity": {
+      "description": "An [x, z] pair in m, or a value/units object holding the pair.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/pair"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/pair"
+            },
+            "units": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "pair": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "number"
+      }
+    },
+    "fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "moleFractions": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "$ref": "#/$defs/fraction"
+      },
+      "description": "Hydrocarbon overall mole fractions in component order; they must sum to one."
+    },
+    "component": {
+      "type": "object",
+      "required": [
+        "name",
+        "critical_temperature",
+        "critical_pressure",
+        "acentric_factor",
+        "molecular_weight",
+        "critical_volume"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Unique identifier; also names exported per-component fields."
+        },
+        "critical_temperature": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Critical temperature in K."
+        },
+        "critical_pressure": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Critical pressure in Pa."
+        },
+        "acentric_factor": {
+          "type": "number",
+          "description": "Pitzer acentric factor."
+        },
+        "molecular_weight": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Molar mass in kg/mol."
+        },
+        "critical_volume": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Critical molar volume in m^3/mol, used by Lohrenz-Bray-Clark viscosity."
+        }
+      },
+      "additionalProperties": false
+    },
+    "fluid": {
+      "type": "object",
+      "required": [
+        "components",
+        "water"
+      ],
+      "properties": {
+        "components": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 11,
+          "items": {
+            "$ref": "#/$defs/component"
+          },
+          "description": "Hydrocarbon components, lightest first by convention. The order fixes every composition vector."
+        },
+        "binary_interaction": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "description": "Symmetric component-by-component Peng-Robinson binary interaction coefficients with a zero diagonal. Defaults to zero."
+        },
+        "equation_of_state": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "const": "peng_robinson",
+              "default": "peng_robinson"
+            },
+            "flash_tolerance": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1e-08,
+              "description": "Fugacity-equilibrium convergence tolerance of the two-phase flash."
+            },
+            "flash_maximum_iterations": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 20000
+            }
+          },
+          "additionalProperties": false
+        },
+        "viscosity": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "const": "lohrenz_bray_clark",
+              "default": "lohrenz_bray_clark"
+            }
+          },
+          "additionalProperties": false
+        },
+        "water": {
+          "type": "object",
+          "required": [
+            "reference_pressure",
+            "reference_density",
+            "compressibility",
+            "viscosity"
+          ],
+          "properties": {
+            "model": {
+              "const": "slightly_compressible",
+              "default": "slightly_compressible"
+            },
+            "reference_pressure": {
+              "$ref": "#/$defs/nonnegativeQuantity",
+              "description": "Default unit Pa."
+            },
+            "reference_density": {
+              "$ref": "#/$defs/positiveQuantity",
+              "description": "Default unit kg/m^3."
+            },
+            "compressibility": {
+              "$ref": "#/$defs/nonnegativeQuantity",
+              "description": "Default unit 1/Pa; density = reference_density exp(compressibility (p - reference_pressure))."
+            },
+            "viscosity": {
+              "$ref": "#/$defs/positiveQuantity",
+              "description": "Constant water viscosity; default unit Pa*s."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "rock": {
+      "type": "object",
+      "required": [
+        "reference_pressure",
+        "reference_porosity",
+        "compressibility"
+      ],
+      "properties": {
+        "model": {
+          "const": "compressible",
+          "default": "compressible"
+        },
+        "reference_pressure": {
+          "$ref": "#/$defs/nonnegativeQuantity",
+          "description": "Default unit Pa."
+        },
+        "reference_porosity": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "compressibility": {
+          "$ref": "#/$defs/nonnegativeQuantity",
+          "description": "Default unit 1/Pa; porosity = reference_porosity exp(compressibility (p - reference_pressure))."
+        }
+      },
+      "additionalProperties": false
+    },
+    "relativePermeability": {
+      "type": "object",
+      "required": [
+        "connate_water",
+        "residual_oil_water",
+        "residual_oil_gas",
+        "critical_gas"
+      ],
+      "properties": {
+        "model": {
+          "const": "corey_stone2",
+          "default": "corey_stone2"
+        },
+        "connate_water": {
+          "$ref": "#/$defs/fraction"
+        },
+        "residual_oil_water": {
+          "$ref": "#/$defs/fraction"
+        },
+        "residual_oil_gas": {
+          "$ref": "#/$defs/fraction"
+        },
+        "critical_gas": {
+          "$ref": "#/$defs/fraction"
+        },
+        "water_endpoint": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 1
+        },
+        "gas_endpoint": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 1
+        },
+        "oil_water_endpoint": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 1
+        },
+        "oil_gas_endpoint": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 1
+        },
+        "water_exponent": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 2
+        },
+        "gas_exponent": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 2
+        },
+        "oil_water_exponent": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 2
+        },
+        "oil_gas_exponent": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "domain": {
+      "type": "object",
+      "required": [
+        "length",
+        "height",
+        "root_elements"
+      ],
+      "properties": {
+        "length": {
+          "$ref": "#/$defs/positiveQuantity",
+          "description": "Horizontal extent x in [0, length]; default unit m."
+        },
+        "height": {
+          "$ref": "#/$defs/positiveQuantity",
+          "description": "Vertical extent z in [0, height], z upward; default unit m."
+        },
+        "root_elements": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "Uniform native root quadrilaterals in x and z."
+        },
+        "degree": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6,
+          "default": 2,
+          "description": "Polynomial degree of volume and facet fields."
+        }
+      },
+      "additionalProperties": false
+    },
+    "well": {
+      "type": "object",
+      "required": [
+        "name",
+        "type",
+        "location",
+        "completion"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "injector",
+            "producer"
+          ]
+        },
+        "location": {
+          "$ref": "#/$defs/pointQuantity",
+          "description": "Completion center [x, z]; default unit m."
+        },
+        "completion": {
+          "type": "object",
+          "required": [
+            "radius"
+          ],
+          "properties": {
+            "kind": {
+              "const": "gaussian",
+              "default": "gaussian"
+            },
+            "radius": {
+              "$ref": "#/$defs/pointQuantity",
+              "description": "Positive Gaussian radii [r_x, r_z]; weight exp(-((x-x_w)/r_x)^2 - ((z-z_w)/r_z)^2)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "refinement_radius": {
+          "$ref": "#/$defs/pointQuantity",
+          "description": "Positive elliptical radii around the location refined to numerics.adaptation.well_level and protected from coarsening. Defaults to four completion radii."
+        }
+      },
+      "additionalProperties": false
+    },
+    "stream": {
+      "type": "object",
+      "required": [
+        "name",
+        "phase"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "phase": {
+          "enum": [
+            "water",
+            "hydrocarbon"
+          ]
+        },
+        "pressure": {
+          "$ref": "#/$defs/positiveQuantity",
+          "description": "Reference pressure defining the injected amount per reservoir volume; default unit Pa. Defaults to the water reference pressure."
+        },
+        "composition": {
+          "$ref": "#/$defs/moleFractions",
+          "description": "Required for hydrocarbon streams; rejected for water streams."
+        }
+      },
+      "additionalProperties": false
+    },
+    "phase": {
+      "type": "object",
+      "required": [
+        "duration",
+        "rate"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "duration": {
+          "$ref": "#/$defs/positiveQuantity",
+          "description": "Default unit day."
+        },
+        "rate": {
+          "$ref": "#/$defs/nonnegativeQuantity",
+          "description": "Voidage-replacement reservoir-volume rate per unit out-of-plane thickness; default unit m^2/day. Zero shuts all wells in."
+        },
+        "stream": {
+          "type": "string",
+          "description": "Injected stream name; required when rate is positive."
+        },
+        "alternation": {
+          "type": "object",
+          "required": [
+            "stream",
+            "start",
+            "period"
+          ],
+          "properties": {
+            "stream": {
+              "type": "string",
+              "description": "Alternate stream injected in the first slug and every second slug after it."
+            },
+            "start": {
+              "$ref": "#/$defs/nonnegativeQuantity",
+              "description": "Offset from the phase start; default unit day."
+            },
+            "period": {
+              "$ref": "#/$defs/positiveQuantity",
+              "description": "Slug length; default unit day."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "schedule": {
+      "type": "object",
+      "required": [
+        "phases"
+      ],
+      "properties": {
+        "phases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/phase"
+          },
+          "description": "Consecutive control phases starting at day zero."
+        }
+      },
+      "additionalProperties": false
+    },
+    "initialState": {
+      "type": "object",
+      "required": [
+        "datum_elevation",
+        "datum_pressure",
+        "hydrostatic_density",
+        "water_saturation",
+        "composition"
+      ],
+      "properties": {
+        "datum_elevation": {
+          "$ref": "#/$defs/scalarQuantity",
+          "description": "Elevation z of the pressure datum; default unit m."
+        },
+        "datum_pressure": {
+          "$ref": "#/$defs/positiveQuantity",
+          "description": "Pressure at the datum; default unit Pa."
+        },
+        "hydrostatic_density": {
+          "$ref": "#/$defs/nonnegativeQuantity",
+          "description": "Density of the initial linear hydrostatic gradient; default unit kg/m^3."
+        },
+        "water_saturation": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "composition": {
+          "$ref": "#/$defs/moleFractions"
+        }
+      },
+      "additionalProperties": false
+    },
+    "numerics": {
+      "type": "object",
+      "properties": {
+        "pressure_scale": {
+          "$ref": "#/$defs/positiveQuantity",
+          "default": 10000000.0,
+          "description": "Pressure unknown scale; default unit Pa."
+        },
+        "amount_scale": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "description": "Residual scales: water mass in kg/m^3, then one moles/m^3 entry per component. Defaults to 1000 then 10000 per component."
+        },
+        "time_stepping": {
+          "type": "object",
+          "properties": {
+            "initial_step": {
+              "$ref": "#/$defs/positiveQuantity",
+              "default": 0.1,
+              "description": "Default unit day."
+            },
+            "maximum_step": {
+              "$ref": "#/$defs/positiveQuantity",
+              "default": 2,
+              "description": "Default unit day."
+            },
+            "growth_factor": {
+              "type": "number",
+              "minimum": 1,
+              "default": 1.4
+            }
+          },
+          "additionalProperties": false
+        },
+        "adaptation": {
+          "type": "object",
+          "properties": {
+            "interval": {
+              "$ref": "#/$defs/positiveQuantity",
+              "default": 0.5,
+              "description": "Adaptation check interval; default unit day."
+            },
+            "maximum_level": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3
+            },
+            "maximum_level_z": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Independent vertical cap; defaults to maximum_level."
+            },
+            "front_threshold": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 0.05,
+              "description": "Saturation/composition variation that marks a front."
+            },
+            "coarsening_threshold": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 0.01,
+              "description": "Variation below which quiet leaves may merge after three checks."
+            },
+            "well_level": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 4
+            },
+            "geology_level": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3
+            },
+            "geology_log_contrast": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1.2,
+              "description": "Natural-log permeability range within a leaf that requests geology_level."
+            }
+          },
+          "additionalProperties": false
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "interval": {
+              "$ref": "#/$defs/positiveQuantity",
+              "default": 1,
+              "description": "Whole-day VTU/checkpoint interval; default unit day."
+            }
+          },
+          "additionalProperties": false
+        },
+        "stabilization": {
+          "type": "object",
+          "properties": {
+            "facet_minimum": {
+              "$ref": "#/$defs/positiveQuantity",
+              "default": 0.02,
+              "description": "Lower bound of the conservative facet stabilization speed; default unit m/day."
+            },
+            "facet_speed_factor": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 2
+            },
+            "diffusion_coefficient": {
+              "type": "number",
+              "minimum": 0,
+              "default": 0.8,
+              "description": "Curvature-activated numerical diffusion factor times element size and pore flux."
+            },
+            "curvature_gain": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 4
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

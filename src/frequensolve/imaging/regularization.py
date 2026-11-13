@@ -40,6 +40,7 @@ from frequensolve.imaging.controls import (
 from frequensolve.imaging.jobs import FWIOperatorJob, SmoothJob
 from frequensolve.imaging.operators import ModelOperator
 from frequensolve.inversion.least_squares import QuadraticRegularization
+from frequensolve.inversion.optimization import _shares_arrays
 from frequensolve.inversion.preconditioning import (
     DiagonalInverseHessian,
     GaussNewtonDiagonalEstimate,
@@ -717,6 +718,7 @@ class Identity(Preconditioner):
 
 
 class _BoundIdentity(BoundPreconditioner):
+    @_shares_arrays  # Reads ``g``; returns a new vector.
     def apply(self, g: Any) -> ControlVector:
         return ControlVector(np.array(_values_on(self.space, g), copy=True), self.space)
 
@@ -798,7 +800,8 @@ class Diagonal(Preconditioner):
         seed: Probe seed.
         relative_damping: Damping relative to each block's maximum diagonal.
         maximum_inverse_ratio: Cap on each block's inverse dynamic range.
-        probes: ``"rademacher"`` (randomized, ``probe_count`` normal actions)
+        probes: ``"receiver"`` (shared receiver-adjoint probes saved by the
+            linearization), ``"rademacher"`` (``probe_count`` normal actions)
             or ``"unit"`` (exact diagonal, ``space.size`` normal actions).
     """
 
@@ -814,8 +817,8 @@ class Diagonal(Preconditioner):
             raise ValueError("probe_count must be positive")
         object.__setattr__(self, "probe_count", count)
         probes = str(self.probes).strip().lower()
-        if probes not in {"rademacher", "unit"}:
-            raise ValueError("probes must be 'rademacher' or 'unit'")
+        if probes not in {"receiver", "rademacher", "unit"}:
+            raise ValueError("probes must be 'receiver', 'rademacher' or 'unit'")
         object.__setattr__(self, "probes", probes)
         if self.seed is not None:
             object.__setattr__(self, "seed", int(self.seed))
@@ -851,17 +854,21 @@ class _BoundDiagonal(BoundPreconditioner):
             regularization.space is space or regularization.space.equivalent(space)
         ):
             raise ValueError("regularization is bound to a different control space")
-        normal = linearization.normal
         size = space.size
         config = self.config
         data = np.zeros(size, dtype=np.float64)
-        if config.probes == "unit":
+        if config.probes == "receiver":
+            data = np.asarray(linearization.receiver_diagonal.values).copy()
+            probe_count = config.probe_count
+        elif config.probes == "unit":
+            normal = linearization.normal
             for i in range(size):
                 probe = np.zeros(size)
                 probe[i] = 1.0
                 data[i] = float(normal.matvec(probe).values[i])
             probe_count = size
         else:
+            normal = linearization.normal
             rng = np.random.default_rng(config.seed)
             for _ in range(config.probe_count):
                 probe = rng.choice((-1.0, 1.0), size=size)
@@ -884,6 +891,7 @@ class _BoundDiagonal(BoundPreconditioner):
             maximum_inverse_ratio=config.maximum_inverse_ratio,
         )
 
+    @_shares_arrays  # Reads ``g``; returns a new vector.
     def apply(self, g: Any) -> ControlVector:
         if self.inverse is None:
             raise RuntimeError(

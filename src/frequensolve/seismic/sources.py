@@ -31,6 +31,7 @@ from frequensolve.geometry.frame import (
     coordinate_value_to_fs,
     direction_to_fs,
 )
+from frequensolve.seismic.convolution import ConvolutionFilters
 from frequensolve.units import (
     is_quantity,
     unit_expression,
@@ -52,6 +53,7 @@ __all__ = [
     "RuptureSource",
     "CompoundSource",
     "PointSource",
+    "GaussianSupport",
     "SourceGeometry",
     "SourceEncoding",
     "EncodedSource",
@@ -59,7 +61,16 @@ __all__ = [
 ]
 
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
+_SOURCE_KINDS = {
+    "scalar",
+    "vector",
+    "tensor",
+    "monopole",
+    "dipole",
+    "volume_injection",
+    "pressure_monopole",
+    "isotropic_moment",
+}
 
 
 def _path_to_fs(path: Union[str, Path], ctx: Optional[ExportContext]) -> str:
@@ -522,6 +533,77 @@ def _acoustic_reciprocal_receiver(
     return ReceiverComponent(name=name, field="pressure", units=units)
 
 
+@dataclass(frozen=True)
+class GaussianSupport:
+    """Compact isotropic Gaussian support, integrated and normalized by Sauce.
+
+    ``sigma`` is a physical length. The radial Gaussian tapers smoothly to zero
+    at one sigma; ``cutoff`` is fixed at 1. ``surface`` selects
+    a named exterior mesh surface; otherwise this is a volume source. The
+    authored amplitude is the total integrated strength, including when clipped.
+    Sampling resolves the source width by default; set ``tolerance`` explicitly
+    to request adaptive quadrature.
+    """
+
+    sigma: Any
+    cutoff: float = 1.0
+    boundary: str = "truncate_renormalize"
+    surface: Optional[str] = None
+    tolerance: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        sigma = value_and_units_to_fs(self.sigma)
+        if not isinstance(sigma, Mapping) or not sigma.get("units"):
+            raise ValueError("GaussianSupport.sigma requires a length with units")
+        value = np.asarray(
+            ureg.Quantity(sigma["value"], sigma["units"]).to("m").magnitude
+        )
+        if value.ndim != 0 or not np.isfinite(value) or value <= 0:
+            raise ValueError(
+                "GaussianSupport.sigma must be a finite positive scalar length"
+            )
+        if not np.isfinite(self.cutoff) or self.cutoff != 1:
+            raise ValueError("GaussianSupport.cutoff must be 1 (one-sigma support)")
+        if self.boundary not in {"truncate_renormalize", "reject"}:
+            raise ValueError(
+                "GaussianSupport.boundary must be truncate_renormalize or reject"
+            )
+        if self.tolerance is not None and (
+            not np.isfinite(self.tolerance) or not 1e-7 < self.tolerance <= 1e-2
+        ):
+            raise ValueError("GaussianSupport.tolerance must be > 1e-7 and <= 1e-2")
+        if self.surface is not None and (
+            not isinstance(self.surface, str) or not self.surface.strip()
+        ):
+            raise ValueError(
+                "GaussianSupport.surface must be a nonempty mesh surface name"
+            )
+
+        if self.surface is not None and self.boundary == "reject":
+            raise ValueError("Gaussian surface supports require truncate_renormalize")
+
+    def to_fs(self) -> Dict[str, Any]:
+        return {
+            "type": "gaussian",
+            "sigma": value_and_units_to_fs(self.sigma),
+            "cutoff": float(self.cutoff),
+            "boundary": self.boundary,
+            **(
+                {"tolerance": float(self.tolerance)}
+                if self.tolerance is not None
+                else {}
+            ),
+            **({"surface": self.surface} if self.surface is not None else {}),
+        }
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "GaussianSupport":
+        payload = dict(data)
+        if payload.pop("type", None) != "gaussian":
+            raise ValueError("Unsupported spatial source support")
+        return cls(**payload)
+
+
 @dataclass(init=False)
 class PointSource(ExtraFieldsMixin):
     """One physical source point in a source geometry catalog."""
@@ -533,6 +615,7 @@ class PointSource(ExtraFieldsMixin):
     domain: Optional[int] = None
     amplitude: Optional[Any] = None
     mechanism: Optional[Any] = None
+    support: Optional[GaussianSupport] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -547,6 +630,7 @@ class PointSource(ExtraFieldsMixin):
         domain: Optional[int] = None,
         amplitude: Optional[Any] = None,
         mechanism: Optional[Any] = None,
+        support: Optional[GaussianSupport] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
@@ -585,6 +669,13 @@ class PointSource(ExtraFieldsMixin):
         self.domain = None if domain is None else int(domain)
         self.amplitude = amplitude
         self.mechanism = mechanism
+        self.support = (
+            GaussianSupport.from_fs(support)
+            if isinstance(support, Mapping)
+            else support
+        )
+        if self.support is not None and not isinstance(self.support, GaussianSupport):
+            raise TypeError("support must be GaussianSupport")
         self._init_extra(extra_fields, **kwargs)
 
     @classmethod
@@ -605,6 +696,7 @@ class PointSource(ExtraFieldsMixin):
             domain=payload.pop("domain", None),
             amplitude=payload.pop("amplitude", None),
             mechanism=payload.pop("mechanism", None),
+            support=payload.pop("support", None),
             extra=payload,
         )
 
@@ -646,6 +738,10 @@ class PointSource(ExtraFieldsMixin):
                 else {}
             ),
         }
+        if self.support is not None:
+            if "footprint" in self.extra:
+                raise ValueError("Use support or footprint, not both")
+            payload["support"] = self.support.to_fs()
         return merge_extra(payload, self.extra, "PointSource")
 
 
@@ -805,6 +901,7 @@ class SourceGeometry(ExtraFieldsMixin):
         direction: Optional[Any] = None,
         amplitude: Optional[Any] = None,
         mechanism: Optional[Any] = None,
+        support: Optional[GaussianSupport] = None,
         defaults: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> "SourceGeometry":
@@ -865,7 +962,24 @@ class SourceGeometry(ExtraFieldsMixin):
             system=system,
             coordinate_extra=coordinate_extra,
         )
+        if support is not None:
+            if not isinstance(support, GaussianSupport):
+                raise TypeError("support must be GaussianSupport")
+            points = [geometry.point(i) for i in range(len(matrix))]
+            for point in points:
+                point.support = support
+            geometry._storage = _InlineSourceGeometry(sources=points)
         return geometry
+
+    @classmethod
+    def pressure_monopole(cls, coords: Any, **kwargs: Any) -> "SourceGeometry":
+        """Create acoustic monopoles whose wavelet directly forces the pressure equation.
+
+        Physical amplitudes use m^3/s^2 (default 1); a transient signature is
+        neither differentiated nor integrated. Acoustic scalar uses the same convention; isotropic_moment
+        and legacy monopole retain physical moment histories. Sources must lie in the fluid.
+        """
+        return cls.points(coords=coords, kind="pressure_monopole", **kwargs)
 
     @classmethod
     def inline(
@@ -1700,11 +1814,13 @@ class SourceEncoding(ExtraFieldsMixin):
     conjugate_coefficients: bool
     extra: Dict[str, Any]
     _storage: SourceEncodingStorage
+    filters: Optional[ConvolutionFilters]
 
     def __init__(
         self,
         *,
         encoding_type: str,
+        filters: Optional[ConvolutionFilters] = None,
         name: Optional[str] = None,
         fields: Optional[Iterable[EncodedSource]] = None,
         weights: Optional[Any] = None,
@@ -1719,6 +1835,11 @@ class SourceEncoding(ExtraFieldsMixin):
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
+        self.filters = filters
+        if isinstance(filters, Mapping):
+            self.filters = ConvolutionFilters.from_fs(filters)
+        if self.filters is not None and len(self.filters.shape) != 3:
+            raise ValueError("Source filters require (encoding, source, tap)")
         self.name = name
         normalized_type = str(encoding_type).strip().lower()
         field_objects = list(fields or [])
@@ -2162,6 +2283,20 @@ class SourceEncoding(ExtraFieldsMixin):
         )
 
     @classmethod
+    def filtered(
+        cls, taps: Any, *, dt: float, names: Optional[Iterable[str]] = None
+    ) -> "SourceEncoding":
+        """Encode sources with causal real FIRs (encoding, source, tap)."""
+        filters = ConvolutionFilters(taps, dt=dt)
+        if len(filters.shape) != 3:
+            raise ValueError("Source filters require (encoding, source, tap)")
+        return cls.dense(
+            np.any(filters.taps != 0, axis=-1).astype(float),
+            names=names,
+            filters=filters,
+        )
+
+    @classmethod
     def frequency_dense(
         cls,
         weights: Optional[Any] = None,
@@ -2288,6 +2423,7 @@ class SourceEncoding(ExtraFieldsMixin):
         )
         return cls(
             encoding_type=encoding_type,
+            filters=payload.pop("convolution", None),
             name=payload.pop("name", None),
             fields=fields,
             file=payload.pop("file", None),
@@ -2305,6 +2441,23 @@ class SourceEncoding(ExtraFieldsMixin):
         )
 
     def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        payload = self._to_fs_weights(ctx)
+        if self.filters is not None:
+            if self.filters.shape[:2] != (
+                self.field_count,
+                (
+                    self.weights.shape[-1]
+                    if self.weights is not None
+                    else self.filters.shape[1]
+                ),
+            ):
+                raise ValueError("Source filter dimensions differ from source encoding")
+            payload["convolution"] = self.filters.to_fs(
+                ctx, path="inputs/acquisition/source_encoding/convolution"
+            )
+        return payload
+
+    def _to_fs_weights(self, ctx: Any = None) -> Any:
         self.validate_dense_shape()
         store = getattr(ctx, "store", None) if ctx is not None else None
         if self.encoding_type == "FrequencyDense":
@@ -2455,6 +2608,8 @@ class SourceEncoding(ExtraFieldsMixin):
     def _resolve_project_reference(self, project_path: Path) -> None:
         """Resolve a loaded local coefficient reference without reading weights."""
 
+        if self.filters is not None:
+            self.filters.resolve(project_path)
         if not isinstance(self._storage, _HDF5SourceEncoding):
             return
         text = str(self._storage.file)
@@ -2704,7 +2859,13 @@ class SourceEncoding(ExtraFieldsMixin):
         encoding.conjugate_coefficients = not self.conjugate_coefficients
         return encoding
 
-    time_reversed = conjugated
+    def time_reversed(self) -> "SourceEncoding":
+        """Return harmonic time reversal; causal FIR reversal needs an explicit time origin."""
+        if self.filters is not None:
+            raise ValueError(
+                "Time reversal of causal convolution filters requires explicitly reversed taps and a time origin"
+            )
+        return self.conjugated()
 
 
 from frequensolve.seismic._legacy_source_types import (  # noqa: E402

@@ -74,6 +74,27 @@ def setup(tmp_path, fake):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("method", ["cg", "lsqr"])
+def test_lsrtm_reflectivity_falls_back_without_changing_the_image(setup, fake, method):
+    _, problem = setup
+    automatic = im.LSRTM(problem, method=method, iterations=40, tolerance=1e-10)
+    image = automatic.run()
+    assert automatic.linearization.job.background is None
+    assert not automatic.linearization._reuse_background
+    assert all(
+        job.background is None
+        for job in fake.jobs
+        if isinstance(job, im.FWIOperatorJob)
+    )
+    replay = im.LSRTM(
+        problem, method=method, iterations=40, tolerance=1e-10, reuse_background=False
+    )
+    np.testing.assert_allclose(
+        image.values, replay.run().values, rtol=1e-10, atol=1e-12
+    )
+    assert automatic.info["converged"]
+
+
 def test_bound_space_emits_the_pinned_reflectivity_payload(tmp_path):
     sim = layered_simulation(tmp_path / "project")
 
@@ -400,7 +421,13 @@ def test_capabilities_reject_phase_objectives_interfaces_signature_df_and_extens
     assert report["errors"] == [
         "reflectivity and extension are mutually exclusive in one problem"
     ]
-    assert problem.restrict(active=["vp"]).capabilities(extension=object())["ok"]
+    assert not problem.restrict(active=["vp"]).capabilities(extension=object())["ok"]
+    with pytest.raises(ValueError, match="reflectivity requires waveform"):
+        problem.restrict(active=["vp"], misfit=im.Misfit(comparison="phase_derivative"))
+    with pytest.raises(ValueError, match="kernel_derivative requires fixed sources"):
+        problem.restrict(
+            active=["vp"], kernel_derivative={"order": 1, "residual": "derivative"}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -438,8 +465,54 @@ def test_linearize_returns_both_blocks_and_restrictions_slice_them(setup, fake):
     assert background.space.blocks == ("model.vp",)
     assert background.vector().size == VP_COUNT
     assert "refl" not in background.space
-    assert background.linearize().job.reflectivity is None
+    assert background.linearize().job.reflectivity == lin.job.reflectivity
     assert only.linearize().job.reflectivity is not None
+
+
+@pytest.mark.parametrize("active", [["vp"], ["refl.ip"], ["refl.dv", "vp"]])
+def test_restricted_jobs_preserve_all_reflectivity_fields_and_state(tmp_path, active):
+    fake = FakeImagingSite(
+        block_sizes={"reflectivity.ip": VP_COUNT, "reflectivity.dv": VP_COUNT}, seed=3
+    )
+    controls = im.ControlSpace(
+        vp=im.DepthProfile("vp", "sediment", count=VP_COUNT),
+        refl=im.ReflectivityParameters(
+            "vp_ip",
+            fields=[
+                im.ReflectivityField("ip", layer=2, axis=2, basis="vp"),
+                im.ReflectivityField("dv", layer=2, axis=1, basis="vp"),
+            ],
+        ),
+    )
+    _, problem = _problem(tmp_path, fake, controls=controls)
+    problem.linearize()
+    values = problem.space.pack(
+        {
+            "vp": problem.vector()["vp"],
+            "refl.ip": np.full(VP_COUNT, 0.12),
+            "refl.dv": np.full(VP_COUNT, -0.03),
+        }
+    )
+    problem.state = problem.state.with_update(values)
+    view = problem.restrict(active=active)
+    first_job = len(fake.jobs)
+    lin = view.linearize()
+    _ = lin.jacobian @ lin.space.random(1)
+    _ = lin.jacobian.H @ lin.data_space.random(2)
+    # Frozen reflectivity still uses the joint backend, which accepts one
+    # normal direction per action and has no ordinary background checkpoint.
+    lin._normal_products([lin.space.random(3), lin.space.random(4)])
+    assert not view._supports_background_reuse()
+    jobs = fake.jobs[first_job:]
+    expected = problem.full_space.reflectivity_payload()
+    assert {job.action for job in jobs} == {"linearize", "jvp", "vjp", "normal"}
+    for job in jobs:
+        assert job.reflectivity == expected
+        assert job.active == list(view.space.blocks)
+        assert job.directions is None
+        state = ControlStateFile.read(job.control_state)
+        np.testing.assert_array_equal(state["reflectivity.ip"], 0.12)
+        np.testing.assert_array_equal(state["reflectivity.dv"], -0.03)
 
 
 def test_joint_jacobian_is_adjoint_and_normal_is_symmetric(setup):
@@ -573,3 +646,119 @@ def test_surface_coordinate_reflectivity_maps_are_supported(tmp_path, fake):
     assert below.capabilities()["ok"]
     assert global_z.space.block("refl").coordinate_system == "global"
     assert global_z.capabilities()["warnings"] == []
+
+
+def test_rwi_job_contract_and_state_output(setup):
+    from frequensolve.orchestrator.sites.partition import partitioned_inputs
+
+    sim, problem = setup
+    job = im.FWIOperatorJob(
+        "rwi",
+        sim,
+        FREQUENCIES,
+        action="solve",
+        active=list(problem.space.blocks),
+        state="state.json",
+        covector="gradient.h5",
+        reflectivity={
+            **problem._reflectivity(),
+            "solver": {"damping": 0.01, "frequency_weights": [1.0, 0.5]},
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    assert job.frequency_groups == 2
+    assert all(x.name != "state" for x in partitioned_inputs(job))
+    assert job.reflectivity_solution_file(2).name == "reflectivity_2.h5"
+    replay = im.FWIOperatorJob.from_fs(payload, project_path=sim.project_path)
+    assert _shape(replay.to_fs()["fwi_operator"]) == _shape(payload["fwi_operator"])
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"damping": 0},
+        {"damping": np.nan},
+        {"relative_tolerance": 0},
+        {"max_iterations": -1},
+        {"max_iterations": 2.5},
+        {"cache_mb": -1},
+        {"frequency_weights": [0, 0]},
+        {"require_convergence": "yes"},
+        {"unknown": 1},
+    ],
+)
+def test_rwi_rejects_invalid_solver(options):
+    from frequensolve.imaging.rwi import _solver_options
+
+    with pytest.raises(ValueError):
+        _solver_options(options)
+
+
+def test_rwi_selects_background_and_keeps_inner_controls_on_stage(setup):
+    _, problem = setup
+    rwi = problem.rwi(damping=0.01)
+    assert rwi.space.blocks == ("model.vp",)
+    assert rwi._reflectivity == ("reflectivity.ip",)
+    stage = rwi.restrict(frequencies=[4.0], weights=[0.5])
+    assert isinstance(stage, im.RWIProblem)
+    assert stage.weights == (0.5,)
+    assert stage.solver["damping"] == 0.01
+    with pytest.raises(NotImplementedError, match="control basis"):
+        stage.with_controls({})
+    with pytest.raises(ValueError, match="L2"):
+        rwi.restrict(loss="huber")
+
+
+def test_rwi_reduces_shared_fit_outputs_and_rejects_nonstationarity(setup, monkeypatch):
+    from frequensolve.imaging._artifacts import ControlVectorFile
+
+    _, problem = setup
+    baseline = problem.state
+    rwi = problem.restrict(weights=[0.5, 2.0]).rwi(
+        damping=0.01, require_convergence=False, execution="native"
+    )
+    jobs = []
+    stationary = True
+
+    def run(job):
+        jobs.append(job)
+        state = ControlStateFile.read(job.control_state)
+        if len(jobs) == 2:
+            np.testing.assert_array_equal(state["reflectivity.ip"], 0.25)
+        state.blocks["reflectivity.ip"][:] = 0.25
+        for task in range(1, job.n_tasks + 1):
+            path = job.reflectivity_report_file(task)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    dict(
+                        schema="fs-reflectivity-solve-1",
+                        converged=stationary,
+                        gradient_kind="reduced" if stationary else "fixed_reflectivity",
+                        stationarity_norm=0.0,
+                        data_objective=float(task),
+                        regularization=2.0,
+                    )
+                )
+            )
+            state.write(job.reflectivity_solution_file(task))
+            ControlVectorFile(
+                {name: np.full(state[name].size, float(task)) for name in job.active},
+                state_fingerprint=f"state-{task}",
+                control_registry_fingerprint=f"registry-{task}",
+                native=False,
+            ).write(job.covector_file(task))
+
+    monkeypatch.setattr(rwi._problem, "_run_job", run)
+    fit = rwi.linearize()
+    assert fit.value == 6.5  # weighted data + one shared penalty
+    np.testing.assert_array_equal(fit.gradient.values, 4.5)
+    np.testing.assert_array_equal(fit.state["refl"], 0.25)
+    np.testing.assert_array_equal(problem.state["refl"], baseline["refl"])
+    assert rwi.linearize() is fit
+    assert len(jobs) == 1
+    point = fit.point + rwi.space.pack({"vp": np.full(VP_COUNT, 0.01)})
+    assert rwi.state_from(point)["refl"][0] == 0.25
+    stationary = False
+    with pytest.raises(RuntimeError, match="not stationary"):
+        rwi.linearize(point * 1.01)

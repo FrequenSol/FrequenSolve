@@ -61,6 +61,9 @@ class FrequencyDomainJob(BaseJob):
             from zero (the default) through four. A positive value selects the
             solver's ``forward_df`` workflow and includes every derivative from
             first order through the requested order.
+        source_derivative: Include source frequency dependence (``"total"``,
+            default), or hold the source load fixed (``"frozen"``). Use the
+            same policy as the imaging comparison for synthetic observations.
 
     Raises:
         ValueError: If ``phase_derivatives`` is not an integer from zero
@@ -78,9 +81,14 @@ class FrequencyDomainJob(BaseJob):
         k_units: Optional[str] = None,
         phase_derivatives: int = 0,
         *,
+        source_derivative: Literal["total", "frozen"] = "total",
         preserve_task_outputs: bool = False,
         patches: PatchSet | None = None,
+        simulation_overrides=None,
     ):
+        if source_derivative not in {"total", "frozen"}:
+            raise ValueError("source_derivative must be total or frozen")
+        self.source_derivative = source_derivative
         phase_derivatives = _phase_derivative_order(phase_derivatives)
         if patches is not None:
             from frequensolve.mesh.patches import PatchSet
@@ -105,6 +113,9 @@ class FrequencyDomainJob(BaseJob):
             k_weights=k_weights,
             k_units=k_units,
             preserve_task_outputs=preserve_task_outputs,
+            simulation_overrides=(
+                {} if simulation_overrides is None else simulation_overrides
+            ),
         )
         self.phase_derivatives: int = phase_derivatives
 
@@ -116,6 +127,7 @@ class FrequencyDomainJob(BaseJob):
         payload = super().to_fs(ctx, project_relative=project_relative)
         if self.phase_derivatives:
             payload["derivative_order"] = self.phase_derivatives
+            payload["source_derivative"] = self.source_derivative
         if self.patches is not None:
             payload["patches"] = self.patches.to_dict()
         return payload
@@ -146,6 +158,7 @@ class FrequencyDomainJob(BaseJob):
                 k_weights=self.k_weights,
                 k_units=self.k_units,
                 phase_derivatives=self.phase_derivatives,
+                source_derivative=self.source_derivative,
                 preserve_task_outputs=self.preserve_task_outputs,
             )
             for child in children
@@ -198,10 +211,12 @@ class FrequencyDomainJob(BaseJob):
             k_weights=d.get("k_weights"),
             k_units=d.get("k_units"),
             phase_derivatives=phase_derivatives,
+            source_derivative=d.get("source_derivative", "total"),
             patches=(
                 None if d.get("patches") is None else cls._restore_patches(d["patches"])
             ),
         )
+        job._restore_simulation_overrides(d)
         job.preserve_task_outputs = d.get("preserve_task_outputs", False)
         if not isinstance(job.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")
@@ -292,6 +307,7 @@ class TimeDomainJob(BaseJob):
         phase_derivatives: int = 0,
         *,
         preserve_task_outputs: bool = False,
+        simulation_overrides=None,
     ):
         if damping_factor is not None and laplace is not None:
             raise ValueError("Specify only one of damping_factor or laplace")
@@ -371,6 +387,9 @@ class TimeDomainJob(BaseJob):
             simulation=simulation,
             workflow=workflow,
             f_list=f_list,
+            simulation_overrides=(
+                {} if simulation_overrides is None else simulation_overrides
+            ),
             outputs=JobOutputs(outputs),
             k_list=k_list,
             k_weights=k_weights,
@@ -486,6 +505,7 @@ class TimeDomainJob(BaseJob):
             ),
         )
         job.f_list = f_list.tolist()
+        job._restore_simulation_overrides(d)
         job.preserve_task_outputs = d.get("preserve_task_outputs", False)
         if not isinstance(job.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")

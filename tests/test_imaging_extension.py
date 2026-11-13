@@ -514,7 +514,10 @@ def test_extension_jobs_validate_against_the_pinned_schema(tmp_path, fake, frequ
             assert solver["solution"].endswith("taps.h5")
             assert solver["report"].endswith("inner_solve.json")
             if job.reduced_normal is not None:
-                assert "direction" in op and "covector" in op
+                # One direction set (a single row) serves every task; its covector stays per task.
+                assert (
+                    "direction_set" in op and "direction" not in op and "covector" in op
+                )
                 assert op["reduced_normal"] == {}
             elif job.model_gradient:
                 assert op["model_gradient"] is True and "covector" in op
@@ -526,6 +529,9 @@ def test_extension_jobs_validate_against_the_pinned_schema(tmp_path, fake, frequ
             assert "covector" not in op
         elif job.action == "jvp":
             assert "direction" in op["extension"] and "direction" not in op
+            # The tap vector is one file for every task, stamped with the control identity.
+            taps = ExtensionVectorFile.read(op["extension"]["direction"])
+            assert taps.control_identity is not None and taps.baseline is None
         elif job.action == "vjp":
             assert "covector" in op["extension"] and "covector" not in op
         else:

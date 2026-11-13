@@ -814,3 +814,51 @@ def test_fetch_outputs_preserves_control_postprocess_with_exact_catalog(tmp_path
     site.fetch_artifacts = lambda *args, **kwargs: []
     with pytest.raises(FileNotFoundError, match="No postprocess artifact"):
         site.fetch_outputs(job)
+
+
+def test_transient_fetch_uses_operation_without_frequency_tasks(tmp_path):
+    fingerprints = {k: "sha256:" + "a" * 64 for k in ("job", "simulation", "outputs")}
+    prefix = "project/jobs/simulation/job/results"
+    operation = {
+        "schema": "fs-operation-result-1",
+        "operation": {"name": "transient", "generation": "time-1"},
+        "fingerprints": fingerprints,
+        "status": {"state": "success", "code": 0},
+        "artifacts": [
+            {
+                "id": "field/step_000000000001",
+                "role": "sampled_wavefield",
+                "representation": "hdf5_shard",
+                "schema": "fs-time-step-1",
+                "path": "field/step_000000000001.h5",
+                "retention": "durable",
+                "bytes": 5,
+            }
+        ],
+    }
+    client = FakeS3Client(
+        {
+            f"{prefix}/_fs_run/operations/transient/result.json": json.dumps(operation),
+            f"{prefix}/field/step_000000000001.h5": "field",
+        }
+    )
+    job = SimpleNamespace(
+        workflow="transient",
+        n_tasks=1,
+        project_path=tmp_path / "project",
+        _result_path=tmp_path / prefix,
+        name="job",
+        simulation=SimpleNamespace(name="simulation"),
+        staged_artifact_fingerprints=lambda site: fingerprints,
+    )
+    fetched = make_site(client).fetch_artifacts(
+        job,
+        requests=(ArtifactRequest(role="sampled_wavefield"),),
+        include_defaults=False,
+    )
+    assert fetched == [job._result_path / "field/step_000000000001.h5"]
+    assert [d["Key"] for d in client.downloads] == [
+        f"{prefix}/_fs_run/operations/transient/result.json",
+        f"{prefix}/field/step_000000000001.h5",
+    ]
+    assert not client.paginate_calls

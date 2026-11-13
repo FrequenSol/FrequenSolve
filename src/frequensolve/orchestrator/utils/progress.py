@@ -301,6 +301,23 @@ def status_table_html(runs: list[RunHandle], statuses: Dict[int, JobStatus]) -> 
         state = html.escape(str(status.state))
         counts = _status_counts(status)
         color = _status_html_color(status.state)
+        time_progress = status.raw.get("time_progress")
+        if time_progress is not None:
+            from .transient_progress import progress_summary
+
+            progress_cells = (
+                "<td colspan='5' style='padding:7px 10px; text-align:right; "
+                "font-variant-numeric:tabular-nums; font-weight:750'>"
+                f"{html.escape(progress_summary(time_progress))}</td>"
+            )
+        else:
+            progress_cells = (
+                _count_cell(counts["succeeded"], "#1a7f37", border_left=True)
+                + _count_cell(counts["failed"], "#cf222e")
+                + _count_cell(counts["running"], "#8250df")
+                + _count_cell(counts["pending"], "#9a6700")
+                + _count_cell(counts["total"], "#24292f")
+            )
         rows.append(
             "<tr style='border-bottom:1px solid #d8dee4'>"
             f"<td style='padding:7px 10px; color:#57606a'>{site}</td>"
@@ -312,13 +329,22 @@ def status_table_html(runs: list[RunHandle], statuses: Dict[int, JobStatus]) -> 
             "color:white; border-radius:999px; padding:2px 9px; "
             "font-size:12px; font-weight:700; line-height:1.6'>"
             f"{state}</span></td>"
-            f"{_count_cell(counts['succeeded'], '#1a7f37', border_left=True)}"
-            f"{_count_cell(counts['failed'], '#cf222e')}"
-            f"{_count_cell(counts['running'], '#8250df')}"
-            f"{_count_cell(counts['pending'], '#9a6700')}"
-            f"{_count_cell(counts['total'], '#24292f')}"
+            f"{progress_cells}"
             "</tr>"
         )
+    only_transient = bool(runs) and all(
+        "time_progress" in statuses.get(i, run._last_status).raw
+        for i, run in enumerate(runs)
+    )
+    count_headers = (
+        "<th colspan='5' style='padding:6px 10px; text-align:right'>Time steps</th>"
+        if only_transient
+        else _header_cell("Succeeded", align="right", border_left=True)
+        + _header_cell("Failed", align="right")
+        + _header_cell("Running", align="right")
+        + _header_cell("Pending", align="right")
+        + _header_cell("Total", align="right")
+    )
     return (
         "<div style='background:#ffffff; border:1px solid #d0d7de; "
         "border-radius:8px; padding:12px; color:#24292f; "
@@ -338,11 +364,7 @@ def status_table_html(runs: list[RunHandle], statuses: Dict[int, JobStatus]) -> 
         f"{_header_cell('Job')}"
         f"{_header_cell('Job ID')}"
         f"{_header_cell('State')}"
-        f"{_header_cell('Succeeded', align='right', border_left=True)}"
-        f"{_header_cell('Failed', align='right')}"
-        f"{_header_cell('Running', align='right')}"
-        f"{_header_cell('Pending', align='right')}"
-        f"{_header_cell('Total', align='right')}"
+        f"{count_headers}"
         "</tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
@@ -364,6 +386,7 @@ def _status_signature(
                 run.id,
                 status.state,
                 status.message,
+                repr(status.raw.get("time_progress")),
                 payload.get("successful") if payload else None,
                 payload.get("succeeded") if payload else None,
                 payload.get("failed") if payload else None,
@@ -396,6 +419,8 @@ def _status_counts(status: JobStatus) -> Dict[str, Any]:
 
 
 def _status_summary(status: JobStatus) -> str:
+    if "time_progress" in status.raw:
+        return f" - {status.message}"
     payload = status.raw.get("task_status") if isinstance(status.raw, dict) else None
     if isinstance(payload, dict):
         counts = _status_counts(status)

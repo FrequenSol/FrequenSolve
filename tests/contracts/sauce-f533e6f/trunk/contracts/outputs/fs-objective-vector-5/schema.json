@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fs-objective-vector-5",
+  "description": "One objective-space vector bound to a frozen FWI state, stored as canonical rows in one HDF5 file readable on any MPI rank count.",
+  "type": "object",
+  "required": [
+    "schema",
+    "state_fingerprint",
+    "file",
+    "terms",
+    "manifest_fingerprint"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-objective-vector-5"
+    },
+    "state_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "HDF5 row file, relative to the manifest directory or absolute."
+    },
+    "terms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "n_global_rows",
+          "layout_fingerprint",
+          "digests"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "n_global_rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "layout_fingerprint": {
+            "$ref": "#/$defs/sha256"
+          },
+          "digests": {
+            "type": "object",
+            "required": [
+              "coordinate_keys",
+              "values"
+            ],
+            "properties": {
+              "coordinate_keys": {
+                "$ref": "#/$defs/digest"
+              },
+              "values": {
+                "$ref": "#/$defs/digest"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "manifest_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^fs-block-sha256-1:[0-9a-f]{64}$"
+    }
+  }
+}

@@ -193,6 +193,7 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
         "sockets_per_node": 2,
         "memory_per_node": 262144,
         "gpus_per_node": 0,
+        "gpu_memory_per_gpu": 0,
     }
 
     site = sites.Site()

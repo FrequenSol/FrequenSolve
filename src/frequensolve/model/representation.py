@@ -12,7 +12,12 @@ from scipy.sparse import csr_matrix, diags
 from scipy.sparse.linalg import lsqr
 
 from frequensolve.geometry.grids import CartesianGrid
-from frequensolve.model.parameterization import BSplineControl, HatControl
+from frequensolve.model.parameterization import (
+    BSplineControl,
+    HatControl,
+    TensorBSplineControl,
+    TensorHatControl,
+)
 from frequensolve.util.mixins import ExportContext
 
 __all__ = [
@@ -20,6 +25,7 @@ __all__ = [
     "ControlRepresentation",
     "EvaluationContext",
     "FieldRepresentation",
+    "TensorControlRepresentation",
 ]
 
 
@@ -123,7 +129,7 @@ class FieldRepresentation(ABC):
 
     def evaluate(
         self,
-        coefficients: Sequence[float],
+        coefficients: Sequence[float] | np.ndarray,
         context: EvaluationContext,
         *,
         derivative_order: int = 0,
@@ -191,7 +197,7 @@ class FieldRepresentation(ABC):
     def transfer_to(
         self,
         target: "FieldRepresentation",
-        coefficients: Sequence[float],
+        coefficients: Sequence[float] | np.ndarray,
         context: EvaluationContext,
         *,
         weights: Optional[Any] = None,
@@ -205,7 +211,7 @@ class FieldRepresentation(ABC):
             samples, context, weights=weights, damping=damping, tolerance=tolerance
         )
 
-    def _vector(self, values: Sequence[float], name: str) -> np.ndarray:
+    def _vector(self, values: Sequence[float] | np.ndarray, name: str) -> np.ndarray:
         vector = np.asarray(values)
         if np.iscomplexobj(vector):
             raise ValueError(f"{name} must be real-valued")
@@ -233,6 +239,8 @@ class ControlRepresentation(FieldRepresentation):
             self.knots = np.array(control.knots, copy=True)
         self.axis = control.axis
         self.coordinate_system = control.coordinate_system
+        #: ``hold`` clamps coordinates into the knot span like the solver does.
+        self.hold = getattr(control, "extrapolate", "zero") == "hold"
 
     @property
     def size(self) -> int:
@@ -259,10 +267,20 @@ class ControlRepresentation(FieldRepresentation):
                 f"degree-{self.degree} controls do not have classical "
                 f"derivative order {derivative_order}"
             )
-        coordinates = context.coordinate(self.axis, self.coordinate_system)
+        coordinates = np.asarray(context.coordinate(self.axis, self.coordinate_system))
         lower = self.knots[self.degree]
         upper = self.knots[self.size]
-        active = (coordinates >= lower) & (coordinates <= upper)
+        inside = (coordinates >= lower) & (coordinates <= upper)
+        if self.hold:
+            # Edge-held extrapolation: evaluate the nearest end of the span, and
+            # as the clamped coordinate map is constant there, its derivatives
+            # vanish outside the span.
+            active = np.isfinite(coordinates)
+            if derivative_order > 0:
+                active &= inside
+            coordinates = np.clip(coordinates, lower, upper)
+        else:
+            active = inside
         if not np.any(active):
             return csr_matrix((context.size, self.size), dtype=np.float64)
         rows = np.flatnonzero(active)
@@ -282,6 +300,128 @@ class ControlRepresentation(FieldRepresentation):
             (coo.data, (rows[coo.row], coo.col)),
             shape=(context.size, self.size),
         )
+
+
+def _row_khatri_rao(operators: Sequence[csr_matrix], rows: int) -> csr_matrix:
+    """Return the row-wise Khatri-Rao product of per-axis sampling operators.
+
+    Row ``r`` of the product is the Kronecker product of the factors' rows
+    ``r`` with the first factor's column varying fastest, so the flat column
+    index is ``i_0 + n_0 * (i_1 + n_1 * i_2)`` (the Sauce tensor ordering).
+    """
+
+    result: Optional[csr_matrix] = None
+    stride = 1
+    for factor in operators:
+        op = factor.tocsr()
+        if result is None:
+            result = op
+        else:
+            prev = result.tocsr()
+            prev_rows = np.repeat(np.arange(rows), np.diff(prev.indptr))
+            repeats = np.diff(op.indptr)[prev_rows]
+            prev_index = np.repeat(np.arange(prev.nnz), repeats)
+            starts = np.repeat(op.indptr[prev_rows], repeats)
+            offsets = np.arange(prev_index.size) - np.repeat(
+                np.cumsum(repeats) - repeats, repeats
+            )
+            op_index = starts + offsets
+            result = csr_matrix(
+                (
+                    prev.data[prev_index] * op.data[op_index],
+                    (
+                        prev_rows[prev_index],
+                        prev.indices[prev_index] + stride * op.indices[op_index],
+                    ),
+                ),
+                shape=(rows, stride * op.shape[1]),
+            )
+        stride *= op.shape[1]
+    if result is None:
+        raise ValueError("a tensor sampling operator needs at least one axis")
+    return result
+
+
+class TensorControlRepresentation(FieldRepresentation):
+    """Tensor-product hat/B-spline control evaluation and transfer map.
+
+    Accepts a :class:`~frequensolve.model.parameterization.TensorHatControl`
+    (uniform hat axes) or a
+    :class:`~frequensolve.model.parameterization.TensorBSplineControl`
+    (one B-spline basis per axis). The sampling operator is the row-wise
+    Khatri-Rao product of the per-axis :class:`ControlRepresentation`
+    operators with the first axis fastest; each axis clamps its own coordinate
+    into its span when the control holds its edge values.
+    """
+
+    def __init__(self, control: TensorHatControl | TensorBSplineControl):
+        if isinstance(control, TensorHatControl):
+            axis_controls: Sequence[HatControl | BSplineControl] = [
+                HatControl(
+                    axis=axis,
+                    spacing=float(control.spacing[k]),
+                    origin=float(control.origin[k]),
+                    coefficients=np.zeros(control.shape[k]),
+                    coordinate_system=control.coordinate_system,
+                    units=control.units,
+                    extrapolate=control.extrapolate,
+                )
+                for k, axis in enumerate(control.axes)
+            ]
+        elif isinstance(control, TensorBSplineControl):
+            axis_controls = control.axis_controls
+        else:
+            raise TypeError(
+                "tensor control representation requires a tensor-hat or tensor "
+                "B-spline control"
+            )
+        self.control = control
+        self.axes = tuple(control.axes)
+        self.coordinate_system = control.coordinate_system
+        #: One-dimensional factor maps in coefficient storage order.
+        self.axes_1d = [ControlRepresentation(axis) for axis in axis_controls]
+        self.hold = control.extrapolate == "hold"
+
+    @property
+    def size(self) -> int:
+        """Return the number of tensor coefficients."""
+
+        return self.control.size
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Return the coefficient count per axis."""
+
+        return tuple(rep.size for rep in self.axes_1d)
+
+    def sampling_operator(
+        self, context: EvaluationContext, *, derivative_order: Any = 0
+    ) -> csr_matrix:
+        """Build the sparse tensor evaluation operator.
+
+        ``derivative_order`` is ``0`` for values or one order per axis for a
+        mixed partial derivative (``(1, 0)`` differentiates along the first
+        axis); each order is limited as in :class:`ControlRepresentation`.
+        """
+
+        if np.ndim(derivative_order) == 0:
+            if int(derivative_order) != 0:
+                raise ValueError(
+                    "tensor derivative orders must be given per axis, e.g. (1, 0)"
+                )
+            orders = (0,) * len(self.axes_1d)
+        else:
+            orders = tuple(int(order) for order in derivative_order)
+            if len(orders) != len(self.axes_1d):
+                raise ValueError(
+                    f"tensor derivative orders need one value per axis "
+                    f"({len(self.axes_1d)})"
+                )
+        operators = [
+            rep.sampling_operator(context, derivative_order=order)
+            for rep, order in zip(self.axes_1d, orders)
+        ]
+        return _row_khatri_rao(operators, context.size)
 
 
 class CartesianGridRepresentation(FieldRepresentation):

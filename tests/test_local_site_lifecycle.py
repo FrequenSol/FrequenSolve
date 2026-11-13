@@ -964,7 +964,10 @@ def test_auto_dask_sizing_refreshes_for_larger_later_job(monkeypatch):
     assert site._active_threads_per_worker == 1
 
 
-def test_initialize_dask_preserves_auto_requested_settings(monkeypatch):
+@pytest.mark.parametrize("custom_directory", [False, True])
+def test_initialize_dask_preserves_auto_requested_settings(
+    monkeypatch, tmp_path, custom_directory
+):
     captured = {}
 
     class FakeCluster:
@@ -990,7 +993,8 @@ def test_initialize_dask_preserves_auto_requested_settings(monkeypatch):
     monkeypatch.setattr(local_module, "LocalCluster", FakeCluster)
     monkeypatch.setattr(local_module, "Client", FakeClient)
 
-    site = LocalSite()
+    directory = tmp_path / "workers" if custom_directory else None
+    site = LocalSite(local_directory=directory)
     site.config.cores = 16
     site.config.memory = 16000
 
@@ -1005,6 +1009,9 @@ def test_initialize_dask_preserves_auto_requested_settings(monkeypatch):
     assert captured["cluster"]["n_workers"] == 1
     assert captured["cluster"]["threads_per_worker"] == 16
     assert captured["cluster"]["memory_limit"] == "14400MB"
+    assert captured["cluster"]["local_directory"] == (
+        str(directory) if custom_directory else "/tmp/dask-worker-space"
+    )
 
 
 def test_close_uses_cluster_close_without_retiring_workers(monkeypatch):
@@ -2177,3 +2184,33 @@ def test_selected_dispatcher_allows_explicit_backend_directory(tmp_path):
     )
 
     assert site.env["FS_SOLVER_PATH"] == "/custom/backends"
+
+
+def test_transient_submission_cannot_tolerate_failed_trajectory(monkeypatch):
+    site, _closed = make_site(monkeypatch)
+
+    class Transient(DummyJob):
+        workflow = "transient"
+        supports_trace_packing = False
+        name = "transient"
+
+        def is_run_current(self):
+            return False
+
+    monkeypatch.setattr(
+        site,
+        "_submit_local_tasks",
+        lambda *args, **kwargs: local_module.LocalTaskSubmission(
+            futures=[DummyFuture({"task_id": 0, "status": "error", "complete": False})],
+            task_plan={"pending_indices": [0]},
+        ),
+    )
+    run = site.submit(Transient())
+    assert run.backend["tolerate_failures"] == 0
+    assert run.backend["pack_after_tasks"] is False
+    monkeypatch.setattr(
+        local_module, "wait", lambda futures, timeout=None: SimpleNamespace(not_done=[])
+    )
+    assert not site._wait_local_run(run).successful
+    with pytest.raises(ValueError, match="tolerate_failures=0"):
+        site.submit(Transient(), tolerate_failures=1)

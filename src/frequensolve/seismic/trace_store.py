@@ -1247,11 +1247,15 @@ class TraceStore:
                 except (TypeError, ValueError):
                     continue
         out = []
+        used: set[int] = set()
         for frequency in frequencies:
             value = 0.0
-            for known_frequency, known_laplace in pairs:
+            for index, (known_frequency, known_laplace) in enumerate(pairs):
+                if index in used:
+                    continue
                 if np.isclose(float(frequency), known_frequency, rtol=0.0, atol=1.0e-9):
                     value = known_laplace
+                    used.add(index)
                     break
             out.append(value)
         return np.asarray(out, dtype=float)

@@ -4,6 +4,12 @@ Status: initial
 Visibility: public
 Schema id: `fs-imaging-1`
 
+## Numerical tolerance guidance
+
+Use relative tolerance 1e-4 by default for iterative solvers, smoothers, and regularization/proximal solves, not only TV. It rarely needs to change; most seismic imaging problems do not require tighter accuracy. Preserve explicit user-selected tolerances. A smaller tolerance may be justified for very hard problems or unusually high accuracy requirements, with a documented need and verified downstream benefit. Keep relative tolerances strictly above 1e-7 for single-precision solves. Do not transfer stringent diagnostic/test tolerances into production settings. Absolute tolerances depend on residual scaling and units and are not interchangeable with relative tolerances.
+
+This is authoring guidance, not a new runtime validation bound. Existing field defaults and accepted numeric ranges remain unchanged.
+
 ## Summary
 
 For workflow selection, support limits and maintained examples, see the
@@ -51,26 +57,25 @@ plus imaging evaluation cases.
   derivatives of frequency-dependent encoding weights are not added.
 - `misfit/objective` selects the scalar data objective and defaults to `l2` when
   omitted, preserving the legacy objective behavior. Its `kind` accepts
-  `l2`/`none`, `huber`/`hybrid`, and
+  `l2`/`none`, `huber`/`hybrid`, `tukey`/`bisquare`, and
   `studentst`/`student_t`/`student-t`; matching is case-insensitive. Huber uses
   positive `delta`. Student's t uses positive squared scale `c2` and positive
   degrees of freedom `nu`.
-- An explicit `misfit/objective_terms[*].objective.kind: hv` selects the 2D
-  acoustic HV data action and native material-control gradient in the ordinary
-  `rtm` workflow. It requires a complete, uniformly spaced physical pressure
-  receiver line, independent physical sources, identity projection, waveform
-  comparison, no preprocessing hooks, one fixed unit-bearing amplitude scale,
-  and `reduction: sum`. `kappa` and `epsilon` are positive, `lambda` is
-  nonnegative. The auxiliary H1 order and optional initial spatial cell count
-  are independent of receiver positions. Receiver signals are projected onto
-  the boundary trace, and its transpose maps reactions back to receiver data.
-  The path and receiver axes are doubled until both action and receiver covector
-  change by less than `relative_mesh_tolerance` (default 0.01), with at most
-  `max_refinements` steps (default 4). The task fails if either the inner solve
-  or mesh convergence is not reached. Other physics,
-  distributed execution, source controls, spectral windows, and mixed scalar
-  objective terms are currently unsupported. See the
-  [HV example](examples/acoustic-hv-gradient.json).
+  Tukey uses positive cutoff `delta`: for metric residual magnitude `r` below
+  the cutoff its loss is `r²/2 - r⁴/(2 delta²) + r⁶/(6 delta⁴)` and its positive
+  IRLS multiplier is `(1 - r²/delta²)²`. At or above the cutoff the loss is
+  constant `delta²/6`, and both score and IRLS weight are zero. This positive
+  frozen IRLS normal is not the full, potentially indefinite Tukey Hessian.
+- Explicit `misfit/objective_terms` require a normalization scale. Their
+  `normalization.reduction` defaults to `sum`; `weighted_mean` divides by the
+  effective static-weight mass when selected. The Python API emits explicit
+  scale `1.0` by default. Observed-RMS scaling remains an explicit choice.
+- `misfit/objective_terms[*].objective.kind: hv` selects the experimental
+  complete-pressure-line objective in builds with `FS_ENABLE_HV=1`. Default
+  builds reject it explicitly. The [HV example](examples/acoustic-hv-gradient.json)
+  retains its parameter format. The supported workflow is the serial Cartesian
+  2D acoustic, elastic, or coupled material gradient with fixed explicit scale
+  and frozen Gram maps. Each receiver line has one scalar output channel.
 - `misfit/comparison` selects the receiver attribute presented to the objective
   and defaults to `{"kind":"waveform"}`. `phase_derivative` compares the
   stabilized physical-frequency phase slope
@@ -79,14 +84,40 @@ plus imaging evaluation cases.
 - `spectral_derivative` compares the full complex physical-frequency derivative
   `df(v)` at fixed Laplace damping, in the channel's units per Hz. Unlike
   `phase_derivative`, it retains amplitude information and has no amplitude-floor
-  quotient. Its `observed_rms` normalization uses the observed derivative energy.
+  quotient. Its optional `observed_rms` normalization uses the observed derivative energy.
   Separate waveform and spectral objective terms may use independent scales and weights.
-- Both derivative comparisons require `observed_derivatives/df` for every receiver
-  group. The derivative dataset must identify its base dataset and declare
+- `wavenumber` compares the instantaneous wavenumber along the receiver line,
+  in rad/m (`measure: slowness` divides by `2*pi*f` for s/m). Consecutive
+  output channels `a, b = a+1` at distance `h` pair into `conjg(v_a) v_b` and
+  `|v_a + v_b|^2/4`; each channel pools `N = sum W Im(conjg(v_a) v_b)`,
+  `D = epsilon^2 + sum W |v_a + v_b|^2/4` and `H = sum W h` over its adjacent
+  pairs (or an `array`'s weights by distance to the pair midpoints) and
+  compares `k = (2/H) atan(N/(2 D))`. This is `Im(v^H d_s v)/(v^H v)` in the
+  continuum and exact for a plane wave up to spatial Nyquist; a wave travelling
+  towards increasing channel index gives `-omega/c`. `derivative_axis` is
+  `receiver_line`. Pairs farther apart than `max_spacing_m` (default 2.5 times
+  the median spacing) are not formed. It takes the phase comparisons' observed
+  inputs and windowed pair, ignores the df trace, and needs dense output-channel
+  rows (`fwi_operator`); confidence floors, reliability and `source_delay` are
+  phase-only.
+- The derivative comparisons require an observed physical-frequency derivative
+  for every receiver group. An explicit `observed_derivatives/df` dataset takes
+  precedence. It must identify its base dataset and declare
   `derivative_axis=df`, `frequency_unit=Hz`, derivative units compatible with
   the base channel units per Hz, and the same `source_derivative` policy as the
   comparison. Runtime neighboring-frequency differencing is not a valid
   substitute.
+- Without explicit data, observed derivatives of any order may be derived from a
+  time-domain `HDF5TraceStore`/`SeismicStore` (`/data/time/value`) as
+  `(-2*pi*i)^p` times its p-th time moment
+  `X_p(f) = sum_n x[n] t_n^p exp(-2*pi*i*(f + i*sigma)*t_n)`, with
+  `t_n = t0 + n*dt` in seconds and the task's Laplace damping `sigma`. Sauce
+  evaluates the moment on demand; no key is needed. Recorded data contain the
+  source spectrum, so the derived policy is `total`: phase and spectral
+  comparisons and `receiver_linearize` `base_df` exports reject
+  `source_derivative: frozen`, and use the encoded `source_encoding` basis.
+  `kernel_derivative` orders read the same moments; they are consistent with
+  `frozen` hierarchies only for frequency-independent authored spectra.
 - `source_derivative` defaults to `frozen`, which holds authored source and
   instrument spectra fixed while retaining propagation and model-dependent
   load derivatives. `total` also differentiates authored spectra and is an
@@ -96,6 +127,22 @@ plus imaging evaluation cases.
   observed base amplitude over active receivers. Observed and simulated phase
   attributes use the same model-independent epsilon. A zero-energy component
   contributes zero and the complete objective must contain an active sample.
+- `source_delay` (`phase_derivative` only) defaults to `none`. `fit` projects
+  one source delay per task and encoded RHS out of the traveltime residual: a
+  per-RHS complex source factor `q` cancels from the phase slope except for
+  `Im(q_f/q)/(2*pi)`, which shifts every row of the RHS by the same time. Sauce fits
+  `tau = sum(w r)/sum(w)` over active rows, with `w` the residual-stage weight,
+  data-metric weight and squared inverse term scale, and evaluates the loss at
+  `r - tau`. Robust losses minimize the same weighted loss over `tau` (the IRLS
+  fixed point) by safeguarded Newton steps, converging within `1e-3` of the
+  loss's residual scale and `1e-6 s` in at most 100 iterations; a capped fit
+  keeps its best delay and is reported as not converged. The
+  objective `min_tau L` keeps the fixed-delay gradient (exact for L2, the
+  converged IRLS fixed point otherwise). `fwi_operator` stores the centred
+  residual and applies the same linear centring in `jvp`, `vjp` and `normal`,
+  so they remain adjoint; for L2 this is the exact Jacobian of the projected
+  residual. The fitted delays are reported per RHS in the
+  [objective report](../../outputs/fs-objective-report-1/contract.md).
 - Receiver `projection` defaults to `identity`. `up_down` infers acoustic
   reconstruction when the receiver group has compatible pressure and normal-
   velocity channels. It forms the physical upgoing pressure characteristic
@@ -203,10 +250,20 @@ Current built-ins are registered by `register_builtin_ics()`:
 - `fwi:acoustic`
 - `fwi:acoustic_up_down`
 - `fwi:elastic`
+- `fwi:coupled`
 
 Bare `fwi` and `energy` select the active acoustic or elastic variant, preferring
 elastic when both physics are active. Explicit kind strings avoid ambiguity.
 `fwi` may read `property` to target a material property such as `vp`.
+
+`fwi:coupled` is the fluid-solid material kernel. Acoustic incidences use the
+`fwi:acoustic` kernel (acoustic pressure and velocity, `dBeta`) and elastic
+incidences the `fwi:elastic` kernel (elastic velocity and stress, `S`, `dC`);
+each medium's fields average only that medium's incidences, and a point shared
+by both media blends the two kernels by its fluid incidence fraction. A
+property without a kernel in one medium (for example `vs` or `qs` in the
+fluid, `beta` in the solid) contributes zero there; a property with neither
+kernel is rejected.
 
 For an exact FWI gradient of the projected upgoing-data objective, use the
 `up_down` receiver projection with `fwi:acoustic`. The optional
@@ -222,7 +279,9 @@ kernel needs more than the local pressure/vertical-velocity decomposition.
   or from an HDF5 trace store when `observed._type` is `HDF5TraceStore` or
   `SeismicStore`.
 - Simulated data defaults to the receiver group's output file unless `simulated`
-  provides a path stem.
+  provides a path stem or a stored trace file (a trace shard, or a packed trace
+  directory). The `adjoint` workflow has no forward solve of its own and
+  requires `simulated` for every misfit receiver group.
 - Misfit values are accumulated in real64 as a source-batch-invariant `misfit`
   sum on the simulated HDF5 receiver group. A singular objective records
   `objective_kind` and `objective_parameters=[delta,c2,nu]`. For
@@ -230,9 +289,15 @@ kernel needs more than the local pressure/vertical-velocity decomposition.
   position using the `objective_term_<index>_` prefix; `id`, `weight`, and
   `value` identify each contribution, and the loss, comparison, and
   preprocessing attributes use the same prefix.
-  An HV term records `objective_kind=hv`, weighted `value_by_rhs`, maximum
+  The optional HV implementation records `objective_kind=hv`, weighted `value_by_rhs`, maximum
   inner iteration count and stationarity residual. Its coefficient
-  configuration is carried by the input term.
+  configuration is carried by the input term. The internal
+  `objective.export_receiver_curvature` flag additionally writes
+  `hv_curvature_task_<task>_term_<term>_source_<source>_{real,imag}.h5`.
+  Each `fs-hv-receiver-gn-1` artifact contains a zero-based sparse coupled
+  `(f,v,q)` matrix, free indices and receiver-to-Dirichlet map, physical input
+  samples, source/receiver IDs, fixed amplitude scale and term weight. Consumers
+  eliminate the free block and apply the scale twice and term weight once.
 - Durable per-task imaging fields are written to `fields<task>.h5`. Disposable
   fields are written to `fields<task>.transient.h5` and the complete transient
   file is deleted at image-manager teardown. Bulk field payloads are never
@@ -257,11 +322,11 @@ Hooks must not silently mutate observed or simulated receiver data in place.
 The built-in v1 hook kinds are `offset_power`, `offset_taper`,
 `source_scalar_fit`, `component_scale`, `trace_normalize`, `frequency_weight`,
 `source_spectrum_correction`, `trace_mask`, `trace_weight`, `receiver_ar1_whiten`, `scholte_notch`, `slow_velocity_mute`,
-`amplitude_clip`, and `wavefield_source_taper`.
+`slow_velocity_pass`, `amplitude_clip`, `material_weighting`, and `wavefield_source_taper`.
 
 Phase-derivative comparison requires a bundle-consistent JVP/VJP. Version 1
 accepts frequency-independent linear offset power/taper, component scale,
-trace mask/weight, and receiver AR(1) whitening. It also accepts residual-stage
+trace mask/weight, pinned frequency-independent material weighting, and receiver AR(1) whitening. It also accepts residual-stage
 frequency weighting, externally supplied `source_spectrum_correction`, and
 dense Scholte/slow-velocity filtering with an explicit spectral-derivative
 policy. It rejects `source_scalar_fit`, trace normalization, amplitude clipping,
@@ -278,7 +343,8 @@ The supplied `q` and `q_f` are held fixed during the model-gradient evaluation;
 an orchestrator should therefore update them between outer iterations from a
 smooth multi-frequency source estimate. `source_scalar_fit` remains available
 for waveform objectives, but its independent per-frequency variable projection
-does not define `q_f` and is rejected for phase-derivative comparison.
+does not define `q_f` and is rejected for phase-derivative comparison; use
+`comparison.source_delay: "fit"` for the phase slope's projectable unknown.
 
 `offset_taper` and `wavefield_source_taper` use `d0` and `d1` for the taper
 limits. With `scale: "absolute"`, these may be scalar values paired with
@@ -311,6 +377,36 @@ sources and components; `component_receiver`, with receiver varying fastest;
 indexed by global source id across batches; or `sparse_trace`, which follows the
 sparse trace catalog order. The `values` key remains an accepted inline alias
 for `weights`. Bulk values are not copied into preprocessing provenance.
+Alternatively, `params.frequency_weights` contains entries with `frequency_hz`,
+`laplace_hz`, and an `HDF5Dense` `weights` reference. Exactly one entry must match
+the task's complex frequency (absolute tolerance 1e-9 Hz). This supports frozen
+confidence snapshots with different weights per frequency, independent of task
+ordering. It is mutually exclusive with a shared `weights` value.
+
+`material_weighting` is a `trace_pair` factor W, applied to observed and modeled
+traces and reversed with Wᴴ. Its `params/blocks` selects nonoverlapping one-based
+`components`, a typed material `coefficient`, and weighted output `units`.
+`mode: "frozen"` (default) samples W on first use, omits its material derivatives,
+and holds it fixed within that objective instance, including model trials and
+remaps preserving the receiver points. New jobs sample a new factor. If both
+points and model change, a frozen instance refuses to resample.
+`mode: "live"` evaluates W from the current model in each job and adds
+its direct model derivative to gradients and to separate `fwi_operator`
+`jvp`/`vjp`/`normal` actions, which read the raw residual persisted by
+`linearize`. `phase_derivative` comparisons, spectral-kernel control gradients,
+receiver-space actions, and extension/joint JVPs require a fixed mode (`frozen` or `pinned`). `pinned`
+reuses one reference factor persisted in `state_file` and refuses a file created
+for other receiver points, hook configuration, or material-layer structure.
+Factors are frequency independent, reject PML and spatial averaging, and
+require complete coupled sparse component pairs. Material references can select
+an incident material with `domain` independently of the receiver field domain;
+unselected references require one unambiguous layer. Selected coefficients
+require a fixed mode and do not contribute material-weight derivatives.
+Factors retain only authored diagonal or tensor-block entries; unspecified
+components keep their input coordinates without stored identity entries. The runtime provenance
+records the mode, point identity, and a factor fingerprint. No metric square
+root is supplied.
+See [configuration and spectral semantics](../../../docs/imaging/configuration.md#material-receiver-responses-and-objective-factors).
 
 `receiver_ar1_whiten` is a fixed linear `trace_pair` operator for stationary
 nearest-neighbor receiver covariance. With authored correlation `rho`, the
@@ -321,13 +417,21 @@ whitened residual. Correlation must be finite with absolute value below one.
 Version 1 requires a complete ordered dense receiver axis and rejects sparse
 trace catalogs whose neighbor topology is ambiguous.
 
-`scholte_notch` and `slow_velocity_mute` are frequency-local spatial filters
-along a regularly sampled dense receiver cable. Both apply an FFT along cable
-order, multiply by a smooth real symmetric receiver-wavenumber mask, and
-transform back. They therefore have an exact self-adjoint reverse action.
-Receiver coordinates may follow a curved cable, but consecutive along-cable
-spacings must agree within `spacing_tolerance`; sparse trace catalogs are
-rejected because they do not define a complete regular FFT axis.
+`scholte_notch`, `slow_velocity_mute` and `slow_velocity_pass` are
+frequency-local spatial filters along a regularly sampled dense receiver cable.
+All apply an FFT along cable order, multiply by a smooth real symmetric
+receiver-wavenumber mask, and transform back. They therefore have an exact
+self-adjoint reverse action. The cable axis is the group's output channels:
+point receivers, node-averaged channels (located at the mean of their member
+nodes) or DAS gauge channels (located at the weighted mean of their gauge
+samples). Averaged and gauge channels are filtered on output-channel objective
+rows, which `fwi_operator` keeps; a workflow that evaluates such a group on its
+sample points rejects the hook. Channel anchors may follow a curved cable, but
+consecutive along-cable spacings must agree within `spacing_tolerance`; sparse
+trace catalogs are rejected because they do not define a complete regular FFT
+axis. The hooks require an FFTW build: when `--capabilities-json` reports
+`build.fftw: false`, their catalog operations are unavailable and a frequency
+task requesting them stops before reading model, mesh, or trace data.
 
 `scholte_notch` accepts exactly one ridge center: `phase_velocity`, giving
 angular wavenumber `2*pi*frequency/phase_velocity`, or a measured angular
@@ -336,12 +440,22 @@ signed ridge branches and `relative_taper_width` specifies its raised-cosine
 edge. `slow_velocity_mute` rejects apparent velocities at or below
 `stop_velocity`, passes velocities at or above `pass_velocity`, and tapers
 smoothly between them. Its `keep_slow` mode uses the complementary mask.
+`slow_velocity_pass` is that complement as its own hook kind: it takes the same
+`stop_velocity`/`pass_velocity` band (and `spacing_tolerance`,
+`spectral_derivative`), keeps apparent velocities at or below `stop_velocity`
+(`|k| >= omega/stop_velocity`), removes those at or above `pass_velocity`, and
+tapers with the same raised cosine, so a mute and a pass with one band sum to
+the identity; it accepts no `mode` key. Use it to keep a slow train (for
+example Scholte waves on a seabed DAS cable) in both observed and simulated
+traces before residual formation. Velocities are physical (`{"value": 900,
+"units": "m/s"}` or solver km/s scalars) and compare with `omega/|k|` along
+the cable, where `omega = 2*pi*|Re f|` is the task's physical frequency.
 For phase-derivative comparison, `spectral_derivative: "total"` (the default)
 includes the analytic physical-Hz derivative of the frequency-dependent mask
 in both the bundle JVP and its triangular transpose. `"frozen"` deliberately
 sets that mask derivative to zero. A wavenumber-centered Scholte notch has zero
-mask derivative under either policy, while a velocity-centered notch and both
-slow-velocity modes generally do not.
+mask derivative under either policy, while a velocity-centered notch and the
+slow-velocity mute and pass generally do not.
 
 These filters run after receiver-device evaluation, including DAS gauge
 integration. The same forward action is applied to observed and simulated
@@ -367,8 +481,19 @@ objective weights, and robust loss as the enclosing objective. Its default
 `norm` is inherited; an explicit per-hook norm must be equivalent to the
 objective or initialization fails. `max_iterations` and `relative_tolerance`
 control robust IRLS convergence (`n_irls` remains a compatibility alias for
-`max_iterations`). Fit scalar, iteration count, and convergence status are
-written to preprocessing provenance. Robust incremental/Hessian residual mode
+`max_iterations`; default 100). Robust fits take safeguarded Newton steps from
+the IRLS majorization and test `relative_tolerance` on the Newton step.
+`variant` selects `complex` (default), `amplitude_only`
+(real nonnegative factor) or `phase_only` (unit-modulus factor). Fit scalar,
+iteration count, and convergence status are written to preprocessing provenance.
+`fwi_operator` accepts the hook for waveform comparisons as a projected source:
+the fit also divides by the objective-term scales, `linearize` freezes the
+fitted factor `a` per RHS in the objective state and reports it, the gradient is
+the fixed-`a` gradient (envelope theorem), and `jvp`/`normal` use the tangent
+`a du` with `a` frozen, omitting the `u da` term of the exact projected
+Jacobian. A fit that reaches `max_iterations` is an error outside
+`fwi_operator`; `fwi_operator` keeps the best accepted factor and reports
+`converged: false`. Robust incremental/Hessian residual mode
 is rejected until a baseline score-weight state is supplied. Incremental mode
 with source fitting is likewise rejected until a projected baseline
 linearization state is supplied; neither case silently falls back to an
@@ -447,3 +572,31 @@ the active workflow needs top-level imaging data and misfit setup.
 ## Elastic density imaging
 
 Cartesian elastic FWI `rho` kernels use the material's declared parameter space. In `velocity-density` and `slowness-density`, density changes both inertia and compliance while the other coordinates are held fixed. In `bulk-shear-density`, `pmod-shear-density`, and `lambda-shear-density`, the stiffness coordinates remain fixed and the constitutive density contribution vanishes. Aggregate images, per-source images, incremental loads, and mixed frequency/material images follow the same convention.
+
+### Synthetic arrays for instantaneous traveltime
+
+A `phase_derivative` comparison may provide `array` with `kind` (`gaussian`,
+`hann`, or `uniform`), positive `length_m`, and optional positive `truncate`
+(default 3). Gaussian length is its standard deviation and its cutoff is
+`truncate * length_m`; Hann and uniform lengths are support radii. Dense
+receiver channels are pooled in physical space, independently for each source
+and component: point receivers at their coordinates, node-averaged channels at
+the mean of their member nodes, and DAS gauge channels at the weighted mean of
+their gauge samples (averaged and gauge channels need the output-channel
+objective rows that `fwi_operator` keeps). Rows are normalized, including at array ends. The comparison is the
+ratio of pooled cross-products to pooled power plus the observed RMS floor;
+its derivative includes both numerator and denominator, with an exact transpose
+scatter through the pooling map. Ordinary comparisons allocate no pooling map.
+
+Optional `confidence_floor` (default zero) multiplies each objective weight by
+observed power divided by observed power plus the square of this fraction of
+observed RMS. Power is pooled when an array is selected; individual traces are
+also supported. This weight is fixed from observed data.
+
+Optional `reliability: "predicted"` requires frozen-source phase derivatives.
+It additionally multiplies the loss by predicted power divided by predicted
+power plus the squared observed RMS stabilization floor. Arrays pool the power
+before this ratio. The weight is outside the robust loss, and its model
+derivative is excluded. Native saved linearizations retain this frozen weight
+for Jacobian, adjoint, normal and receiver-probe actions. A new `linearize`
+refreshes it; it does not automatically pin weights across candidate models.

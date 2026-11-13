@@ -129,7 +129,8 @@ context for a future agent to reproduce the problem without relying on chat.
 Use relative tolerance `1e-4` by default for iterative solvers, smoothers,
 regularization/proximal solves, and similar numerical routines, not only TV.
 This tolerance rarely needs to change; most seismic imaging problems do not
-need tighter solver accuracy. Preserve explicit user-selected tolerances.
+need tighter solver accuracy. Transient linear solves default to `1e-3` for
+both Newmark and Gauss. Preserve explicit user-selected tolerances.
 
 For very hard problems or tasks that require unusually high accuracy, a smaller
 tolerance may be justified. Explain the need and verify the downstream benefit

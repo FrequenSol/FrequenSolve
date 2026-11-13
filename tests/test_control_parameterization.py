@@ -7,6 +7,9 @@ from frequensolve.model.parameterization import (
     BSplineControl,
     HatControl,
     ParameterizedProperty,
+    TensorBSplineControl,
+    TensorHatControl,
+    control_from_fs,
 )
 from frequensolve.model.property import Property
 
@@ -29,6 +32,63 @@ def test_hat_control_is_an_ordered_uniform_grid_without_point_ids():
         "spacing": 0.25,
         "coefficients": [0.0, 0.2, -0.1],
     }
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda **kw: HatControl(axis="z", spacing=1.0, coefficients=[0.0, 1.0], **kw),
+        lambda **kw: BSplineControl(
+            axis="z",
+            degree=1,
+            knots=[0.0, 0.0, 1.0, 1.0],
+            coefficients=[0.0, 1.0],
+            **kw,
+        ),
+        lambda **kw: TensorHatControl(
+            axes=["x", "z"],
+            shape=[2, 2],
+            origin=[0.0, 0.0],
+            spacing=[1.0, 1.0],
+            coefficients=np.zeros(4),
+            **kw,
+        ),
+        lambda **kw: TensorBSplineControl(
+            axes=["x", "z"],
+            degree=1,
+            knots=[[0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 1.0, 1.0]],
+            coefficients=np.zeros(4),
+            **kw,
+        ),
+    ],
+    ids=["hat", "bspline", "tensor_hat", "tensor_bspline"],
+)
+def test_controls_round_trip_the_extrapolate_policy(factory):
+    default = factory()
+    assert default.extrapolate == "zero"
+    assert "extrapolate" not in default.to_fs()
+    assert control_from_fs(default.to_fs()).extrapolate == "zero"
+
+    held = factory(extrapolate="HOLD")
+    assert held.extrapolate == "hold"
+    payload = held.to_fs()
+    assert payload["extrapolate"] == "hold"
+    restored = control_from_fs(payload)
+    assert restored.extrapolate == "hold"
+    assert restored.to_fs() == payload
+    assert held.with_coefficients(np.ones(held.size)).extrapolate == "hold"
+    _material_validator(f"#/$defs/{_SCHEMA_DEF[payload['kind']]}").validate(payload)
+
+    with pytest.raises(ValueError, match="extrapolate must be one of"):
+        factory(extrapolate="linear")
+
+
+_SCHEMA_DEF = {
+    "hat": "hatControlMap",
+    "bspline": "bsplineControlMap",
+    "tensor_hat": "tensorHatControlMap",
+    "tensor_bspline": "tensorBSplineControlMap",
+}
 
 
 def test_property_control_coefficients_reject_complex_values():
@@ -57,6 +117,55 @@ def test_bspline_control_validates_coefficient_count():
             knots=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             coefficients=[0.0, 0.0],
         )
+
+
+def test_held_controls_extend_their_edge_values_when_applied():
+    from frequensolve.model.representation import EvaluationContext
+
+    reference = Property.from_value(10.0)
+    hat = ParameterizedProperty(
+        id="held_hat",
+        reference=reference,
+        control=HatControl(
+            axis="z",
+            origin=1.0,
+            spacing=1.0,
+            coefficients=[1.0, 2.0, 0.5],
+            extrapolate="hold",
+        ),
+    )
+    zero = ParameterizedProperty(
+        id="zero_hat",
+        reference=reference,
+        control=HatControl(
+            axis="z", origin=1.0, spacing=1.0, coefficients=[1.0, 2.0, 0.5]
+        ),
+    )
+    context = EvaluationContext({"z": [-5.0, 1.0, 1.5, 3.0, 9.0]})
+    np.testing.assert_allclose(
+        hat.apply_control(10.0, context), [11.0, 11.0, 11.5, 10.5, 10.5]
+    )
+    np.testing.assert_allclose(
+        zero.apply_control(10.0, context), [10.0, 11.0, 11.5, 10.5, 10.0]
+    )
+
+    lattice = ParameterizedProperty(
+        id="held_lattice",
+        reference=reference,
+        control=TensorHatControl(
+            axes=["x", "z"],
+            shape=[2, 2],
+            origin=[2.0, 0.0],
+            spacing=[1.0, 1.0],
+            coefficients=np.array([[1.0, 3.0], [2.0, 4.0]]),
+            extrapolate="hold",
+        ),
+    )
+    context = EvaluationContext({"x": [0.0, 2.5, 7.0, 0.0], "z": [0.5, 0.5, 1.0, -3.0]})
+    # Left of the lattice the x = 2 column holds (1 -> 3 along z), right of it the x = 3 column.
+    np.testing.assert_allclose(
+        lattice.apply_control(10.0, context), [12.0, 12.5, 14.0, 11.0]
+    )
 
 
 def test_parameterized_property_round_trips_as_a_property_provider():
@@ -191,8 +300,6 @@ from frequensolve.model.parameterization import (  # noqa: E402
     CONTROL_TRANSFORMS,
     MeshControl,
     MeshPropertySpace,
-    TensorHatControl,
-    control_from_fs,
 )
 from frequensolve.units import Q_  # noqa: E402
 
@@ -312,6 +419,255 @@ def test_tensor_hat_parameterized_property_matches_sauce_contract():
     loaded = Property.from_value(payload)
     assert isinstance(loaded, ParameterizedProperty)
     assert isinstance(loaded.control, TensorHatControl)
+    assert loaded.to_fs() == payload
+    np.testing.assert_allclose(loaded.control.coordinates, prop.control.coordinates)
+
+
+_LAND_X = [0.45, 0.45, 0.9, 1.27, 1.6, 1.6]
+_LAND_Z = [0, 0, 0, 0, 0.03, 0.06, 0.09, 0.12, 0.15, 0.15, 0.15, 0.15]
+
+
+def _tensor_bspline(**overrides):
+    kwargs = dict(
+        axes=["x", "z"],
+        degree=[1, 3],
+        knots=[_LAND_X, _LAND_Z],
+        coefficients=np.zeros(32),
+        coordinate_system="seabed_depth",
+    )
+    kwargs.update(overrides)
+    return TensorBSplineControl(**kwargs)
+
+
+def test_tensor_bspline_control_serializes_the_sauce_contract():
+    coefficients = np.arange(32.0)
+    control = _tensor_bspline(coefficients=coefficients, units="km", extrapolate="hold")
+
+    payload = control.to_fs()
+    assert payload == {
+        "kind": "tensor_bspline",
+        "coordinate_system": "seabed_depth",
+        "units": "km",
+        "extrapolate": "hold",
+        "axes": [
+            {"axis": "x", "degree": 1, "knots": _LAND_X},
+            {"axis": "z", "degree": 3, "knots": [float(v) for v in _LAND_Z]},
+        ],
+        "coefficients": coefficients.tolist(),
+    }
+    assert list(payload) == [
+        "kind",
+        "coordinate_system",
+        "units",
+        "extrapolate",
+        "axes",
+        "coefficients",
+    ]
+    _material_validator("#/$defs/tensorBSplineControlMap").validate(payload)
+    restored = control_from_fs(payload)
+    assert isinstance(restored, TensorBSplineControl)
+    assert restored.to_fs() == payload
+    # Defaults are omitted, like the other control maps.
+    plain = _tensor_bspline(coordinate_system="global").to_fs()
+    assert "units" not in plain and "extrapolate" not in plain
+    _material_validator("#/$defs/tensorBSplineControlMap").validate(plain)
+    with pytest.raises(ValidationError):
+        _material_validator("#/$defs/tensorBSplineControlMap").validate(
+            {**plain, "axes": [{**plain["axes"][0], "degree": 8}, plain["axes"][1]]}
+        )
+
+
+def test_tensor_bspline_control_orders_the_first_axis_fastest():
+    grid = np.arange(32.0).reshape(4, 8)
+    control = _tensor_bspline(coefficients=grid)
+
+    assert control.shape == (4, 8)
+    assert control.size == 32 and control.ndim == 2
+    # Tensor-shaped input is flattened so axis 0 (x) varies fastest.
+    np.testing.assert_array_equal(control.coefficients[:5], [0, 8, 16, 24, 1])
+    np.testing.assert_array_equal(control.grid, grid)
+    greville_z = [0.0, 0.01, 0.03, 0.06, 0.09, 0.12, 0.14, 0.15]
+    np.testing.assert_allclose(control.axis_coordinates[0], [0.45, 0.9, 1.27, 1.6])
+    np.testing.assert_allclose(control.axis_coordinates[1], greville_z)
+    np.testing.assert_allclose(control.coordinates[1], [0.9, 0.0])
+    np.testing.assert_allclose(control.coordinates[4], [0.45, 0.01])
+    axis_x, axis_z = control.axis_controls
+    assert isinstance(axis_z, BSplineControl)
+    assert (axis_z.axis, axis_z.degree, axis_z.size) == ("z", 3, 8)
+    assert axis_z.coordinate_system == "seabed_depth"
+    np.testing.assert_array_equal(axis_x.coefficients, np.zeros(4))
+    replaced = control.with_coefficients(np.ones(32))
+    np.testing.assert_array_equal(replaced.grid, np.ones((4, 8)))
+
+
+def test_tensor_bspline_from_nodes_builds_open_knots_on_breakpoints():
+    control = TensorBSplineControl.from_nodes(
+        ["x", "z"],
+        {"z": np.linspace(0.0, 0.15, 6), "x": [0.45, 0.9, 1.27, 1.6]},
+        degree=[1, 3],
+        coordinate_system="seabed_depth",
+        extrapolate="hold",
+    )
+    np.testing.assert_allclose(control.knots[0], _LAND_X)
+    np.testing.assert_allclose(control.knots[1], _LAND_Z)
+    assert control.degree == (1, 3)
+    assert control.shape == (4, 8)
+    np.testing.assert_array_equal(control.coefficients, np.zeros(32))
+    assert control.extrapolate == "hold"
+    # With open knots the end Greville abscissae are the end breakpoints.
+    assert control.axis_coordinates[1][0] == 0.0
+    np.testing.assert_allclose(control.axis_coordinates[1][-1], 0.15)
+    # One degree for every axis; degree one is the hat basis on the nodes.
+    hats = TensorBSplineControl.from_nodes(
+        ["x", "y", "z"], [[0.0, 1.0], [0.0, 2.0, 3.0], [1.0, 2.0]]
+    )
+    assert hats.degree == (1, 1, 1) and hats.shape == (2, 3, 2)
+    np.testing.assert_allclose(hats.axis_coordinates[1], [0.0, 2.0, 3.0])
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"axes": ["x"]}, "two or three axes"),
+        ({"axes": ["x", "x"]}, "distinct"),
+        ({"axes": "xz"}, "sequence of axis names"),
+        ({"degree": [0, 3]}, "between 1 and 7"),
+        ({"degree": [1, 8]}, "between 1 and 7"),
+        ({"degree": [1.0, 3.0]}, "between 1 and 7"),
+        ({"degree": [1, 3, 2]}, "one integer or one per axis"),
+        ({"knots": [_LAND_X]}, "one knot vector per axis"),
+        ({"knots": [_LAND_X, _LAND_Z[::-1]]}, "axis 'z'.*nondecreasing"),
+        (
+            {"knots": [[0.45, 0.45, 0.45, 0.9, 1.6, 1.6], _LAND_Z]},
+            "axis 'x'.*multiplicity",
+        ),
+        (
+            {"knots": [[0.0, 0.0, 1.0], _LAND_Z], "coefficients": np.zeros(8)},
+            r"degree \+ 1 controls",
+        ),
+        ({"coefficients": np.zeros(31)}, "coefficient count 31"),
+        ({"coefficients": np.zeros((8, 4))}, "does not match the coefficient shape"),
+        ({"coefficients": np.zeros(32, dtype=complex)}, "real-valued"),
+        ({"coefficients": np.full(32, np.nan)}, "finite"),
+        ({"units": " "}, "units cannot be empty"),
+    ],
+)
+def test_tensor_bspline_control_rejects_inconsistent_bases(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        _tensor_bspline(**overrides)
+
+
+@pytest.mark.parametrize(
+    "nodes, message",
+    [
+        ([[0.0, 1.0], [0.0]], "at least two values"),
+        ([[0.0, 1.0], [0.0, 1.0, 1.0]], "strictly increasing"),
+        ({"x": [0.0, 1.0], "y": [0.0, 1.0]}, "exactly the axes"),
+        ([[0.0, 1.0]], "breakpoints per axis"),
+    ],
+)
+def test_tensor_bspline_from_nodes_rejects_invalid_breakpoints(nodes, message):
+    with pytest.raises(ValueError, match=message):
+        TensorBSplineControl.from_nodes(["x", "z"], nodes, degree=2)
+
+
+def _random_points(seed, low, high, count=200):
+    rng = np.random.default_rng(seed)
+    return {
+        axis: rng.uniform(lo, hi, count) for axis, lo, hi in zip(("x", "z"), low, high)
+    }
+
+
+@pytest.mark.parametrize("extrapolate", ["zero", "hold"])
+def test_degree_one_tensor_bspline_samples_like_the_tensor_hat(extrapolate):
+    from frequensolve.model.representation import EvaluationContext
+
+    hat = TensorHatControl(
+        axes=["x", "z"],
+        shape=[4, 3],
+        origin=[0.5, 1.0],
+        spacing=[0.25, 2.0],
+        coefficients=np.random.default_rng(3).normal(size=12),
+        extrapolate=extrapolate,
+    )
+    spline = TensorBSplineControl.from_nodes(
+        ["x", "z"],
+        hat.axis_coordinates,
+        degree=1,
+        coefficients=hat.coefficients,
+        extrapolate=extrapolate,
+    )
+    context = EvaluationContext(_random_points(5, (0.0, -1.0), (1.75, 6.0)))
+    reference = Property.from_value(2.0)
+    values = [
+        ParameterizedProperty(reference, id="m", control=c).apply_control(2.0, context)
+        for c in (hat, spline)
+    ]
+    np.testing.assert_allclose(values[1], values[0], rtol=0.0, atol=1e-14)
+    assert np.any(values[0] != 2.0)
+
+
+def test_tensor_bspline_reproduces_bilinear_fields_from_greville_coefficients():
+    from frequensolve.model.representation import EvaluationContext
+
+    control = _tensor_bspline(coordinate_system="global")
+    nodes = control.coordinates
+    control = control.with_coefficients(
+        (1.0 + 2.0 * nodes[:, 0]) * (1.0 + 3.0 * nodes[:, 1])
+    )
+    points = _random_points(7, (0.45, 0.0), (1.6, 0.15))
+    prop = ParameterizedProperty(0.0, id="m", control=control)
+    values = prop.apply_control(0.0, EvaluationContext(points))
+    np.testing.assert_allclose(
+        values, (1.0 + 2.0 * points["x"]) * (1.0 + 3.0 * points["z"]), atol=1e-12
+    )
+
+
+def test_tensor_bspline_holds_or_zeroes_outside_its_knot_spans():
+    from frequensolve.model.representation import EvaluationContext
+
+    nodes = _tensor_bspline().coordinates
+    coefficients = (1.0 + nodes[:, 0]) * (2.0 + nodes[:, 1])
+    held = ParameterizedProperty(
+        0.0,
+        id="held",
+        control=_tensor_bspline(
+            coordinate_system="global", coefficients=coefficients, extrapolate="hold"
+        ),
+    )
+    zero = ParameterizedProperty(
+        0.0,
+        id="zero",
+        control=_tensor_bspline(coordinate_system="global", coefficients=coefficients),
+    )
+    outside = EvaluationContext({"x": [0.0, 2.0, 1.0, 0.0], "z": [0.05, 0.05, 0.4, -1]})
+    clamped = EvaluationContext(
+        {"x": [0.45, 1.6, 1.0, 0.45], "z": [0.05, 0.05, 0.15, 0.0]}
+    )
+    np.testing.assert_allclose(
+        held.apply_control(0.0, outside), held.apply_control(0.0, clamped)
+    )
+    np.testing.assert_allclose(
+        held.apply_control(0.0, clamped),
+        (1.0 + np.array([0.45, 1.6, 1.0, 0.45]))
+        * (2.0 + np.array([0.05, 0.05, 0.15, 0])),
+    )
+    np.testing.assert_array_equal(zero.apply_control(0.0, outside), 0.0)
+
+
+def test_tensor_bspline_parameterized_property_matches_sauce_contract():
+    prop = ParameterizedProperty(
+        {"value": 0.4, "units": "km/s"},
+        id="land_vs",
+        transform="log",
+        control=_tensor_bspline(units="km", extrapolate="hold"),
+    )
+
+    payload = prop.to_fs()
+    _material_validator("#/$defs/property").validate(payload)
+    loaded = Property.from_value(payload)
+    assert isinstance(loaded, ParameterizedProperty)
+    assert isinstance(loaded.control, TensorBSplineControl)
     assert loaded.to_fs() == payload
     np.testing.assert_allclose(loaded.control.coordinates, prop.control.coordinates)
 
@@ -631,3 +987,48 @@ def test_layered_sampling_applies_control_in_named_surface_frame(tmp_path):
         sampled["vp"].isel(x=0), [2, 2 * np.sqrt(2), 4, 2 * np.sqrt(2), 2]
     )
     assert sampled["vp"].attrs["units"] == "km/s"
+
+
+def test_layered_sampling_applies_a_tensor_bspline_in_a_named_surface_frame(
+    tmp_path,
+):
+    from frequensolve.geometry.frame import Axis, SurfaceCoordinateSystem
+    from frequensolve.simulation.simulation import SeismicSimulation
+    from frequensolve.units import ureg as u
+
+    simulation = SeismicSimulation(
+        name="sample", physics="acoustic", dimension=2, project_path=tmp_path
+    )
+    # ``x`` is inherited from the global frame; ``below`` is depth below "top".
+    simulation += SurfaceCoordinateSystem(
+        name="below_top",
+        surface="top",
+        axes=[Axis("below", direction="z", positive="down")],
+    )
+    control = TensorBSplineControl.from_nodes(
+        ["x", "below"],
+        [[0.0, 1000.0], [0.0, 500.0, 1000.0]],
+        degree=[1, 2],
+        coordinate_system="below_top",
+        units="m",
+    )
+    nodes = control.coordinates
+    control = control.with_coefficients(np.log(2.0) * (nodes[:, 0] + nodes[:, 1]) / 1e3)
+    model = LayeredModel(dimension=2, x_limits=[0, 1] * u.km)
+    model.add_surface(name="top", depth=0.5 * u.km)
+    model.add_layer(
+        name="rock",
+        properties={
+            "Vp": ParameterizedProperty(
+                2.0, id="vp", units="km/s", transform="log", control=control
+            )
+        },
+    )
+    model.add_surface(name="bottom", depth=1.5 * u.km)
+    simulation += model
+    sampled = model.sample_uniform(
+        [3, 5], axes_units={"x": "km", "z": "km"}, properties="Vp"
+    )["vp"]
+    x = sampled.coords["x"].broadcast_like(sampled).values
+    below = sampled.coords["z"].broadcast_like(sampled).values - 0.5
+    np.testing.assert_allclose(sampled.values, 2.0 * 2.0 ** (x + below))

@@ -2,6 +2,7 @@
 
 import copy
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import Any, Dict, List, Literal, Mapping, Optional, Union
 
 from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
@@ -123,23 +124,35 @@ class SolverConfig(ExtraFieldsMixin):
         solve_on: Whether to solve only on the final adaptive mesh or on all
             adaptive steps.
         max_iter: Maximum Krylov/nonlinear iterations.
-        tolerance: Solver convergence tolerance.
+        tolerance: Solver convergence tolerance. None uses the backend default
+            (1e-3 for transient solves, 1e-4 for frequency-domain solves).
         precision: Floating-point precision used by the solver executable.
+        cycle: "auto" preserves the solver preset; "V", "W", and "log" select
+            a traversal. A mapping supplies a custom visits/anchor/coarse schedule.
+        pre_smooth: Number of smoothing sweeps before coarse descent; zero skips it.
+        post_smooth: Number of smoothing sweeps after coarse correction; zero skips it.
         **kwargs: Additional solver-facing configuration fields.
     """
 
     solve_on: Literal["final", "all"] = "final"
     max_iter: int = 300
-    tolerance: float = 1.0e-4
+    tolerance: Optional[float] = None
     precision: Literal["single", "double"] = "single"
+    cycle: Union[str, int, Mapping[str, Any]] = "auto"
+    pre_smooth: int = 1
+    post_smooth: int = 1
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
         solve_on: Literal["final", "all"] = "final",
         max_iter: int = 300,
-        tolerance: float = 1.0e-4,
+        tolerance: Optional[float] = None,
         precision: Literal["single", "double"] = "single",
+        *,
+        cycle: Union[str, int, Mapping[str, Any]] = "auto",
+        pre_smooth: int = 1,
+        post_smooth: int = 1,
         **kwargs: Any,
     ) -> None:
         """Create iterative solver settings."""
@@ -150,6 +163,10 @@ class SolverConfig(ExtraFieldsMixin):
         self.max_iter = max_iter
         self.tolerance = tolerance
         self.precision = precision
+        self.cycle = copy.deepcopy(dict(cycle)) if isinstance(cycle, Mapping) else cycle
+        self.pre_smooth = pre_smooth
+        self.post_smooth = post_smooth
+        self._multigrid_fields()
         self._init_extra(None, **kwargs)
 
     @classmethod
@@ -167,8 +184,11 @@ class SolverConfig(ExtraFieldsMixin):
         obj = cls(
             solve_on=payload.pop("solve_on", "final"),
             max_iter=payload.pop("max_iter", 300),
-            tolerance=payload.pop("tolerance", 1.0e-4),
+            tolerance=payload.pop("tolerance", None),
             precision=payload.pop("precision", "single"),
+            cycle=payload.pop("cycle", "auto"),
+            pre_smooth=payload.pop("pre_smooth", 1),
+            post_smooth=payload.pop("post_smooth", 1),
         )
         obj._init_extra(payload)
         return obj
@@ -199,14 +219,74 @@ class SolverConfig(ExtraFieldsMixin):
             JSON-compatible solver configuration.
         """
 
-        payload = {
+        payload: Dict[str, Any] = {
             "solve_on": self.solve_on,
             "max_iter": self.max_iter,
-            "tolerance": self.tolerance,
             "precision": self.precision,
         }
+        payload.update(self._multigrid_fields())
+        if self.tolerance is not None:
+            payload["tolerance"] = self.tolerance
         return merge_extra(
             payload,
             _serialize_solver_extra(self.extra, ctx),
             "SolverConfig",
         )
+
+    def _multigrid_fields(self) -> Dict[str, Any]:
+        """Validate and serialize cycle controls, leaving automatic defaults unset."""
+        payload: Dict[str, Any] = {}
+        for name in ("pre_smooth", "post_smooth"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+            if value != 1:
+                payload[name] = int(value)
+        cycle = self.cycle
+        if isinstance(cycle, str):
+            if cycle.lower() not in {"auto", "v", "w", "log"}:
+                raise ValueError(
+                    "cycle must be auto, V, W, log, a visit count or a schedule"
+                )
+            if cycle.lower() != "auto":
+                payload["cycle"] = (
+                    cycle.upper() if cycle.lower() in {"v", "w"} else "log"
+                )
+        elif (
+            isinstance(cycle, Integral)
+            and not isinstance(cycle, bool)
+            and int(cycle) > 0
+        ):
+            payload["cycle"] = int(cycle)
+        elif isinstance(cycle, Mapping):
+            schedule = copy.deepcopy(dict(cycle))
+            if set(schedule) - {"visits", "anchor", "coarse"}:
+                raise ValueError(
+                    "cycle schedule accepts only visits, anchor and coarse"
+                )
+            if schedule.get("anchor", "fine") not in {"fine", "coarse"}:
+                raise ValueError("cycle anchor must be fine or coarse")
+            visits = schedule.get("visits", [1])
+            if not isinstance(visits, (list, tuple)) or not visits:
+                raise ValueError(
+                    "cycle visits must be a nonempty sequence of positive integers"
+                )
+            for value in [*visits, schedule.get("coarse", 1)]:
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, Integral)
+                    or value < 1
+                ):
+                    raise ValueError(
+                        "cycle visits and coarse must be positive integers"
+                    )
+            if "visits" in schedule:
+                schedule["visits"] = [int(value) for value in visits]
+            if "coarse" in schedule:
+                schedule["coarse"] = int(schedule["coarse"])
+            payload["cycle"] = schedule
+        else:
+            raise ValueError(
+                "cycle must be auto, V, W, log, a visit count or a schedule"
+            )
+        return payload

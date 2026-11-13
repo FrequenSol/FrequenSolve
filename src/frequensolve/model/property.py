@@ -800,8 +800,23 @@ def _dataarray_from_inline_value(
         else:
             restored_coords[dim] = coord_payload
 
+    array = np.asarray(value)
+    if array.ndim == 1 and len(dimension_names) > 1:
+        missing = [name for name in dimension_names if name not in restored_coords]
+        if missing:
+            raise ValueError(
+                f"Flat inline property data require coordinates for dimensions {missing}"
+            )
+        shape = tuple(len(restored_coords[name]) for name in dimension_names)
+        if array.size != int(np.prod(shape)):
+            raise ValueError(
+                f"Flat inline property data contain {array.size} values; "
+                f"coordinates require shape {shape}"
+            )
+        array = array.reshape(shape, order="F")
+
     return xr.DataArray(
-        data=np.asarray(value),
+        data=array,
         dims=dimension_names,
         coords=restored_coords,
     )

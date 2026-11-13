@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 import os
 import re
 import shlex
@@ -11,17 +13,127 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 import uuid
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
 from frequensolve.orchestrator.sites.base import _wait_for_path
 from frequensolve.orchestrator.sites.config_file import _host_tmp_path_for_config
-from frequensolve.orchestrator.sites.hpc.slurm_helpers import ssh_exit_status
-from frequensolve.orchestrator.utils.ssh import control_socket_ssh_options
+from frequensolve.orchestrator.sites.hpc.slurm_helpers import (
+    shell_word_batches,
+    ssh_exit_status,
+)
+from frequensolve.orchestrator.utils.ssh import (
+    SSHProxy,
+    SSHTransportError,
+    control_socket_ssh_options,
+)
 from frequensolve.util.setup_logger import init_logger
 
+try:
+    from paramiko import SSHException
+except ModuleNotFoundError:  # pragma: no cover - the hpc extra provides it
+
+    class SSHException(Exception):  # type: ignore[no-redef]
+        """Placeholder when Paramiko is unavailable."""
+
+
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/hpc.log")
+
+__all__ = [
+    "DEFAULT_TRANSFER_ATTEMPTS",
+    "DEFAULT_TRANSFER_STALL_TIMEOUT",
+    "SlurmTransferManager",
+]
+
+# Seconds an rsync/SFTP transfer may make no progress before it is stopped.
+DEFAULT_TRANSFER_STALL_TIMEOUT = 120.0
+# Attempts per upload/download after a stall or SSH connection failure.
+DEFAULT_TRANSFER_ATTEMPTS = 3
+# Backoff before the second, third, ... attempt; doubled per attempt.
+_RETRY_BACKOFF_SECONDS = 2.0
+_RETRY_BACKOFF_LIMIT = 30.0
+# rsync exit codes for socket I/O (10), protocol stream (12), I/O timeout
+# (30), connection timeout (35) and SSH failure (255): the connection, not the
+# files, failed.
+_RSYNC_TRANSIENT_STATUSES = frozenset({10, 12, 30, 35, 255})
+
+_T = TypeVar("_T")
+# Retry backoff; a module attribute so tests replace it, not ``time.sleep``.
+_sleep = time.sleep
+# Clock for staged-upload records; a module attribute so tests replace it.
+_monotonic = time.monotonic
+
+# Quoted directories per ``mkdir -p`` command; well below Linux's 128 KiB cap
+# on the one ``-c`` argument a remote command reaches the login shell as.
+_MKDIR_COMMAND_BYTES = 64 * 1024
+# Local sources per rsync invocation: keeps argv well below ARG_MAX for long paths.
+_RSYNC_SOURCES_PER_CALL = 256
+# Seconds a staged-upload record is trusted. Rounds normally last seconds; an
+# older record (an upload whose job never launched) is re-sent, since scratch
+# file systems purge idle files.
+_STAGED_RECORD_LIFETIME = 3600.0
+
+_UploadPair = Tuple[Union[str, Path], Union[str, Path]]
+
+
+@dataclass(frozen=True)
+class _StagedFile:
+    """Content of a local file as one batch uploaded it to a remote path."""
+
+    size: int
+    mtime_ns: int
+    sha256: str
+    recorded_at: float
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+class _TransientTransferError(RuntimeError):
+    """A transfer failed in a way a retry over a live connection may fix."""
+
+
+def _is_transient(error: BaseException) -> bool:
+    """Return whether a transfer error is a stall or connection failure.
+
+    Missing files, permissions, invalid paths and verification failures are
+    not retried; neither are other provider errors.
+    """
+
+    return isinstance(
+        error,
+        (
+            TimeoutError,  # includes socket.timeout and stalled SFTP
+            subprocess.TimeoutExpired,
+            ConnectionError,  # resets, broken pipes, lost OpenSSH SFTP
+            EOFError,
+            SSHException,
+            SSHTransportError,
+            _TransientTransferError,
+        ),
+    )
+
 
 _REMOTE_USERNAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 _REMOTE_HOST = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])\Z")
@@ -48,6 +160,12 @@ def _validated_remote_path(value: Union[str, Path]) -> PurePosixPath:
     return PurePosixPath(raw)
 
 
+def _directory_argument(path: str) -> str:
+    """Return ``path`` with one trailing slash: rsync's "contents of" form."""
+
+    return path if path.endswith("/") else f"{path}/"
+
+
 class SlurmTransferManager:
     """Owns remote file transfer mechanics for a SLURM site.
 
@@ -58,13 +176,25 @@ class SlurmTransferManager:
 
     def __init__(self, site: Any) -> None:
         self.site = site
+        # Remote path -> content put_files sent there in the current staging
+        # round. Locked: session lease renewals upload from another thread.
+        self._staged: Dict[str, _StagedFile] = {}
+        self._staged_lock = threading.Lock()
 
-    def put(self, local_path: Union[str, Path], remote_path: Union[str, Path]) -> None:
+    def put(
+        self,
+        local_path: Union[str, Path],
+        remote_path: Union[str, Path],
+        *,
+        compress: bool = True,
+    ) -> None:
         """Transfer a local file or directory to a remote path.
 
         Args:
             local_path: Local source file or directory.
             remote_path: Remote destination path.
+            compress: Compress rsync transfers. Disable for incompressible
+                numerical payloads, where compression only costs CPU time.
 
         Raises:
             FileNotFoundError: If ``local_path`` does not exist.
@@ -79,14 +209,16 @@ class SlurmTransferManager:
 
         local_path = Path(local_path)
         validated_remote_path = _validated_remote_path(remote_path)
+        # This upload replaces whatever put_files recorded at or below it.
+        self._forget_staged([validated_remote_path])
 
-        try:
+        def attempt() -> None:
             site.run_login(
                 f"mkdir -p -- {shlex.quote(str(validated_remote_path.parent))}"
             )
 
             if self._uses_sftp():
-                sftp = site.login_client.open_sftp()
+                sftp = self._open_sftp()
                 try:
                     if local_path.is_dir():
                         self._put_dir(sftp, local_path, validated_remote_path)
@@ -96,21 +228,294 @@ class SlurmTransferManager:
                     sftp.close()
             else:
                 source = f"{local_path}/" if local_path.is_dir() else str(local_path)
-                self._run_rsync(source, self._remote_spec(validated_remote_path))
+                self._run_rsync(
+                    source,
+                    self._remote_spec(validated_remote_path),
+                    compress=compress,
+                )
 
-            logger.debug("Transfer completed successfully")
+        self._with_retries("upload", attempt)
+        logger.debug("Transfer completed successfully")
 
-        except (FileNotFoundError, ValueError, RuntimeError):
-            raise
-        except Exception as exc:
-            logger.error("HPC upload failed (%s)", type(exc).__name__)
-            raise RuntimeError(f"HPC upload failed ({type(exc).__name__})") from None
+    def put_files(
+        self,
+        pairs: Iterable[_UploadPair],
+        *,
+        compress: bool = True,
+        before_launch: bool = False,
+    ) -> List[PurePosixPath]:
+        """Upload many local files with one ``mkdir`` and few transfers.
+
+        Equivalent to :meth:`put` for each ``(local_path, remote_path)`` pair
+        (a later pair for a remote path replaces an earlier one), without two
+        SSH round trips per file: one ``mkdir -p`` login command creates every
+        remote parent directory (split only when its argument list would pass
+        the shell's cap), then rsync sends each group of files that share a
+        local root and a remote root as one ``--files-from`` transfer, or SFTP
+        sends every file over one session. Transfers keep ``put``'s stall
+        timeout and retries; an SFTP retry resumes with the files it has not
+        published yet. Directories are uploaded with :meth:`put`.
+
+        Within a staging round a file is not sent again when this manager
+        already uploaded the same content (size and SHA-256 of the bytes, not
+        the path or timestamps) to the same remote path. The ``before_launch``
+        batch that completes a run's inputs ends the round: it records nothing
+        and drops every record once it finishes, because the run may rewrite
+        files on the site. :meth:`put` drops the records at and below its
+        target.
+
+        Args:
+            pairs: ``(local_path, remote_path)`` pairs.
+            compress: Compress rsync transfers.
+            before_launch: The batch completes the inputs of a run about to
+                start; end the staging round afterwards.
+
+        Returns:
+            The remote paths sent, in input order, without the files skipped
+            as already staged.
+
+        Raises:
+            FileNotFoundError: If a local path does not exist; nothing is sent.
+            ValueError: If a remote path is unsafe; nothing is sent.
+            RuntimeError: If a transfer fails.
+        """
+
+        try:
+            return self._put_files(pairs, compress=compress, remember=not before_launch)
+        finally:
+            if before_launch:
+                self.forget_staged()
+
+    def forget_staged(self) -> None:
+        """End the staging round: later batches send every file again."""
+
+        with self._staged_lock:
+            self._staged.clear()
+
+    def _put_files(
+        self,
+        pairs: Iterable[_UploadPair],
+        *,
+        compress: bool,
+        remember: bool,
+    ) -> List[PurePosixPath]:
+        targets: Dict[PurePosixPath, Path] = {}
+        for local, remote_input in pairs:
+            local_path = Path(local)
+            if not _wait_for_path(local_path):
+                logger.error("Local path %s does not exist", local_path)
+                raise FileNotFoundError(f"Local path {local_path} does not exist")
+            targets[_validated_remote_path(remote_input)] = local_path
+
+        directories = [
+            (local, remote) for remote, local in targets.items() if local.is_dir()
+        ]
+        pending = [
+            (local, remote)
+            for remote, local in targets.items()
+            if not local.is_dir() and not self._is_staged(local, remote)
+        ]
+        skipped = len(targets) - len(directories) - len(pending)
+        if pending:
+            use_sftp = self._uses_sftp()
+            # Hash before sending, so a record never describes newer bytes
+            # than the ones the transfer read.
+            signatures = (
+                {remote: self._content_signature(local) for local, remote in pending}
+                if remember
+                else {}
+            )
+            remotes = [remote for _, remote in pending]
+            self._forget_staged(remotes)
+            self._with_retries("upload", lambda: self._make_remote_dirs(remotes))
+            if use_sftp:
+                self._put_files_sftp(pending)
+            else:
+                self._put_files_rsync(pending, compress=compress)
+            for local, remote in pending:
+                signature = signatures.get(remote)
+                if signature is not None:
+                    self._record_staged(local, remote, signature)
+        for local, remote in directories:
+            self.put(local, Path(remote), compress=compress)
+
+        logger.debug(
+            "Batched upload sent %d file(s) and %d directory(ies); %d already staged",
+            len(pending),
+            len(directories),
+            skipped,
+        )
+        sent = {remote for _, remote in pending}
+        sent.update(remote for _, remote in directories)
+        return [remote for remote in targets if remote in sent]
+
+    def _make_remote_dirs(self, remotes: Sequence[PurePosixPath]) -> None:
+        """Create the parent directories of ``remotes`` with one login command.
+
+        Only the deepest parents are named; ``mkdir -p`` creates the rest.
+        """
+
+        parents = {remote.parent for remote in remotes}
+        implied = {ancestor for parent in parents for ancestor in parent.parents}
+        leaves = sorted(str(parent) for parent in parents if parent not in implied)
+        for batch in shell_word_batches(
+            [shlex.quote(leaf) for leaf in leaves], _MKDIR_COMMAND_BYTES
+        ):
+            self.site.run_login(f"mkdir -p -- {batch}")
+
+    def _put_files_sftp(self, files: Sequence[Tuple[Path, PurePosixPath]]) -> None:
+        """Publish ``files`` over one SFTP session; a retry resumes the rest."""
+
+        remaining = deque(files)
+
+        def attempt() -> None:
+            sftp = self._open_sftp()
+            try:
+                while remaining:
+                    local, remote = remaining[0]
+                    self._put_file(sftp, local, remote)
+                    remaining.popleft()
+            finally:
+                sftp.close()
+
+        self._with_retries("upload", attempt)
+
+    def _put_files_rsync(
+        self, files: Sequence[Tuple[Path, PurePosixPath]], *, compress: bool
+    ) -> None:
+        """Send ``files`` with one rsync per remote directory.
+
+        The directories already exist (``_make_remote_dirs``), so each group
+        is a plain multi-source rsync into its directory: no ``--relative`` path
+        reconstruction, which would replace a symlinked remote directory and
+        whose ``--no-implied-dirs`` form macOS openrsync (protocol 29) cannot
+        negotiate with rsync 3 ("invalid path from sender"). Existing remote
+        directories and symlinks are left alone, like a single-file ``put``.
+        """
+
+        groups, renamed = self._rsync_directory_groups(files)
+        for remote_dir, locals_ in groups.items():
+            for start in range(0, len(locals_), _RSYNC_SOURCES_PER_CALL):
+                self._rsync_into_directory(
+                    locals_[start : start + _RSYNC_SOURCES_PER_CALL],
+                    remote_dir,
+                    compress=compress,
+                )
+        # A file stored under another name needs its own destination path.
+        for local, remote in renamed:
+            self._rsync_file(local, remote, compress=compress)
+
+    @staticmethod
+    def _rsync_directory_groups(
+        files: Sequence[Tuple[Path, PurePosixPath]],
+    ) -> Tuple[Dict[PurePosixPath, List[Path]], List[Tuple[Path, PurePosixPath]]]:
+        """Group uploads by remote directory; a renamed file is returned apart."""
+
+        groups: Dict[PurePosixPath, List[Path]] = {}
+        renamed: List[Tuple[Path, PurePosixPath]] = []
+        for local, remote in files:
+            if local.name != remote.name:
+                renamed.append((local, remote))
+                continue
+            groups.setdefault(remote.parent, []).append(local)
+        return groups, renamed
+
+    def _rsync_into_directory(
+        self, locals_: Sequence[Path], remote_dir: PurePosixPath, *, compress: bool
+    ) -> None:
+        """Send ``locals_`` into the existing ``remote_dir`` with one rsync."""
+
+        sources = [str(local) for local in locals_]
+        target = self._remote_spec(_directory_argument(remote_dir.as_posix()))
+        self._with_retries(
+            "upload",
+            lambda: self._run_rsync(sources, target, compress=compress),
+        )
+
+    def _rsync_file(
+        self, local: Path, remote: PurePosixPath, *, compress: bool
+    ) -> None:
+        target = self._remote_spec(remote)
+        self._with_retries(
+            "upload",
+            lambda: self._run_rsync(str(local), target, compress=compress),
+        )
+
+    def _staged_key(self, remote: PurePosixPath) -> str:
+        credentials = getattr(self.site, "credentials", None)
+        config = getattr(self.site, "config", None)
+        username = getattr(credentials, "username", "")
+        hostname = getattr(config, "hostname", "")
+        return f"{username}@{hostname}:{remote.as_posix()}"
+
+    def _is_staged(self, local: Path, remote: PurePosixPath) -> bool:
+        """Whether this round already uploaded ``local``'s bytes to ``remote``."""
+
+        key = self._staged_key(remote)
+        with self._staged_lock:
+            record = self._staged.get(key)
+            if (
+                record is not None
+                and _monotonic() - record.recorded_at > _STAGED_RECORD_LIFETIME
+            ):
+                del self._staged[key]
+                record = None
+        if record is None:
+            return False
+        try:
+            if local.stat().st_size != record.size:
+                return False
+            return _file_sha256(local) == record.sha256
+        except OSError:
+            return False
+
+    @staticmethod
+    def _content_signature(local: Path) -> Optional[Tuple[int, int, str]]:
+        try:
+            before = local.stat()
+            return before.st_size, before.st_mtime_ns, _file_sha256(local)
+        except OSError:
+            return None  # the transfer reports the error
+
+    def _record_staged(
+        self,
+        local: Path,
+        remote: PurePosixPath,
+        signature: Tuple[int, int, str],
+    ) -> None:
+        """Record a sent file unless it changed while it was hashed or sent."""
+
+        size, mtime_ns, digest = signature
+        try:
+            after = local.stat()
+        except OSError:
+            return
+        if (after.st_size, after.st_mtime_ns) != (size, mtime_ns):
+            return
+        record = _StagedFile(size, mtime_ns, digest, _monotonic())
+        with self._staged_lock:
+            self._staged[self._staged_key(remote)] = record
+
+    def _forget_staged(self, remotes: Iterable[PurePosixPath]) -> None:
+        """Drop the records at and below each remote path."""
+
+        keys = {self._staged_key(remote) for remote in remotes}
+        prefixes = tuple(key.rstrip("/") + "/" for key in keys)
+        with self._staged_lock:
+            if not self._staged or not keys:
+                return
+            for key in [
+                key for key in self._staged if key in keys or key.startswith(prefixes)
+            ]:
+                del self._staged[key]
 
     def get(
         self,
         remote_path: Union[str, Path],
         local_path: Union[str, Path],
         overwrite: bool = False,
+        *,
+        compress: bool = True,
     ) -> None:
         """Transfer a remote file or directory to a local path.
 
@@ -119,18 +524,18 @@ class SlurmTransferManager:
             local_path: Local destination path.
             overwrite: Accepted for API compatibility; transfer backends decide
                 replacement behavior.
+            compress: Compress rsync transfers.
 
         Raises:
             RuntimeError: If rsync fails.
         """
 
-        site = self.site
         logger.debug("Starting HPC download")
 
         local_path = Path(local_path)
         validated_remote_path = _validated_remote_path(remote_path)
 
-        try:
+        def attempt() -> None:
             local_path.parent.mkdir(parents=True, exist_ok=True)
             if self._uses_sftp():
                 logger.debug(
@@ -138,7 +543,7 @@ class SlurmTransferManager:
                     validated_remote_path,
                     local_path,
                 )
-                sftp = site.login_client.open_sftp()
+                sftp = self._open_sftp()
                 try:
                     if self._sftp_is_dir(sftp, validated_remote_path):
                         self._get_dir(sftp, validated_remote_path, local_path)
@@ -153,15 +558,121 @@ class SlurmTransferManager:
                     else str(validated_remote_path)
                 )
                 local_str = f"{local_path}/" if local_path.is_dir() else str(local_path)
-                self._run_rsync(self._remote_spec(remote_str), local_str)
+                self._run_rsync(
+                    self._remote_spec(remote_str), local_str, compress=compress
+                )
 
-            logger.debug("Transfer completed successfully")
+        self._with_retries("download", attempt)
+        logger.debug("Transfer completed successfully")
 
-        except (FileNotFoundError, ValueError, RuntimeError):
-            raise
-        except Exception as exc:
-            logger.error("HPC download failed (%s)", type(exc).__name__)
-            raise RuntimeError(f"HPC download failed ({type(exc).__name__})") from None
+    def _transfer_setting(self, name: str, default: Any) -> Any:
+        return getattr(getattr(self.site, "config", None), name, default)
+
+    def _stall_timeout(self) -> float:
+        return float(
+            self._transfer_setting(
+                "transfer_stall_timeout", DEFAULT_TRANSFER_STALL_TIMEOUT
+            )
+        )
+
+    def _open_sftp(self) -> Any:
+        """Open SFTP whose data transfers fail after ``transfer_stall_timeout``."""
+
+        client = self.site.login_client
+        stall = self._stall_timeout()
+        if isinstance(client, SSHProxy):
+            return client.open_sftp(stall_timeout=stall)
+        sftp = client.open_sftp()
+        # Paramiko: a blocked channel read raises socket.timeout.
+        get_channel = getattr(sftp, "get_channel", None)
+        channel = get_channel() if callable(get_channel) else None
+        settimeout = getattr(channel, "settimeout", None)
+        if callable(settimeout):
+            settimeout(stall)
+        return sftp
+
+    def _with_retries(self, action: str, operation: Callable[[], _T]) -> _T:
+        """Run one transfer, retrying stalls and SSH connection failures.
+
+        rsync keeps partially transferred files (``--partial``), so a retry
+        resumes from them; an SFTP retry restarts the file. Before a retry the
+        site checks its login connection and switches to another live control
+        socket when its own no longer answers.
+        """
+
+        attempts = int(
+            self._transfer_setting("transfer_attempts", DEFAULT_TRANSFER_ATTEMPTS)
+        )
+        attempt = 1
+        while True:
+            try:
+                return operation()
+            except (FileNotFoundError, ValueError):
+                raise
+            except Exception as exc:
+                transient = _is_transient(exc)
+                recoverable = transient and attempt < attempts
+                if recoverable:
+                    recover = getattr(self.site, "_recover_login_connection", None)
+                    try:
+                        recoverable = not callable(recover) or bool(recover())
+                    except Exception as recovery_error:
+                        logger.warning(
+                            "Could not check the SSH connection (%s)",
+                            type(recovery_error).__name__,
+                        )
+                if recoverable:
+                    delay = min(
+                        _RETRY_BACKOFF_LIMIT,
+                        _RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1),
+                    )
+                    logger.warning(
+                        "HPC %s attempt %d of %d failed (%s); retrying in %g s",
+                        action,
+                        attempt,
+                        attempts,
+                        self._describe(exc),
+                        delay,
+                    )
+                    _sleep(delay)
+                    attempt += 1
+                    continue
+                if not transient and isinstance(exc, RuntimeError):
+                    raise
+                logger.error("HPC %s failed (%s)", action, type(exc).__name__)
+                raise RuntimeError(self._failure_message(action, exc, attempt)) from (
+                    exc if transient else None
+                )
+
+    def _describe(self, error: BaseException) -> str:
+        """Name an error without echoing provider output, which may be private."""
+
+        if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+            return (
+                f"{type(error).__name__}: no progress within "
+                f"{self._stall_timeout():g} s (transfer_stall_timeout)"
+            )
+        if isinstance(error, (_TransientTransferError, SSHTransportError)):
+            return str(error)  # FrequenSolve's own message
+        return type(error).__name__
+
+    def _failure_message(self, action: str, error: BaseException, attempts: int) -> str:
+        if not _is_transient(error):
+            return f"HPC {action} failed ({type(error).__name__})"
+        plural = "s" if attempts != 1 else ""
+        message = (
+            f"HPC {action} failed after {attempts} attempt{plural} "
+            f"({self._describe(error)})"
+        )
+        if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+            return message + (
+                "; raise transfer_stall_timeout or transfer_attempts in the site "
+                "profile if the filesystem is slow"
+            )
+        return message + (
+            "; the SSH connection failed. Check it with `frequensolve site check` "
+            "(reconnect with `frequensolve site connect`) and retry"
+        )
 
     def get_files(
         self,
@@ -185,7 +696,10 @@ class SlurmTransferManager:
         if missing_ok:
             return self._get_files_sftp(remote_root, local_root, paths)
         if self._uses_sftp():
-            self._get_files_tar(remote_root, local_root, paths)
+            self._with_retries(
+                "download",
+                lambda: self._get_files_tar(remote_root, local_root, paths),
+            )
         else:
             with tempfile.NamedTemporaryFile(
                 mode="wb",
@@ -199,10 +713,13 @@ class SlurmTransferManager:
                     "--from0",
                     f"--files-from={file_list.name}",
                 ]
-                self._run_rsync(
-                    self._remote_spec(f"{remote_root}/"),
-                    f"{local_root}/",
-                    options=options,
+                self._with_retries(
+                    "download",
+                    lambda: self._run_rsync(
+                        self._remote_spec(f"{remote_root}/"),
+                        f"{local_root}/",
+                        options=options,
+                    ),
                 )
 
         local_paths = [local_root / Path(*path.parts) for path in paths]
@@ -222,23 +739,34 @@ class SlurmTransferManager:
             hostname
         ):
             raise ValueError("SSH username or hostname contains unsafe characters")
-        rendered_path = str(path) + ("/" if trailing_slash else "")
+        rendered_path = str(path)
+        if trailing_slash and not rendered_path.endswith("/"):
+            rendered_path += "/"
         return f"{username}@{hostname}:{shlex.quote(rendered_path)}"
 
     def _run_rsync(
         self,
-        source: str,
+        source: Union[str, Sequence[str]],
         target: str,
         *,
         options: Sequence[str] = (),
+        compress: bool = True,
     ) -> None:
         debug_output = logger.isEnabledFor(logging.DEBUG)
-        rsync_flags = "-avzP" if debug_output else "-az"
+        rsync_flags = (
+            "-a"
+            + ("v" if debug_output else "")
+            + ("z" if compress else "")
+            + ("P" if debug_output else "")
+        )
         rsync_cmd = ["rsync", rsync_flags]
         if not debug_output:
             rsync_cmd.append("--partial")
+        # rsync's own I/O timeout stops a transfer that stalls.
+        rsync_cmd.append(f"--timeout={max(1, math.ceil(self._stall_timeout()))}")
         rsync_cmd.extend(options)
-        rsync_cmd.extend([source, target])
+        rsync_cmd.extend([source] if isinstance(source, str) else list(source))
+        rsync_cmd.append(target)
         if self.site._login_client.is_proxy():
             control_path, _ = self.site._login_client.get_proxy_details()
             if not control_path:
@@ -254,7 +782,12 @@ class SlurmTransferManager:
         else:
             result = subprocess.run(rsync_cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"rsync transfer failed with status {result.returncode}")
+            error = (
+                _TransientTransferError
+                if result.returncode in _RSYNC_TRANSIENT_STATUSES
+                else RuntimeError
+            )
+            raise error(f"rsync transfer failed with status {result.returncode}")
 
     @staticmethod
     def _verify_sftp_size(
@@ -369,7 +902,7 @@ class SlurmTransferManager:
         """Fetch a small optional set through exact SFTP requests."""
 
         downloaded = []
-        sftp = self.site.login_client.open_sftp()
+        sftp = self._open_sftp()
         try:
             for path in paths:
                 local = local_root / Path(*path.parts)
@@ -404,7 +937,7 @@ class SlurmTransferManager:
         ) as tar_file:
             local_tar = Path(tar_file.name)
 
-        sftp = self.site.login_client.open_sftp()
+        sftp = self._open_sftp()
         try:
             self.site.run_login(f"mkdir -p {shlex.quote(str(remote_tar.parent))}")
             sftp.put(str(local_list), str(remote_list))

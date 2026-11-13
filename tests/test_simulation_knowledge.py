@@ -276,9 +276,9 @@ def test_authoring_rules_match_public_boundaries_and_numerics():
     assert fs.SolverConfig().to_fs() == {
         "solve_on": solver_rules.default_solve_on,
         "max_iter": solver_rules.default_max_iter,
-        "tolerance": solver_rules.default_tolerance,
         "precision": solver_rules.default_precision,
     }
+    assert fs.SolverConfig().tolerance is solver_rules.default_tolerance is None
     for solve_on in solver_rules.solve_on_values:
         assert fs.SolverConfig(solve_on=solve_on).to_fs()["solve_on"] == solve_on
     for precision in solver_rules.precision_values:

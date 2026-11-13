@@ -8,6 +8,213 @@ target FrequenSol Cloud, a local solver installation, or an :term:`HPC`
 cluster. Most user scripts should call ``fs.Site()`` and let the
 :term:`site configuration file` choose the active backend.
 
+Persistent SLURM sessions
+-------------------------
+
+For small iterative workloads, reserve one batch allocation and submit all
+operations to its resident scheduler. Entering the context waits for the
+controller to become ready. It remains active while the queue is empty::
+
+   from frequensolve.orchestrator.sites import Site, AdaptiveWorkers
+
+   site = Site(profile="stampede3")
+   with site.session(
+       nodes=1,
+       ranks_per_node=8,
+       duration="02:00:00",
+       workers=AdaptiveWorkers(min_ranks=1, max_ranks_per_task=2),
+   ) as session:
+       runs = [session.submit(job) for job in jobs]
+       results = session.wait_all(runs, check=True)
+
+A session is itself a normal Slurm batch job, with a FrequenSolve controller
+as its resident process. The controller starts solver steps inside the actual
+allocation environment, accepts further runs and keeps their status on the
+shared filesystem. ``attach_session`` reconnects a Python client to that
+controller; it does not SSH into a compute node or reconstruct Slurm variables.
+An arbitrary batch or interactive allocation has no such controller and cannot
+be borrowed through this API. For a single independent simulation, the usual
+``site.run(job)`` batch workflow remains available.
+
+The resource values above are illustrative. Allocation resources are fixed;
+``AdaptiveWorkers`` bounds the ranks of individual frequency tasks. Tasks use
+memory estimates when needed and retain MPI rank counts required by saved
+partitioned artifacts. Initialization, smoothing, packing and curvature also
+reserve resources through the same scheduler. Stampede3 uses ``ibrun`` offsets
+and ``task_affinity``; generic ``srun`` sites use exclusive job steps. Generic
+``mpirun``/``mpiexec`` launchers execute one process group at a time. On a GPU
+partition the allocation exports the partition's ``environment``, sizes
+workers by device memory, and each ``ibrun`` step's ranks select the device
+under their slot, as in batch sweeps.
+
+``site.provision(nodes, tasks, duration)`` and
+``site.attach_allocation(job_id)`` are deprecated. ``provision`` now starts
+a persistent session with ``tasks`` ranks spread evenly over ``nodes``;
+``site.run``/``site.submit`` in ``"auto"`` or ``"attached"`` mode and attached
+curvature use it until ``site.deprovision()`` or ``site.close()``.
+``attach_allocation`` reconnects only to an allocation running a FrequenSolve
+session. Earlier versions launched attached work over SSH on the allocation's
+batch host, where the shell lacks the job's Slurm and module environment, so
+launchers such as TACC's ``ibrun`` could not start there. Prefer
+``site.session(...)`` directly.
+
+``session.submit`` returns the usual ``RunHandle``. Its ``id`` identifies this
+run; ``handle.backend["allocation_id"]`` identifies the enclosing Slurm job.
+``handle.cancel()`` cancels the run without releasing the allocation. Explicit
+sessions fail if the controller dies or a request cannot fit; they never
+silently submit a replacement batch job. Solver processes start afresh for
+individual operations; the session does not retain live solver factorizations.
+
+The controller accepts atomically published requests on the site's shared work
+filesystem through the existing SSH/file-transfer connection. ``request_id``
+may be supplied to ``session.submit`` as 32 lowercase hexadecimal characters;
+republication with the same id and payload does not execute the request twice.
+An id cannot be reused for different work. Durable session records remain under
+``<work_dir>/.fs_sessions/<session_id>`` after the allocation ends.
+
+The SLURM ``work_dir`` is a persistent project directory. Before uploading inputs,
+FrequenSolve records its originating local project directory and rejects uploads
+from a different project. Repeated runs and updated inputs from the same project
+continue to use the existing layout; no new project directories are created.
+Use a separate ``work_dir`` for each local project. Older remote directories are
+adopted only when their saved project metadata identifies the same origin;
+ambiguous ownership or a moved local project produces an error before upload.
+
+Creating the session directory and publishing each lease renewal, request and
+command are login-node filesystem commands (``mkdir``, ``mv`` and ``ln``).
+Each may take up to ``session_command_timeout`` seconds (default 120), set in
+the profile's ``run_config`` or per session with
+``site.session(session_command_timeout=...)`` or
+``PersistentAllocation(session_command_timeout=...)``. A timeout or failure
+names the command and remote path. The 15-second bound on solver identity
+queries does not apply to these commands.
+
+To reconnect to a running session, use its ``session.session_id``::
+
+   with site.attach_session(session_id) as borrowed:
+       run = borrowed.handle(job, job_id=run_id)
+       result = run.wait(check=True)
+
+A borrowed context only detaches on exit. The context that created the
+allocation owns its lifetime. On normal exit it drains work: runs already in
+flight finish, including their packing and output writes, and the controller
+then exits, ending the batch job; ``scancel`` is used only if the job is still
+listed ten seconds after the controller reported that it closed.
+``cleanup_timeout`` caps the drain; the default ``None`` waits as long as the
+controller heartbeat keeps advancing (the walltime still bounds it). If the
+cap is reached, or the heartbeat stops advancing during the drain, exit emits
+a ``RuntimeWarning`` naming the session and Slurm allocation and leaves the
+allocation running rather than killing work mid-write: the controller cancels
+unfinished work once the lease lapses, and Slurm ends the job at walltime.
+Reattach with ``site.attach_session(session_id)`` or release it with
+``scancel``. On an exception or interruption the context cancels outstanding
+work, waits up to ``cleanup_timeout`` (120 seconds when unset) for the
+controller, and cancels the allocation; cleanup errors there are logged and
+never replace the original exception. Cleanup errors after the body has
+completed (for example a lost SSH connection) are reported as a
+``RuntimeWarning`` with the session and allocation ids instead of being
+raised, so results computed in the context are not lost. Cleanup does not
+close caller-owned site connections or delete solver artifacts.
+
+If the client cannot establish who else is attached, cleanup leaves the
+allocation running and warns instead of assuming it is unused. A failed drain
+also preserves the remaining lease grace period for reconnection. After a
+transport failure, ``session.release()`` can be retried; this explicitly ends
+the allocation, including other clients' work. Ordinary owner cleanup checks
+for other clients again on the controller before ending a shared allocation.
+If that response is lost, automatic cleanup preserves the lease grace period;
+it does not escalate to ``scancel`` and risk interrupting a new borrower.
+
+The controller writes a heartbeat with an increasing ``sequence`` from a
+dedicated thread, so per-run status writes on a slow work filesystem cannot
+delay it. The client declares the controller lost only when two successful
+reads, a poll interval apart, show a heartbeat unchanged for longer than
+``heartbeat_timeout`` on the client's monotonic clock while Slurm still
+reports the allocation running; the runs then fail. Timestamps written on the
+compute node are never compared with the client's clock, so clock skew does
+not matter, and failed status reads are not counted as evidence of loss. The
+default ``heartbeat_timeout="auto"`` uses the site's
+``run_config.scheduler_heartbeat_timeout`` (default 300 seconds) as configured;
+pass seconds to choose a window for one session or ``None`` to disable the
+check. Shared scratch filesystems can stall metadata operations for minutes
+during large writes, so a session whose window is below 120 seconds logs a
+warning when it starts. ``PersistentAllocation`` accepts the same ``heartbeat_timeout`` and
+``cleanup_timeout`` options. The controller writes its output, the Python
+traceback of an unhandled error, and, on a fatal signal such as a
+segmentation fault, every thread's traceback to
+``<work_dir>/.fs_sessions/<session_id>/controller.log``. A lost heartbeat, a
+controller that reported ``failed``, or a job Slurm ended names that file
+(``session.controller_log``) in the reported status. Processed requests and commands move to
+``processed/`` subdirectories of the session directory, so the controller
+lists only new work.
+
+Clients renew leases from a background thread while connected, including
+during long uploads and project synchronization. The controller times each
+renewal with its own monotonic clock, so client clock skew does not expire a
+lease. If every client disappears, the controller cancels unfinished work and
+exits after ``lease_timeout`` (default 300 seconds) without a renewal, unless
+the session lingers (see below); the hard Slurm walltime still bounds the
+allocation. A warning signal 120 seconds before walltime stops admission and
+marks unfinished runs timed out. Resume an inversion from its last accepted
+checkpoint in a new session. Automatic allocation rollover is not supported.
+
+Reusing a session across scripts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To let a later script reuse an allocation instead of waiting in the queue
+again, start sessions with a reuse scope and, optionally, a linger period::
+
+   with site.session(
+       nodes=2,
+       ranks_per_node=48,
+       duration="04:00:00",
+       reuse=project,  # or a string naming the scope
+       linger="30m",  # stay up this long once nothing is attached or running
+   ) as session:
+       session.submit(job)
+
+With ``reuse``, entering the context first looks for a session that this user
+started with the same scope, and adopts it when all of these hold:
+
+- its Slurm job is this user's, named ``FS_session``, queued or running, and
+  recorded by a session directory under the site's work directory, so no
+  other job ever qualifies;
+- it has the same nodes, ranks per node, queue, account, solver executable,
+  launcher, worker limits, GPU layout and module and environment setup;
+- at least ``min_time_left`` of walltime remains (default 15 minutes);
+- no other client is attached; ``share=True`` also joins a session that
+  another client is using.
+
+Otherwise the context queues a new allocation as before and records the
+scope; each skipped session is reported with the reason. ``session.reused``
+tells which happened. A project scope combines the project's name with its
+resolved path, so unrelated projects that share a name never share
+allocations; a string scope can be shared deliberately across projects or
+machines. ``site.attach_session(reuse=project)`` adopts a matching session but
+raises instead of queueing one. A client that exited on the same host is
+recognized at once; otherwise its lease must lapse (``lease_timeout``) before
+another client may adopt the session.
+
+``linger`` (seconds, or a duration such as ``"30m"``, ``"2h"`` or
+``"01:30:00"``; default 0) keeps the allocation once no client is attached and
+nothing runs. A context with ``linger`` therefore only detaches on exit,
+after waiting for its own runs (normal exit) or cancelling them (exception),
+and reports how long the allocation stays up. Interrupting a lingering
+session while it waits in the queue leaves it queued, so the next script
+keeps its place. If a client disappears without detaching, its runs finish;
+resubmitting such a job after adopting the session waits on the existing run
+instead of starting it again. The longest ``linger`` among the clients
+attached last applies. Without ``linger`` a session ends with its owner, as
+before, unless other clients are still attached.
+
+End a lingering allocation with ``session.release()`` (also after the context
+has exited), ``site.release_sessions(project)`` (the scope's idle sessions;
+``include_attached=True`` also ends ones in use and cancels their work) or
+``scancel``. ``site.sessions(reuse=...)`` lists queued and running sessions
+with their state, attached clients, idle time, linger and remaining walltime.
+``PersistentAllocation`` accepts the same ``reuse``, ``linger``, ``share`` and
+``min_time_left`` options.
+
 Quick Start
 -----------
 
@@ -332,8 +539,24 @@ extra.
      - Hostname for the Dask dashboard. Defaults to ``localhost``.
    * - ``dashboard_port``
      - Dashboard port. ``0`` lets Dask choose an available port.
+   * - ``curvature_ranks``
+     - MPI ranks for row-distributed Sauce curvature operations; they share
+       the worker thread budget. Defaults to ``1``. Mesh transfer and sampling
+       always run on one rank.
+   * - ``background_layout``
+     - Files of imaging background checkpoints: ``rank`` (default) or
+       ``shared`` (see `Partitioned Solver Inputs`_).
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
+
+A task submitted with ``procs_per_job`` greater than one runs under
+``mpirun`` with ``-nthreads`` set to its share of the worker thread budget.
+Open MPI would bind each rank, and all of its threads, to a single core, and
+concurrent tasks to the same cores, so local multi-rank launches set
+``PRTE_MCA_hwloc_default_binding_policy`` and
+``OMPI_MCA_hwloc_base_binding_policy`` to ``none`` unless the environment
+already sets them. Tasks that read a linearization's saved inputs run on the
+rank count that wrote them (see `Partitioned Solver Inputs`_).
 
 Local Host Settings
 ~~~~~~~~~~~~~~~~~~~
@@ -385,6 +608,7 @@ extra.
    sockets_per_node = 2
    memory_per_node = 262144
    gpus_per_node = 0
+   gpu_memory_per_gpu = 0
 
    [sites.cluster.environment]
    # LD_LIBRARY_PATH = "${PARALLEL_HDF5_LIB}:${LD_LIBRARY_PATH}"
@@ -394,7 +618,7 @@ extra.
    duration = "00:30:00"
    ranks_per_node = 4
    ranks_per_task = 1
-   scheduler_heartbeat_timeout = 60
+   scheduler_heartbeat_timeout = 300
    # Optional controller-enforced deadline for a full-rank MPI check before sizing.
    # mpi_health_check_timeout = "00:02:00"
 
@@ -428,11 +652,15 @@ The generated profile is equivalent to this minimal configuration:
    preset = "stampede3"
    username = "username"
    solver = "/work/shared/frequensol/FS_seismic"
-   # Omit work_dir to use $WORK/frequensolve, or choose another writable base:
-   # work_dir = "/shared/username/frequensolve"
+   # Omit work_dir to use $WORK/frequensolve. Move it to $SCRATCH/frequensolve
+   # when the work filesystem is slow (purged; fetch results to keep):
+   # storage = "scratch"
+   # Or choose another writable base; a leading $WORK or $SCRATCH is resolved
+   # on the login node:
+   # work_dir = "$SCRATCH/frequensolve-runs"
    # Optional future location for models and other high-I/O data:
-   # scratch_dir = "/scratch/username/frequensolve"
-   # tmp_dir = "/scratch/username/frequensolve/tmp"
+   # scratch_dir = "$SCRATCH/frequensolve"
+   # tmp_dir = "$SCRATCH/frequensolve/tmp"
 
    [sites.stampede3.run_config]
    account = "your-tacc-project-id"
@@ -464,20 +692,50 @@ The generated profile is equivalent to this minimal configuration:
    * - ``solver``
      - Absolute path to the remote ``FS_seismic`` router executable.
        FrequenSolve launches this configured executable for initialization,
-       frequency tasks, imaging postprocessing, and packing.
+       frequency tasks, imaging postprocessing, packing, and curvature
+       postprocessing.
    * - ``work_dir``
-     - Absolute remote base directory for relative project, simulation, and job
+     - Remote base directory for relative project, simulation, and job
        paths. It may be on any writable remote filesystem. Absolute paths in
-       those definitions are not rebased. When omitted, FrequenSolve uses
-       ``$WORK/frequensolve``.
+       those definitions are not rebased. Persistent-session directories,
+       scheduler heartbeat and status files, and curvature mirrors without
+       ``scratch_dir`` live below it. When omitted, FrequenSolve uses
+       ``$WORK/frequensolve``, or ``$SCRATCH/frequensolve`` with
+       ``storage = "scratch"``. ``work_dir``, ``scratch_dir`` and ``tmp_dir``
+       are absolute paths or start with one remote variable, such as
+       ``"$SCRATCH/frequensolve"`` or ``"${WORK}/runs"``, which FrequenSolve
+       resolves once in the login shell and logs.
+   * - ``storage``
+     - ``"work"`` (default) or ``"scratch"``: the remote filesystem variable,
+       ``$WORK`` or ``$SCRATCH``, below which ``work_dir`` defaults to
+       ``frequensolve``. Use ``"scratch"`` when the work filesystem is slow;
+       scratch filesystems are usually purged and not backed up. It cannot be
+       combined with ``work_dir``.
    * - ``scratch_dir``
-     - Optional absolute remote scratch directory reserved for future model and
-       high-I/O storage. FrequenSolve records this setting but does not use it
-       for job data yet.
+     - Optional remote scratch directory reserved for future model and
+       high-I/O storage. Sauce curvature postprocessing stages its HDF5 inputs
+       and results below ``curvature/`` here, or below ``work_dir`` when unset,
+       until ``site.remove_curvature_files()`` deletes them.
+   * - ``transfer_stall_timeout``
+     - Seconds an upload or download may make no progress before it is
+       stopped: rsync's ``--timeout``, the SFTP size watchdog for OpenSSH
+       control-socket transfers, or the Paramiko channel timeout. Defaults to
+       120. Slow transfers that keep moving are never cut off.
+   * - ``transfer_attempts``
+     - Attempts per upload or download after a stall or SSH connection
+       failure (default 3; ``1`` disables retries), with a 2, 4, ... second
+       backoff. Before retrying, FrequenSolve checks that the login connection
+       still completes a round trip; if a shared OpenSSH control connection no
+       longer answers, it switches to another live one under
+       ``~/.ssh/control`` (for example one reopened with ``frequensolve site
+       connect``) and stops retrying when none is found. It never closes your
+       control connection, which would need MFA to reopen. rsync retries
+       resume from the partially transferred file (``--partial``); SFTP
+       retries restart the file. Missing files, permission errors and failed
+       size verification are not retried.
    * - ``tmp_dir``
-     - Optional remote directory for transient transfer tarballs and
-       provisioning scripts. Use a concrete absolute path on the login
-       filesystem. Defaults to ``/tmp``.
+     - Optional remote directory for transient transfer tarballs on the
+       login node. Defaults to ``/tmp``, which ``storage`` does not change.
    * - ``modules``
      - Environment modules loaded from left to right before the solver starts.
        A preset may supply a runtime stack; an explicit profile array replaces
@@ -488,21 +746,36 @@ The generated profile is equivalent to this minimal configuration:
        Simple ``${NAME}`` references expand after every configured module has
        loaded; other shell expressions remain escaped.
    * - ``mpi_wrapper``
-     - MPI launcher such as ``srun`` or ``ibrun``.
+     - MPI launcher such as ``srun`` or ``ibrun``. Batch jobs give every rank
+       its own ``cores_per_node // ranks_per_node`` cores for its threads:
+       ``srun --cpus-per-task``, TACC ``ibrun ... task_affinity``, or, for Open
+       MPI ``mpirun``/``mpiexec`` on Linux, ``--map-by slot:PE=<threads>
+       --bind-to core`` with ``OMP_PLACES=cores`` and ``OMP_PROC_BIND=close``
+       unless the environment sets them. Other ``mpirun``/``mpiexec`` ranks
+       stay unbound. Binding or mapping options in ``launcher_args`` or Open
+       MPI binding variables in the environment take precedence. Batch scripts
+       request ``--cpus-per-task`` except with ``ibrun``.
    * - ``launcher_args``
      - Arguments passed to every MPI launcher invocation, such as SLURM's
        ``--kill-on-bad-exit=1`` and ``--wait=30``.
    * - ``poll_interval``
      - Seconds between scheduler status polls.
    * - ``scheduler_heartbeat_timeout``
-     - Maximum seconds without a new adaptive-scheduler heartbeat before a
-       running SLURM job is reported failed. Defaults to 60. Set it to
-       ``None`` through ``SlurmRunConfig`` to disable the check.
+     - Maximum seconds without a new adaptive-scheduler or persistent-session
+       controller heartbeat before a running SLURM job is reported failed.
+       Defaults to 300; shorter windows misfire when the shared work
+       filesystem stalls. Set it to ``None`` through ``SlurmRunConfig`` to
+       disable the check.
+   * - ``session_command_timeout``
+     - Seconds one persistent-session filesystem command on the login node
+       (session directory creation and lease, request and command publication)
+       may take before it fails with the command and path named. Defaults to
+       120. Raise it when the work filesystem is slow.
    * - ``mpi_health_check_timeout``
      - Optional SLURM step time limit for a full-rank solver MPI health check
        before sizing. The solver must support ``--mpi-health-check``. Disabled
        by default for compatibility with older solver installations. Requires
-       batch mode with ``srun``; attached allocations and other MPI launchers
+       batch mode with ``srun``; persistent sessions and other MPI launchers
        reject this option before input upload or launch.
    * - ``account``
      - HPC allocation/account name.
@@ -516,20 +789,41 @@ The generated profile is equivalent to this minimal configuration:
      - Optional tables keyed by partition name. Each table can define
        ``max_duration``, node bounds, cores, sockets, memory, and GPUs per node.
        When a run selects another known partition, FrequenSolve resolves its
-       limits and node shape before validating and sizing the run.
+       limits and node shape before validating and sizing the run. On a
+       partition with ``gpus_per_node`` (GPU devices, or stacks, per node) runs
+       default to one MPI rank per device unless the run sets
+       ``ranks_per_node``, ranks of tasks that share a node select different
+       devices, and ``gpu_memory_per_gpu`` (MiB per device) also bounds each
+       rank's share of a task's memory estimate. A partition's
+       ``environment`` table is exported by jobs on that partition; the site
+       ``environment`` overrides its values. The Stampede3 ``pvc`` preset uses
+       it to enable GPU-aware MPI.
    * - ``nodes``
      - Requested nodes for submitted jobs.
    * - ``duration``
      - Requested wall time, such as ``"00:30:00"``.
    * - ``ranks_per_node`` / ``ranks_per_task``
      - MPI rank layout for solver runs. ``procs_per_node`` and
-       ``procs_per_task`` remain compatibility aliases.
+       ``procs_per_task`` remain compatibility aliases. Batch jobs and
+       persistent sessions size each task's ranks from its memory estimate;
+       ``ranks_per_task`` passed to ``session.submit`` sets each task's
+       minimum. Tasks that read a linearization's saved inputs
+       run on the rank count that wrote them; a job whose tasks all do so
+       skips sizing (see `Partitioned Solver Inputs`_).
    * - ``notify_on`` / ``notify_email``
      - Scheduler notification settings when supported.
    * - ``run_path``
      - Optional remote run directory override.
    * - ``slurm_args``
      - Extra scheduler arguments as a TOML array of strings.
+   * - ``curvature_run_config``
+     - Optional table of run fields (``nodes``, ``ranks_per_node``,
+       ``duration``, ``queue``, ...) for Sauce curvature batch jobs. The run
+       fields above apply when it is omitted. Without ``ranks_per_node``,
+       curvature uses one rank per socket.
+   * - ``background_layout``
+     - Files of imaging background checkpoints: ``rank`` (default) or
+       ``shared`` (see `Partitioned Solver Inputs`_).
    * - ``verbose``
      - Print user-facing status messages in addition to logging.
 
@@ -537,6 +831,67 @@ For generic ``slurm`` profiles, config fields and run fields may be written
 flat as shown above, or grouped under nested ``config`` and ``run_config``
 tables. Preset values are loaded first, nested profile tables are merged over
 them, and explicit construction-time overrides are applied last.
+
+Adaptive Slurm Task Placement
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Adaptive ``srun`` sweeps map reserved rank slots onto the allocation's ordered
+hosts and per-node task counts, including unequal capacities. Each step uses
+an explicit repeated-host file with ``--distribution=arbitrary --exclusive
+--exact``. Tasks can share a node on disjoint CPUs; they do not use
+``--overlap``. Allocation-wide node and task placement variables are removed
+from the step environment. Thread counts, CPU binding and memory settings are
+preserved. Conflicting explicit placement options in ``launcher_args`` are
+rejected. Multi-component heterogeneous Slurm jobs are not supported.
+
+This applies to both observation and imaging tasks. A launched ``srun`` is
+reported as ``launching`` until rank zero starts on a worker and records its
+Slurm step ID. Startup waits longer than 60 seconds appear in the status and
+scheduler log; reserved slots remain held until the launcher exits. This
+signal confirms step startup, not completion of solver MPI initialization.
+
+Developers can run a bounded, solver-free placement check inside an explicitly
+approved, otherwise idle allocation with at least three rank slots. It starts
+two concurrent steps using one and two ranks, checks actual hosts against their
+host files, and terminates pending launchers on timeout. The working directory
+must be shared by all allocated nodes; it does not submit a batch job:
+
+.. code-block:: bash
+
+   FS_SLURM_PLACEMENT_PROBE=1 FS_SLURM_PROBE_DIR=/approved/shared/scratch \
+     python -m pytest -m hpc tests/test_adaptive_scheduler_slurm_live.py
+
+Partitioned Solver Inputs
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sauce partitions version-3 objective states and vectors, receiver states and
+background checkpoints by MPI rank, records the rank count of the task that
+wrote them, and rejects a later JVP, VJP, normal or receiver action that reads
+them on another count (a background is recomputed instead). Version-5
+objective states and vectors reload on any rank count and impose none. Local
+and SLURM sites therefore run each task reading a partitioned input on
+the rank count recorded in its producer's manifest, read from the fetched
+copy or, when absent, from the remote project in one login command; all other
+tasks keep their adaptive sizing. A batch job whose tasks all have recorded
+counts skips the sizing pass. A required count larger than the job's ranks per
+task fails before submission. Persistent sessions pin each task the same way.
+
+``site.supports_background_reuse`` is ``True`` for local and SLURM sites,
+which keep result directories in place for later actions. FrequenSol Cloud
+does not keep results for later workers, so it reports ``False`` and
+workflows recompute the background there. Source batching follows the job's
+acquisition and is unchanged by the site. A background checkpoint is a task
+manifest (``fs-background-state-2``) and the HDF5 files it names below
+``<manifest stem>/generations/<run>/``; the profile key ``background_layout``
+chooses them for the site's file system: ``rank`` (default) writes one file
+per MPI rank without collective I/O, ``shared`` one file per task through
+parallel HDF5, which keeps the file count independent of the rank count.
+Reuse needs the producer's rank count in both layouts, and Sauce's
+``FS_BACKGROUND_LAYOUT`` environment variable (for example in the profile's
+``environment``) overrides the setting.
+``site.remove_result_files(job, ["background_1.json", ...])`` deletes files by
+path relative to a job's result directory once they are no longer needed,
+together with the directories that this leaves empty.
 
 Module And Library Setup
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -593,7 +948,8 @@ The same keywords can override those defaults for one submission:
    )
 
 The packaged ``site_presets.toml`` catalog currently defines Stampede3's
-``spr``, ``icx``, ``skx``, and ``skx-dev`` CPU partitions plus its standard
+``spr``, ``icx``, ``skx``, and ``skx-dev`` CPU partitions, its ``pvc`` GPU
+partition (see :doc:`stampede3_getting_started`), plus its standard
 Intel MPI, PETSc, and parallel-HDF5 runtime modules. These values are defaults:
 local profile values can override them, and TACC's ``qlimits`` output remains
 authoritative because queue policy can change without notice. See the
@@ -615,6 +971,9 @@ FrequenSolve sets ``MKL_NUM_THREADS=1`` and ``MKL_DYNAMIC=FALSE`` for local and
 SLURM solver processes so MKL does not add nested threading underneath the
 solver's own thread controls. HPC launch scripts also default to
 ``OMP_WAIT_POLICY=PASSIVE`` and ``KMP_STACKSIZE=20M``.
+Stampede3 PVC batch and persistent-session launches set ``KMP_BLOCKTIME=0``
+so idle OpenMP workers sleep immediately, leaving CPU time for GPU submission.
+Other HPC partitions retain the ``20ms`` block-time default.
 Explicit profile ``environment`` values override these defaults. Local users
 may set ``OMP_NUM_THREADS`` under the selected profile's ``environment`` table.
 HPC run scripts export ``OMP_NUM_THREADS=$n_threads`` alongside the existing
@@ -675,7 +1034,9 @@ identify each remote command and transfer backend without logging passwords,
 private keys, key passphrases, or two-factor codes. OpenSSH commands that reuse
 a verified control socket are non-interactive and bounded by connection and
 command timeouts, so an expired socket produces an exception instead of an
-invisible credential prompt.
+invisible credential prompt. SFTP file transfers over the socket have no total
+time limit, so multi-gigabyte files can finish, but fail once the transferred
+size stops changing for the command timeout (120 seconds).
 
 The site CLI uses a bounded remote probe rather than relying only on the local
 OpenSSH master process when deciding that a shared connection is alive. Inspect

@@ -72,7 +72,9 @@
             "hybrid",
             "studentst",
             "student_t",
-            "student-t"
+            "student-t",
+            "tukey",
+            "bisquare"
           ],
           "default": "l2",
           "description": "Radial loss applied to each complex metric-weighted residual sample. Matching is case-insensitive at runtime."
@@ -81,7 +83,7 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "default": 1.5,
-          "description": "Positive Huber transition amplitude in data-metric coordinates."
+          "description": "Positive Huber transition or Tukey cutoff amplitude in data-metric coordinates. Tukey has zero score and frozen IRLS weight at or beyond this amplitude."
         },
         "c2": {
           "type": "number",
@@ -99,13 +101,17 @@
       "additionalProperties": false
     },
     "hvObjective": {
+      "description": "Experimental HV objective; requires an executable compiled with FS_ENABLE_HV=1.",
+      "x-fs-visibility": "experimental",
+      "x-fs-docs": false,
       "type": "object",
       "required": ["kind", "kappa", "lambda", "epsilon", "discretization", "inner_solver"],
       "properties": {
         "kind": {"const": "hv"},
+        "export_receiver_curvature": {"type": "boolean", "default": false, "x-fs-visibility": "internal", "x-fs-docs": false, "description": "Export the converged coupled auxiliary Gauss-Newton matrices and endpoint maps for receiver curvature applications."},
         "kappa": {"type": "number", "exclusiveMinimum": 0, "description": "Positive transport-velocity penalty in normalized receiver coordinates."},
-        "lambda": {"type": "number", "minimum": 0, "description": "Nonnegative velocity-curvature penalty."},
-        "epsilon": {"type": "number", "exclusiveMinimum": 0, "description": "Positive velocity-gradient penalty."},
+        "lambda": {"type": "number", "minimum": 0, "description": "Nonnegative squared velocity-gradient penalty."},
+        "epsilon": {"type": "number", "exclusiveMinimum": 0, "description": "Positive squared velocity-curvature penalty."},
         "discretization": {
           "type": "object",
           "required": ["path_intervals", "order"],
@@ -138,15 +144,26 @@
           "enum": [
             "waveform",
             "phase_derivative",
-            "spectral_derivative"
+            "spectral_derivative",
+            "wavenumber"
           ],
           "default": "waveform",
-          "description": "Attribute compared before the radial objective is applied."
+          "description": "Attribute compared before the radial objective is applied. wavenumber compares the instantaneous wavenumber along the receiver line: consecutive output channels a, b = a+1 at distance h pair into conjg(S_a) S_b and |S_a + S_b|^2/4, each channel pools N = sum W Im(conjg(S_a) S_b), D = eps^2 + sum W |S_a + S_b|^2/4 and H = sum W h, and k = (2/H) atan(N/(2 D)) in rad/m (exact for a plane wave up to spatial Nyquist; a wave travelling towards increasing channel index gives -omega/c). It needs the same observed inputs as phase_derivative and dense output-channel rows (fwi_operator)."
         },
         "derivative_axis": {
-          "const": "frequency",
+          "enum": ["frequency", "receiver_line"],
           "default": "frequency",
-          "description": "Physical-frequency derivative axis; derivatives are with respect to Hz at fixed Laplace damping."
+          "description": "Physical-frequency derivative axis; derivatives are with respect to Hz at fixed Laplace damping. receiver_line (the default for, and only axis of, wavenumber) differentiates along the ordered output channels."
+        },
+        "measure": {
+          "enum": ["wavenumber", "slowness"],
+          "default": "wavenumber",
+          "description": "wavenumber only: compare k in rad/m, or the slowness k/(2 pi f) in s/m."
+        },
+        "max_spacing_m": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "wavenumber only: consecutive channels farther apart than this many metres form no pair, splitting the line. Defaults to 2.5 times the median consecutive spacing."
         },
         "source_derivative": {
           "enum": [
@@ -161,8 +178,69 @@
           "exclusiveMinimum": 0,
           "default": 0.01,
           "description": "Stabilization floor relative to the preprocessed observed RMS amplitude for each RHS/component."
+        },
+        "array": {
+          "type": "object",
+          "description": "Pool receiver energy and cross-products before forming instantaneous traveltime (or, for wavenumber, pair cross-products weighted by the distance from each channel to the pair midpoints); dense point receiver groups only.",
+          "required": [
+            "kind",
+            "length_m"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "gaussian",
+                "hann",
+                "uniform"
+              ]
+            },
+            "length_m": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Gaussian standard deviation, or Hann/uniform support radius, in metres."
+            },
+            "truncate": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 3
+            }
+          },
+          "additionalProperties": false
+        },
+        "reliability": {
+          "const": "predicted",
+          "description": "Freeze predicted power / (predicted power + observed RMS floor squared) outside the loss for each native linearization. Requires frozen-source phase_derivative. Refresh between outer reweighting steps, not within line-search trials."
+        },
+        "confidence_floor": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Optional observed RMS amplitude fraction used for static confidence weighting on point traces or pooled arrays."
+        },
+        "source_delay": {
+          "enum": [
+            "none",
+            "fit"
+          ],
+          "default": "none",
+          "description": "fit projects one source delay per task and RHS out of the phase-slope residual: the loss uses r - tau with tau the weighted (IRLS for robust losses) mean traveltime residual, and every derivative action applies the same projector. phase_derivative only."
         }
       },
+      "allOf": [
+        {
+          "if": {"properties": {"source_delay": {"const": "fit"}}, "required": ["source_delay"]},
+          "then": {"properties": {"kind": {"const": "phase_derivative"}}, "required": ["kind"]}
+        },
+        {
+          "if": {"anyOf": [{"required": ["measure"]}, {"required": ["max_spacing_m"]}]},
+          "then": {"properties": {"kind": {"const": "wavenumber"}}, "required": ["kind"]}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "wavenumber"}}, "required": ["kind"]},
+          "then": {"properties": {"derivative_axis": {"const": "receiver_line"}}},
+          "else": {"properties": {"derivative_axis": {"const": "frequency"}}}
+        }
+      ],
       "additionalProperties": false
     },
     "receiverImpedance": {
@@ -329,7 +407,7 @@
           "properties": {
             "df": {
               "$ref": "#/$defs/observedData",
-              "description": "Observed derivative with respect to physical frequency in Hz."
+              "description": "Observed derivative with respect to physical frequency in Hz. Takes precedence; when absent, a time-domain trace-store observed supplies -2*pi*i times its first time moment."
             }
           },
           "additionalProperties": false
@@ -339,7 +417,7 @@
         },
         "simulated": {
           "$ref": "#/$defs/pathStem",
-          "description": "Simulated data path stem; omitted uses the receiver group's output file."
+          "description": "Simulated data path stem or stored trace file; omitted uses the receiver group's output file. Required by the adjoint workflow."
         },
         "projection": {
           "$ref": "#/$defs/receiverProjection",
@@ -370,7 +448,7 @@
         "kind": {
           "type": "string",
           "minLength": 1,
-          "description": "Built-ins include offset_power, offset_taper, source_scalar_fit, source_spectrum_correction, component_scale, trace_normalize, frequency_weight, trace_mask, trace_weight, material_weighting, receiver_ar1_whiten, scholte_notch, slow_velocity_mute, amplitude_clip, and wavefield_source_taper."
+          "description": "Built-ins include offset_power, offset_taper, source_scalar_fit, source_spectrum_correction, component_scale, trace_normalize, frequency_weight, trace_mask, trace_weight, material_weighting, receiver_ar1_whiten, scholte_notch, slow_velocity_mute, slow_velocity_pass, amplitude_clip, and wavefield_source_taper."
         },
         "stage": {
           "enum": [
@@ -384,7 +462,7 @@
         },
         "params": {
           "type": "object",
-          "description": "Hook-specific deterministic parameters. trace_weight accepts finite nonnegative weights and an explicit receiver, component_receiver, source_component_receiver, or sparse_trace layout; production arrays use an HDF5Dense reference while compact inline arrays remain supported. receiver_ar1_whiten accepts a finite correlation with absolute value below one and applies the exact stationary AR(1) inverse covariance factor along an ordered dense receiver axis. source_scalar_fit accepts norm (default inherit), max_iterations, relative_tolerance, and matching robust-loss parameters; n_irls is a deprecated max_iterations alias. source_spectrum_correction requires simulated stage plus complex scale and frequency_derivative arrays, each containing one broadcast value or global per-RHS values; complex entries are [real, imaginary] pairs and the derivative is with respect to physical Hz. scholte_notch accepts exactly one of phase_velocity or angular wavenumber plus relative_half_width, relative_taper_width, spacing_tolerance, and total or frozen spectral_derivative. slow_velocity_mute accepts stop_velocity, pass_velocity, reject_slow or keep_slow mode, spacing_tolerance, and the same spectral_derivative policy. Receiver-wavenumber hooks require a regularly sampled dense cable and use trace_pair stage. For taper hooks, absolute d0/d1 values may carry physical units via a shared units field or per-value {value, units} objects; domain_fraction d0/d1 values are dimensionless fractions of the largest domain extent. Acquisition-spacing scales are unsupported. material_weighting defines disjoint one-based component blocks, a material coefficient and output units. It freezes receiver-local factors on first application, applies W to both traces and W^H to covectors, and requires frequency-independent coefficients. Unspecified components keep their input coordinates; live model-dependent weighting is unavailable.",
+          "description": "Hook-specific deterministic parameters. trace_weight accepts finite nonnegative weights and an explicit receiver, component_receiver, source_component_receiver, or sparse_trace layout; production arrays use an HDF5Dense reference while compact inline arrays remain supported. Alternatively frequency_weights entries provide frequency_hz, laplace_hz and an HDF5Dense weights reference; exactly one entry must match the complex task frequency within 1e-9 Hz. receiver_ar1_whiten accepts a finite correlation with absolute value below one and applies the exact stationary AR(1) inverse covariance factor along an ordered dense receiver axis. source_scalar_fit accepts norm (default inherit), max_iterations (default 100), relative_tolerance, matching robust-loss parameters, and variant (complex, the default; amplitude_only for a real nonnegative factor; phase_only for a unit-modulus factor); n_irls is a deprecated max_iterations alias. fwi_operator accepts it for waveform comparisons as a projected source with frozen per-RHS factors. source_spectrum_correction requires simulated stage plus complex scale and frequency_derivative arrays, each containing one broadcast value or global per-RHS values; complex entries are [real, imaginary] pairs and the derivative is with respect to physical Hz. scholte_notch accepts exactly one of phase_velocity or angular wavenumber plus relative_half_width, relative_taper_width, spacing_tolerance, and total or frozen spectral_derivative. slow_velocity_mute accepts stop_velocity, pass_velocity, reject_slow or keep_slow mode, spacing_tolerance, and the same spectral_derivative policy. slow_velocity_pass is its exact complement (keeps apparent velocities at or below stop_velocity, removes those at or above pass_velocity, same raised-cosine taper, no mode key), so mute plus pass with one band is the identity. Receiver-wavenumber hooks require a regularly sampled dense cable (point receivers, node-averaged channels, or DAS gauge channels whose objective rows are output channels) and use trace_pair stage. For taper hooks, absolute d0/d1 values may carry physical units via a shared units field or per-value {value, units} objects; domain_fraction d0/d1 values are dimensionless fractions of the largest domain extent. Acquisition-spacing scales are unsupported. material_weighting defines disjoint one-based component blocks, a material coefficient and output units, applies W to both traces and W^H to covectors, and requires frequency-independent coefficients. mode frozen (default) holds W fixed within the objective instance and adds no material derivative; mode live evaluates W from the current model in each job and adds its model derivative to gradients and to separate fwi_operator jvp, vjp and normal actions; Explicit material domains select coefficients independently of receiver field domains; selected coefficients require frozen or pinned mode. mode pinned reuses a reference factor persisted in state_file. Unspecified components keep their input coordinates.",
           "additionalProperties": true
         }
       },
@@ -414,10 +492,42 @@
                 "required": [
                   "blocks"
                 ],
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "pinned"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "state_file"
+                  ]
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "state_file"
+                    ]
+                  }
+                },
                 "properties": {
-                  "model_policy": {
-                    "const": "frozen",
-                    "default": "frozen"
+                  "mode": {
+                    "enum": [
+                      "frozen",
+                      "live",
+                      "pinned"
+                    ],
+                    "default": "frozen",
+                    "description": "frozen samples W once per objective instance and omits material derivatives; live reevaluates W and differentiates it; pinned persists one fixed reference factor in state_file across jobs. Independently selected material coefficients require frozen or pinned mode."
+                  },
+                  "state_file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Pinned reference-factor file, absolute or relative to the project path. The first job writes it; later jobs refuse it for different receiver points, hook configuration, or material model structure."
                   },
                   "blocks": {
                     "type": "array",
@@ -548,7 +658,7 @@
         },
         "reduction": {
           "enum": ["weighted_mean", "sum"],
-          "default": "weighted_mean"
+          "default": "sum"
         }
       },
       "additionalProperties": false
@@ -663,7 +773,7 @@
               "comparison": {
                 "required": ["kind"],
                 "properties": {
-                  "kind": {"enum": ["phase_derivative", "spectral_derivative"]}
+                  "kind": {"enum": ["phase_derivative", "spectral_derivative", "wavenumber"]}
                 }
               }
             },
@@ -673,12 +783,29 @@
             "properties": {
               "receiver_groups": {
                 "items": {
-                  "required": ["observed", "observed_derivatives"],
-                  "properties": {
-                    "observed_derivatives": {
-                      "required": ["df"]
+                  "required": ["observed"],
+                  "anyOf": [
+                    {
+                      "required": ["observed_derivatives"],
+                      "properties": {
+                        "observed_derivatives": {
+                          "required": ["df"]
+                        }
+                      }
+                    },
+                    {
+                      "description": "Without explicit df, a time-domain trace store supplies df as -2*pi*i times its first time moment.",
+                      "properties": {
+                        "observed": {
+                          "type": "object",
+                          "required": ["_type"],
+                          "properties": {
+                            "_type": {"enum": ["SeismicStore", "HDF5TraceStore"]}
+                          }
+                        }
+                      }
                     }
-                  }
+                  ]
                 }
               }
             }
@@ -697,7 +824,7 @@
         "IC": {
           "type": "string",
           "default": "up_down",
-          "description": "Imaging-condition kind. Built-ins include pressure, velocity, up_down, energy, energy:acoustic, energy:elastic, fwi, fwi:acoustic, fwi:acoustic_up_down, and fwi:elastic; custom registry entries are allowed."
+          "description": "Imaging-condition kind. Built-ins include pressure, velocity, up_down, energy, energy:acoustic, energy:elastic, fwi, fwi:acoustic, fwi:acoustic_up_down, fwi:elastic, and fwi:coupled; custom registry entries are allowed."
         },
         "property": {
           "type": "string",
@@ -860,7 +987,7 @@
           "type": "number",
           "minimum": 0,
           "default": 1,
-          "description": "Fraction of the local P wavelength used as the smoothing length."
+          "description": "Number of local wavelengths in the smoothing length: length(x)=lambda*v(x)/f with the layer's local sizing wavespeed at each quadrature point and f the largest f_list frequency (no 2*pi); jobs tuned against the former lambda*v/(2*pi*f) scale lambda by 1/(2*pi)."
         },
         "alpha": {
           "type": "number",
@@ -936,7 +1063,7 @@
         "lower_bound": {"type": "number"},
         "upper_bound": {"type": "number"},
         "absolute_tolerance": {"type": "number", "exclusiveMinimum": 0, "default": 1e-6},
-        "relative_tolerance": {"type": "number", "exclusiveMinimum": 0, "default": 1e-4},
+        "relative_tolerance": {"type": "number", "exclusiveMinimum": 0, "default": 1e-4, "description": "Use relative tolerance 1e-4 by default for iterative solvers, smoothers, and regularization/proximal solves, not only TV. It rarely needs to change; most seismic imaging problems do not require tighter accuracy. Preserve explicit user-selected tolerances. A smaller tolerance may be justified for very hard problems or unusually high accuracy requirements, with a documented need and verified downstream benefit. Keep relative tolerances strictly above 1e-7 for single-precision solves. Do not transfer stringent diagnostic/test tolerances into production settings. Absolute tolerances depend on residual scaling and units and are not interchangeable with relative tolerances."},
         "nonconvergence_policy": {"enum": ["fail", "return_best"], "default": "fail"},
         "result": {
           "$ref": "../../fragments/fs-common-defs.schema.json#/$defs/path",

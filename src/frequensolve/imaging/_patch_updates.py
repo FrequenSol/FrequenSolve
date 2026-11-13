@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from dataclasses import asdict, dataclass
@@ -19,6 +18,7 @@ import numpy as np
 from frequensolve.inversion import LossTerms
 from frequensolve.mesh._stage_snapshot import _contained, _digest
 
+from ._block_digest import block_digest
 from ._patch_masks import core_masks, local_patch_view
 from .controls import ControlSpace, ControlState, ControlVector
 from .problem import ImagingProblem, Linearization
@@ -204,7 +204,8 @@ def solve_local_stage(
     policy = settings.to_dict()
 
     def epoch(model: ControlState) -> str:
-        return hashlib.sha256(model.values.tobytes()).hexdigest()
+        # Hashes the coefficients in place (threaded), without a bytes copy.
+        return block_digest(model.values).rsplit(":", 1)[-1]
 
     def save_proposal(model: ControlState) -> dict[str, str]:
         root = runtime.stage.manifest.parent
@@ -238,6 +239,16 @@ def solve_local_stage(
             completed=completed,
             history=history,
         )
+        # Proposals the published checkpoint no longer references are
+        # superseded; keep at most the baseline and one state per patch.
+        root = runtime.stage.manifest.parent
+        keep = set()
+        if progress is not None:
+            keep.add(progress["baseline"]["file"])
+            keep.update(r["state"]["file"] for r in progress["proposals"].values())
+        for stale in (root / "proposals").glob("*.h5"):
+            if stale.relative_to(root).as_posix() not in keep:
+                stale.unlink(missing_ok=True)
 
     def proposal(
         patch: int, base: ControlState, recorded: Mapping[str, Any] | None
@@ -295,7 +306,7 @@ def solve_local_stage(
                         model,
                         local_objective.loss(event.model),
                         event,
-                        None if scaling is None else np.asarray(scaling).tolist(),
+                        None if scaling is None else np.asarray(scaling, float),
                     )
                 )
 

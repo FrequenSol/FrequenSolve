@@ -84,6 +84,22 @@ def _coordinate_reference(value: Any) -> Optional[str]:
     return reference.strip("/")
 
 
+def _coordinate_storage_values(coordinate: Any) -> np.ndarray:
+    """Store real coordinates as solver-compatible doubles; preserve labels."""
+    values = np.asarray(coordinate)
+    if values.dtype.kind not in {"i", "u", "f"}:
+        return values
+    if values.dtype.kind in {"i", "u"}:
+        outside = values > 2**53
+        if values.dtype.kind == "i":
+            outside |= values < -(2**53)
+        if any(int(value) != float(value) for value in values[outside]):
+            raise ValueError(
+                "Integer coordinates must be exactly representable as float64"
+            )
+    return values.astype(np.float64, copy=False)
+
+
 def _coordinate_references_available(
     h5: h5py.File,
     dset: h5py.Dataset,
@@ -96,6 +112,11 @@ def _coordinate_references_available(
         if reference is not None and (
             reference not in h5 or not isinstance(h5[reference], h5py.Dataset)
         ):
+            return False
+        coordinate = h5[reference] if reference is not None else dset.attrs[dim]
+        dtype = np.asarray(coordinate).dtype if reference is None else coordinate.dtype
+        # Re-export legacy integer coordinates even when the input hash matches.
+        if dtype.kind in {"i", "u", "f"} and dtype != np.dtype(np.float64):
             return False
     return True
 
@@ -111,7 +132,7 @@ def _write_dimension_coordinates(
     inline_bytes = 0
     coordinate_group = _coordinate_group_path(dataset)
     for index, (dim, coordinate) in enumerate(coordinates.items()):
-        values = np.asarray(coordinate)
+        values = _coordinate_storage_values(coordinate)
         estimated_bytes = _coordinate_value_nbytes(values)
         if inline_bytes + estimated_bytes <= _MAX_INLINE_COORDINATE_BYTES:
             dset.attrs[dim] = _h5_attr_value(values)
@@ -360,7 +381,8 @@ class SimulationStore:
             attrs: Additional HDF5 attributes to write on the dataset.
             coordinate_dims: Dimensions whose coordinates should be described
                 by HDF5 attributes. Large values are stored in referenced
-                datasets. Defaults to every dimension.
+                datasets. Real numeric coordinates are stored as float64,
+                independently of the value dtype. Defaults to every dimension.
             interpolation_dims: Dimensions presented to the solver's spatial
                 xarray evaluator. When omitted, every data dimension is an
                 interpolation dimension. Remaining dimensions must form one
@@ -549,7 +571,8 @@ class SimulationStore:
         This is intended for generated arrays that are too large to first
         materialize as a single NumPy or xarray object. Passing a callable that
         creates a fresh iterator lets an unchanged existing dataset be reused
-        after a hash-only pass.
+        after a hash-only pass. Real numeric dimension coordinates are stored
+        as float64 independently of the payload dtype.
         """
 
         dataset = dataset.strip("/")

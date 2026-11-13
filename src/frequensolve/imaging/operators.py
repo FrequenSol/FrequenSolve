@@ -15,7 +15,7 @@ the Hermitian pairing, no factor 2), matching Sauce's ``vjp``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol, Sequence, Union
 
 import numpy as np
 from scipy.sparse import issparse
@@ -384,6 +384,15 @@ class Jacobian(ModelOperator):
         )
 
 
+class _NormalSource(Protocol):
+    @property
+    def space(self) -> ControlSpace: ...
+
+    def apply_normal(self, direction: Any) -> ControlVector: ...
+
+    def apply_normal_batch(self, directions: Any) -> Sequence[ControlVector]: ...
+
+
 class Normal(ModelOperator):
     """Frozen Gauss-Newton normal operator ``Re(J^H W J)`` (Sauce ``normal``).
 
@@ -391,7 +400,7 @@ class Normal(ModelOperator):
     itself.
     """
 
-    def __init__(self, linearization: "Linearization") -> None:
+    def __init__(self, linearization: _NormalSource) -> None:
         self.linearization = linearization
         super().__init__(linearization.space, linearization.space, dtype=np.float64)
 
@@ -399,6 +408,20 @@ class Normal(ModelOperator):
         return self.linearization.apply_normal(_real_direction(x)).values
 
     _rmatvec = _matvec
+
+    def _matmat(self, x: np.ndarray) -> np.ndarray:
+        """Apply every column through one batched ``normal`` job."""
+
+        columns = np.asarray(x)
+        products = self.linearization.apply_normal_batch(
+            [_real_direction(columns[:, j]) for j in range(columns.shape[1])]
+        )
+        result = np.zeros((self.shape[0], columns.shape[1]))
+        for j, product in enumerate(products):
+            result[:, j] = product.values
+        return result
+
+    _rmatmat = _matmat
 
     def _adjoint(self) -> ModelOperator:
         return self

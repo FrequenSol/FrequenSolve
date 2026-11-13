@@ -97,10 +97,10 @@
       "defaults": {
         "solve_on": "final",
         "max_iter": 300,
-        "tolerance": 0.0001,
+        "tolerance": null,
         "precision": "single"
       },
-      "tolerance_guidance": "Use relative tolerance 1e-4 by default for iterative solvers, smoothers, and regularization/proximal solves, not only TV. It rarely needs to change; most seismic imaging problems do not require tighter accuracy. Preserve explicit user-selected tolerances. A smaller tolerance may be justified for very hard problems or unusually high accuracy requirements, with a documented need and verified downstream benefit. Keep relative tolerances strictly above 1e-7 for single-precision solves. Do not transfer stringent diagnostic/test tolerances into production settings. Absolute tolerances depend on residual scaling and units and are not interchangeable with relative tolerances.",
+      "tolerance_guidance": "Leaving SolverConfig.tolerance unset omits it from solver JSON: transient Newmark and Gauss solves default to 1e-3, and frequency-domain solves default to 1e-4. Preserve explicit user-selected tolerances. Use 1e-4 by default for other iterative solvers, smoothers and regularization/proximal solves. Keep relative tolerances strictly above 1e-7 for single-precision solves; tighter tolerances need a documented accuracy benefit. Absolute tolerances depend on residual scaling and units.",
       "additional_fields_status": "contract-dependent"
     },
     "frequencies": {
@@ -1286,11 +1286,25 @@
       "remediation": "Use 2, 2.5, or 3 and follow any formulation-specific dimension constraints."
     },
     {
+      "code": "helmholtz.axisymmetric.s_projection.unsupported",
+      "severity": "error",
+      "path": "helmholtz_projection.s_projection",
+      "explanation": "The direct solenoidal projection uses Cartesian operators and is unavailable for axisymmetric fields.",
+      "remediation": "Use s_projection=complement for axisymmetric P/S velocity decomposition."
+    },
+    {
       "code": "discretization.method.incompatible",
       "severity": "error",
       "path": "discretization.method",
       "explanation": "The selected finite-element discretization is unavailable for the simulation physics.",
-      "remediation": "Use a discretization supported by the physics; Galerkin currently supports acoustic, acoustic_axisym, and elastic."
+      "remediation": "Use a discretization supported by the physics; Galerkin supports acoustic, elastic, their axisymmetric variants, and coupled_axisym; transient coupled is also supported."
+    },
+    {
+      "code": "model.attenuation.gsls.unsupported",
+      "severity": "error",
+      "path": "model.attenuation.model",
+      "explanation": "GSLS multi-mechanism attenuation is a time-domain constitutive law; frequency-domain, imaging and FWI workflows cannot use it.",
+      "remediation": "Use attenuation model 'kjartansson' (or 'none') for frequency-domain workflows; 'gsls' is for TransientJob only."
     },
     {
       "code": "model.missing",
@@ -1937,6 +1951,13 @@
       "remediation": "Rebuild the model with the spatial dimension required by the simulation."
     },
     {
+      "code": "model.fracture.solve.unsupported",
+      "severity": "error",
+      "path": "model.surfaces[*].fracture_model",
+      "explanation": "Reduced fracture seismic solves require native transient Galerkin coupling.",
+      "remediation": "Use a supported Cartesian or axisymmetric native TransientJob with Galerkin coupling. Match fracture geometry, solver and parallel settings to the paired Sauce build; frequency-domain reduced-fracture solves are not supported."
+    },
+    {
       "code": "model.property.coordinate_units.invalid",
       "severity": "error",
       "path": "model.subdomains[*].properties.*.coordinate_units",
@@ -1949,6 +1970,13 @@
       "path": "model.subdomains[*].properties.*.units",
       "explanation": "A model property uses an invalid value-unit expression.",
       "remediation": "Use valid physical units appropriate for the model property."
+    },
+    {
+      "code": "model.property_space.artifact.unsupported",
+      "severity": "error",
+      "path": "model.property_spaces.*.artifact",
+      "explanation": "An existing property-space artifact that the solver would reuse, at the declared path or as a mesh-keyed sibling, is not a packed fs-property-space-3 artifact; Sauce would abort when staging it.",
+      "remediation": "Move the artifact aside so the job regenerates the space; control states saved for the old basis do not match the regenerated one."
     },
     {
       "code": "model.subdomain.mesh_block_id.duplicate",

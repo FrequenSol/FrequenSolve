@@ -97,6 +97,7 @@ class StageResult:
     vector: Optional[ControlVector] = None
     space: Optional[ControlSpace] = None
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    uncertainty: Any = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "index", int(self.index))
@@ -215,6 +216,11 @@ class FWIResult:
         return self.stages[-1] if self.stages else None
 
     @property
+    def uncertainty(self) -> Any:
+        """Return the final stage's posterior approximation, when requested."""
+        return None if self.final is None else self.final.uncertainty
+
+    @property
     def success(self) -> bool:
         """Return whether every stage terminated successfully."""
 
@@ -273,9 +279,15 @@ class FWIResult:
             sort_keys=True,
             trailing_newline=True,
         )
+        summary = self.to_fs()
+        for stage, record in zip(self.stages, summary["stages"]):
+            if stage.uncertainty is not None:
+                relative = f"uncertainty/stage_{stage.index}"
+                stage.uncertainty.save(directory / relative)
+                record["uncertainty"] = relative
         atomic_write_json(
             directory / "result.json",
-            self.to_fs(),
+            summary,
             indent=2,
             sort_keys=True,
             trailing_newline=True,
@@ -307,12 +319,30 @@ class FWIResult:
             )
         state = ControlState.load(directory / "state.h5", space)
         history = OptimizationHistory.load(directory / "history.json")
-        stages = tuple(StageResult.from_fs(item) for item in data.get("stages", []))
+        from dataclasses import replace
+
+        from .statistics import UncertaintyResult
+
+        stages = []
+        for item in data.get("stages", []):
+            stage = StageResult.from_fs(item)
+            if item.get("uncertainty"):
+                native = None if problem is None else problem.backend.curvature()
+                uncertainty = UncertaintyResult.load(
+                    directory / item["uncertainty"], space, native=native
+                )
+                stage = replace(
+                    stage,
+                    uncertainty=uncertainty,
+                    space=uncertainty.space,
+                    vector=uncertainty.point,
+                )
+            stages.append(stage)
         checkpoint = data.get("checkpoint")
         return cls(
             state=state,
             history=history,
-            stages=stages,
+            stages=tuple(stages),
             checkpoint=None if checkpoint is None else Path(checkpoint),
             problem=problem,
         )

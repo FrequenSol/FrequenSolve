@@ -47,6 +47,39 @@ contains:
 ``project.save()`` explicitly is still useful when you want to inspect generated
 :term:`JSON`/:term:`HDF5` inputs before running.
 
+Job-specific simulation settings
+--------------------------------
+
+Use ``job.override_simulation(...)`` to change solver-JSON settings for one job
+while keeping its shared simulation definition. For example:
+
+.. code-block:: python
+
+   job.override_simulation({
+       "Mesh/adapt/f_adapt": 5.6,
+       "Solver/tolerance": 1e-4,
+   })
+
+``FrequencyDomainJob``, ``TimeDomainJob`` and ``TransientJob`` also accept the
+mapping through their ``simulation_overrides`` constructor argument. Keys may
+be slash-separated object-member paths or nested section names. A leading slash
+is optional; pointer paths support ``~1`` for a literal slash and ``~0`` for a
+literal tilde within a member name. Set arrays as a whole rather than indexing
+individual elements. Later dictionary entries take precedence when paths overlap.
+Existing nested mappings and keyword sections remain accepted. Objects
+merge recursively; arrays, scalar values and null replace the matching value.
+Omitted settings retain the simulation value. Override keys use Sauce JSON names
+and values use the solver's documented units, such as hertz for ``f_adapt``.
+
+``job.simulation`` remains the authored definition. Inspect the merged settings
+through ``job.effective_simulation``; edit ``job.simulation_overrides`` or call
+``override_simulation`` to persist job-specific changes. Simulation names, types
+and project paths belong to the base definition and cannot be overridden.
+Saved jobs use a File simulation reference with an ``overrides`` object; the
+referenced simulation file is shared. Loading, project copying, fingerprints
+and staging preserve the overrides. Sauce applies command-line simulation
+overrides last.
+
 Relocating Simulations
 ----------------------
 
@@ -222,6 +255,8 @@ a site will stage.
 
 Jobs
 ----
+
+For direct physical-time propagation, use :doc:`transient`.
 
 ``TimeDomainJob`` defines a frequency sweep and reconstructs :term:`time-domain`
 traces through the trace API. ``FrequencyDomainJob`` runs explicit frequencies

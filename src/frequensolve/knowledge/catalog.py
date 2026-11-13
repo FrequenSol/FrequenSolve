@@ -235,7 +235,7 @@ class SolverAuthoringRules:
     precision_values: tuple[str, ...]
     default_solve_on: str
     default_max_iter: int
-    default_tolerance: float
+    default_tolerance: Optional[float]
     default_precision: str
     additional_fields_status: str
     tolerance_guidance: str = ""
@@ -1064,7 +1064,11 @@ def _solver_rules(value: object, path: str) -> SolverAuthoringRules:
         ),
         default_solve_on=_string(defaults["solve_on"], f"{path}.defaults.solve_on"),
         default_max_iter=_integer(defaults["max_iter"], f"{path}.defaults.max_iter"),
-        default_tolerance=_number(defaults["tolerance"], f"{path}.defaults.tolerance"),
+        default_tolerance=(
+            None
+            if defaults["tolerance"] is None
+            else _number(defaults["tolerance"], f"{path}.defaults.tolerance")
+        ),
         default_precision=_string(defaults["precision"], f"{path}.defaults.precision"),
         additional_fields_status=_string(
             data["additional_fields_status"], f"{path}.additional_fields_status"
@@ -2273,7 +2277,7 @@ def _validate_authoring_rules(
     if (
         solver.default_solve_on != "final"
         or solver.default_max_iter != 300
-        or solver.default_tolerance != 1.0e-4
+        or solver.default_tolerance is not None
         or solver.default_precision != "single"
     ):
         raise CatalogValidationError("default solver settings are invalid")

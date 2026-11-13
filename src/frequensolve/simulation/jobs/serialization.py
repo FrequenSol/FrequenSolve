@@ -11,7 +11,18 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 import blake3
 import numpy as np
@@ -21,7 +32,15 @@ from frequensolve.simulation.artifact_contract import (
     COLLECTION_CONTRACT_VERSION,
     OPERATION_CONTRACT_VERSION,
 )
-from frequensolve.simulation.simulation import BaseSimulation, CustomJSONEncoder
+from frequensolve.simulation.overrides import (
+    reference_overrides,
+    simulation_reference_path,
+)
+from frequensolve.simulation.simulation import (
+    BaseSimulation,
+    CustomJSONEncoder,
+    _file_status,
+)
 from frequensolve.simulation.task_index import TASK_INDEX_VERSION
 from frequensolve.util.atomic import atomic_write_json
 from frequensolve.util.class_registry import class_registry
@@ -40,6 +59,9 @@ _ARTIFACT_CONTRACT_VERSIONS = {
     "task_index": TASK_INDEX_VERSION,
     "collection": COLLECTION_CONTRACT_VERSION,
 }
+# Fingerprinted JSON documents (chiefly saved simulations, O(controls) with
+# inline coefficients): (resolved path, ignored keys) -> (file status, hash).
+_JSON_FILE_HASHES: Dict[Tuple[str, Tuple[str, ...]], Any] = {}
 
 
 class JobSerializationMixin:
@@ -51,6 +73,16 @@ class JobSerializationMixin:
     """
 
     if TYPE_CHECKING:
+
+        @property
+        def job_file(self) -> Path: ...
+
+        simulation: BaseSimulation
+
+        def validate_outputs(self) -> None: ...
+
+        frequency_independent: ClassVar[bool]
+        _simulation_overrides_payload: Callable[[], dict[str, Any]]
 
         def export_context(self) -> ExportContext: ...
 
@@ -80,6 +112,8 @@ class JobSerializationMixin:
 
         if not isinstance(path, (str, Path)) and hasattr(path, "job_file"):
             path = path.job_file
+        if not isinstance(path, (str, Path)):
+            raise TypeError("Expected a job path or an object with job_file")
         path = cls._job_file_from_path(path)
         try:
             with open(path, "r") as f:
@@ -134,6 +168,7 @@ class JobSerializationMixin:
             import frequensolve.simulation.jobs._patches  # noqa: F401
             import frequensolve.simulation.jobs.eikonal  # noqa: F401
             import frequensolve.simulation.jobs.forward  # noqa: F401
+            import frequensolve.simulation.jobs.transient  # noqa: F401
 
         if class_name not in class_registry:
             raise ValueError(f"Unknown job class: {class_name}")
@@ -164,15 +199,15 @@ class JobSerializationMixin:
         """
 
         self.validate_outputs()
-        f_list = self._encoded_frequencies()
+        f_list = None if self.frequency_independent else self._encoded_frequencies()
         payload = {
             "schema": "fs-job-1",
             "_type": self.__class__.__name__,
             "name": self.name,
             "project_path": str(self._project_path()),
-            "simulation": self._simulation_path(project_relative=project_relative),
+            "simulation": self._simulation_reference(project_relative=project_relative),
             "workflow": self.workflow,
-            "f_list": f_list,
+            **({"f_list": f_list} if f_list is not None else {}),
             "Outputs": self.outputs.to_fs(),
         }
         payload.update(self._wavenumber_payload())
@@ -278,14 +313,20 @@ class JobSerializationMixin:
             [
                 "Outputs",
                 "Eikonal",
+                "Time",
                 "Image",
                 "control_sensitivities",
                 "focus",
                 "time_reconstruction",
                 "derivative_order",
+                "source_derivative",
             ]
         )
-        return {field: job_data[field] for field in fields if field in job_data}
+        payload = {field: job_data[field] for field in fields if field in job_data}
+        overrides = reference_overrides(job_data.get("simulation"))
+        if overrides:
+            payload["simulation_overrides"] = overrides
+        return payload
 
     def task_fingerprint(self, task: int) -> str:
         """Return the stable hash for one one-based frequency task.
@@ -354,24 +395,50 @@ class JobSerializationMixin:
 
     @staticmethod
     def _load_simulation_for_job(
-        path: Union[str, Path],
+        path: Union[str, Path, Mapping],
         *,
         base_path: Optional[Union[str, Path]] = None,
         project_path: Optional[Union[str, Path]] = None,
         source_project: Optional[Union[str, Path]] = None,
     ) -> BaseSimulation:
+        reference = path
+        path = simulation_reference_path(
+            path, job_file=Path(base_path) / "job.json" if base_path else None
+        )
         sim_file = JobSerializationMixin._resolve_simulation_file(
             path,
             base_path=base_path,
             project_path=project_path,
             source_project=source_project,
         )
+        if isinstance(reference, Mapping) and (
+            expected := reference.get("meta", {}).get("hash")
+        ):
+            actual = JobSerializationMixin._sha256_file(sim_file)
+            if actual.removeprefix("sha256:") != str(expected).removeprefix("sha256:"):
+                raise ValueError(f"Simulation file SHA-256 mismatch: {sim_file}")
         sim = BaseSimulation.load(sim_file)
         if project_path is not None:
             project = Path(project_path).expanduser().resolve()
             sim._file = Path(sim_file).expanduser().resolve()
             sim.relocate(project)
         return sim
+
+    def _restore_simulation_overrides(self, data: Any) -> None:
+        """Keep imported job overrides separate from the loaded base simulation."""
+        self.simulation_overrides = reference_overrides(data.get("simulation"))
+
+    def _simulation_reference(self, *, project_relative: Any = False) -> Any:
+        """Keep the legacy filename for unmodified jobs, otherwise emit a File reference."""
+        overrides = self._simulation_overrides_payload()
+        if not overrides:
+            return self._simulation_path(project_relative=project_relative)
+        path = Path(self._simulation_path())
+        key = "absolute_path"
+        if project_relative:
+            key = "relative_path"
+            path = Path(os.path.relpath(str(path), str(self.job_file.parent)))
+        return {"type": "File", key: str(path), "overrides": overrides}
 
     @staticmethod
     def _decode_frequencies(value: Any) -> np.ndarray:
@@ -424,10 +491,26 @@ class JobSerializationMixin:
         return f"blake3:{blake3.blake3(encoded).hexdigest()}"
 
     @staticmethod
-    def _hash_json_file(path: Union[str, Path]) -> str:
+    def _hash_json_file(
+        path: Union[str, Path], ignored_keys: Tuple[str, ...] = ()
+    ) -> str:
+        """Hash a JSON document without top-level ``ignored_keys``, once per file status."""
+
+        key = (str(Path(path).resolve()), tuple(ignored_keys))
+        status = _file_status(Path(path))
+        cached = _JSON_FILE_HASHES.get(key)
+        if status is not None and cached is not None and cached[0] == status:
+            return str(cached[1])
         with open(path, "r") as f:
             payload = json.load(f)
-        return JobSerializationMixin._hash_payload(payload)
+        if ignored_keys and isinstance(payload, Mapping):
+            payload = dict(payload)
+            for name in ignored_keys:
+                payload.pop(name, None)
+        digest = JobSerializationMixin._hash_payload(payload)
+        if status is not None and _file_status(Path(path)) == status:
+            _JSON_FILE_HASHES[key] = (status, digest)
+        return digest
 
     @staticmethod
     def _sha256_file(path: Union[str, Path]) -> str:
@@ -496,6 +579,8 @@ class JobSerializationMixin:
             "schema": "fs-effective-output-request-1",
             "workflow": job_payload["workflow"],
         }
+        if "Time" in job_payload:
+            request["Time"] = job_payload["Time"]
         outputs = job_payload.get("Outputs")
         if outputs is None and simulation_payload is not None:
             outputs = simulation_payload.get("Outputs")
@@ -650,7 +735,9 @@ class JobSerializationMixin:
             name="output_request",
             schema=_OUTPUT_REQUEST_FINGERPRINT_SCHEMA,
         )
-        self._output_request_fingerprint_cache = dict(output_request)
+        self._output_request_fingerprint_cache = dict(
+            cast(Mapping[str, str], output_request)
+        )
         inputs = value.get("external_inputs")
         if inputs is None:
             return

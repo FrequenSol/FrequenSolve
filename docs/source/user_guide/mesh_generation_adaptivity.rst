@@ -141,6 +141,13 @@ Adaptivity
        hmax=0.08,
    )
 
+``f_low`` and ``f_high`` bound the adaptation frequency. ``f_adapt`` sets an
+explicit physical adaptation frequency in hertz and serializes as
+``Mesh/adapt/f_adapt`` independently of those bounds. Transient wave simulations
+require a positive ``f_adapt``; ``f0`` only sets the nondimensionalization
+reference. For example, add ``f_adapt=30.0`` to the call above to resolve that
+frequency throughout a transient run.
+
 ``order`` is the initial :term:`polynomial order` assigned to the root mesh.
 ``elems_per_wave`` is the requested minimum element count per wavelength after
 adaptation. The practical points per wavelength are roughly
@@ -198,3 +205,26 @@ This matches the style used by ``elems_per_wave`` and ``order``.
 Initial meshes do not need to resolve the final wavefield. A coarse generated
 mesh plus :term:`mesh adaptivity` is the preferred starting point for most
 tutorials.
+
+Multigrid Cycles
+------------------
+
+Traversal and smoothing are independent solver settings:
+
+.. code-block:: python
+
+   sim += fs.SolverConfig(mode="fast", cycle="auto")
+   sim.solver.cycle = "V"
+   sim.solver.pre_smooth = 0      # Post-smoothing only
+   sim.solver.post_smooth = 1
+
+``cycle="auto"`` is the default and leaves the backend's preset policy intact:
+2D fast mode with MUMPS uses V cycles, while 3D fast mode uses log-growth visits.
+Explicit choices are ``"V"``, ``"W"`` and ``"log"``. Log-growth chooses
+intermediate-level visits from DOF growth, retaining one fine-level visit.
+Both smoothing counts default to one; zero skips that leg.
+
+For a custom traversal, use ``cycle={"visits": [1, 2, 2]}``. Entries run from
+finest toward coarsest by default; missing entries mean one visit.
+``anchor="coarse"`` reverses the indexing origin, and ``coarse`` selects the
+coarse-solve grid. Coarse-solver iteration controls remain separate.

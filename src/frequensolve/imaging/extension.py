@@ -60,6 +60,7 @@ import numpy as np
 from frequensolve.imaging._artifacts import (
     WORKSPACE_DEPRECATION,
     ControlVectorFile,
+    ControlVectorSetFile,
     ExtensionSolveReport,
     ExtensionVectorField,
     ExtensionVectorFile,
@@ -1014,9 +1015,18 @@ class ExtensionVector:
         return xr.Dataset(arrays)
 
     def to_file(
-        self, *, fingerprint: str, baseline: str, role: str = "tangent"
+        self,
+        *,
+        fingerprint: str,
+        baseline: Optional[str] = None,
+        role: str = "tangent",
+        control_identity: Optional[str] = None,
     ) -> ExtensionVectorFile:
-        """Return the ``fs-extension-vector-1`` representation."""
+        """Return the ``fs-extension-vector-1`` representation.
+
+        A vector for every frequency task carries ``control_identity`` instead of
+        one task's ``baseline``.
+        """
 
         fields = [
             ExtensionVectorField(
@@ -1027,7 +1037,11 @@ class ExtensionVector:
             for control, values in self.fields().items()
         ]
         return ExtensionVectorFile(
-            fields, fingerprint=fingerprint, baseline=baseline, role=role
+            fields,
+            fingerprint=fingerprint,
+            baseline=baseline,
+            role=role,
+            control_identity=control_identity,
         )
 
     @classmethod
@@ -1083,6 +1097,8 @@ class ExtensionManifest:
     raw: Dict[str, Any] = dataclasses.field(
         default_factory=dict, repr=False, compare=False
     )
+    # The frequency-independent identity of the task's linearization (newer Sauce).
+    control_identity: Optional[str] = None
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "ExtensionManifest":
@@ -1097,6 +1113,7 @@ class ExtensionManifest:
             baseline=str(data["baseline"]),
             fields=tuple(dict(f) for f in data.get("fields", [])),
             raw=dict(data),
+            control_identity=data.get("control_identity"),
         )
 
     def check(self, space: ExtensionSpace, path: Path) -> None:
@@ -1198,6 +1215,15 @@ class ExtensionLinearization:
         self.extension_fingerprints: List[Tuple[str, str]] = [
             (manifest.fingerprint, manifest.baseline) for manifest in self.manifests
         ]
+        # Every task of one linearization reports the same frequency-independent identity and extension
+        # fingerprint when the solver supports single-copy inputs; otherwise inputs stay per task.
+        identities = {manifest.control_identity for manifest in self.manifests}
+        fingerprints = {manifest.fingerprint for manifest in self.manifests}
+        self.control_identity: Optional[str] = (
+            identities.pop()
+            if len(identities) == 1 and len(fingerprints) == 1
+            else None
+        )
         self.support_masks = {
             name: np.array(mask, dtype=bool) for name, mask in support_masks.items()
         }
@@ -1486,13 +1512,33 @@ class ExtensionLinearization:
         )
 
     def _tap_stem(self, taps: ExtensionVector, directory: Path) -> Path:
-        """Write ``taps`` once per task (its extension fingerprints); return the input."""
+        """Write ``taps`` once for every task, or once per task for older solvers; return the input."""
 
         stem = directory / "taps.h5"
+        if self.control_identity is not None:
+            taps.to_file(
+                fingerprint=self.extension_fingerprints[0][0],
+                control_identity=self.control_identity,
+                role="tangent",
+            ).write(stem)
+            return stem
         for task, path in task_inputs(stem, len(self.frequencies)):
             fp, baseline = self.extension_fingerprints[task - 1]
             taps.to_file(fingerprint=fp, baseline=baseline, role="tangent").write(path)
         return stem
+
+    def _direction_input(self, dv: ControlVector, directory: Path) -> Dict[str, Any]:
+        """Return the job input of a physical direction: one direction set every task reads, or per-task copies.
+
+        Extensions hold sources fixed, so no mechanism block needs rescaling.
+        """
+
+        if self.control_identity is None:
+            return {"direction": self._direction_stem(dv, directory)}
+        path = ControlVectorSetFile.from_vectors(
+            [dv.to_file()], control_identity=self.control_identity
+        ).write(directory / "directions.h5")
+        return {"direction_set": path}
 
     def _direction_stem(self, dv: ControlVector, directory: Path) -> Path:
         """Write ``dv`` once per task (its state/registry fingerprints); return the input."""
@@ -1571,8 +1617,7 @@ class ExtensionLinearization:
                     term_layout=self.data_space.term_layouts(
                         frequency=self.frequencies[task - 1]
                     ),
-                    n_ranks=self.objective_states[task - 1].n_ranks,
-                    schema=self.objective_states[task - 1].vector_schema,
+                    **self.objective_states[task - 1].vector_options(),
                 )
             job = self._action_job(
                 "vjp",
@@ -1620,7 +1665,7 @@ class ExtensionLinearization:
         def compute() -> ControlVector:
             directory = self._ops_dir()
             job = self._solve(
-                direction=self._direction_stem(direction, directory),
+                **self._direction_input(direction, directory),
                 covector="reduced_normal.h5",
                 reduced_normal=dict(self.extension.reduced_normal or {}),
             )

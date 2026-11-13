@@ -387,6 +387,7 @@ class PatchPreparationJob(BaseJob):
             cls._decode_frequencies(data["f_list"]),
             data["PatchPreparation"],
         )
+        job._restore_simulation_overrides(data)
         job._job_id = data.get("job_id")
         return job
 

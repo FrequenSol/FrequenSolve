@@ -360,7 +360,44 @@ def test_control_registry_manifest_reads_pinned_example():
     np.testing.assert_array_equal(
         manifest.unpack_state()["source.1.position"], [513.7, 34.1]
     )
-    assert manifest.rank_descriptors[0]["file"] == "controls.json.rank_0.json"
+    # Sauce publishes only the index, without rank descriptors.
+    assert manifest.n_ranks == 1 and manifest.descriptor_rank == 0
+    assert manifest.rank_descriptors == ()
+
+
+def test_control_registry_reads_current_and_legacy_rank_indexes():
+    from jsonschema import Draft202012Validator
+
+    root = CONTRACT_ROOT / "outputs" / "fs-control-registry-1"
+    example = json.loads((root / "examples" / "source-position.json").read_text())
+    schema = json.loads((root / "schema.json").read_text())
+    two_ranks = dict(example, n_ranks=2)
+    Draft202012Validator(schema).validate(two_ranks)
+    current = ControlRegistryManifest.from_dict(two_ranks)
+    assert current.n_ranks == 2 and current.rank_descriptors == ()
+    # Registries from earlier solver builds list every rank's fingerprint.
+    fingerprints = ["sha256:" + d * 64 for d in "12"]
+    indexed = dict(
+        two_ranks, rank_descriptors=[{"fingerprint": item} for item in fingerprints]
+    )
+    assert [
+        entry["fingerprint"][-1]
+        for entry in ControlRegistryManifest.from_dict(indexed).rank_descriptors
+    ] == ["1", "2"]
+    # Older builds also name per-rank files.
+    legacy = dict(
+        two_ranks,
+        rank_descriptors=[
+            {"file": f"controls.json.rank_{rank}.json", "fingerprint": entry}
+            for rank, entry in enumerate(fingerprints)
+        ],
+    )
+    manifest = ControlRegistryManifest.from_dict(legacy)
+    assert manifest.rank_descriptors[1] == {
+        "file": "controls.json.rank_1.json",
+        "fingerprint": "sha256:" + "2" * 64,
+    }
+    assert manifest.names == ("source.1.position",)
 
 
 def test_control_registry_manifest_orders_active_blocks_and_offsets():
@@ -501,6 +538,54 @@ def test_objective_report_reads_pinned_example():
     assert sum(report.weighted_values.values()) == pytest.approx(report.total)
     with pytest.raises(KeyError):
         report.term("missing")
+
+
+def test_objective_report_exposes_projected_source_values():
+    term = {
+        "raw_sum": 1.0,
+        "effective_weight_mass": 1.0,
+        "normalized_value": 1.0,
+        "weight": 1.0,
+        "weighted_value": 1.0,
+        "active_samples": 4,
+        "scale": [1.0],
+    }
+    report = ObjectiveReport.from_dict(
+        {
+            "schema": "fs-objective-report-1",
+            "total": 2.0,
+            "terms": [
+                dict(
+                    term,
+                    id="phase",
+                    source_projection={
+                        "kind": "delay",
+                        "delay_s": [0.01, -0.02],
+                        "iterations": 3,
+                        "converged": True,
+                    },
+                ),
+                dict(
+                    term,
+                    id="waveform",
+                    source_projection={
+                        "kind": "scalar",
+                        "real": [1.0, 0.5],
+                        "imag": [0.0, -0.25],
+                        "iterations": 1,
+                        "converged": True,
+                    },
+                ),
+                dict(term, id="plain"),
+            ],
+        }
+    )
+    assert report.term("phase").source_delay == (0.01, -0.02)
+    assert report.term("phase").source_scalar is None
+    assert report.term("waveform").source_scalar == (1.0 + 0.0j, 0.5 - 0.25j)
+    assert report.term("waveform").source_delay is None
+    assert report.term("plain").source_projection == {}
+    assert report.term("plain").source_delay is None
 
 
 def test_objective_report_rejects_wrong_schema_and_duplicate_terms(tmp_path):

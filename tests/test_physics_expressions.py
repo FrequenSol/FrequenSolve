@@ -12,6 +12,7 @@ from frequensolve.imaging.misfit import Preprocess
 from frequensolve.physics import Field, MaterialProperty
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import (
+    ReceiverArray,
     ReceiverComponent,
     ReceiverGroup,
     ReceiverNode,
@@ -19,8 +20,7 @@ from frequensolve.seismic.receivers import (
 from frequensolve.util.mixins import ExportContext
 
 
-@pytest.fixture
-def validator():
+def _contract_validator(schema_name, definition):
     root = Path(__file__).parent / "contracts/sauce-f533e6f/trunk/contracts"
     registry = Registry()
     for path in root.rglob("*.json"):
@@ -29,10 +29,20 @@ def validator():
             registry = registry.with_resource(
                 contents["$id"], Resource.from_contents(contents)
             )
-    schema = json.loads((root / "inputs/fs-acquisition-1/schema.json").read_text())
+    schema = json.loads((root / f"inputs/{schema_name}/schema.json").read_text())
     return Draft202012Validator(
-        {"$ref": schema["$id"] + "#/$defs/receiverGroup"}, registry=registry
+        {"$ref": schema["$id"] + f"#/$defs/{definition}"}, registry=registry
     )
+
+
+@pytest.fixture
+def validator():
+    return _contract_validator("fs-acquisition-1", "receiverGroup")
+
+
+@pytest.fixture
+def hook_validator():
+    return _contract_validator("fs-imaging-1", "preprocessHook")
 
 
 @pytest.mark.parametrize(
@@ -40,6 +50,7 @@ def validator():
     [
         (fs.physics.acoustic, "pressure", "rho"),
         (fs.physics.elastic, "strain", "compliance"),
+        (fs.physics.coupled, "velocity", "rho"),
         (fs.physics.poroelastic, "fluid_flux", "porosity"),
         (fs.physics.electromagnetic, "electric", "conductivity"),
     ],
@@ -51,6 +62,92 @@ def test_namespaces_are_discoverable_typed_references(factory, field, material):
     assert field in dir(namespace.fields)
     with pytest.raises(AttributeError, match="Unknown quantity"):
         namespace.materials.missing
+
+
+@pytest.mark.parametrize("dimension", [2, 3])
+def test_scoped_and_coupled_fields_keep_distinct_native_plans(dimension, validator):
+    acoustic = fs.physics.acoustic()
+    elastic = fs.physics.elastic()
+    coupled = fs.physics.coupled()
+    device = ReceiverNode(name="mixed")
+    device.add_component("fluid_pressure", acoustic.fields.pressure)
+    device.add_component("solid_velocity", elastic.fields.velocity)
+    device.add_component("pressure", coupled.fields.pressure)
+    device.add_component("velocity", coupled.fields.velocity)
+    device.add_component("strain_xz", coupled.fields.strain.xz)
+    group = ReceiverGroup("mixed", device, [[0] * dimension])
+    payload = group.to_fs(ExportContext(dimension=dimension, physics="coupled"))
+    entries = {entry["name"]: entry for entry in payload["device"]["components"]}
+    assert entries["fluid_pressure"]["expression"]["name"] == "acoustic:pressure"
+    assert entries["pressure"]["expression"]["name"] == "pressure"
+    assert (
+        entries["solid_velocity.x"]["expression"]["child"]["name"]
+        == "elastic:velocity_all"
+    )
+    assert entries["velocity.x"]["expression"]["child"]["name"] == "velocity_all"
+    assert entries["strain_xz"]["expression"]["child"]["name"] == "strain_all"
+    assert "domain" not in payload
+    validator.validate(payload)
+    assert ReceiverGroup.from_fs(payload).to_fs() == payload
+    with pytest.raises(ValueError, match="physics"):
+        ReceiverGroup("generic", coupled.fields.pressure, [[0] * dimension]).to_fs(
+            ExportContext(dimension=dimension, physics="acoustic")
+        )
+
+
+def test_coupled_material_scaling_and_halfdimensional_limits():
+    coupled = fs.physics.coupled()
+    expression = coupled.materials.rho * coupled.fields.velocity
+    payload = ReceiverGroup("momentum", expression, [[0, 0]], domain="solid").to_fs(
+        ExportContext(dimension=2, physics="coupled")
+    )
+    assert payload["device"]["components"][0]["expression"]["child"]["coefficient"] == {
+        "expr": {"ref": "rho"}
+    }
+    for axis in ("x", "z"):
+        assert coupled.fields.velocity[axis]._native(2.5)["name"] == f"velocity_{axis}"
+    with pytest.raises(ValueError, match="x and z"):
+        coupled.fields.velocity.y._native(2.5)
+    for field in (coupled.fields.velocity, coupled.fields.stress):
+        with pytest.raises(ValueError, match="unavailable"):
+            field._native(2.5)
+
+
+@pytest.mark.parametrize(
+    "factory", [fs.physics.acoustic, fs.physics.elastic, fs.physics.coupled]
+)
+def test_shared_materials_follow_local_layer_without_scoping_field_support(factory):
+    acoustic = fs.physics.acoustic()
+    elastic = fs.physics.elastic()
+    materials = factory().materials
+    assert materials.rho.physics is None
+    assert materials.Sp.physics is None
+    for field, physics in (
+        (acoustic.fields.velocity, "acoustic"),
+        (elastic.fields.velocity, "elastic"),
+    ):
+        momentum = materials.rho * field
+        payload = ReceiverGroup("momentum", momentum, [[0, 0]]).to_fs(
+            ExportContext(dimension=2, physics=physics)
+        )
+        expression = payload["device"]["components"][0]["expression"]["child"]
+        assert expression["coefficient"] == {"expr": {"ref": "rho"}}
+        assert expression["child"]["name"] == physics + ":velocity_all"
+    pressure = acoustic.fields.pressure / materials.rho
+    assert pressure.physics == "acoustic"
+    with pytest.raises(ValueError, match="different physics"):
+        elastic.materials.compliance @ fs.physics.poroelastic().fields.stress
+
+
+def test_arithmetic_between_scoped_physics_requires_separate_outputs():
+    acoustic = fs.physics.acoustic()
+    elastic = fs.physics.elastic()
+    for operation in (
+        lambda: acoustic.fields.pressure + elastic.fields.pressure,
+        lambda: acoustic.fields.velocity - elastic.fields.velocity,
+    ):
+        with pytest.raises(ValueError, match="separate receiver outputs"):
+            operation()
 
 
 @pytest.mark.parametrize(
@@ -189,21 +286,133 @@ def test_legacy_components_roundtrip_unchanged():
     assert ReceiverGroup.from_fs(payload).to_fs() == payload
 
 
-def test_material_weighting_uses_frozen_trace_pair_policy_and_physical_units():
+def test_material_weighting_uses_frozen_trace_pair_mode_and_physical_units(
+    hook_validator,
+):
     acoustic = fs.physics.acoustic()
     hook = Preprocess.material_weighting(
         {1: 1 / acoustic.materials.rho}, units={1: "m^2/s^2"}
     )
     payload = hook.to_fs()
     assert payload["stage"] == "trace_pair"
-    assert payload["params"]["model_policy"] == "frozen"
+    assert payload["params"]["mode"] == "frozen"
     assert payload["params"]["blocks"][0]["coefficient"]["expr"]["op"] == "div"
+    hook_validator.validate(payload)
     assert Preprocess.from_fs(payload).to_fs() == payload
     with pytest.raises(ValueError, match="overlap"):
         Preprocess.material_weighting(
             {1: acoustic.materials.rho, (1, 2): acoustic.materials.rho},
             units={1: "Pa", (1, 2): "Pa"},
         )
+
+
+@pytest.mark.parametrize("domain", ["water", 1])
+def test_material_side_selection_preserves_field_support_and_device_roundtrip(
+    domain, validator
+):
+    acoustic, elastic = fs.physics.acoustic(), fs.physics.elastic()
+    rho = elastic.materials.rho.on(domain=domain)
+    assert elastic.materials.rho.domain is None
+    assert rho.coefficient() == {"expr": {"ref": "rho", "domain": domain}}
+    device = ReceiverNode(name="obn")
+    device.add_component("pressure", acoustic.fields.pressure)
+    device.add_component("momentum", rho * elastic.fields.velocity)
+    group = ReceiverGroup("obn", device, [[0, 0]], materials={"rho": rho})
+    payload = group.to_fs(ExportContext(dimension=2, physics="coupled"))
+    assert "domain" not in payload
+    scale = payload["device"]["components"][1]["expression"]["child"]
+    assert scale["coefficient"] == rho.coefficient()
+    assert scale["child"]["name"] == "elastic:velocity_all"
+    assert payload["material_samples"][0]["coefficient"] == rho.coefficient()
+    validator.validate(payload)
+    assert ReceiverGroup.from_fs(payload).to_fs() == payload
+
+
+def test_compound_material_selection_preserves_and_replaces_individual_domains():
+    materials = fs.physics.acoustic().materials
+    expression = materials.rho.on(domain="water") / materials.rho.on(domain="solid")
+    assert expression.coefficient()["expr"]["args"] == [
+        {"ref": "rho", "domain": "water"},
+        {"ref": "rho", "domain": "solid"},
+    ]
+    rebound = expression.on(domain=2)
+    assert rebound.coefficient()["expr"]["args"] == [
+        {"ref": "rho", "domain": 2},
+        {"ref": "rho", "domain": 2},
+    ]
+    compound = (1 / (materials.rho * materials.vp**2)).on(domain="water")
+    assert compound.coefficient()["expr"]["args"][1]["args"][0] == {
+        "ref": "rho",
+        "domain": "water",
+    }
+    assert compound.to("1/Pa").coefficient() == compound.coefficient()
+
+
+def test_selected_constitutive_tensor_retains_basis_and_field_scope(validator):
+    elastic = fs.physics.elastic()
+    compliance = elastic.materials.compliance.on(domain="solid")
+    assert compliance.coefficient() == {
+        "tensor": "compliance",
+        "basis": "mandel",
+        "domain": "solid",
+    }
+    expression = (compliance @ elastic.fields.stress).xz._native(2)
+    assert expression["child"]["coefficient"] == compliance.coefficient()
+    assert expression["child"]["child"]["name"] == "elastic:stress_all"
+    payload = ReceiverGroup(
+        "strain", (compliance @ elastic.fields.stress).xz, [[0, 0]]
+    ).to_fs(ExportContext(dimension=2, physics="coupled"))
+    validator.validate(payload)
+
+
+@pytest.mark.parametrize("domain", [None, True, 1.5, [], "", "   ", 0, -1])
+def test_material_side_selection_rejects_invalid_domains(domain):
+    with pytest.raises((TypeError, ValueError)):
+        fs.physics.acoustic().materials.rho.on(domain=domain)
+
+
+def test_material_side_selection_does_not_select_wavefield_domains():
+    with pytest.raises(ValueError, match="only to material"):
+        fs.physics.acoustic().fields.pressure.on(domain="water")
+    with pytest.raises(ValueError, match="only to material"):
+        (
+            fs.physics.acoustic().materials.rho * fs.physics.acoustic().fields.velocity
+        ).on(domain="water")
+
+
+def test_material_weighting_selected_coefficients_are_fixed_and_can_be_pinned(
+    tmp_path, hook_validator
+):
+    rho = fs.physics.acoustic().materials.rho.on(domain="water")
+    frozen = Preprocess.material_weighting({1: 1 / rho}, units={1: "m^2/s^2"})
+    assert frozen.to_fs()["params"]["mode"] == "frozen"
+    hook_validator.validate(frozen.to_fs())
+    pinned = Preprocess.material_weighting(
+        {1: 1 / rho},
+        units={1: "m^2/s^2"},
+        mode="pinned",
+        state_file=tmp_path / "weights.h5",
+    )
+    assert pinned.to_fs()["params"]["state_file"] == str(tmp_path / "weights.h5")
+    hook_validator.validate(pinned.to_fs())
+    assert Preprocess.from_fs(pinned.to_fs()).to_fs() == pinned.to_fs()
+    with pytest.raises(ValueError, match="independently selected"):
+        Preprocess.material_weighting({1: 1 / rho}, units={1: "m^2/s^2"}, mode="live")
+    live = Preprocess.material_weighting(
+        {1: fs.physics.acoustic().materials.rho}, units={1: "Pa"}, mode="live"
+    )
+    assert live.to_fs()["params"]["mode"] == "live"
+    hook_validator.validate(live.to_fs())
+    for mode, state_file in (
+        ("pinned", None),
+        ("pinned", True),
+        ("frozen", "weights.h5"),
+        ("bad", None),
+    ):
+        with pytest.raises(ValueError):
+            Preprocess.material_weighting(
+                {1: rho}, units={1: "Pa"}, mode=mode, state_file=state_file
+            )
 
 
 @pytest.mark.parametrize("domain", [True, 1.5, [], "", "   "])
@@ -254,3 +463,118 @@ def test_primary_fields_lower_to_registered_native_names(
     components = field.receiver_components(quantity, 2)
     expected = ["x", "y", "z"] if namespace.name == "em" else ["x", "z"]
     assert [component.name for component in components] == expected
+
+
+@pytest.mark.parametrize("dimension, axes", [(2, ["x", "z"]), (3, ["x", "y", "z"])])
+def test_device_accepts_measured_and_derived_quantities(dimension, axes, validator):
+    elastic = fs.physics.elastic()
+    device = ReceiverNode(name="pv")
+    pressure = device.add_component("pressure", elastic.fields.pressure, units="MPa")
+    device.add_component("velocity", elastic.fields.velocity)
+    device.add_component("momentum", elastic.materials.rho * elastic.fields.velocity)
+    strain = elastic.materials.compliance @ elastic.fields.stress
+    device.add_component("strain_xz", strain.xz)
+    group = ReceiverGroup("pv", device, [[0] * dimension], domain="solid")
+    payload = group.to_fs(ExportContext(dimension=dimension, physics="elastic"))
+    components = payload["device"]["components"]
+    assert [entry["name"] for entry in components] == [
+        "pressure",
+        *[f"velocity.{axis}" for axis in axes],
+        *[f"momentum.{axis}" for axis in axes],
+        "strain_xz",
+    ]
+    assert components[0]["units"] == "MPa"
+    assert "material_samples" not in payload
+    assert pressure.field is elastic.fields.pressure
+    assert [entry.name for entry in device.components] == [
+        "pressure",
+        "velocity",
+        "momentum",
+        "strain_xz",
+    ]
+    assert (
+        components[-1]["expression"]["child"]["coefficient"]["tensor"] == "compliance"
+    )
+    validator.validate(payload)
+    assert ReceiverGroup.from_fs(payload).to_fs() == payload
+
+
+def test_reusable_device_resolves_dimensions_per_group_and_preserves_later_additions():
+    acoustic = fs.physics.acoustic()
+    device = ReceiverNode()
+    device.add_component("velocity", acoustic.fields.velocity)
+    group2 = ReceiverGroup("two", device, [[0, 0]])
+    group3 = ReceiverGroup("three", device, [[0, 0, 0]])
+    for group, expected in [
+        (group2, ["velocity.x", "velocity.z"]),
+        (group3, ["velocity.x", "velocity.y", "velocity.z"]),
+        (group2, ["velocity.x", "velocity.z"]),
+    ]:
+        assert [c["name"] for c in group.to_fs()["device"]["components"]] == expected
+    device.add_component("pressure", acoustic.fields.pressure)
+    assert group2.to_fs()["device"]["components"][-1]["name"] == "pressure"
+    assert len(device.components) == 2
+
+
+def test_typed_device_supports_directional_velocity_and_legacy_components(validator):
+    acoustic = fs.physics.acoustic()
+    device = ReceiverNode()
+    device.add_component("p", "pressure")
+    device.add_component("v", acoustic.fields.velocity, direction=[0.6, 0.8], weight=2)
+    payload = ReceiverGroup("pv", device, [[0, 0]]).to_fs()
+    component = payload["device"]["components"][1]
+    assert component["name"] == "v" and component["weight"] == 2
+    assert component["expression"]["kind"] == "add"
+    assert [term["factor"] for term in component["expression"]["args"]] == [0.6, 0.8]
+    assert "direction" not in component
+    validator.validate(payload)
+
+
+def test_array_accepts_typed_components_without_changing_geometry():
+    acoustic = fs.physics.acoustic()
+    device = ReceiverArray(offsets=[[-1, 0], [1, 0]], offset_units="m")
+    device.add_component("pressure", acoustic.fields.pressure)
+    device.add_component("velocity_z", acoustic.fields.velocity.z)
+    payload = ReceiverGroup("array", device, [[0, 0]]).to_fs()["device"]
+    assert payload["offsets"] == [[-1.0, 0.0], [1.0, 0.0]]
+    assert [entry["name"] for entry in payload["components"]] == [
+        "pressure",
+        "velocity_z",
+    ]
+
+
+def test_standalone_device_uses_factory_dimension_and_rejects_ambiguous_names():
+    acoustic = fs.physics.acoustic(dimension=3)
+    device = ReceiverNode(
+        components=[ReceiverComponent(name="velocity", field=acoustic.fields.velocity)]
+    )
+    assert [c["name"] for c in device.to_fs()["components"]] == [
+        "velocity.x",
+        "velocity.y",
+        "velocity.z",
+    ]
+    device.add_component("velocity.x", acoustic.fields.velocity.x)
+    with pytest.raises(ValueError, match="unique"):
+        device.to_fs()
+
+
+def test_typed_device_binds_file_coordinates_when_constructing_data_space(tmp_path):
+    from types import SimpleNamespace
+
+    import h5py
+
+    from frequensolve.imaging.data import DataSpace
+
+    device = ReceiverNode()
+    device.add_component("velocity", fs.physics.acoustic().fields.velocity)
+    acquisition = Acquisition()
+    coords = tmp_path / "coords.h5"
+    with h5py.File(coords, "w") as h5:
+        h5.create_dataset("coords", data=[[0.0, 0.0, 0.0]])
+    acquisition.add_receiver_group("pv", device, coords)
+    acquisition.known_source_field_count = lambda: 1
+    simulation = SimpleNamespace(
+        acquisition=acquisition, physics="acoustic", dimension=3
+    )
+    space = DataSpace.from_simulation(simulation, [1.0])
+    assert space.segment("pv").components == ("velocity.x", "velocity.y", "velocity.z")
