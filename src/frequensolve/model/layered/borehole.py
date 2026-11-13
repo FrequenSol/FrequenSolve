@@ -414,7 +414,8 @@ class BoreholeLinearSlip:
         return cls(**payload)
 
 
-def _coerce_borehole_interface(value):
+def _coerce_borehole_interface(value: Any) -> Optional[BoreholeLinearSlip]:
+    """Normalize an optional bond from an SDK object or native payload."""
     if value is None or isinstance(value, BoreholeLinearSlip):
         return value
     return BoreholeLinearSlip.from_fs(value)
