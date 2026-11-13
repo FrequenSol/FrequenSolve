@@ -311,15 +311,16 @@ class ExecutionResults:
         catalog = ArtifactCatalog.read_task_results(root, tasks=[frequency_index + 1])
         task = catalog.results.get(frequency_index + 1)
         expected = complex(*map(float, row["frequency_value"]))
-        if task is None or not (
+        frequency = None if task is None else task.partition.frequency
+        if frequency is None or not (
             math.isclose(
-                task.partition.frequency.real,
+                frequency.real,
                 expected.real,
                 rel_tol=1e-12,
                 abs_tol=1e-10,
             )
             and math.isclose(
-                task.partition.frequency.imag,
+                frequency.imag,
                 expected.imag,
                 rel_tol=1e-12,
                 abs_tol=1e-10,

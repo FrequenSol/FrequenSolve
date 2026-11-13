@@ -38,8 +38,8 @@ class HVResearchSolver:
         i, j = np.meshgrid(np.arange(intervals), np.arange(path_intervals))
         a = (j * self.nx + i).ravel()
         self.nodes = np.column_stack((a, a + 1, a + self.nx + 1, a + self.nx))
-        q, w = leggauss(3)
-        q, w = (q + 1) / 2, w / 2
+        nodes, weights = leggauss(3)
+        q, w = (nodes + 1) / 2, weights / 2
         r, s = np.meshgrid(q, q)
         r, s = r.ravel(), s.ravel()
         self.shape = np.array([(1 - r) * (1 - s), r * (1 - s), r * s, (1 - r) * s]).T

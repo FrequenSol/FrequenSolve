@@ -1121,7 +1121,7 @@ class WavefieldOutputHandle:
 
         from frequensolve.simulation.outputs import wavefield
 
-        self.job += wavefield(*args, **kwargs)
+        self.job.add_output(wavefield(*args, **kwargs))
         return self.job
 
     @property

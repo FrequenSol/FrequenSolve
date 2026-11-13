@@ -80,7 +80,9 @@ class TransientDataset:
                     raise ValueError("Time shard belongs to a different angular task")
                 if block:
                     steps = np.asarray(h5["time_step"][()]).reshape(-1)
-                    times = np.asarray(h5["time"][()], dtype=float).reshape(-1)
+                    times: np.ndarray = np.asarray(h5["time"][()], dtype=float).reshape(
+                        -1
+                    )
                     if (
                         steps.size == 0
                         or steps.size != times.size

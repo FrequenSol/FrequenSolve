@@ -140,7 +140,7 @@ class ReceiverBlocks:
             raise ValueError(
                 "block solve requires the selected controls to cover the active space"
             )
-        scale = np.ones(len(names))
+        scale: np.ndarray = np.ones(len(names))
         if scales is not None:
             if not isinstance(scales, Mapping):
                 raise TypeError("scales must map control names to positive values")

@@ -193,6 +193,7 @@ class TracePackManifest:
         entries = []
         first = None
         for task, frequency in enumerate(frequencies, 1):
+            actual_frequency: Optional[complex]
             task_catalog = catalog.task_catalog
             if isinstance(task_catalog, TaskIndex):
                 entry = task_catalog.tasks.get(task)

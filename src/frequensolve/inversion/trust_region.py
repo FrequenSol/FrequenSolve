@@ -382,7 +382,7 @@ def _secular_solution(
                 # Singular positive semidefinite model: every null-space
                 # addition leaves q unchanged; take the minimum-norm minimizer.
                 return coefficients, 0.0, False, False
-            direction = np.zeros(int(np.count_nonzero(pole)))
+            direction: np.ndarray = np.zeros(int(np.count_nonzero(pole)))
             if pole_norm > 0.0:
                 direction = -gamma[pole] / pole_norm
             else:
@@ -396,7 +396,7 @@ def _secular_solution(
     low = 0.0
     high = float(np.linalg.norm(gamma)) / radius
     delta = min(pole_norm / radius, high) if pole_norm > 0.0 else 0.0
-    best = (coefficients, delta)
+    best: tuple[np.ndarray, float] = (coefficients, delta)
     for _ in range(_SECULAR_ITERATIONS):
         shifted = offsets + delta
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -605,7 +605,7 @@ def _bounded_step(
         if upper is None
         else model >= upper - tolerance * scale
     )
-    keep = np.ones(size, dtype=bool)
+    keep: np.ndarray = np.ones(size, dtype=bool)
     while keep.any():
         solution = _system(systems, matrix, diagonal, keep).solve(
             gradient[keep], radius
