@@ -139,6 +139,32 @@ def test_model_exports_gsls_band_from_attenuation_extra():
     }
 
 
+def test_model_accepts_typed_attenuation_assignment_and_roundtrip():
+    model = ModelBase(name="model", dimension=2)
+    config = AttenuationConfig(
+        model="gsls", frequency_min=10*u.Hz, frequency_max=200*u.Hz,
+        reference_frequency=10*u.Hz,
+    )
+    model.attenuation = config
+    expected = config.to_fs()
+    config.frequency_max = 100*u.Hz
+    assert model.to_fs()["attenuation"] == expected
+    assert ModelBase.from_fs(model.to_fs()).attenuation.to_fs() == expected
+    model.attenuation = AttenuationConfig(model="none")
+    assert model.to_fs()["attenuation"] == {"model": "none"}
+    model.attenuation = None
+    assert "attenuation" not in model.to_fs()
+
+
+def test_model_typed_attenuation_rejects_invalid_assignment_without_mutation():
+    model = ModelBase(name="model", dimension=2, attenuation_model="none")
+    with pytest.raises(TypeError, match="AttenuationConfig"):
+        model.attenuation = "gsls"
+    with pytest.raises(ValueError, match="frequency_min and frequency_max"):
+        model.attenuation = AttenuationConfig(model="gsls")
+    assert model.to_fs()["attenuation"] == {"model": "none"}
+
+
 def test_model_from_fs_roundtrips_gsls_band():
     # Requires ModelBase/LayeredModel.from_fs to keep AttenuationConfig.fs_extra().
     payload = ModelBase(name="model", dimension=2).to_fs()

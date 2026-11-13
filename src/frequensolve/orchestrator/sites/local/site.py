@@ -895,6 +895,7 @@ class LocalSite(BaseSite):
             completes.
         dashboard_host: Hostname used for the Dask dashboard.
         dashboard_port: Dashboard port, or ``0`` to let Dask choose.
+        local_directory: Optional directory for Dask worker temporary files.
         curvature_ranks: MPI ranks for row-distributed Sauce curvature
             operations; they share the worker thread budget.
         background_layout: Files of a background capture, ``"rank"``
@@ -1012,6 +1013,7 @@ class LocalSite(BaseSite):
     shutdown_on_completion: bool = True
     dashboard_host: str = "localhost"
     dashboard_port: int = 0
+    local_directory: Optional[Union[str, Path]] = None
     curvature_ranks: int = 1
     background_layout: str = "rank"
 
@@ -2466,7 +2468,11 @@ class LocalSite(BaseSite):
                 memory_limit=f"{memory_per_worker}MB",
                 dashboard_address=dashboard_address,
                 host=self.dashboard_host,
-                local_directory="/tmp/dask-worker-space",
+                local_directory=(
+                    str(self.local_directory)
+                    if self.local_directory is not None
+                    else "/tmp/dask-worker-space"
+                ),
                 scheduler_port=0,
                 silence_logs=dependency_log_level,
                 preload=worker_preload,

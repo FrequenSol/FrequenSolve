@@ -235,6 +235,83 @@ def test_put_dataarray_references_large_dimension_coordinate_dataset(tmp_path):
         np.testing.assert_array_equal(h5[coordinate_reference][:], x)
 
 
+@pytest.mark.parametrize(
+    "dtype", ["i1", "i2", "i4", "i8", "u1", "u2", "u4", "u8", "f2", "f4", "f8"]
+)
+@pytest.mark.parametrize("referenced", [False, True])
+@pytest.mark.parametrize("chunked", [False, True])
+def test_store_normalizes_numeric_coordinates(
+    tmp_path, monkeypatch, dtype, referenced, chunked
+):
+    if referenced:
+        monkeypatch.setattr(store_module, "_MAX_INLINE_COORDINATE_BYTES", 0)
+    path = tmp_path / "simulation.h5"
+    store = SimulationStore(path)
+    radius = np.array([0, 12, 20, 50], dtype=dtype)
+    data = xr.DataArray(
+        np.array([0.05, 0.05, 0.0, -0.05], dtype=np.float32),
+        dims=("r",),
+        coords={"r": radius},
+    )
+    data.coords["r"].attrs["units"] = "m"
+    original = data.copy(deep=True)
+
+    def export():
+        if chunked:
+            return store.put_array_chunks(
+                "aperture",
+                data.shape,
+                lambda: iter([data.values]),
+                dims=data.dims,
+                coords={"r": radius},
+                dtype=np.float32,
+            )
+        return store.put_dataarray("aperture", data, dtype=np.float32)
+
+    first = export()
+    with h5py.File(path, "a") as h5:
+        field = h5["aperture"]
+        coordinate = h5[field.attrs["r"]] if referenced else field.attrs["r"]
+        assert coordinate.dtype == np.dtype(np.float64)
+        np.testing.assert_array_equal(np.asarray(coordinate), radius)
+        assert field.dtype == np.dtype(np.float32)
+        if not chunked:
+            assert list(field.attrs["axis_units"]) == ["m"]
+        # Model a file exported by the old SDK, retaining its matching hash.
+        if referenced:
+            reference = field.attrs["r"]
+            del h5[reference]
+            h5.create_dataset(reference, data=radius.astype(np.int64))
+        else:
+            del field.attrs["r"]
+            field.attrs["r"] = radius.astype(np.int64)
+
+    assert export().hash == first.hash
+    with h5py.File(path, "r") as h5:
+        field = h5["aperture"]
+        coordinate = h5[field.attrs["r"]] if referenced else field.attrs["r"]
+        assert coordinate.dtype == np.dtype(np.float64)
+        np.testing.assert_array_equal(np.asarray(coordinate), radius)
+
+    loaded = Property.read(Path(f"{path}:aperture"))
+    np.testing.assert_array_equal(loaded.coords["r"], radius)
+    np.testing.assert_array_equal(loaded.values, data.values)
+    xr.testing.assert_identical(data, original)
+    assert radius.dtype == np.dtype(dtype)
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+def test_store_rejects_integer_coordinate_precision_loss(tmp_path, dtype):
+    path = tmp_path / "simulation.h5"
+    data = xr.DataArray(
+        [0.0, 1.0], dims="r", coords={"r": np.array([0, 2**53 + 1], dtype=dtype)}
+    )
+    with pytest.raises(ValueError, match="exactly representable as float64"):
+        SimulationStore(path).put_dataarray("aperture", data)
+    with h5py.File(path, "r") as h5:
+        assert "aperture" not in h5
+
+
 def test_put_dataarray_rewrites_changed_interpolation_layout(tmp_path):
     path = tmp_path / "simulation.h5"
     store = SimulationStore(path)

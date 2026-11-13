@@ -208,6 +208,15 @@ ones. ``pml_reflectivity`` defaults to ``1e-2`` unless supplied explicitly. For
 conditioning, prefer increasing ``pml_wavelengths`` before making the
 reflection target extremely small.
 
+Elastic and coupled transient PMLs use a frequency shift. When the actual
+layer is thinner than half a wavelength at the source-band floor, including
+layers clipped by a thickness limit, the solver also enables a 0.1 multiaxial
+stretch to control free-surface growth in soft solids. Band-floor-sized layers
+at least that thick retain the matched stretch; sizing above the band floor
+also enables the safeguard. ``pml_multiaxial`` explicitly overrides this policy,
+including ``pml_multiaxial=0`` to disable it; ``pml_cfs_frequency`` sets a
+positive shift frequency in Hz.
+
 .. list-table::
    :header-rows: 1
    :widths: 22 38 40

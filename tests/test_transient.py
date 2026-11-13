@@ -1187,3 +1187,18 @@ def test_order_based_jobs_default_to_radau_and_persist_resolved_order(
     assert restored.time.order == 3 and restored.time.method == fs.Radau()
     assert restored.to_fs()["Time"]["method"] == "radau3"
     assert restored.time.replace(order=4).method == fs.Radau()
+
+
+def test_explicit_pml_frequency_units_roundtrip_and_replacement(tmp_path):
+    job = job_at(tmp_path)
+    job.time = job.time.replace(pml_frequency=80 * fs.ureg.Hz)
+    job.save()
+    restored = fs.BaseJob.load(job.job_file)
+    assert restored.time.pml_frequency == 80
+    assert restored.to_fs()["Time"]["pml_frequency"] == 80
+    assert restored.time.with_dt(0.05).pml_frequency == 80
+    assert restored.time.replace(pml_frequency=0).to_fs()["pml_frequency"] == 0
+    assert "pml_frequency" not in restored.time.replace(pml_frequency=None).to_fs()
+    for frequency in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="pml_frequency"):
+            restored.time.replace(pml_frequency=frequency)

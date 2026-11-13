@@ -193,6 +193,8 @@ class TimeIntegration:
     Error-based selection requires explicit ``f_max`` and chooses a fixed dt
     dividing the interval, with at least two steps per highest-frequency period.
     Explicit dt must divide the interval and is never silently adjusted.
+    ``pml_frequency`` selects the absorbing-layer sizing frequency in Hz;
+    omit it (or use zero) to size from the source-band floor.
     """
 
     start: float
@@ -203,6 +205,7 @@ class TimeIntegration:
     scheme: str | None = field(default=None, kw_only=True)
     f_0: float | None = field(default=None, kw_only=True)
     f_max: float | None = field(default=None, kw_only=True)
+    pml_frequency: float | Quantity | None = field(default=None, kw_only=True)
     period_error: float | None = field(default=None, kw_only=True)
     window_error: float | Quantity | None = field(default=None, kw_only=True)
 
@@ -211,6 +214,11 @@ class TimeIntegration:
         end = _scalar_in_units(self.end, "s", "end")
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "end", end)
+        if self.pml_frequency is not None:
+            frequency = _scalar_in_units(self.pml_frequency, "Hz", "pml_frequency")
+            if not math.isfinite(frequency) or frequency < 0:
+                raise ValueError("pml_frequency must be finite and nonnegative")
+            object.__setattr__(self, "pml_frequency", frequency)
         duration = end - start
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError("TimeIntegration requires a finite end > start")
@@ -341,6 +349,7 @@ class TimeIntegration:
             dt=self.dt,
             method=self.method,
             f_max=self.f_max,
+            pml_frequency=self.pml_frequency,
             period_error=self.period_error,
             window_error=self.window_error,
         )
@@ -427,6 +436,8 @@ class TimeIntegration:
                 cast(str, self.scheme)
             ],
         }
+        if self.pml_frequency is not None:
+            payload["pml_frequency"] = float(self.pml_frequency)
         if isinstance(self.method, Newmark):
             payload["newmark"] = self.method.to_fs()
         elif isinstance(self.method, Gauss) and self.method.f_0 != 0:
@@ -439,7 +450,7 @@ class TimeIntegration:
     ) -> TimeIntegration:
         data = _fields(
             data,
-            {"schema", "start", "end", "time_step", "method", "newmark", "gauss"},
+            {"schema", "start", "end", "time_step", "method", "newmark", "gauss", "pml_frequency"},
             "TimeIntegration",
         )
         if data.get("schema", "fs-time-domain-1") != "fs-time-domain-1":
@@ -473,6 +484,7 @@ class TimeIntegration:
             data["end"],
             None if automatic else data["time_step"],
             method,
+            pml_frequency=data.get("pml_frequency"),
             **selection,
         )
         if not math.isclose(

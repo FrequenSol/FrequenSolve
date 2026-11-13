@@ -195,6 +195,38 @@ Here ``fluid_refine`` and ``casing_refine`` are exported as borehole surfaces
 but are not layer boundaries. The fluid layer extends to ``fluid_wall`` and the
 casing layer extends from ``fluid_wall`` to ``casing_wall``.
 
+Imperfect solid bonds
+--------------------
+
+Interfaces are perfectly bonded by default. Set ``interface`` on a radial
+surface, or on the layer ending at that surface, to permit a displacement
+jump. Both stiffnesses are in Pa/m; zero releases the component. This applies
+to constant-radius solid–solid interfaces, such as PVC–cement or cement–formation, and introduces
+no fluid gap or exchange. Native transient Galerkin supports Newmark, Radau-3
+and Gauss-4; the axial PML convolution currently requires CPU execution.
+
+.. code-block:: python
+
+   well.add_layer(
+       "cement",
+       width      = 4 * u.inch,
+       physics    = "elastic",
+       properties = {
+           "Vp": 3000 * u.m / u.s,
+           "Vs": 1500 * u.m / u.s,
+           "Rho": 2000 * u.kg / u.m**3,
+       },
+       interface  = fs.BoreholeLinearSlip(
+           normal_stiffness     = 1 * u.GPa / u.m,
+           tangential_stiffness = 0 * u.Pa / u.m,
+       ),
+   )
+
+Use ``well.set_interface("casing", bond)`` to change the outer bond of an
+existing named layer; ``well.set_interface("cement", None)`` restores exact
+bonding at the cement–formation wall.
+
+
 Variable Radius
 ---------------
 
@@ -252,6 +284,83 @@ names, ``SimpleSurface`` objects, or solver-ready dictionaries:
        layers=[...],
        surfaces=[...],
    )
+
+Borehole Mesh Grading
+---------------------
+
+Define radial grading and axial resolution on the borehole itself:
+
+.. code-block:: python
+
+   well = model.add_borehole(
+       name="well", x=0 * u.m, layers=[...], surfaces=[...],
+       grading=fs.BoreholeGrading(
+           wall_size=0.1 * u.m,
+           growth=1.5,
+           axial_factor=1.5,
+       ),
+   )
+
+Existing boreholes also support
+``well.set_grading(wall_size=0.1*u.m, growth=1.5, axial_factor=1.5)``.
+``BoreholeLayer`` accepts the same ``grading`` object for layer-local overrides.
+
+``wall_size`` is the solid-side, wall-adjacent normal size envelope. It accepts
+Pint lengths; the native default is 0.075 m, and zero disables the geometric
+envelope. At wall distance ``d``, the envelope is
+``wall_size + (growth - 1)*d``, capped by ordinary wavelength sizing. It does
+not impose a global minimum or maximum element size. This works for uncased
+boreholes as well as cased boreholes; an unavailable tube-wave speed does not
+disable the geometric envelope.
+
+``axial_factor`` multiplies the target elements per wavelength along the
+borehole. For example, 1.5 requests 50% more axial resolution; adaptive
+bisections may exceed that minimum or leave an already sufficient mesh
+unchanged. It applies directionally in the fluid and through the existing
+wall-tangential policy. It is frequency dependent, not a fixed split count.
+In the solid its excess above one tapers as
+``(1 - d/L)**1.5`` over the default reach
+``L = (body_speed/(EPW*f_adapt) - wall_size)/(growth - 1)``;
+it returns to one beyond that reach. In the fluid it is constant.
+Borehole radial grading and the axial request continue through generated PMLs.
+Omitting it preserves native defaults.
+
+Tube-wave mesh sizing uses the bonded radial compliance of the concentric
+casing, cement and surrounding formation. Formation intervals along the well
+select local speed bounds; uncased holes use the formation shear modulus.
+This low-frequency estimate controls resolution, not the coupled equations.
+For a scalar fluid/casing/fluid stack with bonded interfaces, sizing includes
+both coupled fluid-column modes and uses the slower branch for refinement.
+Its conservative speed interval includes the formation stiffness range;
+file-backed profiles are read in distributed slabs before caching these bounds.
+An explicit native ``tube_wave_model="korteweg"`` retains the unsupported
+thin-wall casing estimate.
+
+Guided-wave layers are anisotropic by default. Mesh closure uses the local
+directional sizing ratio to relax the ordinary aspect limit, allowing fine
+wall-normal spacing without imposing it axially. To restore physical aspect
+closure or adjust its baseline:
+
+.. code-block:: python
+
+   sim.mesh.set_adapt(
+       order             = 4,
+       elems_per_wave    = 1.5,
+       f_adapt           = 200,
+       aspect_limit      = 3,
+       guided_anisotropy = False,
+   )
+
+The default ``guided_anisotropy=True`` applies locally to guided-wave sizing;
+ordinary regions retain ``aspect_limit``. Conformity and wavelength resolution
+remain enforced.
+This changes the native 2D aspect closure; 3D refinement already omits that
+physical aspect limiter and remains unchanged.
+
+The SDK exports ``nearfield`` and ``adapt/stoneley/tangential/factor``.
+Legacy ``near_h0`` and ``near_growth`` keyword inputs remain accepted,
+including Pint quantities. Layer controls override borehole controls, which
+override global ``Mesh/adapt/stoneley`` settings.
 
 3D Annular Padding
 ------------------

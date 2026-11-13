@@ -535,6 +535,9 @@ class MeshAdaptor(ExtraFieldsMixin):
         jump_factor: Multiplicative adaptation factor on jump elements.
         smooth_refs: Whether to add smoothing refinements around constrained
             degrees of freedom.
+        aspect_limit: Baseline physical element aspect limit (native default 3).
+        guided_anisotropy: Use local guided-wave spacing anisotropy to relax
+            aspect closure (native default True); False restores physical closure.
         f_low: Low frequency used for adaptation.
         f_high: High frequency used for adaptation.
         f_adapt: Explicit physical frequency in hertz used for adaptation.
@@ -556,6 +559,8 @@ class MeshAdaptor(ExtraFieldsMixin):
     jump_tolerance: Optional[float] = None  # 0.2
     jump_factor: Optional[float] = None  # 1.0
     smooth_refs: Optional[bool] = None  # False
+    aspect_limit: Optional[float] = None
+    guided_anisotropy: Optional[bool] = None
     f_low: Optional[float] = None
     f_high: Optional[float] = None
     f_adapt: Optional[float] = None
@@ -575,6 +580,8 @@ class MeshAdaptor(ExtraFieldsMixin):
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
+        aspect_limit: Optional[float] = None,
+        guided_anisotropy: Optional[bool] = None,
         f_low: Optional[float] = None,
         f_high: Optional[float] = None,
         f_adapt: Optional[float] = None,
@@ -599,6 +606,8 @@ class MeshAdaptor(ExtraFieldsMixin):
         self.jump_tolerance = jump_tolerance
         self.jump_factor = jump_factor
         self.smooth_refs = smooth_refs
+        self.aspect_limit = aspect_limit
+        self.guided_anisotropy = guided_anisotropy
         self.f_low = f_low
         self.f_high = f_high
         self.f_adapt = f_adapt
@@ -611,6 +620,18 @@ class MeshAdaptor(ExtraFieldsMixin):
         self.__post_init__()
 
     def __post_init__(self):
+        if self.aspect_limit is not None:
+            import math
+
+            if isinstance(self.aspect_limit, bool):
+                raise ValueError("aspect_limit must be finite and at least one")
+            self.aspect_limit = float(self.aspect_limit)
+            if not math.isfinite(self.aspect_limit) or self.aspect_limit < 1:
+                raise ValueError("aspect_limit must be finite and at least one")
+        if self.guided_anisotropy is not None and not isinstance(
+            self.guided_anisotropy, bool
+        ):
+            raise TypeError("guided_anisotropy must be a boolean")
         self.source_grading = _coerce_distance_grading(self.source_grading)
         self.receiver_grading = _coerce_distance_grading(self.receiver_grading)
         self.surface_gradings = _coerce_surface_gradings(self.surface_gradings)
@@ -655,6 +676,16 @@ class MeshAdaptor(ExtraFieldsMixin):
             **({"jump_tolerance": self.jump_tolerance} if self.jump_tolerance else {}),
             **({"jump_factor": self.jump_factor} if self.jump_factor else {}),
             **({"smooth_refs": self.smooth_refs} if self.smooth_refs else {}),
+            **(
+                {"aspect_limit": self.aspect_limit}
+                if self.aspect_limit is not None
+                else {}
+            ),
+            **(
+                {"guided_anisotropy": self.guided_anisotropy}
+                if self.guided_anisotropy is not None
+                else {}
+            ),
             **({"f_low": self.f_low} if self.f_low is not None else {}),
             **({"f_high": self.f_high} if self.f_high is not None else {}),
             **({"f_adapt": self.f_adapt} if self.f_adapt is not None else {}),
@@ -703,6 +734,8 @@ class MeshAdaptor(ExtraFieldsMixin):
             jump_tolerance=data.pop("jump_tolerance", None),
             jump_factor=data.pop("jump_factor", None),
             smooth_refs=data.pop("smooth_refs", None),
+            aspect_limit=data.pop("aspect_limit", None),
+            guided_anisotropy=data.pop("guided_anisotropy", None),
             f_low=data.pop("f_low", None),
             f_high=data.pop("f_high", None),
             f_adapt=data.pop("f_adapt", None),
@@ -842,6 +875,8 @@ class MeshManager:
         jump_tolerance: Optional[float] = None,
         jump_factor: Optional[float] = None,
         smooth_refs: Optional[bool] = None,
+        aspect_limit: Optional[float] = None,
+        guided_anisotropy: Optional[bool] = None,
         f_low: Optional[float] = None,
         f_high: Optional[float] = None,
         f_adapt: Optional[float] = None,
@@ -869,6 +904,9 @@ class MeshManager:
             jump_factor: Multiplicative adaptation factor on jump elements.
             smooth_refs: Whether to add smoothing refinements around constrained
                 degrees of freedom.
+            aspect_limit: Baseline physical element aspect limit (native default 3).
+            guided_anisotropy: Relax aspect closure using the local guided-wave
+                sizing ratio (native default True). False restores physical closure.
             f_low: Low frequency used for adaptation.
             f_high: High frequency used for adaptation.
             f_adapt: Explicit physical frequency in hertz used for adaptation.
@@ -891,6 +929,8 @@ class MeshManager:
             jump_tolerance=jump_tolerance,
             jump_factor=jump_factor,
             smooth_refs=smooth_refs,
+            aspect_limit=aspect_limit,
+            guided_anisotropy=guided_anisotropy,
             f_low=f_low,
             f_high=f_high,
             f_adapt=f_adapt,

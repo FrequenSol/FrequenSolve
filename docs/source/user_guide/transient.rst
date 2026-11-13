@@ -48,8 +48,18 @@ has precedence over both the simulation setting and the inferred default:
 
 The same mapping can be supplied as ``simulation_overrides=...`` when constructing
 the job. It serializes inside ``simulation.overrides`` in a Sauce File reference.
-For attenuation, explicitly configure ``model.attenuation_model="gsls"`` and its
-frequency band. GSLS applies to Cartesian 2D/3D and axisymmetric 2D acoustic,
+Assign a complete transient attenuation law with its physical fitting band:
+
+.. code-block:: python
+
+   model.attenuation = fs.AttenuationConfig(
+       model               = "gsls",
+       reference_frequency = 10 * fs.ureg.Hz,
+       frequency_min       = 10 * fs.ureg.Hz,
+       frequency_max       = 200 * fs.ureg.Hz,
+   )
+
+Layer properties supply ``Qp`` and ``Qs``. GSLS applies to Cartesian 2D/3D and axisymmetric 2D acoustic,
 elastic and coupled transients; axisymmetric elastic and coupled models relax the
 hoop strain of azimuthal mode 0 only, and axisymmetric PML layers stay lossless.
 

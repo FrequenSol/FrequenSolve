@@ -291,6 +291,7 @@ class TransientJob(BaseJob):
                 "checkpoint",
                 "restart",
                 "point_source",
+                "pml_frequency",
             },
             "Time",
         )
@@ -390,6 +391,12 @@ class TransientJob(BaseJob):
             for s in getattr(sim.model, "surfaces", []) or []
             if getattr(s, "is_reduced", False)
         ]
+        reduced.extend(
+            wall
+            for well in getattr(sim.model, "boreholes", []) or []
+            for wall in well.surfaces
+            if wall.interface is not None
+        )
         if reduced:
             if sim.dimension not in {2, 3} or physics not in {"elastic", "coupled"}:
                 raise ValueError(

@@ -76,9 +76,9 @@ class AttenuationConfig(ExtraFieldsMixin):
         GSLS band and fit fields are exported only when ``model == "gsls"``;
         they are never written for ``"kjartansson"`` or ``"none"``. For
         ``"gsls"``, GSLS keys found in ``extra`` or ``**kwargs`` are promoted
-        to the typed fields. Layer properties keep supplying ``Qp``/``Qs``/
-        ``Q``; GSLS reads exactly one of them per material as shared
-        ``Qp = Qs``.
+        to the typed fields. Layer properties supply ``Qp``/``Qs``/``Q``.
+        One supplied Q gives shared relaxation; isotropic elastic materials
+        may supply separate ``Qp`` and ``Qs``.
 
         The ``"none"`` model makes the solver ignore solid-frame quality
         factors such as ``Qp``, ``Qs``, ``Qk``, and ``Qmu``. It does not disable

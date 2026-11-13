@@ -26,7 +26,7 @@ import xarray as xr
 
 from frequensolve.model.model import ModelSubdomain
 from frequensolve.model.property import Property
-from frequensolve.units import is_quantity, unit_expression, value_and_units_to_fs
+from frequensolve.units import Q_, is_quantity, unit_expression, value_and_units_to_fs
 from frequensolve.util.mixins import ExportContext, ExtraFieldsMixin, merge_extra
 from frequensolve.util.named_list import NamedList
 
@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from .model import LayeredModel
 
 __all__ = [
+    "BoreholeLinearSlip",
+    "BoreholeGrading",
     "BoreholeAnnularPadding",
     "BoreholeSurface",
     "BoreholeLayer",
@@ -50,6 +52,126 @@ __all__ = [
     "BoreholePlug",
     "Borehole",
 ]
+
+
+@dataclass(kw_only=True)
+class BoreholeGrading:
+    """Wall-normal spacing that grows smoothly into the wavelength-sized mesh.
+
+    ``wall_size`` accepts a physical length, e.g. ``0.1 * fs.ureg.m``.
+    At distance ``d`` from the wall the size envelope is
+    ``wall_size + (growth - 1) * d``. Omit the size to use Sauce's 0.075 m
+    default; zero disables this geometric envelope. Ordinary wave-resolution
+    requirements still apply. ``axial_factor`` multiplies the target EPW
+    along the borehole: 1.5 requests 50% more axial resolution. Dyadic mesh
+    refinement can exceed that minimum. Omit it to preserve native defaults.
+    """
+
+    wall_size: Any = None
+    growth: float = 2.0
+    axial_factor: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        self.growth = _scalar_number(self.growth, "borehole grading growth")
+        if not np.isfinite(self.growth) or self.growth <= 1:
+            raise ValueError(
+                "Borehole grading growth must be finite and greater than one"
+            )
+        if self.axial_factor is not None:
+            self.axial_factor = _scalar_number(
+                self.axial_factor, "borehole grading axial_factor"
+            )
+            if not np.isfinite(self.axial_factor) or self.axial_factor < 1:
+                raise ValueError(
+                    "Borehole grading axial_factor must be finite and at least one"
+                )
+        if self.wall_size is not None:
+            value = self.wall_size
+            if is_quantity(value):
+                value = value.to("m").magnitude
+            elif isinstance(value, Mapping):
+                value = Q_(value["value"], value.get("units", "m")).to("m").magnitude
+            value = _scalar_number(value, "borehole grading wall_size")
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(
+                    "Borehole grading wall_size must be finite and non-negative"
+                )
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "BoreholeGrading":
+        """Read canonical native controls or SDK-friendly field names."""
+        payload = dict(data)
+        if "nearfield" in payload:
+            radial = dict(payload.pop("nearfield"))
+            adapt = payload.pop("adapt", {})
+            axial = adapt.get("stoneley", {}).get("tangential", {}).get("factor")
+            if axial is not None:
+                radial["axial_factor"] = axial
+            if payload:
+                raise ValueError(
+                    "Unexpected BoreholeGrading fields: " + ", ".join(payload)
+                )
+            payload = radial
+        if "h0" in payload:
+            if "wall_size" in payload:
+                raise ValueError("Specify only one of h0 or wall_size")
+            payload["wall_size"] = payload.pop("h0")
+        return cls(**payload)
+
+    def to_fs(self, ctx: Optional[ExportContext] = None) -> Dict[str, Any]:
+        """Export physical lengths without leaving Pint objects in JSON."""
+        nearfield = {
+            **(
+                {"h0": _length_to_fs(self.wall_size)}
+                if self.wall_size is not None
+                else {}
+            ),
+            "growth": self.growth,
+        }
+        result = {"nearfield": nearfield}
+        if self.axial_factor is not None:
+            result["adapt"] = {
+                "stoneley": {"tangential": {"factor": self.axial_factor}}
+            }
+        return result
+
+
+def _coerce_borehole_grading(
+    grading: Any, extra: Dict[str, Any]
+) -> Optional[BoreholeGrading]:
+    """Normalize canonical and legacy controls, consuming recognized extras."""
+    nested = extra.pop("nearfield", None)
+    h0 = extra.pop("near_h0", None)
+    growth = extra.pop("near_growth", None)
+    if grading is not None and (
+        nested is not None or h0 is not None or growth is not None
+    ):
+        raise ValueError("Specify grading or legacy nearfield controls, not both")
+    if grading is None:
+        grading = nested
+        if grading is None and (h0 is not None or growth is not None):
+            grading = BoreholeGrading(
+                wall_size=h0, growth=2.0 if growth is None else growth
+            )
+    if grading is None or isinstance(grading, BoreholeGrading):
+        return grading
+    return BoreholeGrading.from_fs(grading)
+
+
+def _store_borehole_grading(extra: Dict[str, Any], grading: BoreholeGrading) -> None:
+    """Merge typed controls with independent per-borehole wave controls."""
+    controls = grading.to_fs()
+    extra["nearfield"] = controls["nearfield"]
+    if "adapt" in controls:
+        adapt = copy.deepcopy(extra.get("adapt", {}))
+        tangent = adapt.setdefault("stoneley", {}).setdefault("tangential", {})
+        factor = grading.axial_factor
+        if "factor" in tangent and tangent["factor"] != factor:
+            raise ValueError(
+                "Conflicting grading.axial_factor and adapt/stoneley/tangential/factor"
+            )
+        tangent["factor"] = factor
+        extra["adapt"] = adapt
 
 
 def _borehole_surface_ref(value: Any) -> Union[int, Dict[str, Any]]:
@@ -255,6 +377,50 @@ class BoreholeAnnularPadding(ExtraFieldsMixin):
 
 
 @dataclass(kw_only=True)
+class BoreholeLinearSlip:
+    """Massless imperfect solid–solid bond, with stiffnesses in Pa/m.
+
+    Continuous traction equals stiffness times displacement jump. Both normal
+    and tangential stiffnesses are required; zero releases that component.
+    Omit the interface to retain exact displacement continuity. Accepts SI
+    scalars or Pint quantities, e.g. ``1 * fs.ureg.GPa / fs.ureg.m``.
+    """
+
+    normal_stiffness: Any
+    tangential_stiffness: Any
+
+    def __post_init__(self) -> None:
+        for name in ("normal_stiffness", "tangential_stiffness"):
+            value = getattr(self, name)
+            if is_quantity(value):
+                value = value.to("Pa/m").magnitude
+            value = _scalar_number(value, name)
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+            setattr(self, name, value)
+
+    def to_fs(self) -> Dict[str, Any]:
+        return {
+            "model": "linear_slip",
+            "normal_stiffness": self.normal_stiffness,
+            "tangential_stiffness": self.tangential_stiffness,
+        }
+
+    @classmethod
+    def from_fs(cls, data: Mapping[str, Any]) -> "BoreholeLinearSlip":
+        payload = dict(data)
+        if payload.pop("model", "linear_slip") != "linear_slip":
+            raise ValueError("Borehole interfaces support model='linear_slip'")
+        return cls(**payload)
+
+
+def _coerce_borehole_interface(value):
+    if value is None or isinstance(value, BoreholeLinearSlip):
+        return value
+    return BoreholeLinearSlip.from_fs(value)
+
+
+@dataclass(kw_only=True)
 class BoreholeSurface(ExtraFieldsMixin):
     """Cumulative-radius boundary in a layered-model borehole.
 
@@ -262,6 +428,7 @@ class BoreholeSurface(ExtraFieldsMixin):
         name: Optional surface name used by borehole layer references.
         r: Cumulative radius as a scalar, Pint quantity, property payload, file
             reference, or one-/two-dimensional ``xarray.DataArray``.
+        interface: Optional solid–solid linear-slip bond on this wall.
         grid: Optional grid metadata for file-backed or ungridded radius
             profiles.
         scale: Multiplicative scale applied to loaded radius values.
@@ -276,6 +443,7 @@ class BoreholeSurface(ExtraFieldsMixin):
 
     name: Optional[str]
     r: Property = field(default_factory=Property)
+    interface: Optional[BoreholeLinearSlip] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __init__(
@@ -287,6 +455,7 @@ class BoreholeSurface(ExtraFieldsMixin):
         scale: float = 1.0,
         units: Optional[Any] = None,
         system: Optional[str] = None,
+        interface: Optional[Union[BoreholeLinearSlip, Mapping[str, Any]]] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
@@ -295,6 +464,7 @@ class BoreholeSurface(ExtraFieldsMixin):
             name = None
         if r is None:
             raise ValueError("BoreholeSurface requires r")
+        self.interface = _coerce_borehole_interface(interface)
         self.name = name
         self.r = (
             r
@@ -347,6 +517,12 @@ class BoreholeSurface(ExtraFieldsMixin):
             borehole_name=borehole_name,
             radius_name=name,
         )
+        if self.interface is not None:
+            if self.is_axis():
+                raise ValueError("A borehole interface cannot lie on the axis")
+            if not self.r.is_constant:
+                raise ValueError("Borehole linear-slip interfaces currently require a constant radius")
+            payload["interface"] = self.interface.to_fs()
         payload.update(self.merged_extra(payload))
         return payload
 
@@ -362,6 +538,7 @@ class BoreholeLayer:
         name: Optional radial layer name.
         width: Optional scalar radial width. When supplied, the builder can
             close the layer immediately by deriving the outer radius.
+        interface: Optional linear-slip bond on the outer wall.
         mesh_block_id: Existing or generated solver mesh-block id.
         physics: Optional physics/material family for generated subdomains.
         properties: Optional material properties for generated subdomains.
@@ -379,6 +556,7 @@ class BoreholeLayer:
     """
 
     name: Optional[str] = None
+    interface: Optional[BoreholeLinearSlip] = None
     width: Optional[Any] = None
     mesh_block_id: Optional[int] = None
     physics: Optional[str] = None
@@ -396,6 +574,7 @@ class BoreholeLayer:
         name: Optional[str] = None,
         *,
         width: Optional[Any] = None,
+        interface: Optional[Union[BoreholeLinearSlip, Mapping[str, Any]]] = None,
         mesh_block_id: Optional[int] = None,
         physics: Optional[str] = None,
         properties: Optional[dict] = None,
@@ -405,6 +584,7 @@ class BoreholeLayer:
         subdomain_name: Optional[str] = None,
         inner_surface: Optional[str] = None,
         outer_surface: Optional[str] = None,
+        grading: Optional[Union[BoreholeGrading, Mapping[str, Any]]] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
@@ -420,6 +600,7 @@ class BoreholeLayer:
 
         self.name = name
         self.width = width
+        self.interface = _coerce_borehole_interface(interface)
         self.mesh_block_id = mesh_block_id
         self.physics = physics
         self.properties = properties
@@ -431,6 +612,9 @@ class BoreholeLayer:
         self.outer_surface = outer_surface
         self.extra = dict(extra or {})
         self.extra.update(kwargs)
+        normalized = _coerce_borehole_grading(grading, self.extra)
+        if normalized is not None:
+            _store_borehole_grading(self.extra, normalized)
 
 
 @dataclass(kw_only=True)
@@ -508,6 +692,11 @@ class BoreholePart:
         _validate_borehole_radius_profile(self.r)
         self.extra = dict(extra or {})
         self.extra.update(kwargs)
+        normalized = _coerce_borehole_grading(
+            self.extra.pop("grading", None), self.extra
+        )
+        if normalized is not None:
+            _store_borehole_grading(self.extra, normalized)
 
     @classmethod
     def from_fs(cls, data: Mapping[str, Any]) -> "BoreholePart":
@@ -761,6 +950,7 @@ class Borehole:
     parts: NamedList = field(default_factory=NamedList)
     plugs: NamedList = field(default_factory=NamedList)
     annular_padding: Optional[BoreholeAnnularPadding] = None
+    grading: Optional[BoreholeGrading] = None
     extra: Dict[str, Any] = field(default_factory=dict)
     _model: Optional["LayeredModel"] = field(default=None, repr=False)
     _pending_layer: Optional[Dict[str, Any]] = field(default=None, repr=False)
@@ -778,6 +968,7 @@ class Borehole:
         annular_padding: Optional[
             Union[BoreholeAnnularPadding, Mapping[str, Any]]
         ] = None,
+        grading: Optional[Union[BoreholeGrading, Mapping[str, Any]]] = None,
         model: Optional["LayeredModel"] = None,
         extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
@@ -820,6 +1011,27 @@ class Borehole:
         self._part_outer_surface_indices = self._resolve_part_outer_surface_indices()
         self.extra = dict(extra or {})
         self.extra.update(kwargs)
+        self.grading = _coerce_borehole_grading(grading, self.extra)
+
+    def set_grading(
+        self,
+        *,
+        wall_size: Any = None,
+        growth: float = 2.0,
+        axial_factor: Optional[float] = None,
+    ) -> "Borehole":
+        """Set radial grading and an axial EPW multiplier, returning this borehole."""
+        grading = BoreholeGrading(
+            wall_size=wall_size, growth=growth, axial_factor=axial_factor
+        )
+        # An explicit setter replaces a factor imported from native input.
+        if axial_factor is not None:
+            tangent = (
+                self.extra.get("adapt", {}).get("stoneley", {}).get("tangential", {})
+            )
+            tangent.pop("factor", None)
+        self.grading = grading
+        return self
 
     @staticmethod
     def _surfaces_from_parts(parts: Sequence[BoreholePart]) -> List[BoreholeSurface]:
@@ -934,6 +1146,8 @@ class Borehole:
             )
         if not self.parts:
             raise ValueError(f"Borehole '{self.name}' requires at least one layer/part")
+        if any(surface.is_axis() and surface.interface is not None for surface in self.surfaces):
+            raise ValueError("A borehole interface cannot lie on the axis")
         payload = {
             "name": self.name,
             "axis": {
@@ -972,7 +1186,28 @@ class Borehole:
                 else {}
             ),
         }
-        return merge_extra(payload, self.extra, "Borehole")
+        extra = copy.deepcopy(self.extra)
+        if self.grading is not None:
+            _store_borehole_grading(extra, self.grading)
+        return merge_extra(payload, extra, "Borehole")
+
+    def set_interface(
+        self,
+        layer: str,
+        interface: Optional[Union[BoreholeLinearSlip, Mapping[str, Any]]],
+    ) -> BoreholeSurface:
+        """Set the bond on a named material layer's outer wall.
+
+        For example, ``set_interface("casing", bond)`` selects PVC–cement,
+        while ``set_interface("cement", bond)`` selects cement–formation.
+        Pass ``None`` to restore exact bonding.
+        """
+        for index, part in enumerate(self.parts):
+            if part.name == layer:
+                wall = self.surfaces[self._outer_surface_index(index)]
+                wall.interface = _coerce_borehole_interface(interface)
+                return wall
+        raise ValueError(f"Unknown borehole layer: {layer}")
 
     @property
     def surface_names(self) -> List[str]:
@@ -1176,6 +1411,7 @@ class Borehole:
         name: Optional[str] = None,
         *,
         width: Optional[Any] = None,
+        interface: Optional[Union[BoreholeLinearSlip, Mapping[str, Any]]] = None,
         mesh_block_id: Optional[int] = None,
         physics: Optional[str] = None,
         properties: Optional[dict] = None,
@@ -1197,6 +1433,7 @@ class Borehole:
             name: Optional layer name.
             width: Optional scalar radial width. If supplied, the layer is
                 closed immediately.
+            interface: Optional linear-slip bond on this layer's outer wall.
             mesh_block_id: Existing or generated solver mesh-block id.
             physics: Optional physics/material family for generated
                 subdomains.
@@ -1244,6 +1481,7 @@ class Borehole:
             "system": system,
             "subdomain_name": subdomain_name,
             "extra": dict(kwargs),
+            "interface": _coerce_borehole_interface(interface),
         }
         if width is None:
             return None
@@ -1253,6 +1491,7 @@ class Borehole:
         return self.add_layer(
             layer.name,
             width=layer.width,
+            interface=layer.interface,
             mesh_block_id=layer.mesh_block_id,
             physics=layer.physics,
             properties=layer.properties,
@@ -1278,6 +1517,7 @@ class Borehole:
         name: Optional[str] = None,
         r: Any = None,
         *,
+        interface: Optional[Union[BoreholeLinearSlip, Mapping[str, Any]]] = None,
         grid: Optional[xr.DataArray] = None,
         scale: float = 1.0,
         units: Optional[Any] = None,
@@ -1291,6 +1531,7 @@ class Borehole:
                 it is treated as ``r`` for compact authoring.
             r: Cumulative radius for the surface. ``radius`` is accepted as an
                 alias.
+            interface: Optional solid–solid linear-slip bond on this wall.
             grid: Optional grid metadata for file-backed radius values.
             scale: Multiplicative scale applied to loaded radius values.
             units: Optional radius units.
@@ -1332,8 +1573,15 @@ class Borehole:
         if name is not None and any(surface.name == name for surface in self.surfaces):
             raise ValueError(f"Borehole surface name already exists: {name}")
 
+        if self._pending_layer is not None:
+            pending_interface = self._pending_layer.get("interface")
+            if interface is not None and pending_interface is not None:
+                raise ValueError("Specify the interface on the layer or its closing surface")
+            interface = interface if interface is not None else pending_interface
+
         surface = BoreholeSurface(
             name=name,
+            interface=interface,
             r=r,
             grid=grid,
             scale=scale,
@@ -1513,7 +1761,7 @@ class Borehole:
         if isinstance(other, BoreholeLayer):
             self._add_layer_object(other)
         elif isinstance(other, BoreholeSurface):
-            self.add_surface(other.name, r=other.r)
+            self.add_surface(other.name, r=other.r, interface=other.interface)
         elif isinstance(other, BoreholePlug):
             self.plugs.append(other)
         else:

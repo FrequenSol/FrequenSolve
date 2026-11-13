@@ -486,6 +486,26 @@ class ModelBase(ExtraFieldsMixin):
             self.add_subdomain(other)
         return self
 
+    @property
+    def attenuation(self) -> Optional[AttenuationConfig]:
+        """Return a snapshot of the model-wide attenuation law and fit settings."""
+        return self._attenuation_config()
+
+    @attenuation.setter
+    def attenuation(self, value: Optional[AttenuationConfig]) -> None:
+        """Assign a complete attenuation law without editing solver-facing extras."""
+        if value is None:
+            self.attenuation_model = None
+            self.reference_frequency = None
+            self._attenuation_extra = {}
+            return
+        if not isinstance(value, AttenuationConfig):
+            raise TypeError("attenuation must be an AttenuationConfig or None")
+        value.validate()
+        self.attenuation_model = value.model
+        self.reference_frequency = copy.deepcopy(value.reference_frequency)
+        self._attenuation_extra = copy.deepcopy(value.fs_extra())
+
     def _attenuation_config(self) -> Optional[AttenuationConfig]:
         if self.attenuation_model is None and self.reference_frequency is None:
             return None
