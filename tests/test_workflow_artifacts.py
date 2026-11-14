@@ -70,7 +70,7 @@ def native_files(tmp_path, physical=False):
             f.attrs[key] = {
                 "fs_physics": "acoustic",
                 "fs_dimension": "3",
-                "fs_workflow": "forward",
+                "fs_workflow": "init" if physical else "forward",
             }.get(key, "fake-" + key)
     return a, b
 

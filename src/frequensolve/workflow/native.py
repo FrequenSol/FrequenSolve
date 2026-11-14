@@ -108,15 +108,19 @@ def pressure_snapshot(
                 "fs_build_id",
                 "fs_physics",
                 "fs_dimension",
-                "fs_workflow",
             ):
                 if (
                     data.attrs.get(key) != survey.attrs.get(key)
                     or key not in data.attrs
                 ):
                     raise ValueError("Native solver/survey identity differs")
+            if strings(survey.attrs.get("fs_workflow", [])) not in (
+                ["init"],
+                ["forward"],
+            ):
+                raise ValueError("Native survey workflow is unsupported")
             if any(
-                strings(data.attrs[key]) != [expected]
+                strings(data.attrs.get(key, [])) != [expected]
                 for key, expected in (
                     ("fs_dimension", "3"),
                     ("fs_physics", "acoustic"),
