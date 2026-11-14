@@ -1,4 +1,4 @@
-"""Bounded native receiver snapshots with explicit value-frame and survey identity."""
+"""Bounded native receiver snapshots with explicit pressure units and survey identity."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def pressure_snapshot(
     def scalar_attr(node: Any, name: str) -> str:
         values = strings(node.attrs.get(name, []))
         if len(values) != 1:
-            raise ValueError("Native value frame is incomplete")
+            raise ValueError("Native value representation is incomplete")
         return values[0]
 
     with tempfile.TemporaryDirectory(prefix="fs-pressure-") as temp:
@@ -70,11 +70,24 @@ def pressure_snapshot(
                 raise ValueError(
                     "Native traces differ from the qualified 3D acquisition"
                 )
+            if "value_convention_representation" in trace.attrs:
+                prefix_attr = "value_convention_"
+                expected_representation = "physical"
+                units_attr = "primal_units"
+                amplitude_scale_attr = "rhs_amplitude_scale_dataset"
+                amplitude_scale_dataset = group + "_rhs_amplitude_scale"
+            else:
+                prefix_attr = "value_frame_"
+                expected_representation = "coordinate"
+                units_attr = "coordinate_units"
+                amplitude_scale_attr = "rhs_norm_dataset"
+                amplitude_scale_dataset = group + "_rhs_norm"
             if (
-                scalar_attr(trace, "value_frame_representation") != "coordinate"
-                or scalar_attr(trace, "value_frame_coordinate_units") != "Pa"
-                or scalar_attr(trace, "value_frame_components") != "p"
-                or scalar_attr(trace, "value_frame_roles") != "primal"
+                scalar_attr(trace, prefix_attr + "representation")
+                != expected_representation
+                or scalar_attr(trace, prefix_attr + units_attr) != "Pa"
+                or scalar_attr(trace, prefix_attr + "components") != "p"
+                or scalar_attr(trace, prefix_attr + "roles") != "primal"
             ):
                 raise ValueError(
                     "Pressure units or value representation are unsupported; no implicit conversion is performed"
@@ -133,11 +146,11 @@ def pressure_snapshot(
                     else value.tolist()
                 )
             if (
-                scalar_attr(trace, "value_frame_rhs_norm_dataset")
-                != f"/{group}_rhs_norm"
+                scalar_attr(trace, prefix_attr + amplitude_scale_attr)
+                != "/" + amplitude_scale_dataset
             ):
                 raise ValueError("Native source normalization reference is unsupported")
-            encoding["rhs_normalization"] = dataset(data, group + "_rhs_norm")[
+            encoding["rhs_normalization"] = dataset(data, amplitude_scale_dataset)[
                 ()
             ].tolist()
             if encoding["encoding_kind"] != ["identity"] or encoding["counts"] != [
@@ -150,7 +163,7 @@ def pressure_snapshot(
             attrs = {
                 key: strings(value)
                 for key, value in trace.attrs.items()
-                if key.startswith("value_frame_")
+                if key.startswith(prefix_attr)
             }
             complex_values = values[:, 0, :, 0] + 1j * values[:, 0, :, 1]
             result = {
@@ -181,7 +194,8 @@ def pressure_snapshot(
                 "evidence": {
                     **evidence,
                     "converged": True,
-                    "value_representation": "producer_declared_coordinate",
+                    "value_representation": "producer_declared_"
+                    + expected_representation,
                     "scientific_qualification": "curated 3D acoustic case; no general physical-validity claim",
                 },
             }

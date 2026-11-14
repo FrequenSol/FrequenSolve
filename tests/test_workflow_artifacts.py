@@ -13,22 +13,23 @@ from frequensolve.workflow.results import _publish, snapshot_from_bundle
 from tests.test_workflow import snapshot
 
 
-def native_files(tmp_path):
+def native_files(tmp_path, physical=False):
     h5py = pytest.importorskip("h5py")
     a, b = tmp_path / "trace.h5", tmp_path / "survey.h5"
     with h5py.File(a, "w") as f:
         d = f.create_dataset("reciprocal", data=np.ones((2, 1, 2, 2)))
+        prefix = "value_convention_" if physical else "value_frame_"
+        scale = "reciprocal_rhs_amplitude_scale" if physical else "reciprocal_rhs_norm"
         for name, value in {
-            "representation": "coordinate",
-            "coordinate_units": "Pa",
+            "representation": "physical" if physical else "coordinate",
+            "primal_units" if physical else "coordinate_units": "Pa",
             "components": "p",
             "roles": "primal",
-            "rhs_norm_dataset": "/reciprocal_rhs_norm",
+            "rhs_amplitude_scale_dataset" if physical else "rhs_norm_dataset": "/"
+            + scale,
         }.items():
-            d.attrs["value_frame_" + name] = np.asarray(
-                [value], dtype=h5py.string_dtype()
-            )
-        f["reciprocal_rhs_norm"] = [1.0, 1.0]
+            d.attrs[prefix + name] = np.asarray([value], dtype=h5py.string_dtype())
+        f[scale] = [1.0, 1.0]
         f["frequency"], f["laplace"], f["task_id"] = 2.0, 0.0, 1
         for key in (
             "fs_solver_version",
@@ -91,9 +92,10 @@ def test_curated_inputs_new_identity_and_deterministic_remote_serialization(tmp_
         create_project(tmp_path, "first", "Replacement")
 
 
-def test_native_units_and_external_link_rejection(tmp_path):
+@pytest.mark.parametrize("physical", [False, True])
+def test_native_units_and_external_link_rejection(tmp_path, physical):
     h5py = pytest.importorskip("h5py")
-    a, b = native_files(tmp_path)
+    a, b = native_files(tmp_path, physical)
     row = {
         "frequency_index": 0,
         "frequency_value": ["2", "0"],
