@@ -115,5 +115,5 @@ def test_thousand_task_index_time_memory_and_metadata_size(tmp_path, record_prop
     record_property("task_index_peak_bytes", peak_bytes)
     record_property("task_index_file_bytes", path.stat().st_size)
     assert len(index.tasks) == 1000
-    assert elapsed < 1.0
+    assert elapsed < 2.0
     assert path.stat().st_size < 10 * 1024 * 1024

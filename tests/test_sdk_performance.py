@@ -169,6 +169,18 @@ def test_trace_fixture_selects_indexed_packed_access(tmp_path):
         assert len(h5["trace_index/datasets/packed_path"]) == 3
 
 
+@pytest.mark.parametrize("artifact_count", [1, 8])
+def test_result_metadata_scenario_reads_indexed_artifacts_and_timings(
+    tmp_path, artifact_count
+):
+    scenario = _result_metadata_scenario(tmp_path, "test", artifact_count)
+
+    assert scenario.operation() == {
+        "artifacts": artifact_count,
+        "timingRows": artifact_count,
+    }
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
