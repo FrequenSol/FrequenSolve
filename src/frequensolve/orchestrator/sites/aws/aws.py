@@ -1,6 +1,7 @@
-"""FrequenSol cloud execution site backed by Cognito, AppSync, S3, and Batch."""
+"""FrequenSol cloud execution site backed by Cognito, AppSync, S3, and managed Slurm."""
 
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -9,9 +10,10 @@ import subprocess
 import tempfile
 import uuid
 import warnings
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, TypeVar, Union
 
 from frequensolve._optional import optional_dependency_error
 from frequensolve.orchestrator.sites.aws.cache_paths import (
@@ -21,6 +23,8 @@ from frequensolve.orchestrator.sites.aws.cache_paths import (
 from frequensolve.orchestrator.sites.aws.execution_profile import (
     ManagedExecutionProfile,
 )
+from frequensolve.orchestrator.sites.aws.plans import ExecutionPlanningMixin
+from frequensolve.orchestrator.sites.execution import normalize_execution_state
 
 try:
     import boto3
@@ -39,8 +43,10 @@ from frequensolve.orchestrator.sites.base import (
     BaseSite,
     JobStatus,
     RunHandle,
+    _result_relative_paths,
 )
 from frequensolve.orchestrator.sites.config import BaseSiteConfig
+from frequensolve.orchestrator.sites.remote_catalog import validate_remote_task_catalog
 from frequensolve.orchestrator.utils.environment import build_subprocess_environment
 from frequensolve.seismic.traces import TraceDataset
 from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
@@ -58,6 +64,8 @@ from frequensolve.util.atomic import atomic_output_path
 from frequensolve.util.setup_logger import init_logger
 
 __all__ = ["AWSSiteConfig", "AWSSite"]
+
+_JobT = TypeVar("_JobT", bound=BaseJob)
 
 # Initialize the logger
 logger = init_logger(name=__name__, log_file="/tmp/log/frequensolve/aws.log")
@@ -85,7 +93,7 @@ class AWSSiteConfig(BaseSiteConfig):
         api_url: GraphQL API endpoint URL.
         domain: Frontend domain used to discover public configuration.
         s3_bucket: S3 bucket for simulation data, populated after authentication.
-        region: AWS region used for Cognito, S3, and Batch resources.
+        region: AWS region used for Cognito and S3 resources.
         s3_prefix: Prefix for organizing simulation data inside the S3 bucket.
         max_duration: Maximum duration users may request for cloud resources.
     """
@@ -104,12 +112,10 @@ class AWSSiteConfig(BaseSiteConfig):
     region: str = "us-east-1"
     s3_prefix: str = ""
     max_duration: Optional[str] = None
-    execution_backend: str = "batch"
-    compute_mode: Optional[str] = "auto"
-    slurm_partition: Optional[str] = None
-    slurm_nodes: Optional[int] = None
-    slurm_ranks_per_node: Optional[int] = None
-    slurm_wall_time: Optional[str] = None
+    partition: Optional[str] = None
+    allow_unverified_compute: Optional[bool] = None
+    cluster_id: Optional[str] = None
+    execution_resources: Optional[dict[str, int]] = None
 
     @classmethod
     def from_domain(cls, domain: Optional[str] = None) -> "AWSSiteConfig":
@@ -240,7 +246,10 @@ class AWSSiteConfig(BaseSiteConfig):
             self.region = config_data["region"]
 
 
-class AWSSite(BaseSite):
+from .project_identity import ProjectIdentityMixin, local_identity
+
+
+class AWSSite(ProjectIdentityMixin, ExecutionPlanningMixin, BaseSite):
     """AWS site for running FrequenSolve simulations.
 
     Automatically authenticates users and configures AWS resources by simply providing
@@ -262,7 +271,28 @@ class AWSSite(BaseSite):
         2. Authenticates with cached credentials (or prompts for login)
         3. Fetches your infrastructure details (S3 bucket, etc.)
         4. Ready to submit simulations and upload files!
+
+    Background checkpoints (``supports_background_reuse``) are not supported:
+    each batch worker stages inputs only from local files and uploads its
+    results under a fresh prefix, and checkpoint HDF5 files are never
+    transferred by default, so a later worker cannot read a producer's
+    checkpoints.
     """
+
+    supports_background_reuse = False
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Validate ``relative_paths``; AWS keeps no reusable result files.
+
+        Uploaded results are immutable per run, so there is nothing to
+        remove; see :meth:`BaseSite.remove_result_files` for path rules.
+        """
+
+        if _result_relative_paths(relative_paths):
+            logger.debug(
+                "AWSSite keeps no reusable result files; nothing removed for %s",
+                getattr(job, "name", job),
+            )
 
     def __init__(
         self,
@@ -273,12 +303,10 @@ class AWSSite(BaseSite):
         verbose: bool = False,
         force_login: bool = False,
         _credential_profile: Optional[str] = None,
-        execution_backend: Optional[str] = None,
-        compute_mode: Optional[str] = None,
-        slurm_partition: Optional[str] = None,
-        slurm_nodes: Optional[int] = None,
-        slurm_ranks_per_node: Optional[int] = None,
-        slurm_wall_time: Optional[str] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
+        cluster_id: Optional[str] = None,
+        execution_resources: Optional[dict[str, int]] = None,
     ):
         """Initialize AWS site with domain-based authentication.
 
@@ -309,12 +337,10 @@ class AWSSite(BaseSite):
         profile_values = {
             name: value
             for name, value in {
-                "execution_backend": execution_backend,
-                "compute_mode": compute_mode,
-                "slurm_partition": slurm_partition,
-                "slurm_nodes": slurm_nodes,
-                "slurm_ranks_per_node": slurm_ranks_per_node,
-                "slurm_wall_time": slurm_wall_time,
+                "partition": partition,
+                "allow_unverified_compute": allow_unverified_compute,
+                "cluster_id": cluster_id,
+                "execution_resources": execution_resources,
             }.items()
             if value is not None
         }
@@ -323,6 +349,7 @@ class AWSSite(BaseSite):
                 "Managed Cloud execution settings may only be loaded from a "
                 "named site.toml profile via fs.Site(profile=...)"
             )
+        self._explicit_execution_resources = execution_resources is not None
         self.execution_profile = ManagedExecutionProfile.from_mapping(profile_values)
 
         # Load configuration from domain
@@ -330,12 +357,12 @@ class AWSSite(BaseSite):
             f"Loading AWS configuration for {domain or os.getenv('FREQUENSOL_DOMAIN')}"
         )
         config = AWSSiteConfig.from_domain(domain)
-        config.execution_backend = self.execution_profile.backend
-        config.compute_mode = self.execution_profile.compute_mode
-        config.slurm_partition = self.execution_profile.slurm_partition
-        config.slurm_nodes = self.execution_profile.slurm_nodes
-        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
-        config.slurm_wall_time = self.execution_profile.slurm_wall_time
+        config.partition = self.execution_profile.partition
+        config.allow_unverified_compute = (
+            self.execution_profile.allow_unverified_compute
+        )
+        config.cluster_id = self.execution_profile.cluster_id
+        config.execution_resources = dict(self.execution_profile.execution_resources)
 
         # Store domain for potential config refresh
         if domain is None:
@@ -480,7 +507,7 @@ class AWSSite(BaseSite):
         self.graphql_client = GraphQLClient(config.api_url, auth)
 
         # Fetch storage stack info from API to populate config
-        # Storage stack is required for S3 operations; compute stack will be created on-demand
+        # Storage is independent of the registered managed execution site.
         try:
             # Try to get storage stack info
             storage_info = self.graphql_client.get_storage_stack_info()
@@ -507,12 +534,12 @@ class AWSSite(BaseSite):
 
         # A domain-config refresh replaces the dataclass instance, so reapply
         # the immutable named-profile selection before exposing it.
-        config.execution_backend = self.execution_profile.backend
-        config.compute_mode = self.execution_profile.compute_mode
-        config.slurm_partition = self.execution_profile.slurm_partition
-        config.slurm_nodes = self.execution_profile.slurm_nodes
-        config.slurm_ranks_per_node = self.execution_profile.slurm_ranks_per_node
-        config.slurm_wall_time = self.execution_profile.slurm_wall_time
+        config.partition = self.execution_profile.partition
+        config.allow_unverified_compute = (
+            self.execution_profile.allow_unverified_compute
+        )
+        config.cluster_id = self.execution_profile.cluster_id
+        config.execution_resources = dict(self.execution_profile.execution_resources)
         self.config = config
         self.s3_client = self.session.client("s3", region_name=self.config.region)
 
@@ -651,6 +678,65 @@ class AWSSite(BaseSite):
             error_code == "400" and error.operation_name == "HeadObject"
         )
 
+    @staticmethod
+    def _upload_error_category(error: Exception) -> str:
+        """Classify structured provider errors without exposing their payloads.
+
+        boto3's managed uploader wraps ClientError in S3UploadFailedError.
+        Inspect the bounded exception chain, never its private message text.
+        """
+        seen = set()
+        current: Optional[BaseException] = error
+        for _ in range(8):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            if isinstance(current, ClientError):
+                code = current.response.get("Error", {}).get("Code")
+                if code in ("ExpiredToken", "InvalidToken"):
+                    return "credentials_expired"
+                if code in ("AccessDenied", "AccessDeniedException"):
+                    return "storage_access_denied"
+                return "upload_failed"
+            current = current.__cause__ or current.__context__
+        return "upload_failed"
+
+    def _upload_file(self, local_path: Path, s3_key: str) -> None:
+        """Retry only an expired upload once with this site's Cognito identity.
+
+        Already staged files and submission mutations are never replayed. A
+        non-Cognito site's own credential provider remains responsible for auth.
+        """
+        refreshed = False
+        while True:
+            refresh_needed = False
+            try:
+                self.s3_client.upload_file(
+                    str(local_path), self.config.s3_bucket, s3_key
+                )
+                return
+            except Exception as error:
+                category = self._upload_error_category(error)
+                refresh_needed = (
+                    category == "credentials_expired"
+                    and not refreshed
+                    and getattr(self, "cognito_auth", None) is not None
+                )
+            # Leave the provider exception handler before refreshing or raising:
+            # telemetry must not retain its private implicit exception context.
+            if refresh_needed:
+                refreshed = True
+                try:
+                    self._refresh_s3_credentials()
+                except Exception:
+                    category = "credential_refresh_failed"
+                else:
+                    continue
+            raise RuntimeError(
+                f"Cloud file upload failed ({category}). "
+                "Check your storage access and retry."
+            )
+
     def _aws_cli_env(self) -> Dict[str, str]:
         """Build a process environment so the AWS CLI uses Cognito Identity Pool credentials.
 
@@ -698,316 +784,35 @@ class AWSSite(BaseSite):
     def provisioned(self) -> bool:
         """Check if the site is provisioned.
 
-        AWS provisions compute resources automatically on demand when jobs are
-        submitted. This property always returns True to maintain interface
-        compatibility with other sites (e.g. HPC sites that require explicit
-        provisioning before job submission).
+        The service owns the registered managed Slurm site; SDK callers do not
+        provision a cluster. Submission checks site availability on the server.
         """
         return True
 
-    @staticmethod
-    def _exact_s3_paths(values: Iterable[Union[str, Path]]) -> tuple[str, ...]:
-        """Validate and deduplicate portable result-relative object paths."""
-
-        result = []
-        seen = set()
-        for value in values:
-            raw = str(value)
-            path = PurePosixPath(raw)
-            if (
-                not raw
-                or "\\" in raw
-                or "\0" in raw
-                or re.match(r"^[A-Za-z]:", raw)
-                or path.is_absolute()
-                or "." in path.parts
-                or ".." in path.parts
-                or path.as_posix() != raw
-            ):
-                raise ValueError("S3 artifact paths must be normalized relative paths")
-            if raw not in seen:
-                seen.add(raw)
-                result.append(raw)
-        return tuple(result)
-
-    def _s3_result_prefix(self, job: BaseJob) -> str:
-        """Return the exact object prefix containing one job's result tree."""
-
-        return PurePosixPath(
-            Path(job.project_path).name,
-            "jobs",
-            job.simulation.name,
-            job.name,
-            "results",
-        ).as_posix()
-
-    @staticmethod
-    def _local_result_path(
-        job: BaseJob,
-        project_path: Optional[Union[str, Path]] = None,
-    ) -> Path:
-        """Map a job result directory beneath an optional relocated project."""
-
-        if project_path is None:
-            return job._result_path
-        relative = job._result_path.resolve().relative_to(
-            Path(job.project_path).resolve()
-        )
-        return Path(project_path).resolve() / relative
-
-    def _download_s3_files(
-        self,
-        prefix: str,
-        local_root: Path,
-        relative_paths: Iterable[Union[str, Path]],
-        *,
-        missing_ok: bool = False,
-    ) -> list[Path]:
-        """Download only explicit S3 keys; never list an object prefix."""
-
-        paths = self._exact_s3_paths(relative_paths)
-        local_root.mkdir(parents=True, exist_ok=True)
-        fetched = []
-        for relative in paths:
-            key = f"{prefix.rstrip('/')}/{relative}"
-            local = local_root / Path(*PurePosixPath(relative).parts)
-
-            def download() -> None:
-                with atomic_output_path(local) as temporary:
-                    self.s3_client.download_file(
-                        self.config.s3_bucket,
-                        key,
-                        str(temporary),
-                    )
-
-            downloaded = False
-            for attempt in range(2):
-                try:
-                    download()
-                    downloaded = True
-                    break
-                except ClientError as exc:
-                    code = str(exc.response.get("Error", {}).get("Code", ""))
-                    if (
-                        attempt == 0
-                        and self._s3_error_requires_credential_refresh(exc)
-                        and hasattr(self, "cognito_auth")
-                    ):
-                        self._refresh_s3_credentials()
-                        continue
-                    if code in {"404", "NoSuchKey", "NotFound"}:
-                        if missing_ok:
-                            break
-                        raise FileNotFoundError(
-                            f"S3 artifact is missing: {key}"
-                        ) from exc
-                    raise
-            if not downloaded:
-                continue
-            fetched.append(local)
-        return fetched
-
-    def fetch_artifact_catalog(
-        self,
-        job: BaseJob,
-        *,
-        project_path: Optional[Union[str, Path]] = None,
-        operations: Sequence[str] = (),
-    ):
-        """Fetch authoritative task metadata and named operation results."""
-
-        tasks = tuple(range(1, job.n_tasks + 1))
-        requested_operations = tuple(dict.fromkeys(operations))
-        local_root = self._local_result_path(job, project_path)
-        prefix = self._s3_result_prefix(job)
-        local_root.parent.mkdir(parents=True, exist_ok=True)
-        if job.staged_artifact_fingerprints(self.__class__.__name__) is None:
-            raise RuntimeError(
-                "Remote staged provenance is missing; restage the job before fetching"
-            )
-        index_path = "_fs_run/tasks.h5"
-        result_paths = tuple(
-            f"_fs_run/tasks/task_{task:06d}/result.json" for task in tasks
-        )
-        operation_paths = {
-            operation: operation_result_path(Path(), operation).as_posix()
-            for operation in requested_operations
-        }
-        with tempfile.TemporaryDirectory(
-            prefix=".fs-catalog-", dir=local_root.parent
-        ) as temporary:
-            stage = Path(temporary)
-            self._download_s3_files(
-                prefix,
-                stage,
-                (index_path,),
-                missing_ok=True,
-            )
-            use_index = False
-            try:
-                catalog = TaskIndex.read(stage)
-                self._validate_remote_catalog(job, catalog, tasks)
-                use_index = True
-            except (ArtifactContractError, OSError, RuntimeError):
-                self._download_s3_files(
-                    prefix,
-                    stage,
-                    result_paths,
-                    missing_ok=True,
-                )
-                catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
-                self._validate_remote_catalog(job, catalog, tasks)
-
-            if operation_paths:
-                self._download_s3_files(
-                    prefix,
-                    stage,
-                    tuple(operation_paths.values()),
-                    missing_ok=True,
-                )
-            operation_results = {}
-            for operation, relative in operation_paths.items():
-                path = stage / relative
-                if not path.is_file():
-                    continue
-                result = OperationResult.read(
-                    path,
-                    result_path=stage,
-                    workflow=operation,
-                )
-                self._validate_remote_operation(job, result)
-                operation_results[operation] = result
-
-            candidates = (index_path,) if use_index else result_paths
-            publish = [path for path in candidates if (stage / path).is_file()]
-            publish.extend(
-                relative
-                for operation, relative in operation_paths.items()
-                if operation in operation_results
-            )
-            for relative in publish:
-                target = local_root / relative
-                with atomic_output_path(target) as temporary_path:
-                    shutil.copyfile(stage / relative, temporary_path)
-            if not use_index:
-                (local_root / index_path).unlink(missing_ok=True)
-            for operation, relative in operation_paths.items():
-                if operation not in operation_results:
-                    (local_root / relative).unlink(missing_ok=True)
-
-        task_catalog = (
-            TaskIndex.read(local_root)
-            if use_index
-            else ArtifactCatalog.read_task_results(local_root, tasks=tasks)
-        )
-        if not requested_operations:
-            return task_catalog
-        return CombinedArtifactCatalog(
-            result_path=local_root.resolve(strict=False),
-            task_catalog=task_catalog,
-            operations={
-                operation: OperationResult.read(
-                    local_root / relative,
-                    result_path=local_root,
-                    workflow=operation,
-                )
-                for operation, relative in operation_paths.items()
-                if (local_root / relative).is_file()
-            },
-        )
-
-    def _validate_remote_catalog(self, job, catalog, tasks) -> None:
-        """Require exact task partitions and current staged provenance."""
-
-        fingerprints = getattr(
-            job, "staged_task_fingerprints", job.staged_artifact_fingerprints
-        )(self.__class__.__name__)
-        if fingerprints is None:
-            raise RuntimeError(
-                "Remote staged provenance is missing; restage the job before fetching"
-            )
-        for task in tasks:
-            frequency = complex(job.f_list[task - 1])
-            if isinstance(catalog, TaskIndex):
-                current = catalog.is_task_current(
-                    task,
-                    frequency=frequency,
-                    fingerprints=fingerprints,
-                )
-            else:
-                result = catalog.results.get(task)
-                current = bool(
-                    result is not None
-                    and result.successful
-                    and result.partition.frequency == frequency
-                    and all(
-                        result.fingerprints.get(key) == value
-                        for key, value in fingerprints.items()
-                    )
-                )
-            if not current:
-                raise RuntimeError(
-                    f"Remote task {task} does not match the current staged job"
-                )
-
-    def _validate_remote_operation(self, job, result: OperationResult) -> None:
-        """Require a successful operation from the current staged generation."""
-
-        fingerprints = job.staged_artifact_fingerprints(self.__class__.__name__)
-        if (
-            fingerprints is None
-            or not result.successful
-            or any(
-                result.fingerprints.get(key) != value
-                for key, value in fingerprints.items()
-            )
-        ):
-            raise RuntimeError(
-                f"Remote operation {result.name!r} does not match the current "
-                "staged job"
-            )
-
-    def fetch_artifacts(
-        self,
-        job: BaseJob,
-        *,
-        requests: Sequence[ArtifactRequest] = (),
-        include_defaults: bool = True,
-        project_path: Optional[Union[str, Path]] = None,
-        operations: Sequence[str] = (),
-    ) -> list[Path]:
-        """Fetch exact catalog-selected S3 objects and collection parts."""
-
-        local_root = self._local_result_path(job, project_path)
-        prefix = self._s3_result_prefix(job)
-        catalog = (
-            self.fetch_artifact_catalog(
-                job,
-                project_path=project_path,
-                operations=operations,
-            )
-            if operations
-            else self.fetch_artifact_catalog(job, project_path=project_path)
-        )
-        return fetch_artifact_payloads(
-            catalog,
-            fetch_files=lambda paths: self._download_s3_files(
-                prefix,
-                local_root,
-                paths,
-            ),
-            requests=requests,
-            include_defaults=include_defaults,
-        )
-
     def fetch_vtk(self, job: BaseJob, path: Optional[Union[str, Path]] = None) -> None:
         """Fetch exact visualization and companion-data artifacts from S3."""
+        job = self._result_job(job)
 
         self.fetch_artifacts(
             job,
             requests=(
                 ArtifactRequest(role="visualization"),
                 ArtifactRequest(role="visualization_data"),
+                # Native solver v2 catalogs use format-specific roles.
+                *(
+                    ArtifactRequest(role=role)
+                    for role in (
+                        "vtk",
+                        "vtu",
+                        "vtr",
+                        "vtp",
+                        "vts",
+                        "xmf",
+                        "xdmf",
+                        "acquisition_sources",
+                        "acquisition_receivers",
+                    )
+                ),
             ),
             include_defaults=False,
             project_path=path,
@@ -1028,6 +833,8 @@ class AWSSite(BaseSite):
         suffix: Optional[Union[str, tuple[str, ...]]] = None,
     ) -> Path:
         """Fetch supported filesystem-backed AWS outputs used by discovery."""
+
+        job = self._result_job(job)
 
         paraview_kinds = {"vtk", "vtu", "vtr", "vtp", "vts", "xmf", "xdmf"}
         normalized_kind = str(kind).strip().lower() if kind is not None else None
@@ -1106,7 +913,9 @@ class AWSSite(BaseSite):
             "bucket_error": bucket_error,
         }
 
-    def sync_s3(self, local_path: Union[str, Path], s3_key: str) -> str:
+    def sync_s3(
+        self, local_path: Union[str, Path], s3_key: Union[str, Path]
+    ) -> Union[str, Path]:
         """Sync files/directories with S3 using boto3.
 
         Args:
@@ -1124,34 +933,15 @@ class AWSSite(BaseSite):
         if not local_path.exists():
             raise FileNotFoundError(f"Path {local_path} does not exist")
 
-        try:
-            if local_path.is_file():
-                # Upload single file
-                self.s3_client.upload_file(
-                    str(local_path), self.config.s3_bucket, str(s3_key)
-                )
-            else:
-                # TODO: Would be nice to use s3 sync here, but then have to use CLI
-                #       and it doesn't have user temporary credentials
-
-                # Upload directory recursively using boto3
-                for file_path in local_path.rglob("*"):
-                    if file_path.is_file():
-                        relative_path = file_path.relative_to(local_path)
-                        file_s3_key = f"{s3_key}/{relative_path}"
-                        file_s3_key = file_s3_key.replace("\\", "/")
-
-                        self.s3_client.upload_file(
-                            str(file_path),
-                            self.config.s3_bucket,
-                            str(file_s3_key),
-                        )
-            return s3_key
-
-        except ClientError as e:
-            raise RuntimeError(f"Failed to sync {local_path} to S3: {e}")
-        except Exception as e:
-            raise RuntimeError(f"Unexpected error syncing {local_path} to S3: {e}")
+        if local_path.is_file():
+            self._upload_file(local_path, str(s3_key))
+        else:
+            for file_path in local_path.rglob("*"):
+                if file_path.is_file():
+                    relative_path = file_path.relative_to(local_path)
+                    file_s3_key = f"{s3_key}/{relative_path}".replace("\\", "/")
+                    self._upload_file(file_path, file_s3_key)
+        return s3_key
 
     def _ensure_storage_bucket(self) -> None:
         """Load or create the authenticated user's Cloud storage bucket."""
@@ -1180,8 +970,8 @@ class AWSSite(BaseSite):
                         # Wait for stack to be ready (pass stackId so we wait for the one we just created)
                         logger.debug("Waiting for storage stack to be ready...")
                         expected_stack_id = deploy_result.get("stackId")
-                        self.graphql_client.wait_for_stack_ready(
-                            "storage", expected_stack_id=expected_stack_id
+                        self.graphql_client.wait_for_storage_ready(
+                            expected_stack_id=expected_stack_id
                         )
 
                         # Get storage stack info to update bucket name
@@ -1210,6 +1000,9 @@ class AWSSite(BaseSite):
         self._ensure_storage_bucket()
 
         self._emit(f"Syncing project '{project.name}' to S3")
+        self._ensure_project_identity(
+            project.path, getattr(project, "pretty_name", None) or project.name
+        )
         project._transfer(self)
         self._emit(f"Project '{project.name}' synced to S3")
 
@@ -1291,46 +1084,37 @@ class AWSSite(BaseSite):
     def submit(self, job: BaseJob, **kwargs) -> RunHandle:
         """Submit a simulation job.
 
-        Uses platform-managed shared compute when advertised by the Cloud API,
-        while retaining legacy per-user compute-stack provisioning.
+        Resolves the selected Cloud cluster and partition before preparing or reusing work.
 
         Submits through the authenticated GraphQL API.
 
         Args:
             job: The task to submit.
-            **kwargs: Additional job parameters (vcpu, memory, name,
-                description). Pass ``check=True`` to make ``wait()`` raise by
+            **kwargs: Run options, including name and status email preferences.
+                Pass ``check=True`` to make ``wait()`` raise by
                 default for failed runs, or ``validate=False`` to skip SDK
-                pre-run validation.
+                pre-run validation. Pass ``allow_cpu_sharing=True`` to allow up to
+                two eligible single-CPU frequency jobs per vCPU; defaults to False.
+                ``cluster_id``, ``partition`` and ``allow_unverified_compute``
+                override site configuration defaults independently. Compatibility
+                checks are best effort; allow_unverified_compute=True overrides
+                incomplete or incorrect findings on an explicit partition.
+                Standard usage charges apply even if compatibility issues cause failure.
+                Access, enforced limits and execution protocols remain checked.
+                Memory reservations remain unchanged. Pass ``retry=True`` with
+                the authored job to reuse verified completed frequencies from the
+                latest compatible terminal, settled Cloud run. Strict retries require unchanged
+                scientific inputs, outputs, runtime version and execution topology.
+                Resource budgets may change through the site configuration. A retry
+                creates a new run; its ordinary rates and minimum charge apply only
+                to newly performed work. ``force=True`` runs every frequency.
 
         Returns:
             Awaitable run handle.
 
         Raises:
-            RuntimeError: If job submission fails or stack creation fails.
+            RuntimeError: If job submission fails.
         """
-        forbidden_execution_overrides = sorted(
-            {
-                "execution",
-                "execution_backend",
-                "compute_mode",
-                "nodes",
-                "ranks_per_node",
-                "partition",
-                "wall_time",
-                "slurm_partition",
-                "slurm_nodes",
-                "slurm_ranks_per_node",
-                "slurm_wall_time",
-            }
-            & kwargs.keys()
-        )
-        if forbidden_execution_overrides:
-            raise ValueError(
-                "Managed Cloud execution and resources may only be selected "
-                "through a named site.toml profile: "
-                + ", ".join(forbidden_execution_overrides)
-            )
         if bool(kwargs.pop("postprocess_only", False)) or bool(
             getattr(job, "postprocess_only", False)
         ):
@@ -1338,101 +1122,134 @@ class AWSSite(BaseSite):
                 "Managed Cloud execution cannot run a postprocess-only submission "
                 f"({type(job).__name__}); run it on a local or HPC site"
             )
+        if "sizing_policy" in kwargs:
+            return self.submit_automatically(job, **kwargs)
+        unsupported = kwargs.keys() - {
+            "cluster_id",
+            "partition",
+            "allow_unverified_compute",
+            "name",
+            "send_simulation_status_email",
+            "allow_cpu_sharing",
+            "force",
+            "rerun",
+            "skip",
+            "skip_policy",
+            "retry",
+            "check",
+            "validate",
+            "fetch",
+            "poll_interval",
+        }
+        if unsupported:
+            raise ValueError(
+                "Unsupported managed submission options: "
+                + ", ".join(sorted(unsupported))
+                + ". Select execution resources through a named site.toml profile."
+            )
+        allow_cpu_sharing = kwargs.pop("allow_cpu_sharing", False)
+        if type(allow_cpu_sharing) is not bool:
+            raise ValueError("allow_cpu_sharing must be a boolean")
+        execution_arguments = self.execution_profile.graphql_arguments()
+        from .execution_profile import resolve_compute_options
+
+        execution_arguments = resolve_compute_options(execution_arguments, kwargs)
+        for key in ("cluster_id", "partition", "allow_unverified_compute"):
+            kwargs.pop(key, None)
+        resources = execution_arguments["execution_resources"]
+        if allow_cpu_sharing and (
+            resources["nodes"] != 1 or resources["mpiRanks"] != 1
+        ):
+            raise ValueError("CPU sharing requires a single-node, single-rank profile")
+        if allow_cpu_sharing:
+            resources["allowCpuSharing"] = True
         fresh_run = bool(kwargs.pop("force", False) or kwargs.pop("rerun", False))
         skip_policy = SkipPolicy.from_value(
             kwargs.pop("skip", kwargs.pop("skip_policy", None))
         )
         fresh_run = bool(fresh_run or skip_policy.force)
+        retry = kwargs.pop("retry", False)
+        if type(retry) is not bool:
+            raise ValueError("retry must be a boolean")
+        if retry and fresh_run:
+            raise ValueError("Choose retry=True or force=True, not both")
         check = bool(kwargs.pop("check", False))
         validate = kwargs.pop("validate", True)
         fetch = kwargs.pop("fetch", False)
         poll_interval = kwargs.pop("poll_interval", 10)
-        vcpu = kwargs.pop("vcpu", None)
-        memory = kwargs.pop("memory", None)
-        if self.execution_profile.backend == "slurm" and (
-            vcpu is not None or memory is not None
-        ):
-            raise ValueError(
-                "Managed Slurm profiles cannot use Batch vcpu or memory overrides"
-            )
         if self.graphql_client is None:
             raise RuntimeError(
                 "FrequenSolve Cloud requires Cognito authentication and the "
                 "GraphQL API. Recreate this Site with a current Cloud profile."
             )
+        # Resolve before any local reuse decision. The server revalidates at submit.
+        resolved_compute = self.graphql_client.resolve_compute_cluster(
+            cluster_id=execution_arguments.get("cluster_id"),
+            execution_resources=execution_arguments.get("execution_resources"),
+            partition=execution_arguments.get("partition"),
+            allow_unverified_compute=execution_arguments.get(
+                "allow_unverified_compute"
+            ),
+        )
+        execution_arguments["expected_compute_identity"] = resolved_compute[
+            "executionIdentity"
+        ]
         self.prepare_job(job, validate=validate)
-        if not fresh_run and job.is_run_current():
+        reusable_execution = False
+        if (
+            not fresh_run
+            and not retry
+            and local_identity(job.project_path) is None
+            and job._job_id
+            and job.is_run_current()
+        ):
+            previous = self.graphql_client.get_simulation_status_details(
+                str(job._job_id)
+            )
+            reusable_execution = (
+                previous.get("executionSiteId") == resolved_compute["executionSiteId"]
+                and previous.get("executionRegistrationFingerprint")
+                == resolved_compute["executionIdentity"]
+                and previous.get("computePlacement")
+                == resolved_compute.get("computePlacement")
+                and previous.get("status") in {"SUCCEEDED", "COMPLETED"}
+            )
+        if reusable_execution:
             job.write_run_state(status="skipped")
             self._emit(f"Skipping {job.name}; run is current")
-            handle = RunHandle.skipped(self, job)
+            result_job = (
+                self._snapshot_run_job(job, job._job_id) if job._job_id else job
+            )
+            handle = RunHandle.skipped(self, result_job)
             if fetch:
                 handle._pending_fetch_fn = lambda run: self.fetch_outputs(run.job)
             return handle
 
         self.prepare_job(job, sync_project=True, validate=False)
 
-        project = job.project_path.name
+        identity = self._ensure_project_identity(
+            job.project_path,
+            self._authored_project_metadata(job)[1]
+            or self._authored_project_metadata(job)[0]
+            or job.project_path.name,
+        )
+        project = self.project_storage_key(job.project_path)
         if getattr(job.simulation, "_project", None) is None:
             self._sync_loaded_job_inputs(job, project)
 
-        # Current Cloud deployments use platform-managed shared compute. Older
-        # deployments require a per-user compute stack. Discover the contract
-        # before invoking any deployment mutation so a removed legacy field is
-        # never called speculatively.
-        if self.graphql_client is not None:
-            try:
-                compute_mode = self.graphql_client.get_compute_provisioning_mode()
-            except Exception as capability_error:
-                raise RuntimeError(
-                    "Failed to determine whether this FrequenSolve Cloud "
-                    "environment uses shared or per-user compute. No compute "
-                    "infrastructure was changed. Update FrequenSolve or contact "
-                    f"the Cloud environment owner. Details: {capability_error}"
-                ) from capability_error
-
-            if (
-                compute_mode == "per-user"
-                and not self.graphql_client._check_compute_stack_exists()
-            ):
-                # Compute stack doesn't exist, create it
-                self._emit(
-                    "AWS compute stack not found; creating compute infrastructure."
-                )
-                try:
-                    # Deploy compute stack - backend will automatically fetch and use user's compute settings
-                    # (userId extracted automatically from auth context)
-                    deploy_result = self.graphql_client.deploy_compute_stack()
-
-                    # Wait for stack to be ready, passing the stackId from deployment for accurate matching
-                    self._emit("Waiting for AWS compute stack to be ready")
-                    expected_stack_id = deploy_result.get("stackId")
-                    stack_info = self.graphql_client.wait_for_stack_ready(
-                        "compute", expected_stack_id=expected_stack_id
-                    )
-
-                    self._emit(
-                        f"AWS compute stack ready: {stack_info.get('stackId', 'unknown')}"
-                    )
-                except Exception as create_error:
-                    raise RuntimeError(
-                        f"Failed to create compute stack: {create_error}"
-                    ) from create_error
-
         try:
+            # Validate result paths before staging or admitting remote work.
+            self._prepare_run_snapshot(job)
             # Sync job file to S3
             local_job, remote_job = job.save_for_remote(
-                self.__class__.__name__, project
+                self.__class__.__name__, project, include_job_id=False
             )
             s3_job_key = self.sync_s3(local_job, remote_job)
             self._emit(f"Synced job file to S3: {s3_job_key}")
             local_simulation, remote_simulation = job.save_simulation_for_remote(
                 self.__class__.__name__, project
             )
-            s3_simulation_key = self.sync_s3(
-                local_simulation,
-                remote_simulation,
-            )
-            self._emit(f"Synced simulation file to S3: {s3_simulation_key}")
+            self.sync_s3(local_simulation, remote_simulation)
 
             # Check if using Cognito/GraphQL authentication
             self._emit(f"Submitting {job.name} via AWS GraphQL API")
@@ -1441,18 +1258,24 @@ class AWSSite(BaseSite):
                 authored_project_display_name,
             ) = self._authored_project_metadata(job)
 
+            # Freeze and validate the result layout before admitting remote work.
+            run_job = self._prepare_run_snapshot(job)
+            retry_arguments: dict[str, Any] = {"retry": True} if retry else {}
+            project_identity_arguments: Dict[str, Any] = (
+                {"project_id": identity.project_id} if identity else {}
+            )
             result = self.graphql_client.submit_job(
                 job_file_s3_key=str(s3_job_key),
-                vcpu=vcpu,
-                memory=memory,
                 job_name=kwargs.get("name", f"frequensolve-{uuid.uuid4().hex[:8]}"),
+                **project_identity_arguments,
                 project_name=authored_project_name,
                 project_display_name=authored_project_display_name,
                 simulation_name=job.simulation.name,
                 simulation_job_name=job.name,
                 send_simulation_status_email=kwargs.get("send_simulation_status_email"),
                 fresh=fresh_run,
-                **self.execution_profile.graphql_arguments(),
+                **retry_arguments,
+                **execution_arguments,
             )
 
             simulation_id = result["simulationId"]
@@ -1461,8 +1284,10 @@ class AWSSite(BaseSite):
             )
 
             job._job_id = simulation_id
+            bound_job = self._bind_run_snapshot(run_job, simulation_id)
+            job._cloud_result_binding = bound_job._cloud_result_binding
             return self._make_run_handle(
-                job,
+                bound_job,
                 simulation_id,
                 poll_interval=poll_interval,
                 fetch=fetch,
@@ -1470,15 +1295,20 @@ class AWSSite(BaseSite):
                 backend={
                     key: value
                     for key, value in {
-                        "executionBackend": result.get(
-                            "executionBackend", self.execution_profile.backend
+                        "executionSiteId": result.get("executionSiteId")
+                        or resolved_compute["executionSiteId"],
+                        "executionRegistrationFingerprint": result.get(
+                            "executionRegistrationFingerprint"
                         ),
-                        "executionTarget": result.get("executionTarget"),
-                        "slurmPartition": result.get("slurmPartition"),
-                        "slurmNodes": result.get("slurmNodes"),
-                        "slurmRanksPerNode": result.get("slurmRanksPerNode"),
-                        "slurmWallTimeSeconds": result.get("slurmWallTimeSeconds"),
-                        "providerAttemptId": result.get("providerAttemptId"),
+                        "logicalAttemptId": result.get("logicalAttemptId")
+                        or f"{simulation_id}:1",
+                        "providerJobId": result.get("providerJobId"),
+                        "executionState": normalize_execution_state(
+                            result.get("executionState") or result.get("status")
+                        ),
+                        "requestedResources": execution_arguments.get(
+                            "execution_resources"
+                        ),
                     }.items()
                     if value is not None
                 },
@@ -1486,6 +1316,21 @@ class AWSSite(BaseSite):
 
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {e}")
+
+    def handle(
+        self, job: BaseJob, job_id: Optional[str] = None, mode: str = "attached"
+    ) -> RunHandle:
+        """Attach to an existing Cloud run with its own frozen result location."""
+        selected_id = job_id or getattr(job, "_job_id", None)
+        if selected_id is None:
+            raise ValueError("Cannot create a run handle without a job id")
+        run = self._make_run_handle(
+            job,
+            str(selected_id),
+            poll_interval=getattr(getattr(self, "config", None), "poll_interval", 5),
+        )
+        run.mode = mode
+        return run
 
     def _make_run_handle(
         self,
@@ -1496,6 +1341,7 @@ class AWSSite(BaseSite):
         check: bool = False,
         backend: Optional[Dict[str, Any]] = None,
     ) -> RunHandle:
+        job = self._snapshot_run_job(job, str(job_id))
         return RunHandle(
             site=self,
             job=job,
@@ -1503,7 +1349,10 @@ class AWSSite(BaseSite):
             mode="aws",
             poll_interval=poll_interval,
             check=check,
-            backend=backend or {"executionBackend": "batch"},
+            backend=backend or {"logicalAttemptId": f"{job_id}:1"},
+            _logs_fn=lambda run, **options: self.fetch_logs(
+                run.job, simulation_id=str(run.id), **options
+            ),
             _status_fn=self._poll_run,
             _cancel_fn=lambda run: self.cancel_job(str(run.id)),
             _pending_fetch_fn=(
@@ -1511,36 +1360,212 @@ class AWSSite(BaseSite):
             ),
         )
 
+    @staticmethod
+    def _output_relative_path(value: Union[str, Path]) -> str:
+        text = str(value)
+        path = PurePosixPath(text)
+        if (
+            path.is_absolute()
+            or "\\" in text
+            or any(part in {"", ".", ".."} for part in text.split("/"))
+        ):
+            raise ValueError("Cloud output paths must remain inside the run results")
+        return path.as_posix()
+
+    @staticmethod
+    def _prepare_run_snapshot(job: _JobT) -> _JobT:
+        """Freeze result interpretation and validate paths before remote submission."""
+        if getattr(job, "_cloud_result_run_id", None) is not None:
+            raise ValueError("Use the authored job to submit another Cloud run")
+        authored = Path(job._result_path).resolve()
+        authored.relative_to(Path(job.project_path).resolve())
+        if callable(getattr(job, "load_images", None)):
+            try:
+                Path(job.save_path).resolve().relative_to(authored)
+            except ValueError as exc:
+                raise ValueError(
+                    "Cloud imaging output path must be inside the job result directory"
+                ) from exc
+        outputs = getattr(job, "outputs", None)
+        for output in [
+            *(getattr(outputs, "paraview", None) or []),
+            *(getattr(outputs, "wavefields", None) or []),
+        ]:
+            path = getattr(output, "path", None)
+            if path is not None:
+                AWSSite._output_relative_path(str(path))
+        # Project ownership is navigation, not result interpretation. Avoid
+        # copying every simulation in the project through this back-reference.
+        project = getattr(job.simulation, "_project", None)
+        memo = {id(project): project} if project is not None else {}
+        # Subclasses carry result metadata too (for example imaging grids,
+        # weights and regularization). Copy the complete job graph with one
+        # memo so later authoring edits cannot alter an earlier run's reader.
+        snapshot = deepcopy(job, memo)
+        identity = local_identity(job.project_path)
+        if identity:
+            snapshot._cloud_project_prefix = identity.storage_prefix
+        if hasattr(job, "_read_staged_provenance"):
+            snapshot._frozen_staged_provenance = {
+                "AWSSite": deepcopy(job._read_staged_provenance("AWSSite"))
+            }
+            staged = authored / "_fs_run" / "remote" / "AWSSite" / f"{job.name}.json"
+            if staged.is_file() and not getattr(job, "_cloud_saved_plan_inputs", False):
+                descriptor = staged.read_bytes()
+                digest = "sha256:" + hashlib.sha256(descriptor).hexdigest()
+                provenance = snapshot._frozen_staged_provenance["AWSSite"]
+                if provenance.get("job", {}).get("digest") != digest:
+                    raise RuntimeError(
+                        "Cloud staged descriptor does not match its provenance; "
+                        "prepare the job again before submitting"
+                    )
+                snapshot._cloud_staged_job_payload = json.loads(descriptor)
+        return snapshot
+
+    @staticmethod
+    def _bind_run_snapshot(result: _JobT, simulation_id: str) -> _JobT:
+        """Bind a private, prepared snapshot to the accepted run's output directory."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", simulation_id):
+            raise ValueError(
+                "Cloud results require a valid simulation id from submission"
+            )
+        authored = Path(result._result_path).resolve()
+        payload = getattr(result, "_cloud_staged_job_payload", None)
+        if payload is not None and not getattr(
+            result, "_cloud_saved_plan_inputs", False
+        ):
+            result._cloud_authored_job_digest = result._frozen_staged_provenance[
+                "AWSSite"
+            ]["job"]["digest"]
+            # Managed Slurm verifies the uploaded descriptor, then privately
+            # scopes its output paths to the accepted run before invoking the
+            # solver. Match those exact bytes, never a fingerprint supplied by
+            # the remote result itself. Other staged fingerprints stay intact.
+            project = Path(result.project_path).resolve()
+            authored_relative = authored.relative_to(project).as_posix()
+
+            def project_relative(value: str) -> str:
+                return value.strip("/").removeprefix(
+                    getattr(result, "_cloud_project_prefix", project.name) + "/"
+                )
+
+            if (
+                project_relative(payload.get("result_path", "results"))
+                != authored_relative
+            ):
+                raise ValueError(
+                    "Cloud staged result path differs from the authored job"
+                )
+            scoped = deepcopy(payload)
+            scoped["result_path"] = f"{authored_relative}/runs/{simulation_id}"
+            image = scoped.get("Image")
+            if isinstance(image, dict) and image.get("save_path"):
+                image_path = project_relative(image["save_path"])
+                if not image_path.startswith(authored_relative + "/"):
+                    raise ValueError(
+                        "Cloud staged imaging path escapes the job results"
+                    )
+                image["save_path"] = (
+                    scoped["result_path"]
+                    + "/"
+                    + image_path.removeprefix(authored_relative + "/")
+                )
+            descriptor = (json.dumps(scoped, sort_keys=True) + "\n").encode()
+            result._frozen_staged_provenance["AWSSite"]["job"] = {
+                "digest": "sha256:" + hashlib.sha256(descriptor).hexdigest()
+            }
+        result._result_path_override = authored / "runs" / simulation_id
+        result._job_id = simulation_id
+        result._cloud_result_run_id = simulation_id
+        result._cloud_result_binding = (simulation_id, result._result_path)
+        if hasattr(result, "staged_artifact_fingerprints"):
+            result._frozen_artifact_fingerprints = result.staged_artifact_fingerprints(
+                "AWSSite"
+            )
+            result._frozen_task_fingerprints = getattr(
+                result, "staged_task_fingerprints", result.staged_artifact_fingerprints
+            )("AWSSite")
+        if callable(getattr(result, "load_images", None)):
+            relative = Path(result.save_path).resolve().relative_to(authored)
+            result.save_path = result._result_path / relative
+        return result
+
+    @classmethod
+    def _snapshot_run_job(cls, job: _JobT, simulation_id: str) -> _JobT:
+        """Capture the submitted job's result layout without mutating its authoring state."""
+        if getattr(job, "_cloud_result_run_id", None) == simulation_id:
+            return job
+        return cls._bind_run_snapshot(cls._prepare_run_snapshot(job), simulation_id)
+
+    def _result_job(self, job: _JobT) -> _JobT:
+        """Resolve an owned run's frozen S3 location before downloading any artifacts."""
+        simulation_id = getattr(job, "_job_id", None)
+        if not isinstance(simulation_id, str):
+            raise ValueError(
+                "Cloud results require a valid simulation id from submission"
+            )
+        result = self._snapshot_run_job(job, simulation_id)
+        if getattr(result, "_cloud_output_identity", None) is not None:
+            return result
+        if self.graphql_client is None:
+            raise RuntimeError("Authenticated GraphQL client is unavailable")
+        details = self.graphql_client.get_simulation_status_details(simulation_id)
+        project = Path(result.project_path).resolve()
+        prefix = (
+            f"{project.name}/{result._result_path.relative_to(project).as_posix()}/"
+        )
+        expected = f"s3://{self.config.s3_bucket}/{prefix}"
+        if (
+            details.get("id") != simulation_id
+            or details.get("outputIdentity") != expected
+        ):
+            raise RuntimeError("Cloud result location does not match the requested run")
+        strict_retry = details.get("strictRetryFingerprint")
+        if strict_retry is not None:
+            if not isinstance(strict_retry, str) or not re.fullmatch(
+                r"[a-f0-9]{64}", strict_retry
+            ):
+                raise RuntimeError("Cloud returned an invalid strict-retry identity")
+            authored_digest = getattr(result, "_cloud_authored_job_digest", None)
+            if authored_digest is not None:
+                # Strict-retry sites preserve the uploaded producer descriptor
+                # even on a fresh run. Transport alone scopes its outputs. Use
+                # our frozen staged digest, never a hash from remote artifacts.
+                result._frozen_staged_provenance["AWSSite"]["job"] = {
+                    "digest": authored_digest
+                }
+                result._frozen_artifact_fingerprints = (
+                    result.staged_artifact_fingerprints("AWSSite")
+                )
+                result._frozen_task_fingerprints = result.staged_task_fingerprints(
+                    "AWSSite"
+                )
+        result._cloud_output_identity = expected
+        return result
+
     def _poll_run(self, run: RunHandle) -> JobStatus:
         if self.graphql_client is None:
             raise RuntimeError("Authenticated GraphQL client is unavailable")
-        details_getter = getattr(
-            self.graphql_client, "get_simulation_status_details", None
-        )
-        if callable(details_getter):
-            status_details = details_getter(str(run.id))
-            for key in (
-                "creditSettlementMode",
-                "creditSettlementStatus",
-                "creditSettlementOperationId",
-                "creditSettlementAmount",
-                "executionBackend",
-                "executionTarget",
-                "slurmPartition",
-                "slurmNodes",
-                "slurmRanksPerNode",
-                "slurmWallTimeSeconds",
-                "providerAttemptId",
-            ):
-                if status_details.get(key) is not None:
-                    run.backend[key] = status_details[key]
-            raw_status = status_details["status"]
-            raw = {**status_details, "source": "graphql"}
-            message = str(status_details.get("failureMessage") or "")
-        else:
-            raw_status = self.graphql_client.get_simulation_status(str(run.id))
-            raw = {"status": raw_status, "source": "graphql"}
-            message = ""
+        status_details = self.graphql_client.get_simulation_status_details(str(run.id))
+        for key in (
+            "requestedResources",
+            "allocatedResources",
+            "executionSiteId",
+            "executionRegistrationFingerprint",
+            "logicalAttemptId",
+            "providerJobId",
+            "executionState",
+            "failureReason",
+            "creditSettlementMode",
+            "creditSettlementStatus",
+            "creditSettlementOperationId",
+            "creditSettlementAmount",
+        ):
+            if status_details.get(key) is not None:
+                run.backend[key] = status_details[key]
+        raw_status = status_details["status"]
+        raw = {**status_details, "source": "graphql"}
+        message = str(status_details.get("failureMessage") or "")
         state = {
             "PENDING": "pending",
             "SUBMITTED": "pending",
@@ -1585,6 +1610,7 @@ class AWSSite(BaseSite):
         db_map = {}
 
         for job in jobs:
+            job = self._result_job(job)
             try:
                 self.fetch_artifacts(
                     job,
@@ -1600,13 +1626,18 @@ class AWSSite(BaseSite):
                             ),
                             retention="durable",
                         ),
+                        ArtifactRequest(role="traces_metadata", retention="durable"),
                     ),
                     include_defaults=False,
                     project_path=path,
                     operations=("pack",),
                 )
                 project = Path(path).resolve() if path is not None else job.project_path
-                db = TraceDataset.from_job(job, upscale, project_path=project)
+                db = (
+                    job.traces.open(upscale=upscale, project_path=project)
+                    if getattr(job, "workflow", None) == "transient"
+                    else TraceDataset.from_job(job, upscale, project_path=project)
+                )
                 db_map[job.name] = db
 
             except Exception as e:
@@ -1643,7 +1674,22 @@ class AWSSite(BaseSite):
         db_map = {}
 
         for item in jobs:
+            item = self._result_job(item)
             try:
+                if getattr(item, "workflow", None) == "transient":
+                    if upscale != 1:
+                        raise ValueError(
+                            "Transient output uses native samples; upscale must be 1"
+                        )
+                    self.fetch_artifacts(
+                        item,
+                        requests=(ArtifactRequest(role="sampled_wavefield"),),
+                        include_defaults=False,
+                        project_path=path,
+                        operations=("transient",),
+                    )
+                    db_map[item.name] = item.wavefields.open(project_path=path)
+                    continue
                 wavefield_outputs = item.wavefield_trace_outputs
                 if not wavefield_outputs.groups:
                     raise ValueError("Job has no wavefield outputs")
@@ -1679,6 +1725,7 @@ class AWSSite(BaseSite):
 
     def fetch_run_metadata(self, job: BaseJob) -> Optional[Path]:
         """Fetch and validate the authoritative result catalog."""
+        job = self._result_job(job)
         self.fetch_artifact_catalog(job)
         return job._result_path / "_fs_run"
 
@@ -1691,10 +1738,11 @@ class AWSSite(BaseSite):
         Returns:
             :class:`~frequensolve.imaging.ImageSet` for the job.
         """
-        if not hasattr(job, "load_images"):
+        if not callable(getattr(job, "load_images", None)):
             raise TypeError(
                 f"{type(job).__name__} has no images; expected an ImageKernelJob"
             )
+        job = self._result_job(job)
         try:
             job.save_path.resolve().relative_to(job.project_path.resolve())
         except ValueError as exc:
@@ -1714,13 +1762,15 @@ class AWSSite(BaseSite):
         requests: Sequence[ArtifactRequest] = (),
     ) -> Any:
         """Fetch durable final products, plus explicit auxiliary selectors."""
+        job = self._result_job(job)
 
         requires_postprocess = getattr(job, "requires_postprocess", None)
         if callable(requires_postprocess) and requires_postprocess():
             return self.fetch_postprocess(job, requests=requests)
 
+        # The packed trace manifest lives only in the pack operation result.
         self.fetch_artifacts(
-            job, requests=requests, include_defaults=True, operations=()
+            job, requests=requests, include_defaults=True, operations=("pack",)
         )
         if hasattr(job, "result_manifest_file"):
             return job.results
@@ -1728,33 +1778,6 @@ class AWSSite(BaseSite):
         if getattr(job.outputs, "wavefields", None):
             return {"traces": traces, "wavefields": job.wavefields.open()}
         return traces
-
-    def fetch_postprocess(
-        self,
-        job: BaseJob,
-        *,
-        requests: Sequence[ArtifactRequest] = (),
-    ) -> list[Path]:
-        """Fetch the job's postprocess products through the operation catalog.
-
-        Every catalog role a postprocessed imaging job can publish is
-        requested (``image``, ``gradient``, ``objective``, ``state``,
-        ``objective_vector``, ``extension``); roles the job did not publish
-        select nothing.
-        """
-
-        fetched = self.fetch_artifacts(
-            job,
-            requests=(
-                *(ArtifactRequest(role=role) for role in POSTPROCESS_ARTIFACT_ROLES),
-                *requests,
-            ),
-            include_defaults=False,
-            operations=("smooth",),
-        )
-        if not fetched:
-            raise FileNotFoundError("No postprocess artifact was published")
-        return fetched
 
     def fetch_logs(
         self,
@@ -1764,128 +1787,109 @@ class AWSSite(BaseSite):
         task: Optional[int] = None,
         frequency: Optional[Union[float, complex]] = None,
         show: bool = False,
+        simulation_id: Optional[str] = None,
     ) -> Union[Path, Dict[str, Path]]:
-        """Fetch AWS task logs and optionally return one task log file.
+        """Download authenticated Slurm logs for one simulation per job.
 
-        ``task`` is one-based. ``frequency`` selects the matching frequency in
-        ``job.f_list``. Without either selector, the local log directory is
-        returned.
-
-        Args:
-            job: Single job or list of jobs.
-            local_dir: Optional local destination for downloaded logs.
-            task: Optional one-based task number to select.
-            frequency: Optional frequency used to select a task log.
-            show: Whether to print the selected log contents.
-
-        Returns:
-            Log path for one job, or a mapping keyed by job name.
+        Task numbers are one-based. By default use the job's latest submission;
+        run handles bind ``simulation_id`` to their own submission. Logs are
+        staged before updating the local cache, with separate directories for
+        each simulation so reruns cannot reuse an earlier run's cached logs.
+        If the task archive is absent, retrieve the retained planner diagnostic;
+        pass task/frequency to retrieve one task through the same authenticated
+        API. Bounded paging preserves text and refuses incomplete/oversized logs.
         """
-
+        if task is not None and frequency is not None:
+            raise ValueError("Pass either `task` or `frequency`, not both")
+        if task is not None and (
+            isinstance(task, bool) or not isinstance(task, int) or task < 1
+        ):
+            raise ValueError("Log task numbers must be positive integers")
         jobs, single = self._as_jobs(job)
+        if simulation_id is not None and not single:
+            raise ValueError("An explicit simulation id requires a single job")
         requested_local_dir = Path(local_dir) if local_dir is not None else None
         result: Dict[str, Path] = {}
-
         for item in jobs:
-            project_name = item.project_path.name
-            remote_logs_path = (
-                f"s3://{self.config.s3_bucket}/"
-                f"{project_name}/jobs/{item.simulation.name}/{item.name}/logs"
+            run_id = (
+                simulation_id
+                if simulation_id is not None
+                else getattr(item, "_job_id", None)
+            )
+            if not isinstance(run_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,199}", run_id
+            ):
+                raise ValueError(
+                    "Cloud logs require a valid simulation id from submission"
+                )
+            selected_task = (
+                self._frequency_task(item, frequency) if frequency is not None else task
+            )
+            remote = (
+                f"s3://{self.config.s3_bucket}/{self.project_storage_key(item.project_path)}/jobs/"
+                f"{item.simulation.name}/{item.name}/logs/{run_id}/"
             )
             if requested_local_dir is None:
-                log_dir = item._stdout_path
+                log_dir = Path(item._stdout_path) / run_id
             elif single:
                 log_dir = requested_local_dir
             else:
-                log_dir = requested_local_dir / item.name
-
-            try:
-                self.get(remote_logs_path, log_dir)
-            except FileNotFoundError:
-                self._fetch_cloudwatch_logs(
-                    item,
-                    log_dir,
-                    task=(
-                        self._frequency_task(item, frequency)
-                        if frequency is not None
-                        else task
-                    ),
-                )
-            selected = self._select_log_path(
-                item,
-                log_dir,
-                task=task,
-                frequency=frequency,
+                log_dir = requested_local_dir / item.name / run_id
+            # Staging beside the destination keeps file replacement on one filesystem.
+            log_dir.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix=".slurm-logs-", dir=log_dir.parent
+            ) as folder:
+                staged = Path(folder)
+                try:
+                    if selected_task is None:
+                        self.get(remote, staged)
+                    else:
+                        name = f"task_{selected_task}.log"
+                        self.get(remote + name, staged / name)
+                except FileNotFoundError:
+                    self._fetch_api_logs(run_id, staged, task=selected_task)
+                files = [
+                    path
+                    for path in staged.iterdir()
+                    if path.is_file()
+                    and (
+                        path.name == "planner.log"
+                        or re.fullmatch(r"task_[1-9][0-9]*\.log", path.name)
+                    )
+                ]
+                if not files:
+                    raise FileNotFoundError(
+                        "Slurm logs are not available for this simulation yet"
+                    )
+                log_dir.mkdir(parents=True, exist_ok=True)
+                names = {path.name for path in files}
+                for path in files:
+                    path.replace(log_dir / path.name)
+                if selected_task is None:
+                    for stale in [
+                        *log_dir.glob("task_*.log"),
+                        *log_dir.glob("planner.log"),
+                    ]:
+                        if stale.name not in names:
+                            stale.unlink()
+            selected = (
+                log_dir / f"task_{selected_task}.log"
+                if selected_task is not None
+                else log_dir
             )
             if show:
-                self._show_logs(selected, job_name=item.name)
+                planner_only = selected_task is None and names == {"planner.log"}
+                self._show_logs(
+                    log_dir / "planner.log" if planner_only else selected,
+                    job_name=item.name,
+                    label="planner log" if planner_only else "log",
+                )
             result[item.name] = selected
-
-        if single:
-            return result[jobs[0].name]
-        return result
-
-    def _fetch_cloudwatch_logs(
-        self,
-        job: BaseJob,
-        log_dir: Path,
-        *,
-        task: Optional[int],
-    ) -> None:
-        """Materialize Cloud task logs when the runtime has no S3 log prefix."""
-
-        simulation_id = getattr(job, "_job_id", None)
-        if self.graphql_client is None or not simulation_id:
-            raise FileNotFoundError(
-                "Cloud task logs are unavailable from storage or the Cloud API"
-            )
-        rows = self.graphql_client.list_simulation_frequency_jobs(str(simulation_id))
-        indexed: dict[int, str] = {}
-        for row in rows:
-            frequency_index = row.get("frequencyIndex")
-            batch_job_id = row.get("batchJobId")
-            if not isinstance(frequency_index, int) or not isinstance(
-                batch_job_id, str
-            ):
-                continue
-            task_number = frequency_index + 1
-            if task_number in indexed:
-                raise RuntimeError(
-                    f"Cloud returned duplicate logs for task {task_number}"
-                )
-            indexed[task_number] = batch_job_id
-
-        requested_tasks = [task] if task is not None else sorted(indexed)
-        if not requested_tasks or any(
-            number not in indexed for number in requested_tasks
-        ):
-            raise FileNotFoundError("Cloud returned no Batch task logs for this run")
-
-        log_dir.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            dir=log_dir.parent,
-            prefix=f".{log_dir.name}-",
-        ) as staging_dir:
-            staged = Path(staging_dir)
-            for task_number in requested_tasks:
-                events = self.graphql_client.get_job_logs(indexed[task_number])
-                (staged / f"task_{task_number}.log").write_text(
-                    "".join(event["message"].rstrip("\n") + "\n" for event in events),
-                    encoding="utf-8",
-                )
-
-            log_dir.mkdir(parents=True, exist_ok=True)
-            staged_names = {path.name for path in staged.iterdir()}
-            for path in staged.iterdir():
-                path.replace(log_dir / path.name)
-            if task is None:
-                for pattern in ("task_*.log", "task_*.txt", "task_*.out"):
-                    for stale in log_dir.glob(pattern):
-                        if stale.name not in staged_names:
-                            stale.unlink()
+        return result[jobs[0].name] if single else result
 
     def test_api_connectivity(self) -> bool:
-        """Verify the authenticated GraphQL submission contract is reachable.
+        """Verify the authenticated GraphQL API is reachable.
 
         Returns:
             True if API is accessible, False otherwise.
@@ -1893,41 +1897,15 @@ class AWSSite(BaseSite):
         if self.graphql_client is None:
             return False
         try:
-            return self.graphql_client.get_compute_provisioning_mode() in {
-                "shared",
-                "per-user",
-            }
+            return (
+                self.graphql_client.execute(
+                    "query CloudConnectivity { __typename }"
+                ).get("__typename")
+                == "Query"
+            )
         except Exception as exc:
             logger.warning("GraphQL connectivity probe failed: %s", exc)
             return False
-
-    def get_job_status_from_api(self, job_id: str) -> Dict[str, Any]:
-        """Return cloud job status through the authenticated GraphQL client.
-
-        This compatibility method preserves the former public entry point while
-        the cloud transport moves from REST to GraphQL.
-        """
-
-        warnings.warn(
-            "AWSSite.get_job_status_from_api() is deprecated; use RunHandle status APIs",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if self.graphql_client is None:
-            return {}
-        try:
-            details_getter = getattr(
-                self.graphql_client, "get_simulation_status_details", None
-            )
-            if callable(details_getter):
-                return dict(details_getter(job_id))
-            return {"status": self.graphql_client.get_simulation_status(job_id)}
-        except Exception as exc:
-            logger.warning(
-                "GraphQL status lookup failed (%s)",
-                type(exc).__name__,
-            )
-            return {}
 
     def cancel_job(self, job_id: str) -> None:
         """Cancel a running simulation.
@@ -1950,24 +1928,30 @@ class AWSSite(BaseSite):
         except RuntimeError:
             raise RuntimeError(
                 "Could not check the Cloud simulation status before cancellation; "
-                "retry after confirming Cloud connectivity"
+                "check Cloud access and configuration before retrying"
             ) from None
 
         # Check if simulation is in a cancellable state
-        if status in ["SUCCEEDED", "FAILED", "CANCELED"]:
+        terminal_states = {"SUCCEEDED", "COMPLETED", "FAILED", "CANCELED", "CANCELLED"}
+        if str(status).upper() in terminal_states:
             logger.warning(
                 f"Simulation {job_id} is already in terminal state: {status}. "
                 "Nothing to cancel."
             )
             return
 
-        # For now, raise an error indicating cancellation is not yet implemented
-        # This will be implemented when the cancelSimulation GraphQL mutation is available
-        raise NotImplementedError(
-            "Simulation cancellation is not yet implemented in this SDK. "
-            f"The simulation is currently in state {status}. "
-            "Cancel it through the Cloud application."
-        )
+        try:
+            self.graphql_client.cancel_simulation(job_id)
+        except RuntimeError:
+            # Completion can win the race with cancellation. Reconcile once,
+            # without repeating a mutation whose outcome may be uncertain.
+            try:
+                current_status = self.graphql_client.get_simulation_status(job_id)
+            except RuntimeError:
+                current_status = None
+            if str(current_status).upper() in terminal_states:
+                return
+            raise
 
     def put(
         self,
@@ -1983,30 +1967,22 @@ class AWSSite(BaseSite):
         local_path = Path(local_path)
         remote_path = Path(remote_path)
 
+        if not local_path.exists():
+            raise FileNotFoundError("Local upload path does not exist")
+
         # Construct full S3 key by combining work_dir (s3_prefix) with remote_path
         s3_key = str(self.work_dir / remote_path).replace("\\", "/")
 
-        logger.debug(f"Uploading {local_path} to s3://{self.config.s3_bucket}/{s3_key}")
+        logger.debug("Uploading files to Cloud storage")
 
-        try:
-            if local_path.is_file():
-                # Upload single file
-                self.s3_client.upload_file(
-                    str(local_path), self.config.s3_bucket, s3_key
-                )
-            else:
-                # Upload directory recursively
-                for file_path in local_path.rglob("*"):
-                    if file_path.is_file():
-                        relative_path = file_path.relative_to(local_path)
-                        file_s3_key = f"{s3_key}/{relative_path}".replace("\\", "/")
-                        self.s3_client.upload_file(
-                            str(file_path), self.config.s3_bucket, file_s3_key
-                        )
-        except ClientError as e:
-            raise RuntimeError(f"Failed to upload {local_path} to S3: {e}")
-        except Exception as e:
-            raise RuntimeError(f"Unexpected error uploading {local_path} to S3: {e}")
+        if local_path.is_file():
+            self._upload_file(local_path, s3_key)
+        else:
+            for file_path in local_path.rglob("*"):
+                if file_path.is_file():
+                    relative_path = file_path.relative_to(local_path)
+                    file_s3_key = f"{s3_key}/{relative_path}".replace("\\", "/")
+                    self._upload_file(file_path, file_s3_key)
 
     def get(
         self,
@@ -2144,8 +2120,413 @@ class AWSSite(BaseSite):
                     f"S3 transfer failed ({type(exc).__name__})"
                 ) from None
 
+    # if __name__ == "__main__":
+    #     # Example usage
+    #     config = AWSSiteConfig.from_domain('app.frequensol.com')
+    #     site = AWSSite(domain='app.frequensol.com')
 
-# if __name__ == "__main__":
-#     # Example usage
-#     config = AWSSiteConfig.from_domain('app.frequensol.com')
-#     site = AWSSite(domain='app.frequensol.com')
+    @staticmethod
+    def _exact_s3_paths(values: Iterable[Union[str, Path]]) -> tuple[str, ...]:
+        """Validate and deduplicate portable result-relative object paths."""
+
+        result = []
+        seen = set()
+        for value in values:
+            raw = str(value)
+            path = PurePosixPath(raw)
+            if (
+                not raw
+                or "\\" in raw
+                or "\0" in raw
+                or re.match(r"^[A-Za-z]:", raw)
+                or path.is_absolute()
+                or "." in path.parts
+                or ".." in path.parts
+                or path.as_posix() != raw
+            ):
+                raise ValueError("S3 artifact paths must be normalized relative paths")
+            if raw not in seen:
+                seen.add(raw)
+                result.append(raw)
+        return tuple(result)
+
+    def _s3_result_prefix(self, job: BaseJob) -> str:
+        """Return the exact object prefix containing one job's result tree."""
+
+        job = self._result_job(job)
+        return job._cloud_output_identity.removeprefix(
+            f"s3://{self.config.s3_bucket}/"
+        ).rstrip("/")
+
+    @staticmethod
+    def _local_result_path(
+        job: BaseJob,
+        project_path: Optional[Union[str, Path]] = None,
+    ) -> Path:
+        """Map a job result directory beneath an optional relocated project."""
+
+        if project_path is None:
+            return job._result_path
+        relative = job._result_path.resolve().relative_to(
+            Path(job.project_path).resolve()
+        )
+        return Path(project_path).resolve() / relative
+
+    def _download_s3_files(
+        self,
+        prefix: str,
+        local_root: Path,
+        relative_paths: Iterable[Union[str, Path]],
+        *,
+        missing_ok: bool = False,
+    ) -> list[Path]:
+        """Download only explicit S3 keys; never list an object prefix."""
+
+        paths = self._exact_s3_paths(relative_paths)
+        local_root.mkdir(parents=True, exist_ok=True)
+        fetched = []
+        for relative in paths:
+            key = f"{prefix.rstrip('/')}/{relative}"
+            local = local_root / Path(*PurePosixPath(relative).parts)
+
+            def download() -> None:
+                with atomic_output_path(local) as temporary:
+                    self.s3_client.download_file(
+                        self.config.s3_bucket,
+                        key,
+                        str(temporary),
+                    )
+
+            downloaded = False
+            for attempt in range(2):
+                try:
+                    download()
+                    downloaded = True
+                    break
+                except ClientError as exc:
+                    code = str(exc.response.get("Error", {}).get("Code", ""))
+                    if (
+                        attempt == 0
+                        and self._s3_error_requires_credential_refresh(exc)
+                        and hasattr(self, "cognito_auth")
+                    ):
+                        self._refresh_s3_credentials()
+                        continue
+                    if code in {"404", "NoSuchKey", "NotFound"}:
+                        if missing_ok:
+                            break
+                        raise FileNotFoundError(
+                            f"S3 artifact is missing: {key}"
+                        ) from exc
+                    raise
+            if not downloaded:
+                continue
+            fetched.append(local)
+        return fetched
+
+    def fetch_artifact_catalog(
+        self,
+        job: BaseJob,
+        *,
+        project_path: Optional[Union[str, Path]] = None,
+        operations: Sequence[str] = (),
+    ) -> Union[TaskIndex, ArtifactCatalog, CombinedArtifactCatalog]:
+        """Fetch authoritative task metadata and named operation results."""
+        job = self._result_job(job)
+
+        modal = getattr(job, "n_modes", None) is not None
+        transient = getattr(job, "workflow", None) == "transient" and not modal
+        tasks = () if transient else tuple(range(1, job.n_tasks + 1))
+        if modal:
+            operations = tuple(
+                operation for operation in operations if operation != "transient"
+            )
+        if transient:
+            operations = (*operations, "transient")
+        requested_operations = tuple(dict.fromkeys(operations))
+        local_root = self._local_result_path(job, project_path)
+        prefix = self._s3_result_prefix(job)
+        local_root.parent.mkdir(parents=True, exist_ok=True)
+        if job.staged_artifact_fingerprints(self.__class__.__name__) is None:
+            raise RuntimeError(
+                "Remote staged provenance is missing; restage the job before fetching"
+            )
+        index_path = "_fs_run/tasks.h5"
+        result_paths = tuple(
+            f"_fs_run/tasks/task_{task:06d}/result.json" for task in tasks
+        )
+        operation_paths = {
+            operation: operation_result_path(Path(), operation).as_posix()
+            for operation in requested_operations
+        }
+        with tempfile.TemporaryDirectory(
+            prefix=".fs-catalog-", dir=local_root.parent
+        ) as temporary:
+            stage = Path(temporary)
+            use_index = False
+            if tasks:
+                self._download_s3_files(
+                    prefix,
+                    stage,
+                    (index_path,),
+                    missing_ok=True,
+                )
+                try:
+                    catalog: Union[TaskIndex, ArtifactCatalog] = TaskIndex.read(stage)
+                    self._validate_remote_catalog(job, catalog, tasks)
+                    use_index = True
+                except (ArtifactContractError, OSError, RuntimeError):
+                    self._download_s3_files(
+                        prefix,
+                        stage,
+                        result_paths,
+                        missing_ok=True,
+                    )
+                    catalog = ArtifactCatalog.read_task_results(stage, tasks=tasks)
+                    self._validate_remote_catalog(job, catalog, tasks)
+
+            if operation_paths:
+                self._download_s3_files(
+                    prefix,
+                    stage,
+                    tuple(operation_paths.values()),
+                    missing_ok=True,
+                )
+            operation_results = {}
+            for operation, relative in operation_paths.items():
+                path = stage / relative
+                if not path.is_file():
+                    continue
+                result = OperationResult.read(
+                    path,
+                    result_path=stage,
+                    workflow=operation,
+                )
+                self._validate_remote_operation(job, result)
+                operation_results[operation] = result
+
+            candidates = (index_path,) if use_index else result_paths
+            publish = [path for path in candidates if (stage / path).is_file()]
+            publish.extend(
+                relative
+                for operation, relative in operation_paths.items()
+                if operation in operation_results
+            )
+            for relative in publish:
+                target = local_root / relative
+                with atomic_output_path(target) as temporary_path:
+                    shutil.copyfile(stage / relative, temporary_path)
+            if not use_index:
+                (local_root / index_path).unlink(missing_ok=True)
+            for operation, relative in operation_paths.items():
+                if operation not in operation_results:
+                    (local_root / relative).unlink(missing_ok=True)
+
+        task_catalog = (
+            TaskIndex.read(local_root)
+            if use_index
+            else ArtifactCatalog.read_task_results(local_root, tasks=tasks)
+        )
+        if not requested_operations:
+            return task_catalog
+        return CombinedArtifactCatalog(
+            result_path=local_root.resolve(strict=False),
+            task_catalog=task_catalog,
+            operations={
+                operation: OperationResult.read(
+                    local_root / relative,
+                    result_path=local_root,
+                    workflow=operation,
+                )
+                for operation, relative in operation_paths.items()
+                if (local_root / relative).is_file()
+            },
+        )
+
+    def _validate_remote_catalog(
+        self,
+        job: BaseJob,
+        catalog: Union[TaskIndex, ArtifactCatalog],
+        tasks: Sequence[int],
+    ) -> None:
+        """Require exact task partitions and current staged provenance."""
+
+        validate_remote_task_catalog(
+            job, catalog, tasks, site_name=self.__class__.__name__
+        )
+
+    def _validate_remote_operation(self, job: BaseJob, result: OperationResult) -> None:
+        """Require a successful operation from the current staged generation."""
+
+        fingerprints = job.staged_artifact_fingerprints(self.__class__.__name__)
+        if (
+            fingerprints is None
+            or not result.successful
+            or any(
+                result.fingerprints.get(key) != value
+                for key, value in fingerprints.items()
+            )
+        ):
+            raise RuntimeError(
+                f"Remote operation {result.name!r} does not match the current "
+                "staged job"
+            )
+
+    def fetch_artifacts(
+        self,
+        job: BaseJob,
+        *,
+        requests: Sequence[ArtifactRequest] = (),
+        include_defaults: bool = True,
+        project_path: Optional[Union[str, Path]] = None,
+        operations: Sequence[str] = (),
+    ) -> list[Path]:
+        """Fetch exact catalog-selected S3 objects and collection parts."""
+        job = self._result_job(job)
+
+        local_root = self._local_result_path(job, project_path)
+        prefix = self._s3_result_prefix(job)
+        catalog = (
+            self.fetch_artifact_catalog(
+                job,
+                project_path=project_path,
+                operations=operations,
+            )
+            if operations
+            else self.fetch_artifact_catalog(job, project_path=project_path)
+        )
+        return fetch_artifact_payloads(
+            catalog,
+            fetch_files=lambda paths: self._download_s3_files(
+                prefix,
+                local_root,
+                paths,
+            ),
+            requests=requests,
+            include_defaults=include_defaults,
+        )
+
+    def fetch_postprocess(
+        self,
+        job: BaseJob,
+        *,
+        requests: Sequence[ArtifactRequest] = (),
+    ) -> list[Path]:
+        """Fetch required control products through their operation catalog."""
+        job = self._result_job(job)
+
+        fetched = self.fetch_artifacts(
+            job,
+            requests=(
+                *(ArtifactRequest(role=role) for role in POSTPROCESS_ARTIFACT_ROLES),
+                *requests,
+            ),
+            include_defaults=False,
+            operations=("smooth",),
+        )
+        if not fetched:
+            raise FileNotFoundError("No postprocess artifact was published")
+        return fetched
+
+    def _fetch_api_logs(
+        self,
+        simulation_id: str,
+        log_dir: Path,
+        *,
+        task: Optional[int],
+    ) -> None:
+        """Read retained planner logs, or one selected task, through Cloud's API."""
+        if self.graphql_client is None:
+            raise FileNotFoundError(
+                "Cloud logs are unavailable from storage or the Cloud API"
+            )
+        chunks: list[str] = []
+        cursor: Optional[str] = None
+        size = 0
+        for _ in range(16):
+            page = self.graphql_client.get_simulation_logs(
+                simulation_id,
+                frequency_index=task - 1 if task is not None else None,
+                before_byte=cursor,
+            )
+            if (
+                not isinstance(page, dict)
+                or type(page.get("available")) is not bool
+                or type(page.get("truncated")) is not bool
+                or not isinstance(page.get("logs"), list)
+            ):
+                raise RuntimeError("Cloud returned an invalid simulation log page")
+            if not page["available"]:
+                if cursor is not None or page["logs"] or page["truncated"]:
+                    raise RuntimeError("Cloud log changed during retrieval")
+                raise FileNotFoundError(
+                    "No retained Cloud planner/task log is available for this run"
+                )
+            events = page["logs"]
+            if any(
+                not isinstance(event, dict)
+                or not isinstance(event.get("message"), str)
+                or not isinstance(event.get("timestamp"), str)
+                for event in events
+            ):
+                raise RuntimeError("Cloud returned invalid simulation log events")
+            text = "".join(event["message"] for event in events)
+            size += len(text.encode("utf-8"))
+            if size > 1024 * 1024:
+                raise RuntimeError(
+                    "Cloud log exceeds the SDK retrieval limit; use the product log panel"
+                )
+            chunks.append(text)
+            next_cursor = page.get("nextToken")
+            if not page["truncated"]:
+                if next_cursor is not None:
+                    raise RuntimeError("Cloud returned an inconsistent log cursor")
+                break
+            if (
+                not text
+                or not isinstance(next_cursor, str)
+                or not re.fullmatch(r"[1-9][0-9]{0,15}", next_cursor)
+                or int(next_cursor) > 2**53 - 1
+                or (cursor is not None and int(next_cursor) >= int(cursor))
+            ):
+                raise RuntimeError("Cloud returned an invalid or repeated log cursor")
+            cursor = next_cursor
+        else:
+            raise RuntimeError(
+                "Cloud log exceeds the SDK page limit; use the product log panel"
+            )
+        text = "".join(reversed(chunks))
+        if not text:
+            raise FileNotFoundError(
+                "The retained Cloud planner/task log is currently empty"
+            )
+        name = f"task_{task}.log" if task is not None else "planner.log"
+        (log_dir / name).write_text(text, encoding="utf-8")
+
+    def get_job_status_from_api(self, job_id: str) -> Dict[str, Any]:
+        """Return cloud job status through the authenticated GraphQL client.
+
+        This compatibility method preserves the former public entry point while
+        the cloud transport moves from REST to GraphQL.
+        """
+
+        warnings.warn(
+            "AWSSite.get_job_status_from_api() is deprecated; use RunHandle status APIs",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.graphql_client is None:
+            return {}
+        try:
+            details_getter = getattr(
+                self.graphql_client, "get_simulation_status_details", None
+            )
+            if callable(details_getter):
+                return dict(details_getter(job_id))
+            return {"status": self.graphql_client.get_simulation_status(job_id)}
+        except Exception as exc:
+            logger.warning(
+                "GraphQL status lookup failed (%s)",
+                type(exc).__name__,
+            )
+            return {}

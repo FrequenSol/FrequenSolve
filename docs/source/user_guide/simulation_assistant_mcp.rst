@@ -30,6 +30,24 @@ claim that another frequency is supported by this fixed starter mesh.
 It cannot submit, run, upload, change, or delete a simulation. It does not
 provide raw GraphQL access.
 
+Choose your first path
+----------------------
+
+- **Learn or draft without signing in:** a configured public onboarding server
+  prepares and validates the fixed starter entirely in memory. Find its usable
+  endpoint in the Cloud documentation; a placeholder URL is not a connection.
+- **Prepare on your computer:** install the local MCP, run ``doctor``, and
+  configure your client as below. Local files are readable only under a root you
+  explicitly allow. No Cloud login is required for drafting.
+- **Monitor Cloud work:** use a configured authenticated Cloud endpoint with
+  its browser sign-in, or the local MCP with your existing Cloud profile/cache.
+  This adds read-only readiness, recent runs, diagnostics and artifact metadata.
+
+First ask: “Prepare the known-small 2D acoustic starter, explain its assumptions,
+validate it and show me the Python. Do not submit or run anything.” Compare the
+result with :doc:`../acoustic_starter`. An AI draft is a preparation aid; inspect
+its units, boundaries, source and outputs before the explicit Python submission.
+
 Capability profiles
 -------------------
 
@@ -66,14 +84,14 @@ Install and check
 -----------------
 
 Install FrequenSolve with its optional MCP support in a long-lived virtual
-environment. Replace the example absolute path once, then use that same path
+environment. Resolve the executable’s absolute path (expand ``~`` to your home directory), then use that same path
 when configuring your MCP client:
 
 .. code-block:: console
 
-   python -m venv /absolute/path/to/frequensolve-mcp-venv
-   /absolute/path/to/frequensolve-mcp-venv/bin/python -m pip install "frequensolve[mcp]"
-   /absolute/path/to/frequensolve-mcp-venv/bin/frequensolve-mcp doctor
+   python -m venv ~/.venvs/frequensolve-mcp
+   ~/.venvs/frequensolve-mcp/bin/python -m pip install "frequensolve[mcp]"
+   ~/.venvs/frequensolve-mcp/bin/frequensolve-mcp doctor
 
 The doctor uses an in-memory connection. It does not contact the network,
 submit a simulation, or require credentials.
@@ -99,6 +117,13 @@ Before starting the MCP, establish a persistent cached login once in a normal
 interactive terminal. The example below uses the ``cloud`` profile. If your
 Cloud setup names a different profile, replace ``cloud`` with that exact name
 in both the login and server arguments:
+
+For a new invited account, first follow the welcome email and complete sign-in
+in your FrequenSolve web app, including setting your password. The Python client
+does not perform first-time password setup or additional verification challenges
+such as MFA. If your account requires such a challenge, use browser sign-in for
+hosted MCP or contact support about the supported Python/local MCP sign-in path;
+completing a browser session does not itself authenticate the local MCP server.
 
 .. code-block:: console
 
@@ -217,7 +242,7 @@ Read-only Cloud tools
 
 Four Cloud tools help an agent monitor the signed-in user's work:
 
-- check seat, subscription, SCU availability and usage, storage, and compute
+- check seat, subscription, prepaid Credits balances, storage, and compute
   readiness;
 - list a bounded page of the user's simulations;
 - read one simulation summary or its bounded stored diagnostics; and
@@ -229,6 +254,21 @@ object keys. They cannot submit, cancel, upload, download, change, or delete
 anything. Missing and unauthorized simulation IDs receive the same safe
 response. The ``cloud_*`` monitoring tools are Cloud-only; they do not monitor
 jobs submitted to SLURM/HPC sites.
+
+The ``frequensol.customer-cloud-read`` version ``3.0.0`` contract reports
+prepaid Credits from the Cloud billing projection. Amounts are exact decimal
+strings, including available, held and total Credits; optional rollover,
+overdraft and next-expiry amounts remain separate. No SCU conversion is made.
+An unavailable or inactive balance reports its status and refresh time without
+inventing a zero balance. ``REVIEW_REQUIRED`` means the balance can be read but
+needs account review; it does not authorize a simulation. A user without an
+assigned seat can still inspect these readiness details. Missing or unavailable
+compute readiness never implies that a scheduler is healthy or accepts jobs.
+
+The SDK and hosted service must use the same approved contract and package
+release. An older host cannot provide this Credits contract merely because a
+newer local package is installed; reconnect after the matching host release is
+available.
 
 Safe file access
 ----------------

@@ -4,17 +4,21 @@ import asyncio
 import builtins
 import html
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from functools import partial
+from pathlib import Path, PurePosixPath
 from typing import (
     Any,
     Awaitable,
     Callable,
+    ClassVar,
     Dict,
     Generator,
     Iterable,
+    List,
     Mapping,
     Optional,
     Protocol,
@@ -23,6 +27,13 @@ from typing import (
 )
 
 from frequensolve.simulation.jobs.run_state import SkipPolicy
+from frequensolve.solver import (
+    SolverCapabilities,
+    require_held_control_support,
+    solver_backend_selection,
+)
+
+from .execution import ExecutionDetails
 
 TERMINAL_STATES = {
     "completed",
@@ -186,6 +197,65 @@ def _wait_for_path(
         time.sleep(poll_interval)
         waited += poll_interval
     return path.exists()
+
+
+def _result_relative_paths(relative_paths: Iterable[Any]) -> List[PurePosixPath]:
+    """Validate file paths that must stay inside a job result directory."""
+
+    if isinstance(relative_paths, (str, bytes, os.PathLike)):
+        raise TypeError("relative_paths must be an iterable of paths, not one path")
+    validated = []
+    for value in relative_paths:
+        text = os.fspath(value)
+        if not isinstance(text, str):
+            raise TypeError("result file paths must be text")
+        path = PurePosixPath(text)
+        if (
+            any(character in text for character in ("\0", "\n", "\r", "\\"))
+            or path.is_absolute()
+            or ".." in path.parts
+            or not path.parts
+            or (len(text) > 1 and text[1] == ":" and text[0].isalpha())
+        ):
+            raise ValueError(
+                f"Result file path {text!r} must be a relative '/'-separated "
+                "path inside the job result directory"
+            )
+        validated.append(path)
+    return validated
+
+
+def _remove_emptied_directories(root: Path, relative_paths: Iterable[Any]) -> None:
+    """Remove the directories below ``root`` that removing ``relative_paths`` emptied.
+
+    The parents of every validated path are tried deepest first with
+    ``rmdir``; non-empty directories, symbolic links, ``root`` itself and
+    directories resolving outside ``root`` are kept.
+    """
+
+    resolved = root.resolve()
+    parents = {
+        parent
+        for path in _result_relative_paths(relative_paths)
+        for parent in path.parents
+        if parent.parts
+    }
+    for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+        directory = root.joinpath(*parent.parts)
+        if directory.is_symlink() or resolved not in directory.resolve().parents:
+            continue
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # not empty (or already gone)
+
+
+def _background_layout(value: Any) -> str:
+    """Validate a background checkpoint layout (``"rank"`` or ``"shared"``)."""
+
+    if value not in ("rank", "shared"):
+        raise ValueError(f"background_layout must be 'rank' or 'shared', not {value!r}")
+    return str(value)
 
 
 def _check_if_notebook() -> bool:
@@ -513,6 +583,8 @@ class RunResult:
     trace_manifest: Any = None
     logs_path: Optional[Path] = None
     run_metadata: Any = None
+    execution: Optional[ExecutionDetails] = None
+    _logs_fn: Optional[Callable[..., Any]] = field(default=None, repr=False)
 
     @property
     def successful(self) -> bool:
@@ -593,8 +665,8 @@ class RunResult:
         Args:
             kind: Optional artifact kind filter.
             suffix: Optional filename suffix or suffixes to include.
-            base: Optional base directory used to resolve relative artifact
-                paths.
+            base: Optional output request name or filename stem to filter,
+                such as ``"pressure"`` for ``pressure_00000.vtu``.
             existing: If ``True``, return only files that currently exist.
             fetch_missing: If ``True`` and this run is remote-backed, ask the
                 site to fetch filesystem outputs when no matching files are
@@ -623,7 +695,8 @@ class RunResult:
             return files
 
         fetch_output_files(self.job, kind=kind, suffix=suffix)
-        metadata = self.run_metadata or getattr(self.job, "run_metadata", None)
+        metadata = getattr(self.job, "run_metadata", None) or self.run_metadata
+        self.run_metadata = metadata
         if metadata is None:
             result_path = getattr(self.job, "_result_path", None)
             if result_path is None:
@@ -656,14 +729,17 @@ class RunResult:
                 local_logs.is_dir() and next(local_logs.iterdir(), None) is not None
             ):
                 return self.logs_path
-        if self.site is not None:
+        if self._logs_fn is not None:
+            fetched = self._logs_fn(**kwargs)
+        elif self.site is not None:
             fetched = self.site.fetch_logs(self.job, **kwargs)
-            if not kwargs and isinstance(fetched, (str, Path)):
-                self.logs_path = Path(fetched)
-            return fetched
-        if hasattr(self.job, "_stdout_path"):
+        elif hasattr(self.job, "_stdout_path"):
             return self.job._stdout_path
-        return None
+        else:
+            return None
+        if not kwargs and isinstance(fetched, (str, Path)):
+            self.logs_path = Path(fetched)
+        return fetched
 
 
 class RunFailedError(RuntimeError):
@@ -715,6 +791,7 @@ class RunHandle:
     poll_interval: float = 5.0
     check: bool = True
     backend: Dict[str, Any] = field(default_factory=dict)
+    _logs_fn: Optional[Callable[..., Any]] = field(default=None, repr=False)
     _status_fn: Optional[Callable[["RunHandle"], JobStatus]] = None
     _wait_fn: Optional[
         Callable[["RunHandle", Optional[float], Optional[float]], RunResult]
@@ -729,6 +806,11 @@ class RunHandle:
     _pending_fetch_fn: Optional[Callable[["RunHandle"], Any]] = None
     _result: Optional[RunResult] = None
     _last_status: JobStatus = field(default_factory=JobStatus)
+
+    @property
+    def execution(self) -> ExecutionDetails:
+        """Return normalized execution details reported by the site."""
+        return ExecutionDetails.from_mapping(self.backend)
 
     @classmethod
     def skipped(
@@ -755,6 +837,9 @@ class RunHandle:
         handle = cls(
             site=site, job=job, id=status.job_id, mode="skipped", poll_interval=0.0
         )
+        from frequensolve.orchestrator.utils.transient_progress import update_progress
+
+        update_progress(handle, status)
         handle._last_status = status
         handle._result = handle._make_result(status)
         if hasattr(site, "_emit_status"):
@@ -772,9 +857,13 @@ class RunHandle:
         )
         # A failed task may commit diagnostics without any receiver output.
         # Preserve its result even when the site's failure tolerance allows it.
+        remote = (
+            self.mode in {"batch", "attached"}
+            or getattr(self.site, "work_dir", None) is not None
+        )
         trace_manifest = (
             getattr(self.job, "trace_manifest", None)
-            if status.is_successful and not failed_tasks
+            if status.is_successful and not failed_tasks and not remote
             else None
         )
         return RunResult(
@@ -788,6 +877,10 @@ class RunHandle:
                 else getattr(self.job, "_stdout_path", None)
             ),
             run_metadata=getattr(self.job, "run_metadata", None),
+            execution=ExecutionDetails.from_mapping(self.backend),
+            _logs_fn=(
+                partial(self._logs_fn, self) if self._logs_fn is not None else None
+            ),
         )
 
     def status(self) -> JobStatus:
@@ -797,6 +890,11 @@ class RunHandle:
             return self._result.status
         if self._status_fn is not None:
             self._last_status = self._status_fn(self)
+            from frequensolve.orchestrator.utils.transient_progress import (
+                update_progress,
+            )
+
+            update_progress(self, self._last_status)
         return self._last_status
 
     def _complete_from_status(self, status: JobStatus) -> RunResult:
@@ -811,6 +909,9 @@ class RunHandle:
             self._result = self._wait_fn(self, 0, 0)
         else:
             self._result = self._make_result(status)
+        from frequensolve.orchestrator.utils.transient_progress import update_progress
+
+        update_progress(self, self._result.status)
         return self._result
 
     def _run_record_finalizer(
@@ -915,6 +1016,10 @@ class RunHandle:
 
         Yields:
             ``JobStatus`` objects whenever the public state changes.
+
+        Successful completion consumes any submit-time output fetch before the
+        terminal status is yielded. A download failure can be retried by calling
+        ``watch()`` or ``wait()`` again on the same handle.
         """
 
         interval = self.poll_interval if poll_interval is None else poll_interval
@@ -1025,6 +1130,8 @@ class RunHandle:
             Path to logs, fetched log mapping, or ``None`` when unavailable.
         """
 
+        if self._logs_fn is not None:
+            return self._logs_fn(self, **kwargs)
         if self.site is not None:
             return self.site.fetch_logs(self.job, **kwargs)
         if hasattr(self.job, "_stdout_path"):
@@ -1040,6 +1147,81 @@ class BaseSite:
         verbose: Whether site methods should print status messages in addition
             to logging them.
     """
+
+    supports_curvature = False
+
+    stages_job_inputs: ClassVar[bool] = False
+    """Whether ``submit`` uploads the job's ``remote_input_files`` itself.
+
+    ``True`` on SLURM sites, which transfer them with the job and simulation
+    JSON; callers such as the imaging ``Backend`` then upload nothing.
+    """
+
+    supports_background_reuse: ClassVar[bool] = False
+    """Whether later jobs can reuse ``fwi_operator/background`` checkpoints.
+
+    A ``linearize`` job with a ``background`` output leaves a manifest per
+    task and its HDF5 checkpoint files (one per MPI rank, or one per task with
+    the ``"shared"`` :attr:`background_layout`) in its result directory. A
+    later ``jvp``/``vjp``/``normal`` job naming that background reads them in
+    place, so the site must keep the producer's result directory where the
+    consumer runs, and run each consumer task on the same MPI rank count as
+    the producing task in either layout (otherwise Sauce recomputes the
+    fields). ``True`` on ``LocalSite`` and SLURM sites, whose result
+    directories persist and which run every task reading a partitioned input
+    (saved state, objective vector, receiver state or background) on the rank
+    count its producer recorded. ``False`` here and on ``AWSSite``, whose
+    workers start from fresh storage; workflows must not request backgrounds
+    on such sites.
+    """
+
+    background_layout = "rank"
+    """Files of a background capture (``fwi_operator.background_layout``).
+
+    ``"rank"`` writes one HDF5 file per MPI rank and task without collective
+    I/O; ``"shared"`` writes one file per task through parallel HDF5, keeping
+    the file count independent of the rank count. ``LocalSite`` and SLURM
+    sites take it as their ``background_layout`` option; Sauce's
+    ``FS_BACKGROUND_LAYOUT`` environment variable overrides it.
+    """
+
+    def run_curvature(self, request: Path) -> None:
+        """Execute one Sauce ``--curvature`` request on this site's compute resources.
+
+        Return only after the request's declared ``output`` and a
+        ``solver.log`` beside the request are available locally. Sites may
+        accept keyword resource overrides; the caller verifies the output.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not run Sauce curvature operations; "
+            "use LocalSite or a SLURM site"
+        )
+
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        """Delete files below ``job``'s result directory where this site keeps it.
+
+        Args:
+            job: Job whose result directory holds the files.
+            relative_paths: File paths relative to that directory, with ``/``
+                separators. Every path is validated before anything is
+                removed: absolute paths, ``..`` components, backslashes,
+                control characters and paths naming the directory itself
+                raise :class:`ValueError`.
+
+        Missing files are not errors and named directories are never
+        removed; parent directories below the result directory that the
+        removal leaves empty are (``rmdir``, never recursively). ``LocalSite``
+        unlinks the files and SLURM sites remove them on the login node; this
+        base implementation (and ``AWSSite``) only validates the paths,
+        because those sites keep no reusable result files.
+        """
+
+        if _result_relative_paths(relative_paths):
+            logging.getLogger(self.__class__.__module__).debug(
+                "%s keeps no reusable result files; nothing removed for %s",
+                type(self).__name__,
+                getattr(job, "name", job),
+            )
 
     _is_notebook: bool = field(default_factory=_check_if_notebook)
     verbose: bool = False
@@ -1095,6 +1277,10 @@ class BaseSite:
             The same job object, for fluent site implementations.
         """
 
+        if getattr(job, "patches", None) is not None:
+            raise ValueError(
+                "Patch jobs require site.run(job) to dispatch their child jobs"
+            )
         if validate and hasattr(job, "validate"):
             report = job.validate(
                 raise_errors=True,
@@ -1103,10 +1289,40 @@ class BaseSite:
             self._emit_validation_warnings(job, report)
         if hasattr(job, "save"):
             job.save()
+            self._require_solver_features(job)
         project = getattr(getattr(job, "simulation", None), "_project", None)
         if sync_project and project is not None and hasattr(self, "sync"):
             self.sync(project)
         return job
+
+    def solver_capabilities(
+        self, *, dimension: Any = 2, precision: str = "single"
+    ) -> Optional[SolverCapabilities]:
+        """Return the operation catalog of the backend that runs such a simulation.
+
+        ``None`` means this site cannot report it, or solver checks are
+        ``off``; feature gates then assume the solver matches this SDK.
+        """
+
+        return None
+
+    def _require_solver_features(self, job: Any) -> None:
+        """Reject saved job inputs that the configured solver would silently ignore."""
+
+        simulation = getattr(job, "effective_simulation", None)
+        if simulation is None:
+            simulation = getattr(job, "simulation", None)
+        if simulation is None:
+            return
+        files = [getattr(simulation, "_file", None)]
+        try:
+            files.append(job.job_file)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        require_held_control_support(
+            [Path(path) for path in files if path is not None],
+            lambda: self.solver_capabilities(**solver_backend_selection(simulation)),
+        )
 
     def _job_validation_options(self, job: Any) -> Dict[str, Any]:
         """Return execution-site-specific preflight options for one job."""
@@ -1544,6 +1760,14 @@ class BaseSite:
         Returns:
             Final ``RunResult``.
         """
+        if getattr(job, "patches", None) is not None:
+            return job._run_composite(
+                self,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                check=check,
+                **submit_kwargs,
+            )
         return self.submit(job, **submit_kwargs).wait(
             timeout,
             poll_interval,

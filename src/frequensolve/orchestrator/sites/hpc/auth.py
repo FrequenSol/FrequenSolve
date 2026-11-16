@@ -125,44 +125,71 @@ class SlurmAuthenticator:
             and not explicit_trust
             and os.path.exists(control_dir)
         ):
-            for control_path in glob.glob(f"{control_dir}/*"):
+            proxy_client = self.find_control_socket(host)
+            if proxy_client is not None:
+                logger.info("Secure connection established with host: %s", host)
+                return proxy_client
+        return self._interactive_authentication(host)
+
+    def control_socket_works(self, control_path: str, host: str) -> bool:
+        """Return whether a control socket completes a bounded round trip."""
+
+        try:
+            result = subprocess.run(
+                [
+                    "ssh",
+                    "-q",
+                    *control_socket_ssh_options(control_path),
+                    f"{self.site.credentials.username}@{host}",
+                    "echo 'Connection test'",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=SSH_CONNECT_TIMEOUT_SECONDS + 5,
+            )
+        except subprocess.TimeoutExpired:
+            logger.debug("Timed out probing SSH control socket %s", control_path)
+            return False
+        except Exception as exc:
+            logger.debug(
+                "Failed to use control socket %s (%s)",
+                control_path,
+                type(exc).__name__,
+            )
+            return False
+        return result.returncode == 0
+
+    def find_control_socket(
+        self, host: str, *, exclude: tuple[str, ...] = ()
+    ) -> Optional[SSHProxy]:
+        """Return a proxy over a live user control socket, or ``None``.
+
+        Only sockets under ``~/.ssh/control`` that complete a round trip are
+        used. This never prompts, so it is safe from any thread; it never
+        closes or replaces a control master either.
+        """
+
+        control_dir = os.path.expanduser("~/.ssh/control")
+        if not os.path.exists(control_dir):
+            return None
+        for control_path in glob.glob(f"{control_dir}/*"):
+            if control_path in exclude:
+                continue
+            if self.control_socket_works(control_path, host):
+                logger.debug("Found working control socket at %s", control_path)
                 try:
-                    result = subprocess.run(
-                        [
-                            "ssh",
-                            "-q",
-                            *control_socket_ssh_options(control_path),
-                            f"{site.credentials.username}@{host}",
-                            "echo 'Connection test'",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=SSH_CONNECT_TIMEOUT_SECONDS + 5,
+                    return SSHProxy(
+                        control_path=control_path,
+                        username=self.site.credentials.username,
+                        host=host,
                     )
-
-                    if result.returncode == 0:
-                        logger.debug("Found working control socket at %s", control_path)
-                        proxy_client = SSHProxy(
-                            control_path=control_path,
-                            username=site.credentials.username,
-                            host=host,
-                        )
-                        logger.info("Secure connection established with host: %s", host)
-                        return proxy_client
-
-                except subprocess.TimeoutExpired:
-                    logger.debug(
-                        "Timed out probing SSH control socket %s", control_path
-                    )
-                    continue
                 except Exception as exc:
                     logger.debug(
                         "Failed to use control socket %s (%s)",
                         control_path,
                         type(exc).__name__,
                     )
-                    continue
-        return self._interactive_authentication(host)
+        return None
 
     def get_job_host(self, job_id: int) -> str:
         """Return the host assigned to a running SLURM job.

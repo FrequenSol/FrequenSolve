@@ -6,6 +6,8 @@ import importlib
 from types import TracebackType
 from typing import Any, Iterable, NoReturn, Type, cast
 
+from frequensolve._platform import platform_support_guidance
+
 
 def _dependency_list(dependencies: Iterable[str] | None) -> str:
     values = list(dependencies or [])
@@ -34,10 +36,12 @@ def optional_dependency_error(
         ``ImportError`` with an install hint and original error context.
     """
 
+    guidance = platform_support_guidance()
+    platform_hint = f" {guidance}" if guidance else ""
     return ImportError(
         f"{symbol} requires optional FrequenSolve dependencies that are not installed. "
         f"Install them with `pip install frequensolve[{extra}]`."
-        f"{_dependency_list(dependencies)} Original import error: {error}"
+        f"{_dependency_list(dependencies)} Original import error: {error}{platform_hint}"
     )
 
 
@@ -71,6 +75,23 @@ class _LazyOptionalMeta(type):
 
     def __subclasscheck__(cls, subclass: type[Any]) -> bool:
         return issubclass(subclass, cls._load())
+
+
+class MissingOptionalValue:
+    """Importable placeholder for a value whose optional backend is absent."""
+
+    def __init__(self, symbol: str, error: ImportError):
+        self._symbol = symbol
+        self._message = str(error)
+
+    def __repr__(self) -> str:
+        return f"<{self._symbol}: optional dependency unavailable>"
+
+    def __getattr__(self, name: str) -> NoReturn:
+        raise ImportError(self._message)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise ImportError(self._message)
 
 
 def missing_optional_class(

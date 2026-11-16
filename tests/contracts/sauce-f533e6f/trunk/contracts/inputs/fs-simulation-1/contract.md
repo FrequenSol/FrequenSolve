@@ -374,8 +374,8 @@ document.
   `op_max_blocks: 1`. This evaluates the resident FP32 operator, not a separately
   assembled FP64 operator. Widening scratch is reused and capped at 1 GiB per
   CUDA backend; large operators and batches are tiled to respect that bound.
-- `Solver/iterative_refinement` (default `false`) verifies and repairs each CPU
-  FP32 iterative solve in FP64 against the ordinary convergence reference.
+- `Solver/iterative_refinement` (default `true` on supported paths) verifies and repairs CPU and CUDA
+  FP32 iterative solves in FP64 against the ordinary convergence reference.
   The ordinary solve runs first, stopping at the larger of `tolerance` and
   `refinement_inner_tolerance`. Its residual `b-Ax` is recomputed with FP64
   products against the stored FP32 operator and normalized by the same per-RHS
@@ -384,15 +384,30 @@ document.
   misses `tolerance`, FP32 correction solves accumulate into an FP64 solution,
   each asking only for the reduction still needed, measured against its own
   load and floored at `refinement_inner_tolerance` (default `1e-4`);
-  `refinement_max_steps` (default `10`) bounds them. The tolerance and the
+  `refinement_max_steps` (default `4`) bounds them. The tolerance and the
   reported residual apply to the FP64 iterate. The returned solution is its FP32
   rounding, whose own residual can remain at the FP32 floor: refinement improves
-  solution accuracy, not the stored solution's residual. Refinement stops early
-  on an unstable or non-finite solve or a correction that fails to reduce the
-  residual, and reports that status. It keeps one FP32 copy of the load and one
-  FP64 solution per right-hand side, 24 bytes per complex unknown and
-  right-hand side, plus the FP64 fresh-residual workspace. FP64 builds ignore the
-  option; GPU solves and reduced-precision solve grids reject it.
+  solution accuracy, not the stored solution's residual. An unsuccessful
+  refinement check or an exhausted correction limit resumes ordinary iterations
+  from the current solution. Inner solves and fallback share `max_iter`; fallback
+  reports the native residual and convergence status. The initial check retains
+  the original load and uses bounded residual scratch. A saved FP32 load and
+  FP64 solution are allocated only when a correction is needed (24 bytes per
+  complex or 12 per real unknown and RHS), plus fresh-residual scratch bounded to
+  16 RHS and the current grid's elements. If optional allocation fails on any
+  rank, all ranks release partial storage and resume native iterations. CPU fresh
+  residuals then use native arithmetic and skip FGMRES recovery to avoid further
+  large allocations. CUDA retains the saved load and FP64 solution in host RAM;
+  device residual scratch uses two global and two element vectors for at most 16
+  RHS plus an 8 MiB product panel. CUDA products and MPI assembly use FP64;
+  correction solves stay on CUDA. The first correction repeats the residual
+  evaluation to avoid a full-size residual copy. CUDA supports both dense and
+  compact blocked native operators within the same scratch limits.
+  FP64 builds ignore the option. When omitted, refinement is disabled for Metal,
+  reduced-precision solve grids, and native-real CUDA solves. Explicit `true`
+  retains capability errors on those paths; explicit `false` selects ordinary
+  native iterations on every path. Capability selection uses the active runtime,
+  so a CPU fallback keeps the CPU default.
 - `Solver/recompute_residual_fp32` defaults to `5`. In CUDA TF32 mode it
   inserts fresh FP32 residual evaluations with native FP32 communication between
   the FP64 refreshes. Set it to `10` for ten-iteration spacing, or `0` to disable

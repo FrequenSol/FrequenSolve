@@ -5,8 +5,9 @@ and an execution site.  It owns three concerns that the operator layer should
 not repeat:
 
 - **Submission.** :class:`Backend` submits jobs with one pinned set of site
-  options so every action of one linearization runs with the same rank count
-  and mesh partition, names jobs consistently, and waits for job families.
+  options, stages client-written operator inputs on remote sites, names jobs
+  consistently, and waits for job families.  Saved states and objective
+  vectors do not depend on the MPI rank count.
 - **Artifact reduction.** Sauce writes one task-suffixed output per frequency
   task (``<stem>_<task><ext>``).  The module-level helpers reduce per-task
   covectors with the misfit frequency weights, assemble per-task objective
@@ -19,15 +20,21 @@ not repeat:
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import inspect
 import itertools
 import json
 import shutil
+import warnings
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 from typing import (
     Any,
+    Callable,
     Dict,
     Iterable,
     Iterator,
@@ -47,15 +54,24 @@ from frequensolve.imaging._artifacts import (
     ControlVectorFile,
     ObjectiveReport,
 )
+from frequensolve.imaging._block_digest import block_digest
 from frequensolve.imaging.data import DataSpace, DataVector
-from frequensolve.imaging.jobs import FWIOperatorJob
-from frequensolve.orchestrator.sites.base import BaseSite, RunHandle, RunResult
+from frequensolve.imaging.jobs import FWIOperatorJob, _task_path
+from frequensolve.orchestrator.sites.base import (
+    BaseSite,
+    RunHandle,
+    RunResult,
+    _remove_emptied_directories,
+)
+from frequensolve.orchestrator.sites.execution import resolve_execution
+from frequensolve.project import Project
 from frequensolve.simulation.jobs.base import BaseJob
 
 __all__ = [
     "Backend",
     "LinearizationCache",
     "LinearizationEntry",
+    "background_checkpoint_files",
     "content_fingerprint",
     "fingerprint",
     "frequency_weights",
@@ -76,6 +92,42 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+# Arrays with at least this many elements are identified by their canonical
+# bytes instead of JSON lists (see :func:`fingerprint`); smaller ones keep the
+# JSON form, so their fingerprints are unchanged.
+_ARRAY_DIGEST_SIZE = 4096
+# Canonical element type of each array kind on the byte path.
+_ARRAY_KINDS = {"b": "bool", "f": "float", "i": "int", "u": "int", "c": "complex"}
+
+
+def _array_identity(value: np.ndarray) -> Optional[Dict[str, Any]]:
+    """Identify a large array by kind, shape and an ``fs-block-sha256-1`` digest.
+
+    Contiguous float64 arrays (and boolean masks, viewed as uint8 0/1 bytes)
+    are hashed in place on the shared digest thread pool; other real floats are
+    widened to float64, integers to int64, and complex values become float64
+    (real, imaginary) pairs. Returns ``None`` for small or other arrays.
+    """
+
+    kind = value.dtype.kind
+    if (
+        value.size < _ARRAY_DIGEST_SIZE
+        or isinstance(value, np.ma.MaskedArray)
+        or kind not in _ARRAY_KINDS
+        or value.dtype.itemsize > (16 if kind == "c" else 8)
+        or value.dtype == np.uint64
+    ):
+        return None
+    if kind == "b":
+        digest = block_digest(np.ascontiguousarray(value).view(np.uint8), np.uint8)
+    elif kind == "c":
+        pairs = np.ascontiguousarray(value, dtype=np.complex128).view(np.float64)
+        digest = block_digest(pairs, np.float64)
+    else:
+        digest = block_digest(value, np.float64 if kind == "f" else np.int64)
+    return {"fs_array": digest, "kind": _ARRAY_KINDS[kind], "shape": list(value.shape)}
+
+
 def _jsonable(value: Any) -> Any:
     """Convert fingerprint parts to canonical JSON-compatible values."""
 
@@ -85,6 +137,11 @@ def _jsonable(value: Any) -> Any:
         items = [_jsonable(item) for item in value]
         return sorted(items, key=repr) if isinstance(value, (set, frozenset)) else items
     if isinstance(value, np.ndarray):
+        identity = _array_identity(value)
+        if identity is not None:
+            return identity
+        if value.dtype.kind == "b":
+            value = value.astype(np.uint8)  # masks fingerprint as 0/1 on both paths
         return _jsonable(value.tolist())
     if isinstance(value, Path):
         return str(value)
@@ -109,7 +166,12 @@ def fingerprint(**parts: Any) -> str:
     active blocks, the frequencies, the misfit payload, and the content
     fingerprints of the observed data (see :func:`content_fingerprint`).
     NumPy arrays, paths, complex numbers, and objects exposing ``to_fs`` are
-    normalized before hashing.
+    normalized before hashing. Arrays with at least 4096 elements enter as
+    their kind (bool, float, int or complex), shape and ``fs-block-sha256-1``
+    digest of canonical bytes: booleans as uint8 0/1, real floats as float64,
+    integers as int64 and complex values as float64 pairs. Contiguous float64
+    data and masks are hashed in place, in parallel, without JSON lists.
+    Smaller arrays enter as JSON values (booleans as 0/1).
     """
 
     if not parts:
@@ -168,10 +230,36 @@ def _require_file(path: Path, what: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def task_covectors(
+    job: FWIOperatorJob,
+    factors: Optional[Sequence[Mapping[str, float]]] = None,
+) -> Iterable[ControlVectorFile]:
+    """Read each unsummed task covector once, in reference coordinates."""
+
+    if factors is not None and len(factors) != job.n_tasks:
+        raise ValueError(f"expected {job.n_tasks} per-task block factor tables")
+    first = None
+    for task in _tasks(job):
+        path = _require_file(job.covector_file(task), f"task {task} covector")
+        part = ControlVectorFile.read(path, native=False)
+        if first is None:
+            first = (part.names, part.sizes)
+        elif (part.names, part.sizes) != first:
+            raise ValueError(f"{path} has a different block layout than task 1")
+        if factors is not None:
+            for name in part.blocks:
+                part.blocks[name] = part.blocks[name] * float(
+                    factors[task - 1].get(name, 1.0)
+                )
+        yield part
+
+
 def reduce_covectors(
     job: FWIOperatorJob,
     weights: Optional[Sequence[float]] = None,
     factors: Optional[Sequence[Mapping[str, float]]] = None,
+    *,
+    output: Optional[int] = None,
 ) -> ControlVectorFile:
     """Reduce the per-task covector parts of ``job`` with frequency weights.
 
@@ -182,11 +270,14 @@ def reduce_covectors(
     task's coordinates, and FrequenSolve converts each task's part to its
     reference coordinates with ``s_ref / s_task``.  Sauce fingerprints every
     task's saved state on its own (per-frequency mesh adaptation makes them
-    differ), so only the block layout must agree; the reduced file carries
-    task 1's fingerprints.
+    differ), so the block layout and material-basis identities must agree;
+    the reduced file preserves those identities and carries task 1's fingerprints.
+    ``output`` selects the covector of one entry of a multi-direction normal.
     """
 
     weight = frequency_weights(job, weights)
+    if job.action == "wri":
+        weight = job.wri_reduction_weights(weight)
     if factors is not None and len(factors) != job.n_tasks:
         raise ValueError(
             f"expected {job.n_tasks} per-task block factor tables, "
@@ -201,7 +292,9 @@ def reduce_covectors(
     blocks: Dict[str, np.ndarray] = {}
     support: Dict[str, np.ndarray] = {}
     for task in _tasks(job):
-        path = _require_file(job.covector_file(task), f"task {task} covector")
+        path = _require_file(
+            job.covector_file(task, output=output), f"task {task} covector"
+        )
         part = ControlVectorFile.read(path, native=False)
         if first is None:
             first = part
@@ -212,6 +305,10 @@ def reduce_covectors(
             continue
         if part.names != first.names or part.sizes != first.sizes:
             raise ValueError(f"{path} has a different block layout than task 1")
+        if part.control_spaces != first.control_spaces:
+            raise ValueError(
+                f"{path} has different material basis identities than task 1"
+            )
         for name, values in part.blocks.items():
             blocks[name] = blocks[name] + scale(task, name) * values
             support[name] = support[name] & part.support_mask(name)
@@ -222,6 +319,7 @@ def reduce_covectors(
         control_registry_fingerprint=first.control_registry_fingerprint,
         support={name: mask for name, mask in support.items() if not mask.all()},
         support_min_support=first.support_min_support,
+        control_spaces=dict(first.control_spaces),
     )
 
 
@@ -305,12 +403,17 @@ def write_task_objective_vectors(
     space: DataSpace,
     state_fingerprint: str,
     *,
-    n_ranks: int = 1,
+    n_ranks: Optional[int] = None,
+    schema: str = "fs-objective-vector-3",
+    dtype: Any = None,
 ) -> List[Path]:
-    """Write one ``fs-objective-vector-3`` per frequency task of ``job``.
+    """Write one objective vector per frequency task of ``job``.
 
     Task ``t`` receives the rows of ``space`` at ``job.f_list[t - 1]``; the
-    files are written at ``job.objective_vector_file(t)``.
+    files are written at ``job.objective_vector_file(t)``. ``schema``,
+    ``n_ranks`` (version 3) and ``dtype`` (version 5) select the format as in
+    :meth:`DataVector.write_objective_vector`; pass
+    ``**ObjectiveState(...).vector_options()`` for a saved state's duals.
     """
 
     vector = (
@@ -329,6 +432,8 @@ def write_task_objective_vectors(
                 state_fingerprint=state_fingerprint,
                 term_layout=layouts,
                 n_ranks=n_ranks,
+                schema=schema,
+                dtype=dtype,
             )
         )
     return paths
@@ -404,6 +509,47 @@ def read_manifest(job: FWIOperatorJob, task: int = 1) -> ControlRegistryManifest
 # ---------------------------------------------------------------------------
 
 
+def _operator_input_files(job: BaseJob) -> List[Path]:
+    """Return the existing input files a job reads, including per-task siblings."""
+
+    candidates: List[Any] = [
+        getattr(job, name, None)
+        for name in ("direction", "objective_vector", "control_state", "input_vector")
+    ]
+    extension = getattr(job, "extension", None)
+    if isinstance(extension, Mapping):
+        candidates.append(extension.get("direction"))
+    n_tasks = int(getattr(job, "n_tasks", 1) or 1)
+    files: List[Path] = []
+    for value in candidates:
+        if not isinstance(value, (str, Path)):
+            continue
+        path = Path(value)
+        variants = [path, *(_task_path(path, task) for task in range(1, n_tasks + 1))]
+        for variant in variants:
+            if variant.is_file():
+                files.append(variant)
+                files.extend(_manifest_payload(variant))
+    return list(dict.fromkeys(files))
+
+
+def _manifest_payload(path: Path) -> List[Path]:
+    """Return the data file a canonical (version 4 or 5) objective-vector manifest names."""
+
+    if path.suffix != ".json":
+        return []
+    try:
+        name = json.loads(path.read_text()).get("file")
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not isinstance(name, str) or not name:
+        return []
+    payload = Path(name)
+    if not payload.is_absolute():
+        payload = path.parent / payload
+    return [payload] if payload.is_file() else []
+
+
 class Backend:
     """Submit imaging jobs to one site with pinned submission options.
 
@@ -413,9 +559,7 @@ class Backend:
             bookkeeping.  Cache eviction deletes job directories only when
             they live inside it.
         submit_options: Site submission keyword arguments applied to every
-            submission (rank count, partition, validation flags, ...).  Every
-            action of one linearization must use the same profile so Sauce
-            states and objective vectors stay partition-compatible.
+            submission (rank count, partition, validation flags, ...).
         prefix: Job name prefix; names are ``f"{prefix}_{counter:04d}"``.
     """
 
@@ -427,7 +571,7 @@ class Backend:
         submit_options: Optional[Mapping[str, Any]] = None,
         prefix: str = "imaging",
     ) -> None:
-        self.site = site
+        self._site = site
         self.workdir = Path(workdir).expanduser().resolve()
         self.submit_options: Dict[str, Any] = dict(submit_options or {})
         for key in ("check", "postprocess_only"):
@@ -437,6 +581,120 @@ class Backend:
         if not self.prefix:
             raise ValueError("Backend prefix must be non-empty")
         self._counter = itertools.count(1)
+        self._timing_lock = RLock()
+        self._worker_seconds = 0.0
+        self._unmeasured_runs = 0
+        self._recorders: Dict[int, List[BaseJob]] = {}
+
+    @property
+    def site(self) -> BaseSite:
+        """The executor currently bound to this backend's caller-owned site."""
+        return resolve_execution(self._site)
+
+    @site.setter
+    def site(self, value: BaseSite) -> None:
+        self._site = value
+
+    def timing_snapshot(self) -> Tuple[float, int]:
+        """Return counters for measuring a complete stage through this backend."""
+        with self._timing_lock:
+            return self._worker_seconds, self._unmeasured_runs
+
+    @contextmanager
+    def recording(self) -> Iterator[List[BaseJob]]:
+        """Collect every job this backend submits inside the ``with`` block.
+
+        Workflows use the list for per-run job counts and native diagnostics;
+        nested and concurrent recordings each receive every job.
+        """
+        jobs: List[BaseJob] = []
+        token = object()
+        with self._timing_lock:
+            self._recorders[id(token)] = jobs
+        try:
+            yield jobs
+        finally:
+            with self._timing_lock:
+                self._recorders.pop(id(token), None)
+
+    def _record(self, job: BaseJob) -> None:
+        with self._timing_lock:
+            for jobs in self._recorders.values():
+                jobs.append(job)
+
+    def curvature(self, **options: Any) -> Any:
+        """Return Sauce curvature postprocessing on this site and workdir.
+
+        Operations run through ``site.run_curvature``. ``options`` override
+        that site's resources for every operation of the returned object, for
+        example ``ranks``/``threads_per_rank`` on ``LocalSite`` or ``nodes``,
+        ``ranks_per_node``, ``queue`` and ``duration`` on SLURM sites. Without
+        options the site's defaults apply (``LocalSite.curvature_ranks``,
+        ``SlurmSite.curvature_run_config``). Mesh transfer and sampling always
+        run on one rank.
+        """
+        from .curvature import NativeCurvature
+
+        if not getattr(self.site, "supports_curvature", False):
+            raise NotImplementedError(
+                f"{type(self.site).__name__} does not run Sauce curvature "
+                "operations; use LocalSite or a SLURM site."
+            )
+        runner: Callable[[Path], None] = self.site.run_curvature
+        if options:
+            try:
+                inspect.signature(runner).bind(Path("request.json"), **options)
+            except TypeError as error:
+                raise TypeError(
+                    f"Unsupported curvature options for {type(self.site).__name__}: "
+                    f"{error}"
+                ) from None
+            runner = functools.partial(runner, **options)
+        return NativeCurvature(workdir=self.workdir / "curvature", runner=runner)
+
+    def cost_since(self, snapshot: Tuple[float, int]) -> Dict[str, Any]:
+        seconds, missing = self.timing_snapshot()
+        missing -= snapshot[1]
+        return {
+            "summed_worker_seconds": None if missing else seconds - snapshot[0],
+            "worker_time_scope": "site-reported native initialization, tasks and postprocessing",
+            "unmeasured_native_runs": missing,
+        }
+
+    def _record_timing(self, result: RunResult, handle: RunHandle) -> None:
+        if result.status.state == "skipped":
+            return
+        raw = result.status.raw or {}
+        rows = list(raw.get("tasks", []))
+        backend = getattr(handle, "backend", {})
+        for name in ("pack", "smooth"):
+            if isinstance(raw.get(name), Mapping):
+                rows.append(raw[name])
+        if isinstance(backend.get("mesh_result"), Mapping):
+            rows.append(backend["mesh_result"])
+        # A shared-frequency worker reports one row per frequency. Count its
+        # common process log only once rather than multiplying its duration.
+        seen = set()
+        seconds = 0.0
+        measured = bool(rows)
+        for row in rows:
+            duration = row.get("duration_seconds")
+            if duration is None:
+                measured = False
+                continue
+            log = row.get("stdout")
+            if log is not None and log in seen:
+                continue
+            if log is not None:
+                seen.add(log)
+            seconds += float(duration)
+        # Serial benchmark sites can report a complete job duration including
+        # input staging, initialization and packing through this explicit field.
+        if "worker_seconds" in raw:
+            seconds, measured = float(raw["worker_seconds"]), True
+        with self._timing_lock:
+            self._worker_seconds += seconds
+            self._unmeasured_runs += int(not measured)
 
     # -- naming and staging ---------------------------------------------------
 
@@ -468,6 +726,7 @@ class Backend:
 
     def _options(self, *, postprocess_only: bool) -> Dict[str, Any]:
         options = dict(self.submit_options)
+        options.setdefault("fetch", True)
         if postprocess_only:
             options["postprocess_only"] = True
         return options
@@ -475,7 +734,64 @@ class Backend:
     def submit(self, job: BaseJob, *, postprocess_only: bool = False) -> RunHandle:
         """Submit ``job`` with the pinned options and return its handle."""
 
-        return self.site.submit(job, **self._options(postprocess_only=postprocess_only))
+        if getattr(job, "frequency_groups", 1) > 1 and not getattr(
+            self.site, "supports_frequency_groups", False
+        ):
+            raise NotImplementedError(
+                "This site does not yet launch shared-frequency workers; use LocalSite or the native --frequency-groups launcher"
+            )
+        self._stage_remote_inputs(job)
+        handle = self.site.submit(
+            job, **self._options(postprocess_only=postprocess_only)
+        )
+        self._record(job)
+        return handle
+
+    def _stage_remote_inputs(self, job: BaseJob) -> None:
+        """Upload operator inputs written on this machine to a remote site.
+
+        Project sync carries only simulations, and remote jobs see their own
+        results; client-written directions and objective vectors (under the
+        problem workdir) must be uploaded explicitly.  Paths are mapped
+        exactly as the job payload rewrites them: under the remote project
+        root, or, for inputs outside every project root, below the job's
+        ``inputs/external`` directory (see ``remote_input_files``).
+        """
+
+        # Local sites read inputs in place; only remote sites expose a work_dir.
+        # Sites that upload them while submitting need no second copy.
+        if (
+            getattr(self.site, "work_dir", None) is None
+            or not callable(getattr(self.site, "put", None))
+            or getattr(self.site, "stages_job_inputs", False)
+        ):
+            return
+        try:
+            root = job._project_path()
+        except (AttributeError, ValueError):
+            return
+        remote_root = Path(Project.remote_root_for(self.site, root))
+        input_files = getattr(job, "remote_input_files", None)
+        if callable(input_files):
+            pairs = list(input_files(remote_root))
+        else:
+            pairs = []
+            for path in _operator_input_files(job):
+                try:
+                    relative = path.resolve().relative_to(root.resolve())
+                except ValueError:
+                    continue
+                pairs.append((path, remote_root / relative))
+        # A site that batches uploads sends them with one remote mkdir and few
+        # transfers instead of two SSH round trips per file.
+        upload_many = getattr(self.site, "put_files", None)
+        if callable(upload_many):
+            if pairs:
+                upload_many(pairs)
+            return
+        upload = getattr(self.site, "put")
+        for local, remote in pairs:
+            upload(local, remote)
 
     def run(
         self,
@@ -494,7 +810,10 @@ class Backend:
                 when the run does not succeed.
         """
 
-        return self.submit(job, postprocess_only=postprocess_only).wait(check=check)
+        handle = self.submit(job, postprocess_only=postprocess_only)
+        result = handle.wait(check=check)
+        self._record_timing(result, handle)
+        return result
 
     def run_many(
         self, jobs: Iterable[BaseJob], *, check: bool = True
@@ -514,14 +833,55 @@ class Backend:
         keep_cluster = bool(getattr(site, "shutdown_on_completion", False))
         extra = {"shutdown_on_completion": False} if keep_cluster else {}
         try:
+            for job in jobs:
+                self._stage_remote_inputs(job)
             handles = [
                 site.submit(job, **self._options(postprocess_only=False), **extra)
                 for job in jobs
             ]
-            return site.wait_all(handles, check=check)
+            for job in jobs:
+                self._record(job)
+            results = site.wait_all(handles, check=check)
+            for result, handle in zip(results, handles):
+                self._record_timing(result, handle)
+            return results
         finally:
             if keep_cluster:
                 site.close(wait=True, retire=True)
+
+    def run_preparation(self, job: BaseJob, *, check: bool = True) -> RunResult:
+        """Account geometry-only preparation with the site's default rank profile."""
+        handle = self.site.submit(job)
+        self._record(job)
+        result = handle.wait(check=check)
+        self._record_timing(result, handle)
+        return result
+
+    def release_background(self, job: FWIOperatorJob) -> int:
+        """Delete a linearize job's native background checkpoint everywhere.
+
+        Removes the files :func:`background_checkpoint_files` lists, with the
+        directories they leave empty (``<stem>/generations/<run>/`` and its
+        parents), from this machine and from the site's copy of the job result
+        directory (``site.remove_result_files``), and clears
+        ``job.background``: later actions on that linearization run uncached
+        and a new ``background=True`` request linearizes again. Returns the
+        released size in bytes (estimated for payloads kept only on the site).
+        """
+        if getattr(job, "background", None) is None:
+            return 0
+        files, size = background_checkpoint_files(job)
+        root = Path(job._result_path)
+        # Never reference a checkpoint that may be partially deleted.
+        job.background = None
+        for name in files:
+            path = root / name
+            if path.is_file() or path.is_symlink():
+                path.unlink(missing_ok=True)
+        _remove_emptied_directories(root, files)
+        if files:
+            self.site.remove_result_files(job, files)
+        return size
 
     def dry_run(self, job: BaseJob) -> Dict[str, Any]:
         """Describe what :meth:`run` would submit without touching the site.
@@ -549,7 +909,11 @@ class Backend:
                 value = getattr(job, label)
                 if value is None:
                     continue
-                if label == "state" and job.action != "linearize":
+                if (
+                    label == "state"
+                    and job.action != "linearize"
+                    and not (job.action == "solve" and job.reflectivity is not None)
+                ):
                     continue
                 if label == "objective_vector" and job.action != "jvp":
                     continue
@@ -656,23 +1020,140 @@ class LinearizationEntry:
         )
 
 
+_BACKGROUND_ROLES = ("checkpoint", "background_shard", "background_state")
+
+
+def background_checkpoint_files(job: FWIOperatorJob) -> Tuple[List[str], int]:
+    """Return a linearize job's background checkpoint files and their size.
+
+    Paths are relative to the job result directory: each task's manifest, the
+    HDF5 files it names (``fs-background-state-2``: the ``shared`` layout's
+    ``file`` or every rank's ``shards[].file``; ``fs-background-state-1``:
+    per-rank shards or, from earlier solver builds, JSON shard manifests
+    naming ``<shard>_batch_<b>.h5`` payloads) and every task-catalog record
+    with a checkpoint role. The manifests are authoritative because earlier
+    builds recorded only rank 0's files in the task catalog. Files present on
+    this machine count their size, payloads kept only on the site their
+    catalog size, and unrecorded payloads are estimated from the recorded
+    ones.
+    """
+    if getattr(job, "background", None) is None:
+        return [], 0
+    root = Path(job._result_path).expanduser().resolve(strict=False)
+    sizes: Dict[str, Optional[int]] = {}
+
+    def add(path: Path, size: Optional[int] = None) -> Optional[Path]:
+        path = Path(path).expanduser().resolve(strict=False)
+        try:
+            name = path.relative_to(root).as_posix()
+        except ValueError:
+            return None
+        if name in ("", "."):
+            return None
+        if path.is_file():
+            size = path.stat().st_size
+        sizes[name] = size if size is not None else sizes.get(name)
+        return path
+
+    for task in range(1, int(getattr(job, "n_tasks", 1) or 1) + 1):
+        manifest = add(job.background_file(task))
+        if manifest is None:
+            continue
+        try:
+            state = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(state, Mapping):
+            continue
+        shards = state.get("shards")
+        if isinstance(shards, Mapping):
+            shards = list(shards.values())
+        batches = state.get("batches", 0)
+        # Version 2 names one shared ``file`` or one file per rank in ``shards``.
+        for entry in [state, *(shards if isinstance(shards, list) else [])]:
+            name = entry.get("file") if isinstance(entry, Mapping) else None
+            if not isinstance(name, str) or not name:
+                continue
+            path = add(manifest.parent / name)
+            if path is None or path.suffix != ".json":
+                continue
+            # Earlier builds: one payload per batch beside a JSON shard manifest.
+            for batch in range(batches if isinstance(batches, int) else 0):
+                add(path.parent / f"{path.stem}_batch_{batch}.h5")
+            try:
+                records = json.loads(path.read_text()).get("shards") or []
+            except (OSError, ValueError, AttributeError):
+                records = []
+            for record in records if isinstance(records, list) else []:
+                payload = record.get("file") if isinstance(record, Mapping) else None
+                if isinstance(payload, str) and payload:
+                    add(path.parent / payload)
+    try:
+        from frequensolve.simulation.task_index import load_task_catalog
+
+        catalog = load_task_catalog(
+            root, tasks=range(1, int(getattr(job, "n_tasks", 1) or 1) + 1)
+        )
+        for role in _BACKGROUND_ROLES:
+            for record in catalog.query(role=role):
+                add(record.path, record.bytes)
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass  # no committed task results on this machine (e.g. test sites)
+    payloads = [size for name, size in sizes.items() if name.endswith(".h5")]
+    known = [size for size in payloads if size is not None]
+    estimate = int(sum(known) / len(known)) if known else 0
+    total = sum(size for size in sizes.values() if size is not None)
+    total += estimate * sum(size is None for size in payloads)
+    return sorted(sizes), int(total)
+
+
 class LinearizationCache:
     """Least-recently-used cache of :class:`LinearizationEntry` objects.
+
+    Evicted entries release their native background checkpoints through
+    ``release`` (wired by the problem to ``Backend.release_background``), as
+    do the least recently used entries once the retained checkpoints exceed
+    ``background_budget`` bytes; the newest checkpoint is never released by
+    the budget, because the workflow that requested it is still using it.
 
     Args:
         workdir: Directory the cache is allowed to delete inside.  Evicted
             entries whose ``directory`` lies elsewhere are forgotten but kept
             on disk.
         capacity: Maximum number of live entries.
+        release: Callback deleting one entry's background checkpoint.
+        background_budget: Optional limit on retained checkpoint bytes.
     """
 
-    def __init__(self, workdir: Union[str, Path], capacity: int = 2) -> None:
+    def __init__(
+        self,
+        workdir: Union[str, Path],
+        capacity: int = 2,
+        *,
+        release: Optional[Callable[[LinearizationEntry], Any]] = None,
+        background_budget: Optional[float] = None,
+    ) -> None:
         self.workdir = Path(workdir).expanduser().resolve()
         self.capacity = int(capacity)
         if self.capacity < 1:
             raise ValueError("LinearizationCache capacity must be at least 1")
         self._entries: "OrderedDict[str, LinearizationEntry]" = OrderedDict()
         self.evicted: List[str] = []
+        self.release = release
+        self.background_budget = background_budget
+
+    @property
+    def background_budget(self) -> Optional[float]:
+        """Retained background checkpoint bytes before LRU release (``None``: no limit)."""
+        return self._background_budget
+
+    @background_budget.setter
+    def background_budget(self, value: Optional[float]) -> None:
+        if value is not None:
+            value = float(value)
+            if not np.isfinite(value) or value < 0:
+                raise ValueError("background_budget must be finite and nonnegative")
+        self._background_budget = value
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -699,13 +1180,16 @@ class LinearizationCache:
     def put(self, entry: LinearizationEntry) -> List[LinearizationEntry]:
         """Insert ``entry`` as most recently used and return evicted entries."""
 
-        self._entries.pop(entry.fingerprint, None)
+        replaced = self._entries.pop(entry.fingerprint, None)
+        if replaced is not None and replaced.job is not entry.job:
+            self._release(replaced)
         self._entries[entry.fingerprint] = entry
         evicted = []
         while len(self._entries) > self.capacity:
             _, old = self._entries.popitem(last=False)
             self._remove(old)
             evicted.append(old)
+        self._enforce_background_budget(entry)
         return evicted
 
     def evict(self, key: str) -> Optional[LinearizationEntry]:
@@ -734,8 +1218,49 @@ class LinearizationCache:
             return False
         return True
 
+    def _release(self, entry: LinearizationEntry) -> None:
+        if self.release is None or getattr(entry.job, "background", None) is None:
+            return
+        try:
+            self.release(entry)
+        except Exception as exc:  # cleanup must never fail an inversion
+            warnings.warn(
+                f"Could not delete the background checkpoint of "
+                f"{getattr(entry.job, 'name', entry.fingerprint)!r}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+    def background_bytes(self) -> Dict[str, int]:
+        """Return retained background checkpoint bytes per cache key (LRU first)."""
+
+        sizes = {}
+        for key, entry in self._entries.items():
+            if getattr(entry.job, "background", None) is None:
+                continue
+            size = entry.extra.get("background_bytes")
+            if size is None:
+                size = background_checkpoint_files(entry.job)[1]
+                entry.extra["background_bytes"] = size
+            sizes[key] = int(size)
+        return sizes
+
+    def _enforce_background_budget(self, newest: LinearizationEntry) -> None:
+        if self.background_budget is None or self.release is None:
+            return
+        sizes = self.background_bytes()
+        total = sum(sizes.values())
+        for key, size in sizes.items():
+            if total <= self.background_budget:
+                break
+            if key == newest.fingerprint:
+                continue
+            self._release(self._entries[key])
+            total -= size
+
     def _remove(self, entry: LinearizationEntry) -> None:
         self.evicted.append(entry.fingerprint)
+        self._release(entry)
         directory = entry.directory
         if directory is None:
             return

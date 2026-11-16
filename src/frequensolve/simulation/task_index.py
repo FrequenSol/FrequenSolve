@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from stat import S_ISREG
-from typing import Dict, Iterable, List, Mapping, Optional, Sized, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sized, Union
 
 import h5py
 import numpy as np
@@ -217,7 +217,7 @@ class TaskIndex:
 
             artifact_ids = _string_array(artifact_group, "id")
             artifact_count = len(artifact_ids)
-            artifact_columns = {
+            artifact_columns: Dict[str, Any] = {
                 "role": _string_array(artifact_group, "role"),
                 "schema": _string_array(artifact_group, "schema"),
                 "representation": _string_array(artifact_group, "representation"),

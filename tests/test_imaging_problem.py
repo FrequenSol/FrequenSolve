@@ -16,8 +16,12 @@ from frequensolve.imaging import (
     Normal,
     ObservedData,
     SourceParameters,
+    TraceStoreRef,
 )
-from frequensolve.imaging._artifacts import ControlStateFile, ControlVectorFile
+from frequensolve.imaging._artifacts import (
+    ControlStateFile,
+    ControlVectorSetFile,
+)
 from frequensolve.model.parameterization import ParameterizedProperty
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
@@ -65,6 +69,158 @@ def _surrogate(fake, lin):
 # ---------------------------------------------------------------------------
 # construction
 # ---------------------------------------------------------------------------
+
+
+def test_control_gradient_outputs_follow_gradient_jobs_and_views(tmp_path, fake):
+    from frequensolve import vtk
+
+    output = vtk.property_mesh(
+        "vp", source={"kind": "control_gradient", "control": "vp"}
+    )
+    _, problem = _problem(tmp_path, fake, outputs=[output])
+    for view in (
+        problem,
+        problem.restrict(frequencies=[4.0]),
+        problem.with_controls(_space()),
+    ):
+        job = view._linearize_job(view.space, None, gradient=True)
+        job.validate_outputs()
+        payload = job.to_fs()["Outputs"]["ParaView"][0]
+        assert payload["target"] == {"kind": "property_mesh", "space": "vp"}
+        assert payload["source"] == {"kind": "control_gradient", "control": "vp"}
+        value_job = view._linearize_job(view.space, None, gradient=False)
+        assert not value_job.to_fs()["Outputs"].get("ParaView")
+
+    with pytest.raises(ValueError, match="do not specify"):
+        vtk.property_mesh(
+            "vp",
+            properties=["Vp"],
+            source={"kind": "control_gradient", "control": "vp"},
+        ).to_fs()
+
+
+@pytest.mark.parametrize("order", [1, 2, 3, 4])
+def test_spectral_fwi_selection_reaches_every_action(tmp_path, fake, order):
+    selection = {"axis": "fourier", "residual": "derivative", "order": order}
+    _, problem = _problem(
+        tmp_path,
+        fake,
+        kernel_derivative=selection,
+        frequencies=[1.0 - 0.1j, 2.0 - 0.1j],
+    )
+    selection["order"] = 0
+    job = problem._linearize_job(problem.space, None, gradient=True)
+    assert job.to_fs()["kernel_derivative"]["order"] == order
+    assert job.f_list == problem.frequencies
+    for action, inputs in (
+        ("jvp", {"direction": "direction.h5", "objective_vector": "jvp.json"}),
+        ("vjp", {"objective_vector": "dual.json", "covector": "gradient.h5"}),
+        ("normal", {"direction": "direction.h5", "covector": "normal.h5"}),
+    ):
+        job = problem._operator_job(
+            problem.space,
+            action,
+            frequencies=problem.frequencies,
+            state="state.json",
+            **inputs,
+        )
+        assert job.to_fs()["kernel_derivative"]["order"] == order
+    job = problem._linearize_job(
+        problem.space, None, gradient=True, receiver_diagonal={"probes": 16}
+    )
+    assert job.to_fs()["fwi_operator"]["receiver_diagonal"]["probes"] == 16
+
+
+def test_spectral_window_stage_identity_and_control_layout(tmp_path, fake):
+    _, problem = _problem(tmp_path, fake)
+    window = {"axis": "fourier", "residual": "window", "window": [0, 0, 0, 0, 1]}
+    stage = problem.restrict(kernel_derivative=window)
+    assert stage._fingerprint(None) != problem._fingerprint(None)
+    assert stage.restrict(frequencies=[4.0]).kernel_derivative == window
+    assert stage.restrict(kernel_derivative=None).kernel_derivative is None
+    returned = stage.kernel_derivative
+    returned["window"][4] = 9
+    assert stage.kernel_derivative == window
+    _, spectral = _problem(tmp_path, fake, kernel_derivative=window)
+    assert spectral.with_controls(_space()).kernel_derivative == window
+    # A phase comparison selects the windowed traveltime, which needs one plane above the window degree.
+    with pytest.raises(ValueError, match="window degree three at most"):
+        stage.with_misfit(Misfit(comparison="phase_derivative"))
+    total = stage.restrict(kernel_derivative={**window, "source_derivative": "total"})
+    assert (
+        total._linearize_job(total.space, None, gradient=True).kernel_derivative[
+            "source_derivative"
+        ]
+        == "total"
+    )
+    with pytest.raises(ValueError, match="frozen source"):
+        total._operator_job(
+            total.space,
+            "normal",
+            frequencies=total.frequencies,
+            state="state.json",
+            direction="direction.h5",
+            covector="normal.h5",
+        )
+
+
+@pytest.mark.parametrize("action", ["jvp", "normal"])
+def test_first_spectral_action_accepts_total_source_derivative(tmp_path, fake, action):
+    _, problem = _problem(
+        tmp_path,
+        fake,
+        kernel_derivative={
+            "residual": "derivative",
+            "order": 1,
+            "source_derivative": "total",
+        },
+    )
+    outputs = (
+        {"objective_vector": "jvp.json"}
+        if action == "jvp"
+        else {"covector": "normal.h5"}
+    )
+    job = problem._operator_job(
+        problem.space,
+        action,
+        frequencies=problem.frequencies,
+        state="state.json",
+        direction="direction.h5",
+        **outputs,
+    )
+    assert job.to_fs()["kernel_derivative"]["source_derivative"] == "total"
+
+
+def test_spectral_fwi_accepts_physical_shot_trace_store(tmp_path, fake):
+    observed_file = tmp_path / "field_traces.h5"
+    observed = ObservedData(
+        TraceStoreRef(observed_file), source_basis="source_geometry"
+    )
+    _, problem = _problem(
+        tmp_path,
+        fake,
+        observed=observed,
+        kernel_derivative={"axis": "fourier", "residual": "derivative", "order": 4},
+    )
+    job = problem._linearize_job(problem.space, None, gradient=True)
+    group = job.to_fs()["Image"]["misfit"]["receiver_groups"][0]
+    assert group["observed"]["source_basis"] == "source_geometry"
+    assert group["observed"]["file"] == str(observed_file)
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"residual": "derivative", "order": 5},
+        {"residual": "derivative", "order": 1.5},
+        {"residual": "window", "window": [0, float("nan")]},
+        {"residual": "window", "window": [0, 1], "order": 4},
+        {"residual": "jet", "order": 4},
+    ],
+)
+def test_invalid_spectral_fwi_selection(tmp_path, fake, selection):
+    with pytest.raises(ValueError, match="kernel_derivative"):
+        _problem(tmp_path, fake, kernel_derivative=selection)
 
 
 def test_construction_binds_a_renamed_copy_and_leaves_the_simulation_untouched(
@@ -200,6 +356,22 @@ def test_state_vector_and_state_from_round_trip(setup):
 # ---------------------------------------------------------------------------
 # linearize
 # ---------------------------------------------------------------------------
+
+
+def test_receiver_diagonal_uses_frequency_weights_and_refreshes_cache(setup):
+    _, problem = setup
+    previous = problem.linearize()
+    lin = problem.restrict(weights=[0.25, 0.75]).linearize(
+        receiver_diagonal={"probes": 7}
+    )
+    assert lin is not previous
+    assert lin.job.receiver_diagonal["probes"] == 7
+    expected = lin.space.zeros()
+    for task, weight in enumerate(lin.frequency_weights, 1):
+        part = lin.space.ones() * task
+        part.to_file(native=True).write(lin.job.diagonal_file(task))
+        expected = expected + weight * part
+    np.testing.assert_allclose(lin.receiver_diagonal.values, expected.values)
 
 
 def test_linearize_matches_the_surrogate_value_gradient_and_report(setup, fake):
@@ -401,9 +573,9 @@ def test_frozen_dofs_are_dropped_from_vectors_and_expanded_to_sauce_layout(
     np.testing.assert_array_equal(expanded[[1, 4]], 0.0)
     J = lin.jacobian
     np.testing.assert_allclose((J @ dv).values, surrogate.J @ expanded, rtol=1e-12)
-    direction = ControlVectorFile.read(
-        lin.entry.directory / "ops" / "0001" / "direction_1.h5"
-    )
+    direction = ControlVectorSetFile.read(
+        lin.entry.directory / "ops" / "0001" / "directions.h5"
+    ).vector(0)
     np.testing.assert_array_equal(direction.pack(ACTIVE), expanded)
     np.testing.assert_array_equal(direction.support_mask("model.vp"), [1, 0, 1, 1, 0])
     r = lin.data_space.random(2)
@@ -863,11 +1035,13 @@ MECHANISMS = ["source.1.mechanism", "source.2.mechanism"]
 TAYLOR_STEPS = (1.0e-1, 5.0e-2, 2.5e-2)
 
 
-def _mechanism_problem(tmp_path, **options):
+def _mechanism_problem(tmp_path, control_identity=True, **options):
     # s(f) = 2e9 * (5 / f)^2: the tasks at 4 and 6 Hz store mechanisms in
     # different nondimensional units, and neither equals the fake's
     # normalized physical coordinate
-    fake = FakeImagingSite(seed=7, mechanism_reference_frequency=5.0)
+    fake = FakeImagingSite(
+        seed=7, mechanism_reference_frequency=5.0, control_identity=control_identity
+    )
     _sim, problem = _source_problem(
         tmp_path, fake, mechanism=True, signature=False, **options
     )
@@ -952,7 +1126,8 @@ def test_unconverted_mechanism_vectors_fail_the_taylor_test(tmp_path, monkeypatc
     """The bug this conversion fixes: per-task mechanism vectors summed as is.
 
     The dot test cannot see it (J and J^H stay mutually adjoint), but the
-    gradient no longer matches the objective.
+    gradient no longer matches the objective. Per-task direction copies are
+    the older solvers' path; a direction set's ``/scaling`` lets Sauce convert.
     """
 
     monkeypatch.setattr(
@@ -960,7 +1135,7 @@ def test_unconverted_mechanism_vectors_fail_the_taylor_test(tmp_path, monkeypatc
         "_task_factors",
         lambda self, job, space: [{} for _ in range(job.n_tasks)],
     )
-    _fake, problem = _mechanism_problem(tmp_path)
+    _fake, problem = _mechanism_problem(tmp_path, control_identity=False)
 
     report = problem.check(seed=5, steps=TAYLOR_STEPS)
 
@@ -1007,7 +1182,14 @@ def test_mechanism_reference_scale_is_fixed_across_stages_and_layouts(tmp_path):
 
     # a layout change keeps s_ref, even when the new problem's own
     # discovery runs in a 6 Hz stage
-    finer = problem.with_controls({"vp": DepthProfile("vp", "sediment", count=6)})
+    before = len(fake.jobs)
+    finer = problem.with_controls(
+        {"vp": DepthProfile("vp", "sediment", count=6)},
+        discovery_frequencies=[6.0],
+    )
+    # These specs are already resolved, so no discovery solve is needed.
+    assert len(fake.jobs) == before
+    assert finer.frequencies == problem.frequencies
     assert finer.mechanism_scaling == s_ref
     finer.restrict(frequencies=[6.0]).linearize(gradient=False)
     assert finer.mechanism_scaling == s_ref
@@ -1217,3 +1399,69 @@ def test_volume_injection_mechanism_keeps_volumetric_units(tmp_path, fake):
     points = installed.acquisition.source_geometry.sources
     assert points[0].amplitude == {"value": 1.0, "units": "m^3/s"}
     assert points[1].amplitude == {"value": 2.0, "units": "m^3/s"}
+
+
+def test_identity_sees_large_trace_weights_and_source_delay(tmp_path, fake):
+    from frequensolve.imaging.misfit import Preprocess
+
+    _, problem = _problem(tmp_path, fake)
+    many = 300  # above the 256-entry inline limit of Preprocess.trace_weight
+    base = Misfit.l2(preprocess=[Preprocess.trace_weight(np.ones(many))])
+    other = Misfit.l2(
+        preprocess=[Preprocess.trace_weight(np.r_[np.ones(many - 1), 0.5])]
+    )
+    a = problem.restrict(misfit=base)
+    b = problem.restrict(misfit=other)
+    # Identical weights hash alike; the fingerprint carries a digest, not a repr.
+    assert a._fingerprint(None) == problem.restrict(misfit=base)._fingerprint(None)
+    assert a._fingerprint(None) != b._fingerprint(None)
+    assert "weights" in json.dumps(a.identity())
+
+    # The same holds for the shared problem's own identity.
+    _, big = _problem(tmp_path, fake, misfit=base)
+    _, big_other = _problem(tmp_path, fake, misfit=other)
+    assert big.identity()["misfit"] != big_other.identity()["misfit"]
+    assert not isinstance(big.identity()["misfit"], str)
+
+
+def test_windowed_phase_selection_reaches_the_job(tmp_path, fake):
+    from frequensolve.imaging import Comparison
+
+    window = {"residual": "window", "window": [0.0, 1.0], "source_derivative": "frozen"}
+    misfit = Misfit(comparison=Comparison.phase_derivative(source_derivative="frozen"))
+    observed = ObservedData(
+        {"surface": tmp_path / "observed.h5"},
+        derivatives={"df": tmp_path / "observed.h5"},
+    )
+    _, problem = _problem(
+        tmp_path, fake, misfit=misfit, observed=observed, kernel_derivative=window
+    )
+    payload = problem._linearize_job(problem.space, None, gradient=True).to_fs()
+    assert payload["kernel_derivative"]["window"] == [0.0, 1.0]
+    terms = payload["Image"]["misfit"]["objective_terms"]
+    assert [t["comparison"]["kind"] for t in terms] == ["phase_derivative"]
+
+
+@pytest.mark.parametrize(
+    "selection, message",
+    [
+        ({"residual": "window", "window": [0, 1], "axis": "laplace"}, "fourier axis"),
+        ({"residual": "window", "window": [0, 0, 0, 0, 1]}, "degree three"),
+    ],
+)
+def test_invalid_windowed_phase_selection(tmp_path, fake, selection, message):
+    from frequensolve.imaging import Comparison
+
+    misfit = Misfit(comparison=Comparison.phase_derivative())
+    observed = ObservedData(
+        {"surface": tmp_path / "observed.h5"},
+        derivatives={"df": tmp_path / "observed.h5"},
+    )
+    with pytest.raises(ValueError, match=message):
+        _problem(
+            tmp_path,
+            fake,
+            misfit=misfit,
+            observed=observed,
+            kernel_derivative=selection,
+        )

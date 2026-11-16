@@ -1,0 +1,19 @@
+{
+  "version": "frequency-layout-sizing.v1",
+  "layout": {
+    "partition": "cpu",
+    "node_type": "fake.arm",
+    "nodes": 2,
+    "ranks_per_node": 2,
+    "cpus_per_rank": 8
+  },
+  "complete": true,
+  "memory_scope": "rank-local-resident-estimate",
+  "native_safety_applied": true,
+  "rank_memory_bytes": [
+    10737418240,
+    32212254720,
+    21474836480,
+    42949672960
+  ]
+}

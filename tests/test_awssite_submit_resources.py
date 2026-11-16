@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("boto3")
 
-from frequensolve.orchestrator.sites.aws.aws import AWSSite
+from frequensolve.orchestrator.sites.aws.aws import AWSSite, AWSSiteConfig
 from frequensolve.orchestrator.sites.aws.execution_profile import (
     ManagedExecutionProfile,
 )
@@ -14,26 +14,19 @@ from frequensolve.orchestrator.sites.aws.execution_profile import (
 class FakeGraphQLClient:
     def __init__(self):
         self.submit_calls = []
-        self.compute_stack_checks = 0
-        self.compute_mode = "shared"
-        self.compute_stack_exists = True
-        self.compute_deployments = 0
-        self.compute_waits = []
+        self.resolve_calls = []
 
-    def get_compute_provisioning_mode(self):
-        return self.compute_mode
+    def resolve_compute_cluster(self, **kwargs):
+        self.resolve_calls.append(kwargs)
+        return {
+            "executionSiteId": "frequensol-shared-us-east-1",
+            "executionIdentity": "a" * 64,
+        }
 
-    def _check_compute_stack_exists(self):
-        self.compute_stack_checks += 1
-        return self.compute_stack_exists
-
-    def deploy_compute_stack(self):
-        self.compute_deployments += 1
-        return {"stackId": "legacy-compute-stack"}
-
-    def wait_for_stack_ready(self, stack_type, expected_stack_id=None):
-        self.compute_waits.append((stack_type, expected_stack_id))
-        return {"stackId": expected_stack_id, "status": "CREATE_COMPLETE"}
+    def execute(self, query, variables=None):
+        assert query == "query CloudConnectivity { __typename }"
+        assert variables is None
+        return {"__typename": "Query"}
 
     def submit_job(self, **kwargs):
         self.submit_calls.append(kwargs)
@@ -51,11 +44,18 @@ class FakeJob:
             _project=SimpleNamespace(name="project-a", pretty_name="Project A"),
         )
         self._job_id = None
+        self.outputs = SimpleNamespace()
+        self.f_list = [10.0]
+
+    @property
+    def _result_path(self):
+        return self.project_path / "jobs" / self.name / "results"
 
     def is_run_current(self):
         return False
 
-    def save_for_remote(self, site_name, project):
+    def save_for_remote(self, site_name, project, *, include_job_id=True):
+        assert include_job_id is False
         assert site_name == "AWSSite"
         assert project == "project-a"
         return "local-job.json", "project-a/jobs/job.json"
@@ -68,6 +68,7 @@ class FakeJob:
 
 def make_graphql_site():
     site = AWSSite.__new__(AWSSite)
+    site.config = AWSSiteConfig(api_url="https://synthetic.invalid/graphql")
     site.graphql_client = FakeGraphQLClient()
     site.execution_profile = ManagedExecutionProfile.from_mapping({})
     site.prepare_job = lambda job, sync_project=False, validate=True: None
@@ -86,6 +87,38 @@ def make_graphql_site():
         )
     )
     return site
+
+
+def test_expired_staging_failure_never_admits_or_resubmits(tmp_path):
+    from unittest.mock import Mock
+
+    from botocore.exceptions import ClientError
+
+    site = make_graphql_site()
+    job = FakeJob()
+    source = tmp_path / "job.json"
+    source.write_text("{}")
+    job.save_for_remote = lambda *args, **kwargs: (source, "project-a/jobs/job.json")
+    site._prepare_run_snapshot = lambda job: None
+    site.sync_s3 = AWSSite.sync_s3.__get__(site)
+    site.cognito_auth = object()
+    site.s3_client = SimpleNamespace(
+        upload_file=Mock(
+            side_effect=ClientError(
+                {"Error": {"Code": "ExpiredToken", "Message": "synthetic-private"}},
+                "PutObject",
+            )
+        )
+    )
+    site._refresh_s3_credentials = Mock()
+
+    with pytest.raises(RuntimeError):
+        site.submit(job)
+
+    assert site.s3_client.upload_file.call_count == 2
+    site._refresh_s3_credentials.assert_called_once_with()
+    assert site.graphql_client.submit_calls == []
+    assert job._job_id is None
 
 
 def test_aws_cli_environment_replaces_credentials_and_removes_profiles(
@@ -117,75 +150,77 @@ def test_aws_cli_environment_replaces_credentials_and_removes_profiles(
     assert "HPC_PASSWORD" not in environment
 
 
-def test_graphql_submit_preserves_backend_resource_defaults_when_omitted():
+def test_graphql_submit_defers_implicit_default_to_cloud():
     site = make_graphql_site()
-    job = FakeJob()
-
-    site.submit(job)
-
-    assert site.graphql_client.submit_calls[0]["vcpu"] is None
-    assert site.graphql_client.submit_calls[0]["memory"] is None
-    assert site.graphql_client.submit_calls[0]["project_name"] == "project-a"
-    assert site.graphql_client.submit_calls[0]["project_display_name"] == "Project A"
-    assert site.graphql_client.submit_calls[0]["simulation_name"] == "model"
-    assert site.graphql_client.submit_calls[0]["simulation_job_name"] == "demo-job"
-    assert site.graphql_client.compute_stack_checks == 0
-    assert "execution_backend" not in site.graphql_client.submit_calls[0]
+    site.submit(FakeJob())
+    submitted = site.graphql_client.submit_calls[0]
+    assert "cluster_id" not in submitted
+    assert submitted["expected_compute_identity"] == "a" * 64
+    assert site.graphql_client.resolve_calls == [
+        {
+            "cluster_id": None,
+            "partition": None,
+            "allow_unverified_compute": None,
+            "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
+        }
+    ]
+    assert submitted["execution_resources"] == {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 3600,
+    }
+    assert "vcpu" not in submitted and "memory" not in submitted
+    assert submitted["project_name"] == "project-a"
+    assert submitted["project_display_name"] == "Project A"
+    assert submitted["simulation_name"] == "model"
+    assert submitted["simulation_job_name"] == "demo-job"
 
 
 def test_graphql_submit_uses_only_the_named_managed_slurm_shape():
     site = make_graphql_site()
     site.execution_profile = ManagedExecutionProfile.from_mapping(
         {
-            "execution_backend": "slurm",
-            "slurm_partition": "cpu-efa",
-            "slurm_nodes": 2,
-            "slurm_ranks_per_node": 4,
-            "slurm_wall_time": "00-00:30:00",
+            "cluster_id": "frequensol-shared-us-east-1",
+            "execution_resources": {
+                "nodes": 2,
+                "mpi_ranks": 8,
+                "wall_time_seconds": 1800,
+            },
         }
     )
-    job = FakeJob()
-
-    run = site.submit(job)
-
-    assert site.graphql_client.submit_calls[0] == {
-        "job_file_s3_key": "project-a/jobs/job.json",
-        "vcpu": None,
-        "memory": None,
-        "job_name": site.graphql_client.submit_calls[0]["job_name"],
-        "project_name": "project-a",
-        "project_display_name": "Project A",
-        "simulation_name": "model",
-        "simulation_job_name": "demo-job",
-        "send_simulation_status_email": None,
-        "fresh": False,
-        "execution_backend": "slurm",
-        "slurm_partition": "cpu-efa",
-        "slurm_nodes": 2,
-        "slurm_ranks_per_node": 4,
-        "slurm_wall_time_seconds": 1800,
+    run = site.submit(FakeJob())
+    submitted = site.graphql_client.submit_calls[0]
+    assert submitted["execution_resources"] == {
+        "nodes": 2,
+        "mpiRanks": 8,
+        "wallTimeSeconds": 1800,
     }
-    assert run.backend["executionBackend"] == "slurm"
+    assert submitted["cluster_id"] == "frequensol-shared-us-east-1"
+    assert run.backend["executionSiteId"] == "frequensol-shared-us-east-1"
+    assert run.backend["requestedResources"] == submitted["execution_resources"]
 
 
 def test_graphql_submit_supports_right_sized_single_node_profile():
     site = make_graphql_site()
     site.execution_profile = ManagedExecutionProfile.from_mapping(
         {
-            "execution_backend": "slurm",
-            "slurm_partition": "cpu-single",
-            "slurm_nodes": 1,
-            "slurm_ranks_per_node": 1,
-            "slurm_wall_time": "00-00:30:00",
+            "execution_resources": {
+                "nodes": 1,
+                "mpi_ranks": 1,
+                "wall_time_seconds": 1800,
+                "cpu": 8,
+                "memory_mib": 16384,
+            }
         }
     )
-
     site.submit(FakeJob())
-
-    submitted = site.graphql_client.submit_calls[0]
-    assert submitted["slurm_partition"] == "cpu-single"
-    assert submitted["slurm_nodes"] == 1
-    assert submitted["slurm_ranks_per_node"] == 1
+    assert site.graphql_client.submit_calls[0]["execution_resources"] == {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 1800,
+        "cpu": 8,
+        "memoryMiB": 16384,
+    }
 
 
 def test_submit_rejects_managed_execution_overrides():
@@ -202,6 +237,13 @@ def test_graphql_submit_current_job_fetches_once_when_waited():
     site.fetch_outputs = lambda job: fetch_calls.append(job)
     job = FakeJob()
     job.is_run_current = lambda: True
+    job._job_id = "previous-run"
+    job._cloud_result_run_id = "previous-run"
+    site.graphql_client.get_simulation_status_details = lambda _: {
+        "status": "SUCCEEDED",
+        "executionSiteId": "frequensol-shared-us-east-1",
+        "executionRegistrationFingerprint": "a" * 64,
+    }
     job.write_run_state = lambda **kwargs: None
 
     run = site.submit(job, fetch=True)
@@ -272,7 +314,7 @@ def test_graphql_submit_recovers_saved_project_metadata_for_loaded_job(tmp_path)
         f"{project}/simulations/model/model.json",
     )
     job.remote_input_files = lambda project: []
-    job.save_for_remote = lambda site_name, project: (
+    job.save_for_remote = lambda site_name, project, **kwargs: (
         "local-job.json",
         f"{project}/jobs/job.json",
     )
@@ -324,7 +366,18 @@ def test_poll_run_keeps_billing_separate_from_success(billing_status):
     assert run.backend == billing
 
 
-@pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "CANCELED"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        "SUCCEEDED",
+        "COMPLETED",
+        "FAILED",
+        "CANCELED",
+        "CANCELLED",
+        "completed",
+        "cancelled",
+    ],
+)
 def test_cancel_job_treats_terminal_states_as_idempotent(status):
     site = AWSSite.__new__(AWSSite)
     site.graphql_client = SimpleNamespace(
@@ -334,18 +387,17 @@ def test_cancel_job_treats_terminal_states_as_idempotent(status):
     assert site.cancel_job("private-simulation-id") is None
 
 
-def test_cancel_job_running_state_has_actionable_sdk_boundary_without_id():
+@pytest.mark.parametrize("status", ["PENDING", "RUNNING"])
+def test_cancel_job_requests_cloud_cancellation(status):
+    calls = []
     site = AWSSite.__new__(AWSSite)
     site.graphql_client = SimpleNamespace(
-        get_simulation_status=lambda simulation_id: "RUNNING"
+        get_simulation_status=lambda simulation_id: status,
+        cancel_simulation=calls.append,
     )
 
-    with pytest.raises(NotImplementedError) as exc_info:
-        site.cancel_job("private-simulation-id")
-
-    diagnostic = str(exc_info.value)
-    assert "Cancel it through the Cloud application" in diagnostic
-    assert "private-simulation-id" not in diagnostic
+    assert site.cancel_job("simulation-1") is None
+    assert calls == ["simulation-1"]
 
 
 def test_cancel_job_sanitizes_status_lookup_failure():
@@ -358,7 +410,9 @@ def test_cancel_job_sanitizes_status_lookup_failure():
 
     site.graphql_client = SimpleNamespace(get_simulation_status=fail_status)
 
-    with pytest.raises(RuntimeError, match="confirming Cloud connectivity") as exc_info:
+    with pytest.raises(
+        RuntimeError, match="Cloud access and configuration"
+    ) as exc_info:
         site.cancel_job("private-simulation-id")
 
     diagnostic = str(exc_info.value)
@@ -366,50 +420,32 @@ def test_cancel_job_sanitizes_status_lookup_failure():
         assert secret not in diagnostic
 
 
-def test_graphql_submit_checks_legacy_per_user_compute_stack():
+def test_graphql_submit_never_checks_or_provisions_compute():
     site = make_graphql_site()
-    site.graphql_client.compute_mode = "per-user"
 
+    def unexpected(*args, **kwargs):
+        pytest.fail("Submission must not inspect or provision compute")
+
+    site.graphql_client.get_compute_provisioning_mode = unexpected
+    site.graphql_client._check_compute_stack_exists = unexpected
+    site.graphql_client.deploy_compute_stack = unexpected
     site.submit(FakeJob())
-
-    assert site.graphql_client.compute_stack_checks == 1
-
-
-def test_graphql_submit_provisions_missing_legacy_per_user_compute_stack():
-    site = make_graphql_site()
-    site.graphql_client.compute_mode = "per-user"
-    site.graphql_client.compute_stack_exists = False
-
-    site.submit(FakeJob())
-
-    assert site.graphql_client.compute_deployments == 1
-    assert site.graphql_client.compute_waits == [("compute", "legacy-compute-stack")]
     assert len(site.graphql_client.submit_calls) == 1
 
 
-def test_graphql_submit_fails_closed_when_compute_capability_is_unknown():
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"vcpu": 8},
+        {"memory": 16384},
+        {"execution_backend": "batch"},
+    ],
+)
+def test_graphql_submit_rejects_resource_overrides(options):
     site = make_graphql_site()
-
-    def fail_capability_probe():
-        raise RuntimeError("introspection unavailable")
-
-    site.graphql_client.get_compute_provisioning_mode = fail_capability_probe
-
-    with pytest.raises(RuntimeError, match="Failed to determine whether"):
-        site.submit(FakeJob())
-
+    with pytest.raises(ValueError, match="named site.toml profile"):
+        site.submit(FakeJob(), **options)
     assert site.graphql_client.submit_calls == []
-    assert site.graphql_client.compute_stack_checks == 0
-
-
-def test_graphql_submit_sends_explicit_resource_overrides():
-    site = make_graphql_site()
-    job = FakeJob()
-
-    site.submit(job, vcpu=8, memory=16384)
-
-    assert site.graphql_client.submit_calls[0]["vcpu"] == 8
-    assert site.graphql_client.submit_calls[0]["memory"] == 16384
 
 
 @pytest.mark.parametrize("skip", [False, "false"])
@@ -431,7 +467,7 @@ def test_submit_requires_the_current_authenticated_graphql_contract():
         site.submit(job)
 
 
-def test_connectivity_uses_the_same_graphql_capability_probe_as_submission():
+def test_connectivity_queries_authenticated_api():
     site = make_graphql_site()
 
     assert site.test_api_connectivity() is True
@@ -444,25 +480,269 @@ def test_connectivity_returns_false_without_graphql_authentication():
     assert site.test_api_connectivity() is False
 
 
-def test_connectivity_returns_false_when_capability_probe_fails():
+def test_connectivity_returns_false_when_api_probe_fails():
     site = make_graphql_site()
 
-    def fail_capability_probe():
+    def fail_api_probe(*args):
         raise RuntimeError("request timed out")
 
-    site.graphql_client.get_compute_provisioning_mode = fail_capability_probe
+    site.graphql_client.execute = fail_api_probe
 
     assert site.test_api_connectivity() is False
 
 
-def test_legacy_status_entry_point_uses_graphql_details():
+@pytest.mark.parametrize("initial_status", ["PENDING", "RUNNING"])
+@pytest.mark.parametrize(
+    "final_status",
+    ["SUCCEEDED", "completed", "FAILED", "CANCELED", "cancelled", "RUNNING", None],
+)
+def test_cancel_job_reconciles_race_once(initial_status, final_status):
+    from frequensolve.orchestrator.sites.aws.graphql_client import CloudAPIError
+
+    calls = []
+    statuses = iter([initial_status, final_status])
+    rejection = CloudAPIError("Cloud rejected cancellation")
+
+    def status(simulation_id):
+        calls.append(("status", simulation_id))
+        value = next(statuses)
+        if value is None:
+            raise RuntimeError("private-status-error")
+        return value
+
+    def cancel(simulation_id):
+        calls.append(("cancel", simulation_id))
+        raise rejection
+
+    site = AWSSite.__new__(AWSSite)
+    site.graphql_client = SimpleNamespace(
+        get_simulation_status=status, cancel_simulation=cancel
+    )
+    if final_status in {"RUNNING", None}:
+        with pytest.raises(CloudAPIError) as error:
+            site.cancel_job("simulation-1")
+        assert error.value is rejection
+    else:
+        assert site.cancel_job("simulation-1") is None
+    assert calls == [
+        ("status", "simulation-1"),
+        ("cancel", "simulation-1"),
+        ("status", "simulation-1"),
+    ]
+
+
+@pytest.mark.parametrize("location", ["project-images", "outside-project"])
+def test_invalid_imaging_path_is_rejected_before_remote_admission(tmp_path, location):
+    from frequensolve.imaging import ImageKernelJob
+
     site = make_graphql_site()
-    site.graphql_client.get_simulation_status_details = lambda simulation_id: {
-        "id": simulation_id,
-        "status": "RUNNING",
+    job = object.__new__(ImageKernelJob)
+    job.__dict__.update(FakeJob().__dict__)
+    job.name = "demo-job"
+    job.simulation.project_path = tmp_path / "project-a"
+    job.save_path = (
+        job.project_path / "images"
+        if location == "project-images"
+        else tmp_path / "elsewhere"
+    )
+    job.is_run_current = lambda: False
+    job.save_for_remote = lambda *_, **kwargs: (
+        "local-job.json",
+        "project-a/jobs/job.json",
+    )
+
+    with pytest.raises(RuntimeError, match="imaging output path.*inside"):
+        site.submit(job, validate=False)
+    assert site.graphql_client.submit_calls == []
+    assert job._job_id is None
+
+
+def test_submission_freezes_result_state_before_the_remote_call():
+    site = make_graphql_site()
+    job = FakeJob()
+    job.simulation.extra = {"coordinates": [1.0, 2.0]}
+    submit = site.graphql_client.submit_job
+
+    def mutate_after_admission(**kwargs):
+        job.simulation.extra["coordinates"][0] = 99.0
+        return submit(**kwargs)
+
+    site.graphql_client.submit_job = mutate_after_admission
+    run = site.submit(job)
+    assert run.job.simulation.extra == {"coordinates": [1.0, 2.0]}
+    assert job.simulation.extra == {"coordinates": [99.0, 2.0]}
+    assert run.job.simulation._project is job.simulation._project
+
+
+def test_cpu_sharing_is_per_submission_and_does_not_mutate_site():
+    site = make_graphql_site()
+    enabled = site.submit(FakeJob(), allow_cpu_sharing=True)
+    site.submit(FakeJob())
+    site.submit(FakeJob(), allow_cpu_sharing=False)
+    calls = site.graphql_client.submit_calls
+    assert calls[0]["execution_resources"]["allowCpuSharing"] is True
+    assert enabled.backend["requestedResources"]["allowCpuSharing"] is True
+    assert all(
+        "allowCpuSharing" not in call["execution_resources"] for call in calls[1:]
+    )
+    assert (
+        "allowCpuSharing"
+        not in site.execution_profile.graphql_arguments()["execution_resources"]
+    )
+
+
+@pytest.mark.parametrize("value", [1, 2, "true", None])
+def test_cpu_sharing_rejects_nonboolean_before_submission(value):
+    site = make_graphql_site()
+    with pytest.raises(ValueError, match="boolean"):
+        site.submit(FakeJob(), allow_cpu_sharing=value)
+    assert not site.graphql_client.submit_calls
+
+
+def test_cpu_sharing_rejects_distributed_profile():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {"execution_resources": {"nodes": 2, "mpi_ranks": 2, "wall_time_seconds": 600}}
+    )
+    with pytest.raises(ValueError, match="single-node"):
+        site.submit(FakeJob(), allow_cpu_sharing=True)
+    assert not site.graphql_client.submit_calls
+
+
+def test_strict_retry_requests_latest_source_and_does_not_skip_locally_current_job():
+    site = make_graphql_site()
+    job = FakeJob()
+    job.is_run_current = lambda: True
+    site.submit(job, retry=True)
+    assert site.graphql_client.submit_calls[0]["retry"] is True
+    assert site.graphql_client.submit_calls[0]["fresh"] is False
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"retry": "true"},
+        {"retry": True, "force": True},
+        {"retry": True, "skip": False},
+    ],
+)
+def test_invalid_retry_options_fail_before_staging(options):
+    site = make_graphql_site()
+    with pytest.raises(ValueError):
+        site.submit(FakeJob(), **options)
+    assert not site.graphql_client.submit_calls
+
+
+def test_submit_cluster_override_wins_over_configured_selection():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {"cluster_id": "configured"}
+    )
+    site.submit(FakeJob(), cluster_id="override")
+    assert site.graphql_client.resolve_calls[0]["cluster_id"] == "override"
+    assert site.graphql_client.submit_calls[0]["cluster_id"] == "override"
+
+
+def test_cloud_resolution_failure_happens_before_staging_or_cache_reuse():
+    site = make_graphql_site()
+
+    def denied(**kwargs):
+        raise RuntimeError("Access removed")
+
+    site.graphql_client.resolve_compute_cluster = denied
+    job = FakeJob()
+    job.is_run_current = lambda: True
+    with pytest.raises(RuntimeError, match="Access removed"):
+        site.submit(job, cluster_id="research")
+    assert site.graphql_client.submit_calls == []
+
+
+def test_matching_local_outputs_cannot_reuse_a_different_registered_site():
+    site = make_graphql_site()
+    site.graphql_client.get_simulation_status_details = lambda _: {
+        "executionSiteId": "other-site",
+        "executionRegistrationFingerprint": "b" * 64,
+        "status": "SUCCEEDED",
     }
+    job = FakeJob()
+    job._job_id = "previous-run"
+    job.is_run_current = lambda: True
+    site.submit(job)
+    assert len(site.graphql_client.submit_calls) == 1
 
-    with pytest.deprecated_call(match="get_job_status_from_api"):
-        status = site.get_job_status_from_api("simulation-1")
 
-    assert status == {"id": "simulation-1", "status": "RUNNING"}
+def test_cluster_selector_validation_and_cloud_default():
+    assert ManagedExecutionProfile.from_mapping({}).cluster_id is None
+    assert (
+        ManagedExecutionProfile.from_mapping(
+            {"cluster_id": "research"}
+        ).graphql_arguments()["cluster_id"]
+        == "research"
+    )
+    for value in ["", "Upper", "-a", "a" * 65, "managed-batch", 1]:
+        with pytest.raises(ValueError, match="cluster_id"):
+            ManagedExecutionProfile.from_mapping({"cluster_id": value})
+    with pytest.raises(ValueError):
+        ManagedExecutionProfile.from_mapping({"compute_profile": "research"})
+
+
+@pytest.mark.parametrize("value", ["", None, "Upper", "managed-batch", 1])
+def test_invalid_cluster_override_fails_before_resolution(value):
+    site = make_graphql_site()
+    with pytest.raises(ValueError, match="cluster_id"):
+        site.submit(FakeJob(), cluster_id=value)
+    assert site.graphql_client.resolve_calls == []
+    assert site.graphql_client.submit_calls == []
+
+
+def test_removed_compute_profile_option_is_rejected():
+    site = make_graphql_site()
+    with pytest.raises(ValueError, match="Unsupported managed submission options"):
+        site.submit(FakeJob(), compute_profile="research")
+    assert site.graphql_client.submit_calls == []
+
+
+def test_compute_selectors_merge_independently_and_false_overrides_true():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {
+            "cluster_id": "research-cluster",
+            "partition": "configured",
+            "allow_unverified_compute": True,
+        }
+    )
+    site.submit(FakeJob(), partition="verified", allow_unverified_compute=False)
+    resolved = site.graphql_client.resolve_calls[0]
+    submitted = site.graphql_client.submit_calls[0]
+    for args in (resolved, submitted):
+        assert args["cluster_id"] == "research-cluster"
+        assert args["partition"] == "verified"
+        assert args["allow_unverified_compute"] is False
+
+
+def test_submission_override_can_use_configured_partition():
+    site = make_graphql_site()
+    site.execution_profile = ManagedExecutionProfile.from_mapping(
+        {"partition": "lab-mpi"}
+    )
+    site.submit(FakeJob(), cluster_id="another-cluster", allow_unverified_compute=True)
+    assert site.graphql_client.submit_calls[0]["partition"] == "lab-mpi"
+    assert site.graphql_client.submit_calls[0]["allow_unverified_compute"] is True
+    assert site.graphql_client.submit_calls[0]["cluster_id"] == "another-cluster"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"allow_unverified_compute": True},
+        {"allow_unverified_compute": "true"},
+        {"partition": "cpu;injected"},
+        {"execution_site_id": "old-cluster"},
+    ],
+)
+def test_invalid_compute_selection_fails_before_cloud_or_upload(kwargs):
+    site = make_graphql_site()
+    with pytest.raises(ValueError):
+        site.submit(FakeJob(), **kwargs)
+    assert not site.graphql_client.resolve_calls
+    assert not site.graphql_client.submit_calls

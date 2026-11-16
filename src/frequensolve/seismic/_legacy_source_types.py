@@ -140,5 +140,5 @@ class SourceGroup:
     def _path(self) -> Path:
         warn_deprecated_path_api(f"{self.__class__.__name__}._path")
         if self._proj_path is None or self._rel_path is None:
-            raise ValueError("Source path requires a project and relative path")
+            raise ValueError("SourceGroup path has not been configured")
         return self._proj_path / self._rel_path

@@ -5,7 +5,19 @@ from __future__ import annotations
 import copy
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from numbers import Integral
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+    overload,
+)
 
 import numpy as np
 
@@ -22,7 +34,11 @@ from frequensolve.seismic.sources import (
     SourceEncoding,
     SourceGeometry,
 )
-from frequensolve.seismic.sparse_survey import ReceiverSampling, SparseSurvey
+from frequensolve.seismic.sparse_survey import (
+    ReceiverSampling,
+    SparseSurvey,
+    SparseTrace,
+)
 from frequensolve.util.mixins import (
     ExportContext,
     ExtraFieldsMixin,
@@ -32,7 +48,16 @@ from frequensolve.util.named_list import NamedList
 
 __all__ = ["Acquisition"]
 
-_SOURCE_KINDS = {"scalar", "vector", "tensor", "monopole", "dipole", "volume_injection"}
+_SOURCE_KINDS = {
+    "scalar",
+    "vector",
+    "tensor",
+    "monopole",
+    "dipole",
+    "volume_injection",
+    "pressure_monopole",
+    "isotropic_moment",
+}
 
 
 def _coerce_source_geometry(value: Any) -> Optional[SourceGeometry]:
@@ -73,7 +98,7 @@ def _coerce_boundary_loadings(value: Optional[Any]) -> List[Any]:
         return []
     if isinstance(value, (SurfacePressureLoading, Mapping)):
         value = [value]
-    result = []
+    result: List[Any] = []
     for loading in value:
         if isinstance(loading, SurfacePressureLoading):
             result.append(loading)
@@ -267,7 +292,7 @@ class Acquisition(ExtraFieldsMixin):
 
     def to_fs(
         self,
-        ctx=None,
+        ctx: Optional[ExportContext] = None,
         *,
         boundary_loadings: Optional[Sequence[Any]] = None,
     ) -> Dict:
@@ -285,6 +310,8 @@ class Acquisition(ExtraFieldsMixin):
             *self.boundary_loadings,
             *_coerce_boundary_loadings(boundary_loadings),
         ]
+        for group in self.receiver_groups:
+            group.resolve_expressions(ctx)
         self._validate_export_contract(all_boundary_loadings)
 
         ctx = ctx or ExportContext()
@@ -304,13 +331,17 @@ class Acquisition(ExtraFieldsMixin):
         if self.source_signature is not None:
             if self.source_geometry is None:
                 raise ValueError("source_signature requires physical source_geometry")
-            payload["source_signature"] = (
-                self.source_signature.to_fs(
-                    ctx, source_count=self.source_geometry.point_count
+            if isinstance(self.source_signature, SourceSignature):
+                source_count = self.source_geometry.point_count
+                if source_count is None:
+                    raise ValueError(
+                        "Source signatures require a known positive int32 source count"
+                    )
+                payload["source_signature"] = self.source_signature.to_fs(
+                    ctx, source_count=source_count
                 )
-                if isinstance(self.source_signature, SourceSignature)
-                else copy.deepcopy(dict(self.source_signature))
-            )
+            else:
+                payload["source_signature"] = copy.deepcopy(dict(self.source_signature))
         if self.source_encoding is not None:
             payload["source_encoding"] = self.source_encoding.to_fs(ctx)
         if all_boundary_loadings:
@@ -360,6 +391,29 @@ class Acquisition(ExtraFieldsMixin):
         loadings = list(
             self.boundary_loadings if boundary_loadings is None else boundary_loadings
         )
+        selected = self.extra.get("active_sources")
+        if selected is not None:
+            count = self.known_source_field_count()
+            if self.source_encoding is not None or loadings:
+                raise ValueError(
+                    "Active source selection requires physical point shots"
+                )
+            if (
+                not isinstance(selected, (list, tuple))
+                or not selected
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, Integral)
+                    or int(value) < 1
+                    or (count is not None and int(value) > count)
+                    for value in selected
+                )
+            ):
+                raise ValueError(
+                    "active_sources requires nonempty valid physical source IDs"
+                )
+            if len(set(selected)) != len(selected):
+                raise ValueError("Active source IDs must be unique")
         for loading in loadings:
             if not _loading_boundary_name(loading):
                 raise ValueError(
@@ -732,16 +786,16 @@ class Acquisition(ExtraFieldsMixin):
         name: str,
         device: ReceiverDevice,
         coords: np.ndarray,
-        domain: Optional[int] = None,
-        **kwargs,
-    ):
+        domain: Optional[Union[int, str]] = None,
+        **kwargs: Any,
+    ) -> ReceiverGroup:
         """Add a receiver group with common device and coordinates.
 
         Args:
             name: Receiver group name.
-            device: Device defining receiver type and components.
+            device: ReceiverDevice, physical expression, or mapping of named expressions.
             coords: Receiver coordinate array or coordinate object.
-            domain: Optional domain where the receiver group is evaluated.
+            domain: Optional mesh block ID or exact material layer name.
             **kwargs: Additional solver-facing receiver group fields.
 
         Returns:
@@ -818,7 +872,12 @@ class Acquisition(ExtraFieldsMixin):
             self.surveys.append(survey)
         return survey
 
-    def add_sparse_survey(self, name: str, traces=None, **kwargs) -> SparseSurvey:
+    def add_sparse_survey(
+        self,
+        name: str,
+        traces: Optional[Iterable[Union[SparseTrace, Mapping[str, Any]]]] = None,
+        **kwargs: Any,
+    ) -> SparseSurvey:
         """Create and add a named inline sparse survey.
 
         Args:
@@ -839,7 +898,7 @@ class Acquisition(ExtraFieldsMixin):
         coords: np.ndarray,
         survey: Optional[Union[str, SparseSurvey, Dict]] = None,
         domain: Optional[int] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> ReceiverGroup:
         """Add a receiver group that samples traces from a named sparse survey.
 
@@ -953,7 +1012,15 @@ class Acquisition(ExtraFieldsMixin):
 
         return self.receiver_groups[name]
 
-    def receiver_coords(self, group: Optional[str] = None):
+    @overload
+    def receiver_coords(self, group: None = None) -> Dict[str, np.ndarray]: ...
+
+    @overload
+    def receiver_coords(self, group: str) -> np.ndarray: ...
+
+    def receiver_coords(
+        self, group: Optional[str] = None
+    ) -> Union[Dict[str, np.ndarray], np.ndarray]:
         """Return receiver coordinates.
 
         Args:
@@ -962,18 +1029,28 @@ class Acquisition(ExtraFieldsMixin):
         """
         if group is None:
             group_locations = {}
-            for group in self.receiver_groups:
-                group_locations[group.name] = group.coordinates.get()
+            for receiver in self.receiver_groups:
+                group_locations[receiver.name] = receiver.coordinates.get()
             return group_locations
         else:
             return self.receiver_groups[group].coordinates.get()
+
+    @overload
+    def source_coords(
+        self, src: Optional[int] = None, *, preserve_metadata: Literal[False] = False
+    ) -> np.ndarray: ...
+
+    @overload
+    def source_coords(
+        self, src: Optional[int] = None, *, preserve_metadata: bool
+    ) -> object: ...
 
     def source_coords(
         self,
         src: Optional[int] = None,
         *,
         preserve_metadata: bool = False,
-    ):
+    ) -> object:
         """Return source-field reference coordinates.
 
         Args:
@@ -982,6 +1059,7 @@ class Acquisition(ExtraFieldsMixin):
                 metadata instead of only numeric values. When all coordinates
                 are requested, this returns a list of coordinate values.
         """
+        coords: Union[np.ndarray, List[Any]]
         if self.source_geometry is None:
             coords = [] if preserve_metadata else np.empty((0, 0), dtype=float)
         elif self.source_encoding is None:
@@ -1003,16 +1081,40 @@ class Acquisition(ExtraFieldsMixin):
             raise IndexError(f"Source index {src} is out of range.")
         return coords[index - 1]
 
-    def offsets(self, src: int, group: str) -> Dict:
-        """Return horizontal source-field/receiver offsets.
+    def offsets(self, src: int, group: str) -> np.ndarray:
+        """Return unsigned horizontal source-field/receiver offsets.
+
+        Coordinates must already share Cartesian axes and numeric length units;
+        this helper does not convert units or transform coordinate systems.
+        The final coordinate is depth: ``[x, z]`` in 2D, ``[x, y, z]`` in 3D.
+        Encoded sources use their source-field reference coordinate.
 
         Args:
             src: One-based source index.
             group: Receiver group name.
+
+        Returns:
+            One distance per receiver, in the input coordinate units.
+
+        Raises:
+            ValueError: If source and receiver dimensions do not match or are
+                neither two nor three.
         """
-        diff = self.receiver_coords(group) - self.source_coords(src)
-        offsets = np.hypot(diff[:, 0], diff[:, 1])
-        return offsets
+        receivers = self.receiver_coords(group)
+        source = self.source_coords(src)
+        if (
+            receivers.ndim != 2
+            or source.ndim != 1
+            or source.size not in (2, 3)
+            or receivers.shape[1] != source.size
+        ):
+            raise ValueError(
+                "Offsets require matching 2D or 3D source/receiver coordinates"
+            )
+        diff = receivers - source
+        if source.size == 2:
+            return np.abs(diff[:, 0])
+        return np.hypot(diff[:, 0], diff[:, 1])
 
     def _survey_component_maps(self) -> Dict[str, Dict[str, int]]:
         maps: Dict[str, Dict[str, int]] = {}

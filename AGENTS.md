@@ -124,6 +124,23 @@ Use one primary type label: `type:bug`, `type:feature`, `type:enhancement`,
 For agent-created issues, add `source:agent` when available and include enough
 context for a future agent to reproduce the problem without relying on chat.
 
+## Numerical tolerances
+
+Use relative tolerance `1e-4` by default for iterative solvers, smoothers,
+regularization/proximal solves, and similar numerical routines, not only TV.
+This tolerance rarely needs to change; most seismic imaging problems do not
+need tighter solver accuracy. Transient linear solves default to `1e-3` for
+both Newmark and Gauss. Preserve explicit user-selected tolerances.
+
+For very hard problems or tasks that require unusually high accuracy, a smaller
+tolerance may be justified. Explain the need and verify the downstream benefit
+before tightening it; difficulty alone is not a reason to demand a smaller
+residual. For single-precision solves, keep the relative tolerance strictly
+above `1e-7`. Do not copy stringent diagnostic/test tolerances into production
+settings or tighten tolerances merely as a precaution. Choose absolute
+tolerances according to residual scaling and units; they are not interchangeable
+with relative tolerances.
+
 ## Development Setup
 
 Install the editable package with the extras needed for the task:
@@ -219,41 +236,12 @@ validator.
 └── Makefile                # common test/reference-image entrypoints
 ```
 
-## PR Review Follow-Up
+## Pull request validation
 
-When you create or update a PR, handle only the first
-`chatgpt-codex-connector` review round unless the user explicitly asks for a
-deeper review cycle. The first round is the first connector review, top-level
-connector comment, or clean connector result that appears after the PR is opened,
-marked ready, or manually requested with `@codex review`.
-
-1. After opening the PR or marking it ready, wait for the first
-   `chatgpt-codex-connector` review or comment. If no result appears within 30
-   minutes, do a final thread-aware readback and document the timeout instead of
-   assuming the PR is settled.
-2. Inspect unresolved review threads and top-level PR comments. Treat comments
-   from `chatgpt-codex-connector` as review feedback that must be evaluated
-   against the codebase, not accepted blindly.
-3. For each first-round review comment, choose one of two outcomes:
-   - If a code or docs change is warranted, patch the existing PR branch, run
-     the relevant verification, push, and reply in the review thread when
-     appropriate.
-   - If the suggestion should not be implemented, leave a concise PR comment
-     explaining the technical reason and resolve the thread when appropriate.
-4. After pushing first-round fixes, comment `@codex review` once and wait until
-   the bot reacts with the eyes emoji so you know the review request was picked
-   up. Allow up to 30 minutes for pickup before treating the follow-up request
-   as timed out.
-5. Do not enter a second implementation cycle by default. If the connector
-   leaves more feedback after first-round fixes, summarize the new feedback in
-   the PR or worklog and hand it off unless the user explicitly asks you to keep
-   going. For obvious security, data-loss, billing, or tenant-isolation risks,
-   flag the risk prominently in the handoff.
-6. Do not mark the PR handoff complete while first-round bot feedback remains
-   unaddressed. "Addressed" means either implemented with verification, or
-   explicitly answered with a technical reason for not changing the code. Later
-   connector feedback is follow-up work unless the user opts into another review
-   round.
+Run the relevant local checks and required CI before handing off or merging a
+pull request. Address actionable review feedback and preserve any required
+human approvals. Do not automatically request, trigger, or wait for Codex PR
+reviews; use that service only when the user explicitly requests it for the PR.
 
 ## Safety Rules
 

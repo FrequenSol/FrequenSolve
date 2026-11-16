@@ -28,6 +28,7 @@ CONTRACT_ROOT = (
 )
 JOB_SCHEMA = CONTRACT_ROOT / "inputs" / "fs-job-1" / "schema.json"
 JOB_EXAMPLES = CONTRACT_ROOT / "inputs" / "fs-job-1" / "examples"
+BACKGROUND_EXAMPLES = CONTRACT_ROOT / "outputs" / "fs-background-state-2" / "examples"
 
 
 def _job_validator() -> Draft202012Validator:
@@ -93,6 +94,148 @@ def _saved_simulation(tmp_path, name="controlled"):
     return simulation
 
 
+def test_background_checkpoint_roundtrip_and_recursive_staging(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "capture",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["vp"],
+        state="state.json",
+        background="background.json",
+    )
+    loaded = BaseJob.load(linearize.save())
+    assert loaded.background == linearize.background
+    _assert_valid(loaded.to_fs())
+    manifest = linearize.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    shard = manifest.with_name("rank_0.json")
+    field = manifest.with_name("field.h5")
+    field.write_bytes(b"native-checkpoint-fixture")
+    shard.write_text(
+        json.dumps(
+            {"schema": "fs-background-shard-1", "shards": {"0": {"file": field.name}}}
+        )
+    )
+    manifest.write_text(
+        json.dumps(
+            {"schema": "fs-background-state-1", "shards": {"0": {"file": shard.name}}}
+        )
+    )
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction-fixture")
+    action = FWIOperatorJob(
+        "reuse",
+        sim,
+        [3.0],
+        action="normal",
+        active=["vp"],
+        state=state,
+        direction=direction,
+        covector="normal.h5",
+        background=manifest,
+    )
+    loaded = BaseJob.load(action.save())
+    assert loaded.background == manifest
+    pairs = loaded.remote_input_files("/remote/project")
+    local = {Path(pair[0]) for pair in pairs}
+    assert {manifest, shard, field} <= local
+    # A cache already resident on the execution site need not be downloaded.
+    field.unlink()
+    pairs = loaded.remote_input_files("/remote/project")
+    assert {manifest, shard} <= {Path(pair[0]) for pair in pairs}
+
+
+@pytest.mark.parametrize("layout", ["rank", "shared"])
+def test_version2_background_layout_roundtrip_and_staging(tmp_path, layout):
+    sim = _saved_simulation(tmp_path)
+    linearize = FWIOperatorJob(
+        "capture",
+        sim,
+        [3.0],
+        action="linearize",
+        active=["vp"],
+        state="state.json",
+        background="background.json",
+        background_layout=layout,
+    )
+    loaded = BaseJob.load(linearize.save())
+    assert loaded.background_layout == layout
+    assert _assert_valid(loaded.to_fs())["fwi_operator"]["background_layout"] == layout
+    # Sauce's published manifest names one file per rank or one shared file.
+    example = BACKGROUND_EXAMPLES / f"{layout}.json"
+    payload = json.loads(example.read_text())
+    manifest = linearize.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(example.read_text())
+    files = [manifest.parent / entry["file"] for entry in payload.get("shards", [])]
+    files = files or [manifest.parent / payload["file"]]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"native-checkpoint-fixture")
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    direction = tmp_path / "direction.h5"
+    direction.write_bytes(b"direction-fixture")
+    action = FWIOperatorJob(
+        "reuse",
+        sim,
+        [3.0],
+        action="normal",
+        active=["vp"],
+        state=state,
+        direction=direction,
+        covector="normal.h5",
+        background=manifest,
+    )
+    pairs = BaseJob.load(action.save()).remote_input_files("/remote/project")
+    assert {manifest, *files} <= {Path(pair[0]) for pair in pairs}
+
+
+def test_background_layout_requires_a_linearize_capture(tmp_path):
+    sim = _saved_simulation(tmp_path)
+    options = dict(action="linearize", active=["vp"], state="state.json")
+    with pytest.raises(ValueError, match="'rank' or 'shared', not 'striped'"):
+        FWIOperatorJob(
+            "bad",
+            sim,
+            [3.0],
+            background="background.json",
+            background_layout="striped",
+            **options,
+        )
+    with pytest.raises(ValueError, match="requires a linearize background"):
+        FWIOperatorJob("bad", sim, [3.0], background_layout="shared", **options)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {
+            "kernel_derivative": {
+                "axis": "fourier",
+                "order": 1,
+                "residual": "derivative",
+            }
+        },
+        {"source_controls": {"location_method": "analytic"}},
+    ],
+)
+def test_background_rejects_unsupported_actions(tmp_path, extra):
+    with pytest.raises(ValueError, match="background reuse"):
+        FWIOperatorJob(
+            "bad",
+            _saved_simulation(tmp_path),
+            [3.0],
+            action="linearize",
+            background="background.json",
+            **extra,
+        )
+
+
 def _elastic_simulation(tmp_path):
     sim = SeismicSimulation(
         name="smooth", physics="elastic", dimension=2, project_path=tmp_path
@@ -126,6 +269,95 @@ def _round_trip(job):
         json.dumps(before, default=str)
     )
     return loaded
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"probes": 32, "seed": 17}, {"probes": 4, "source_samples": 16, "seed": 7}],
+)
+def test_receiver_diagonal_contract(tmp_path, options):
+    job = FWIOperatorJob(
+        "probes",
+        _saved_simulation(tmp_path),
+        [1.0, 2.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+        covector="gradient.h5",
+        receiver_diagonal=options,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["receiver_diagonal"].get("probes") == options.get(
+        "probes"
+    )
+    assert job.diagonal_file(2).name == "receiver_diagonal_2.h5"
+    _round_trip(job)
+
+
+def test_receiver_blocks_contract_and_round_trip(tmp_path):
+    job = FWIOperatorJob(
+        "blocks",
+        _saved_simulation(tmp_path),
+        [1.0, 2.0],
+        action="linearize",
+        active=["model.vp", "model.rho"],
+        state="state.json",
+        covector="gradient.h5",
+        receiver_diagonal={
+            "probes": 4,
+            "source_samples": 16,
+            "blocks": {"controls": ["model.vp", "rho"]},
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["receiver_diagonal"]["blocks"]["controls"] == [
+        "vp",
+        "rho",
+    ]
+    assert job.receiver_blocks_file(2).name == "receiver_blocks_2.h5"
+    loaded = _round_trip(job)
+    assert loaded.receiver_diagonal == job.receiver_diagonal
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"probes": 0},
+        {"probes": 1.5},
+        {"probes": True},
+        {"seed": 2**40},
+        {"wrong": 1},
+        {"source_samples": 0},
+        {"source_samples": 1.5},
+        {"source_samples": True},
+    ],
+)
+def test_receiver_diagonal_rejects_invalid_options(tmp_path, options):
+    with pytest.raises(ValueError):
+        FWIOperatorJob(
+            "probes",
+            _saved_simulation(tmp_path),
+            [1.0],
+            action="linearize",
+            state="state.json",
+            active=["model.vp"],
+            receiver_diagonal=options,
+        )
+
+
+def test_wri_diagonal_contract(tmp_path):
+    job = FWIOperatorJob(
+        "wri_diagonal",
+        _saved_simulation(tmp_path),
+        [1.0],
+        action="wri",
+        covector="gradient.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0, "diagonal": "diagonal.h5"},
+    )
+    _assert_valid(job.to_fs())
+    assert job.diagonal_file(1).name == "diagonal_1.h5"
+    _round_trip(job)
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +396,10 @@ def test_fwi_linearize_matches_pinned_example_shape(tmp_path):
     expected.pop("model_gradient")  # false is the default; not emitted
     expected.pop("cache_receiver_state")  # true is the default; not emitted
     assert _shape(payload["fwi_operator"]) == expected
-    assert payload["control_sensitivities"] == example["control_sensitivities"]
+    assert payload["control_sensitivities"] == {
+        **example["control_sensitivities"],
+        "quadrature": "auto",
+    }
     assert payload["Imaging"] == {}
     assert payload["workflow"] == "fwi_operator"
     assert "Image" not in payload
@@ -293,6 +528,41 @@ def test_fwi_vjp_normal_and_calibrate_payloads(tmp_path):
     assert loaded.misfit == calibrate.misfit
 
 
+@pytest.mark.parametrize("gram", ["frozen", "total"])
+def test_windowed_wri_round_trip(tmp_path, gram):
+    job = FWIOperatorJob(
+        "windowed_wri",
+        _saved_simulation(tmp_path),
+        [1.0 - 0.2j, 3.0 - 0.2j],
+        action="wri",
+        covector="g.h5",
+        wri={"penalty": 10.0},
+        gram_derivative=gram,
+        kernel_derivative={
+            "axis": "fourier",
+            "residual": "window",
+            "window": [0, 0, 0, 0, 1],
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["kernel_derivative"]["window"] == [0, 0, 0, 0, 1]
+    _round_trip(job)
+
+
+@pytest.mark.parametrize("options", [{"formulation": "original"}, {"diagonal": "d.h5"}])
+def test_windowed_wri_rejects_unmatched_formulation_and_curvature(tmp_path, options):
+    with pytest.raises(ValueError, match="WRI"):
+        FWIOperatorJob(
+            "invalid_wri",
+            _saved_simulation(tmp_path),
+            [3.0],
+            action="wri",
+            covector="g.h5",
+            wri={"penalty": 10.0, **options},
+            kernel_derivative={"residual": "derivative", "order": 4},
+        )
+
+
 def test_fwi_wri_payloads_match_pinned_examples(tmp_path):
     sim = _saved_simulation(tmp_path)
     wri = FWIOperatorJob(
@@ -309,8 +579,34 @@ def test_fwi_wri_payloads_match_pinned_examples(tmp_path):
     payload = _assert_valid(wri.to_fs())
     example = _example("fwi-operator-wri.json")
     assert _shape(payload["fwi_operator"]) == example["fwi_operator"]
-    assert payload["control_sensitivities"] == example["control_sensitivities"]
+    assert payload["control_sensitivities"] == {
+        **example["control_sensitivities"],
+        "quadrature": "auto",
+    }
     _round_trip(wri)
+
+    calibration = FWIOperatorJob(
+        "observed_energy",
+        sim,
+        [4.0],
+        action="wri",
+        objective="scale.h5",
+        wri={"penalty": 10.0, "normalization_only": True},
+    )
+    _assert_valid(calibration.to_fs())
+    _round_trip(calibration)
+    for divisor in ("observed_energy", "none", 1e-15):
+        calibrated = FWIOperatorJob(
+            "normalized_wri",
+            sim,
+            [4.0],
+            action="wri",
+            covector="g.h5",
+            objective="objective.h5",
+            wri={"penalty": 10.0, "objective_normalization": divisor},
+        )
+        _assert_valid(calibrated.to_fs())
+        _round_trip(calibrated)
 
     schur = FWIOperatorJob(
         "wri_schur_normal",
@@ -332,7 +628,10 @@ def test_fwi_wri_payloads_match_pinned_examples(tmp_path):
     payload = _assert_valid(schur.to_fs())
     example = _example("fwi-operator-wri-normal.json")
     assert _shape(payload["fwi_operator"]) == example["fwi_operator"]
-    assert payload["control_sensitivities"] == example["control_sensitivities"]
+    assert payload["control_sensitivities"] == {
+        **example["control_sensitivities"],
+        "quadrature": "auto",
+    }
     loaded = _round_trip(schur)
     assert loaded.direction == tmp_path / "direction.h5"
     assert loaded.covector.name == "wri_normal.h5"
@@ -346,7 +645,40 @@ def test_fwi_wri_payloads_match_pinned_examples(tmp_path):
         wri={"penalty": 10.0, "receiver_groups": ["pressure", "motion"]},
     )
     payload = _assert_valid(groups.to_fs())
-    assert payload["control_sensitivities"] == {}
+    assert payload["control_sensitivities"] == {"quadrature": "auto"}
+
+
+@pytest.mark.parametrize("formulation", [None, "centered", "original"])
+def test_wri_formulation_round_trip(tmp_path, formulation):
+    options = {"penalty": 10.0}
+    if formulation is not None:
+        options["formulation"] = formulation
+    job = FWIOperatorJob(
+        "wri",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="wri",
+        covector="g.h5",
+        wri=options,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["wri"].get("formulation", "centered") == (
+        formulation or "centered"
+    )
+    assert _round_trip(job).wri == job.wri
+
+
+@pytest.mark.parametrize("formulation", ["condensed", "", None, False, {}])
+def test_wri_rejects_invalid_formulation(tmp_path, formulation):
+    with pytest.raises(ValueError, match="formulation must be centered or original"):
+        FWIOperatorJob(
+            "wri",
+            _saved_simulation(tmp_path),
+            [4.0],
+            action="wri",
+            covector="g.h5",
+            wri={"penalty": 10.0, "formulation": formulation},
+        )
 
 
 def test_fwi_extension_payloads_match_pinned_examples(tmp_path):
@@ -539,7 +871,7 @@ def test_fwi_kernel_derivative_emits_both_imaging_keys(tmp_path):
             "order": 2,
             "axis": "laplace",
             "residual": "window",
-            "window": [0.0, 1.0],
+            "window": [0.0, 0.0, 1.0],
         },
     )
     payload = _assert_valid(job.to_fs())
@@ -547,7 +879,7 @@ def test_fwi_kernel_derivative_emits_both_imaging_keys(tmp_path):
         "order": 2,
         "axis": "laplace",
         "residual": "window",
-        "window": [0.0, 1.0],
+        "window": [0.0, 0.0, 1.0],
     }
     assert (
         payload["Image"]
@@ -578,6 +910,42 @@ def test_fwi_kernel_derivative_emits_both_imaging_keys(tmp_path):
         )
 
 
+@pytest.mark.parametrize("action", ["jvp", "normal"])
+def test_fwi_total_source_higher_order_tangents_need_phase(tmp_path, action):
+    sim = _saved_simulation(tmp_path)
+    kernel = {
+        "axis": "fourier",
+        "residual": "window",
+        "window": [0.0, 0.0, 0.0, 1.0],
+        "source_derivative": "total",
+    }
+    outputs = (
+        {"objective_vector": "vector.json"}
+        if action == "jvp"
+        else {"covector": "normal.h5"}
+    )
+
+    def job(kind):
+        return FWIOperatorJob(
+            action,
+            sim,
+            [13.0],
+            action=action,
+            active=["vs"],
+            state="s.json",
+            direction="d.h5",
+            misfit={"comparison": {"kind": kind, "source_derivative": "total"}},
+            kernel_derivative=kernel,
+            **outputs,
+        )
+
+    # A windowed phase mixes its total-source planes from frozen ones at any order.
+    assert job("phase_derivative").kernel_derivative["source_derivative"] == "total"
+    assert job("wavenumber").kernel_derivative["source_derivative"] == "total"
+    with pytest.raises(ValueError, match="waveform series require a frozen source"):
+        job("waveform")
+
+
 def test_fwi_smoothing_binds_the_smooth_postprocess_to_covector_parts(tmp_path):
     sim = _saved_simulation(tmp_path)
     job = FWIOperatorJob(
@@ -593,6 +961,7 @@ def test_fwi_smoothing_binds_the_smooth_postprocess_to_covector_parts(tmp_path):
     )
     payload = _assert_valid(job.to_fs())
     assert payload["control_sensitivities"] == {
+        "quadrature": "auto",
         "active": ["vp", "rho"],
         "gradient": str(job.covector),
         "Smoothing": {
@@ -803,9 +1172,9 @@ def test_fwi_support_keys_are_emitted_under_controls_only_when_set(tmp_path):
                 "action": "wri",
                 "covector": "c",
                 "direction": "d",
-                "wri": {"penalty": 1.0},
+                "wri": {"penalty": 1.0, "diagonal": "diagonal.h5"},
             },
-            "curvature",
+            "direction excludes",
         ),
         (
             {"action": "wri", "covector": "c", "state": "s", "wri": {"penalty": 1.0}},
@@ -1206,6 +1575,157 @@ def test_fwi_vjp_fingerprint_hashes_per_task_objective_duals(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_control_gradient_exports_independent_spectral_orders(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    job = ControlGradientJob(
+        "orders",
+        sim,
+        [1.0 - 0.05j],
+        kind="rtm",
+        observed="observed.h5",
+        gradient="gradient.h5",
+        objective_file="objective.h5",
+        kernel_derivative={
+            "order": 4,
+            "residual": "derivative",
+            "export_lower_orders": True,
+        },
+    )
+    payload = _assert_valid(job.to_fs())
+    loaded = ControlGradientJob.from_fs(payload)
+    assert loaded.derivative_orders == (0, 1, 2, 3, 4)
+    assert loaded.trace_outputs.groups == [
+        "surface",
+        "surface_df",
+        "surface_d2f",
+        "surface_d3f",
+        "surface_d4f",
+    ]
+    assert any(
+        component.startswith("surface_d4f:")
+        for component in loaded.trace_outputs.components
+    )
+    assert loaded.gradient_file(derivative_order=4) == loaded.gradient_file()
+    assert loaded.gradient_file(2, derivative_order=0).name == "gradient_d0_2.h5"
+    assert loaded.objective_file(2, derivative_order=3).name == "objective_d3_2.h5"
+    assert (
+        loaded.gradient_file(raw=True, derivative_order=2).name == "gradient_d2_raw.h5"
+    )
+    assert len(loaded.postprocess_fetch_files()) == 15
+    assert not loaded.postprocess_output_exists()
+    assert not loaded.postprocess_part_outputs_exist()
+    for order in loaded.derivative_orders:
+        for path in (
+            loaded.gradient_file(derivative_order=order),
+            loaded.objective_file(derivative_order=order),
+            loaded.gradient_file(1, derivative_order=order),
+            loaded.objective_file(1, derivative_order=order),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+    assert loaded.postprocess_output_exists()
+    assert loaded.postprocess_part_outputs_exist()
+    loaded.gradient_file(1, derivative_order=2).unlink()
+    assert not loaded.postprocess_part_outputs_exist()
+    with pytest.raises(ValueError, match="not exported"):
+        loaded.gradient_file(derivative_order=5)
+    with pytest.raises(ValueError, match="ControlGradientJob"):
+        FWIOperatorJob(
+            "bad_orders",
+            sim,
+            [1.0],
+            action="linearize",
+            covector="gradient.h5",
+            kernel_derivative=job.kernel_derivative,
+        )
+
+
+def test_control_gradient_spectral_receiver_diagonals(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    job = ControlGradientJob(
+        "probes",
+        sim,
+        [1 - 0.1j, 2 - 0.1j],
+        kind="rtm",
+        observed="observed.h5",
+        gradient="gradient.h5",
+        kernel_derivative={
+            "order": 4,
+            "residual": "derivative",
+            "export_lower_orders": True,
+        },
+        receiver_diagonal={"probes": 16, "seed": 7},
+        weights=[0.3, 0.7],
+    )
+    payload = _assert_valid(job.to_fs())
+    loaded = ControlGradientJob.from_fs(payload)
+    assert loaded.receiver_diagonal == job.receiver_diagonal
+    assert (
+        loaded.diagonal_file(2, derivative_order=3).name == "receiver_diagonal_d3_2.h5"
+    )
+    assert loaded.diagonal_file(derivative_order=4) == loaded.diagonal_file()
+    assert len(loaded.postprocess_fetch_files()) == 15
+    for order in loaded.derivative_orders:
+        for path in (
+            loaded.gradient_file(derivative_order=order),
+            loaded.diagonal_file(derivative_order=order),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        for task in (1, 2):
+            loaded.gradient_file(task, derivative_order=order).touch()
+            loaded.diagonal_file(task, derivative_order=order).touch()
+    assert (
+        loaded.postprocess_output_exists() and loaded.postprocess_part_outputs_exist()
+    )
+    loaded.diagonal_file(2, derivative_order=1).unlink()
+    assert not loaded.postprocess_part_outputs_exist()
+    loaded.diagonal_file(derivative_order=2).unlink()
+    assert not loaded.postprocess_output_exists()
+    with pytest.raises(ValueError, match="not exported"):
+        loaded.diagonal_file(derivative_order=5)
+    operator = FWIOperatorJob(
+        "linearize",
+        sim,
+        [1 - 0.1j],
+        action="linearize",
+        covector="g.h5",
+        active=["model.vp"],
+        state="state.json",
+        kernel_derivative={"order": 4, "residual": "derivative"},
+        receiver_diagonal={},
+    )
+    _assert_valid(operator.to_fs())
+    with pytest.raises(ValueError, match="h5 extension"):
+        ControlGradientJob(
+            "bad_diagonal",
+            sim,
+            [1],
+            kind="rtm",
+            observed="data.h5",
+            gradient="g.h5",
+            kernel_derivative={"order": 4, "residual": "derivative"},
+            receiver_diagonal={"output": "diagonal.txt"},
+        )
+
+
+@pytest.mark.parametrize(
+    "kernel", [None, {"order": 4, "residual": "window", "window": [1, 0, 0, 0, 1]}]
+)
+def test_spectral_receiver_diagonal_rejects_unsupported_residual(tmp_path, kernel):
+    with pytest.raises(ValueError, match="spectral derivative"):
+        ControlGradientJob(
+            "bad",
+            _elastic_simulation(tmp_path),
+            [1],
+            kind="rtm",
+            observed="data.h5",
+            gradient="g.h5",
+            kernel_derivative=kernel,
+            receiver_diagonal={},
+        )
+
+
 def test_control_gradient_rtm_serializes_and_round_trips(tmp_path):
     sim = _saved_simulation(tmp_path)
     observed = tmp_path / "observed.h5"
@@ -1239,6 +1759,7 @@ def test_control_gradient_rtm_serializes_and_round_trips(tmp_path):
     assert payload["workflow"] == "rtm"
     assert payload["f_list"] == [[3.0, -0.5], [5.0, 0.0]]
     assert payload["control_sensitivities"] == {
+        "quadrature": "auto",
         "gradient": str(gradient),
         "objective": str(job.objective_file()),
         "active": ["salt_boundary_rbf", "sediment_sp"],
@@ -1369,6 +1890,7 @@ def test_control_gradient_born_serializes_incremental_traces(tmp_path):
     payload = _assert_valid(job.to_fs())
     assert payload["workflow"] == "born"
     assert payload["control_sensitivities"] == {
+        "quadrature": "auto",
         "direction": str(direction),
         "active": ["vp"],
         "spatial_window": {
@@ -1391,35 +1913,183 @@ def test_control_gradient_born_serializes_incremental_traces(tmp_path):
     assert loaded.observed is None
 
 
-def test_control_gradient_focus_matches_pinned_examples(tmp_path):
+def test_control_gradient_spectral_born_writes_series_planes(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    direction = tmp_path / "controls" / "direction.h5"
+    window = {"axis": "fourier", "residual": "window", "window": [1.0, 0.0, 20.0]}
+    job = ControlGradientJob(
+        "born",
+        sim,
+        [8.0 - 0.1j],
+        kind="born",
+        direction=direction,
+        kernel_derivative=window,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["workflow"] == "born"
+    assert payload["kernel_derivative"] == window
+    assert payload["control_sensitivities"]["direction"] == str(direction)
+    assert "Imaging" not in payload and "Image" not in payload
+    # Born planes with a nonzero series weight: orders zero and two of the window.
+    assert job.trace_outputs.groups == ["surface_inc", "surface_inc_d2f"]
+    assert job.trace_outputs.components == ["surface_inc:vz", "surface_inc_d2f:vz"]
+    assert not job.requires_postprocess()
+    assert _round_trip(job).kernel_derivative == window
+
+    derivative = ControlGradientJob(
+        "born_ds",
+        sim,
+        [8.0 - 0.1j],
+        kind="born",
+        direction=direction,
+        kernel_derivative={"axis": "laplace", "residual": "derivative", "order": 1},
+    )
+    assert derivative.trace_outputs.groups == ["surface_inc_ds"]
+
+
+def test_control_gradient_spectral_lsrtm_gradient(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    kernel = {"axis": "fourier", "residual": "derivative", "order": 3}
+    job = ControlGradientJob(
+        "lsrtm",
+        sim,
+        [2.5],
+        kind="lsrtm_gradient",
+        direction="direction.h5",
+        observed="observed.h5",
+        gradient="g.h5",
+        objective_file="objective.h5",
+        kernel_derivative=kernel,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["workflow"] == "lsrtm_gradient"
+    sensitivities = payload["control_sensitivities"]
+    assert Path(sensitivities["direction"]).name == "direction.h5"
+    assert Path(sensitivities["gradient"]).name == "g.h5"
+    assert Path(sensitivities["objective"]).name == "objective.h5"
+    assert payload["Image"] == payload["Imaging"]
+    assert payload["kernel_derivative"] == kernel
+    assert job.requires_postprocess()
+    assert job.derivative_orders == (3,)
+    # Base order zero is always sampled; the series order carries the Born plane.
+    assert job.trace_outputs.groups == ["surface", "surface_d3f", "surface_inc_d3f"]
+    assert job.trace_outputs.components == [
+        "surface:vz",
+        "surface_d3f:vz",
+        "surface_inc_d3f:vz",
+    ]
+    loaded = _round_trip(job)
+    assert loaded.kind == "lsrtm_gradient"
+    assert loaded.kernel_derivative == kernel
+    assert loaded.direction == job.direction
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+            },
+            "require kernel_derivative",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "observed": "o",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require a direction",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require observed data",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "require a gradient output",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+                "kernel_derivative": {"residual": "jet", "order": 2},
+            },
+            "'jet' is not allowed here",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {"residual": "base"},
+            },
+            "'base' is not allowed here",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {
+                    "residual": "derivative",
+                    "export_lower_orders": True,
+                },
+            },
+            "export_lower_orders requires an rtm",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "gram_derivative": "total",
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "frozen Gram",
+        ),
+        (
+            {
+                "kind": "born",
+                "direction": "d",
+                "kernel_derivative": {
+                    "residual": "derivative",
+                    "order": 2,
+                    "source_derivative": "total",
+                },
+            },
+            "support order one",
+        ),
+        (
+            {
+                "kind": "lsrtm_gradient",
+                "direction": "d",
+                "observed": "o",
+                "gradient": "g",
+                "misfit": {"comparison": {"kind": "phase_derivative"}},
+                "kernel_derivative": {"residual": "derivative"},
+            },
+            "waveform comparisons",
+        ),
+    ],
+)
+def test_control_gradient_spectral_born_validation(tmp_path, kwargs, message):
     sim = _saved_simulation(tmp_path)
-    for name, kind in (("focus-trfwi.json", "trfwi"), ("focus-weft.json", "weft")):
-        example = _example(name)
-        job = ControlGradientJob(
-            example["name"],
-            sim,
-            [3.0, 4.0],
-            kind="focus",
-            observed="observed.h5",
-            gradient=example["control_sensitivities"]["gradient"],
-            objective_file=example["focus"]["objective"],
-            focus={"kind": kind, "softening": 0.12},
-            weights=[1.0, 1.0],
-        )
-        payload = _assert_valid(job.to_fs())
-        assert payload["workflow"] == "focus"
-        assert _shape(payload["focus"]) == example["focus"]
-        assert (
-            _shape(payload["control_sensitivities"])["gradient"]
-            == example["control_sensitivities"]["gradient"]
-        )
-        assert job.objective_file(2).name == example["focus"]["objective"].replace(
-            ".h5", "_2.h5"
-        )
-        assert job.postprocess_fetch_files()[-1] == job.objective_file()
-        loaded = _round_trip(job)
-        assert loaded.focus == {"softening": 0.12, "kind": kind}
-        assert loaded.objective_file() == job.objective_file()
+    with pytest.raises(ValueError, match=message):
+        ControlGradientJob("bad", sim, [3.0], **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -1430,15 +2100,6 @@ def test_control_gradient_focus_matches_pinned_examples(tmp_path):
         (
             {"kind": "rtm", "observed": "o", "gradient": "g", "direction": "d"},
             "do not take a direction",
-        ),
-        (
-            {
-                "kind": "rtm",
-                "observed": "o",
-                "gradient": "g",
-                "focus": {"softening": 1.0},
-            },
-            "kind = 'focus'",
         ),
         (
             {
@@ -1477,62 +2138,7 @@ def test_control_gradient_focus_matches_pinned_examples(tmp_path):
                 "direction": "d",
                 "kernel_derivative": {"residual": "jet"},
             },
-            "do not take",
-        ),
-        (
-            {"kind": "focus", "observed": "o", "gradient": "g", "objective_file": "f"},
-            "require focus",
-        ),
-        (
-            {
-                "kind": "focus",
-                "observed": "o",
-                "gradient": "g",
-                "focus": {"softening": 1.0},
-            },
-            "objective_file",
-        ),
-        (
-            {
-                "kind": "focus",
-                "observed": "o",
-                "gradient": "g",
-                "objective_file": "f",
-                "focus": {"softening": 0.0},
-            },
-            "positive",
-        ),
-        (
-            {
-                "kind": "focus",
-                "observed": "o",
-                "gradient": "g",
-                "objective_file": "f",
-                "focus": {"softening": 1.0, "kind": "beam"},
-            },
-            "focus kind",
-        ),
-        (
-            {
-                "kind": "focus",
-                "observed": "o",
-                "gradient": "g",
-                "objective_file": "f",
-                "focus": {"softening": 1.0},
-                "source_taper": {"d0": 1, "d1": 2},
-            },
-            "source_taper",
-        ),
-        (
-            {
-                "kind": "focus",
-                "observed": "o",
-                "gradient": "g",
-                "objective_file": "f",
-                "focus": {"softening": 1.0},
-                "kernel_derivative": {"residual": "jet"},
-            },
-            "workflow = rtm",
+            "'jet' is not allowed here; choose one of derivative, window",
         ),
         (
             {"kind": "rtm", "observed": "o", "gradient": "g", "active": ["a", "a"]},
@@ -1754,6 +2360,40 @@ def test_image_kernel_born_and_lsrtm_workflows(tmp_path):
     assert _assert_valid(traces_only.to_fs())["Imaging"]["born_traces_only"] is True
 
 
+@pytest.mark.parametrize("workflow", ["born", "lsrtm_gradient"])
+def test_image_kernel_rejects_cartesian_spectral_born(tmp_path, workflow):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    with pytest.raises(ValueError, match="ControlGradientJob"):
+        ImageKernelJob(
+            "bad",
+            sim,
+            [2.5],
+            grid=grid,
+            images={"vp": ("fwi:elastic", "vp")},
+            observed="o",
+            workflow=workflow,
+            zero_direction=True,
+            kernel_derivative={"residual": "window", "window": [1.0, 2.0]},
+        )
+
+
+def test_image_kernel_accepts_base_residual(tmp_path):
+    sim = _elastic_simulation(tmp_path)
+    grid = CartesianGrid(n=[3, 2], x0=[0.0, 0.0], x1=[1.0, 1.0])
+    job = ImageKernelJob(
+        "kernel",
+        sim,
+        [2.5],
+        grid=grid,
+        images={"vp": ("fwi:acoustic", "vp")},
+        kernel_derivative={"order": 2, "axis": "laplace", "residual": "base"},
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["kernel_derivative"]["residual"] == "base"
+    assert _round_trip(job).kernel_derivative == job.kernel_derivative
+
+
 def test_image_kernel_kernel_derivative_emits_image_and_imaging(tmp_path):
     sim = _elastic_simulation(tmp_path)
     grid = CartesianGrid(n=[161, 161], x0=[0, 0], x1=[10, 10], units="km")
@@ -1869,6 +2509,7 @@ def test_smooth_job_wraps_control_gradient_parts(tmp_path):
     assert payload["name"] == "rtm_smooth"
     assert payload["f_list"] == [2.0, 4.0]
     assert payload["control_sensitivities"] == {
+        "quadrature": "auto",
         "gradient": str(source.gradient),
         "active": ["vp"],
         "Smoothing": SmoothingConfig(kind="tv").to_control_fs(),
@@ -2074,7 +2715,11 @@ def test_smooth_job_rejects_sources_without_parts(tmp_path):
         SmoothJob(object(), smoothing={"type": "tv"})
 
 
-def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_path):
+@pytest.mark.parametrize("relative_tolerance", [None, 2e-5])
+@pytest.mark.parametrize("fractional_scales", [None, {"model.vp": 2.5}])
+def test_native_regularization_job_preserves_mesh_identity_and_round_trips(
+    tmp_path, relative_tolerance, fractional_scales
+):
     from frequensolve.imaging.jobs import RegularizationJob
 
     sim = _saved_simulation(tmp_path)
@@ -2095,6 +2740,12 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_p
         smoothing=SmoothingConfig(kind="tv", normalize_amplitude=True),
         input_vector=vector,
         operation="prepare",
+        fractional_scales=fractional_scales,
+        **(
+            {}
+            if relative_tolerance is None
+            else {"relative_tolerance": relative_tolerance}
+        ),
     )
     staged = ControlVectorFile.read(prepare.input_vector, native=True)
     assert staged.control_spaces == {"vp": "mesh-basis"}
@@ -2103,11 +2754,34 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_p
         payload["control_sensitivities"]["Regularization"]["normalize_amplitude"]
         is True
     )
+    expected_tolerance = 1e-4 if relative_tolerance is None else relative_tolerance
+    assert (
+        payload["control_sensitivities"]["Regularization"]["relative_tolerance"]
+        == expected_tolerance
+    )
     loaded = _round_trip(prepare)
+    assert loaded.fractional_scales == (
+        {} if fractional_scales is None else {"vp": 2.5}
+    )
+    assert (
+        payload["control_sensitivities"]["Regularization"].get("fractional_scales", {})
+        == loaded.fractional_scales
+    )
+    assert loaded.relative_tolerance == expected_tolerance
     assert isinstance(loaded, RegularizationJob) and loaded.operation == "prepare"
     assert loaded.context == prepare.context
     assert loaded.postprocess_fetch_files() == prepare.postprocess_fetch_files()
     prepare.context.write_text("{}")
+    for operation in ("gradient", "diagonal", "mass", "mass_inverse", "mass_diagonal"):
+        derivative = RegularizationJob(
+            source,
+            smoothing=SmoothingConfig(kind="tikhonov", alpha=0.1),
+            input_vector=vector,
+            operation=operation,
+            context=prepare.context,
+        )
+        _assert_valid(derivative.to_fs())
+        assert _round_trip(derivative).operation == operation
     prox = RegularizationJob(
         source,
         smoothing=SmoothingConfig(kind="tv"),
@@ -2125,3 +2799,412 @@ def test_native_regularization_job_preserves_mesh_identity_and_round_trips(tmp_p
         assert ControlVectorFile.read(path, native=True).control_spaces == {
             "vp": "mesh-basis"
         }
+
+
+def test_staged_regularization_inputs_are_hashed_once_and_used_in_place(
+    tmp_path, monkeypatch
+):
+    from frequensolve.imaging.jobs import RegularizationJob
+
+    sim = _saved_simulation(tmp_path)
+    source = FWIOperatorJob(
+        "native",
+        sim,
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="s.json",
+        covector="g.h5",
+    )
+    vector = ControlVectorFile(
+        {"model.vp": [1.0, 2.0]}, control_spaces={"model.vp": "mesh-basis"}
+    )
+    context = tmp_path / "context.json"
+    context.write_text("{}")
+    staged = {
+        label: RegularizationJob.stage_input(vector, tmp_path / "stage" / f"{label}.h5")
+        for label in ("metric", "lower", "upper")
+    }
+    # Published in Sauce's native layout; nothing but the final file remains.
+    assert sorted(p.name for p in (tmp_path / "stage").iterdir()) == [
+        "lower.h5",
+        "metric.h5",
+        "upper.h5",
+    ]
+    for path in staged.values():
+        assert ControlVectorFile.read(path, native=True).control_spaces == {
+            "vp": "mesh-basis"
+        }
+        assert RegularizationJob._is_staged(path)
+    hashed = []
+    fingerprint = RegularizationJob._path_content_fingerprint.__func__
+    monkeypatch.setattr(
+        RegularizationJob,
+        "_path_content_fingerprint",
+        classmethod(
+            lambda cls, path: hashed.append(Path(path)) or fingerprint(cls, path)
+        ),
+    )
+
+    def prox(index):
+        return RegularizationJob(
+            source,
+            smoothing=SmoothingConfig(kind="tv"),
+            input_vector=vector,
+            operation="proximal",
+            context=context,
+            name=f"prox{index}",
+            **staged,
+        )
+
+    jobs = [prox(index) for index in range(3)]
+    payloads = [job._input_fingerprint_payload() for job in jobs]
+    for job, payload in zip(jobs, payloads):
+        # Every job references the same files in place: one stable path each.
+        assert job.regularization_inputs == staged
+        request = job.to_fs()["control_sensitivities"]["Regularization"]
+        assert {label: request[label] for label in staged} == {
+            label: str(path) for label, path in staged.items()
+        }
+        assert {label: payload[label] for label in staged} == {
+            label: payloads[0][label] for label in staged
+        }
+    # The fingerprints recorded at staging serve every job: no staged file is
+    # hashed again, only each job's own input vector and context.
+    assert not set(hashed) & set(staged.values())
+    assert len(hashed) == 2 * len(jobs)
+    # A file changed after staging is no longer trusted and is hashed again.
+    ControlVectorFile(
+        {"vp": [3.0, 4.0]}, native=True, control_spaces={"vp": "mesh-basis"}
+    ).write(staged["lower"])
+    assert not RegularizationJob._is_staged(staged["lower"])
+    changed = prox(3)._input_fingerprint_payload()
+    assert changed["lower"] != payloads[0]["lower"]
+    assert changed["metric"] == payloads[0]["metric"]
+    assert staged["lower"] in hashed
+
+
+@pytest.mark.parametrize(
+    "curvature", ["metric_frozen", "exact_gn", "fixed_wavefield", "joint_schur"]
+)
+def test_coupled_wri_contract_export(tmp_path, curvature):
+    sim = SeismicSimulation(
+        name="coupled_wri", physics="coupled", dimension=2, project_path=tmp_path
+    )
+    sim.save()
+    job = FWIOperatorJob(
+        "coupled_wri",
+        sim,
+        [3.0 - 0.2j],
+        action="wri",
+        covector="normal.h5",
+        direction="direction.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0, "curvature": curvature},
+        gram_derivative="frozen",
+        control_active=["fluid_vp", "solid_vp"],
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["fwi_operator"]["wri"]["curvature"] == curvature
+    assert payload["f_list"] == [[3.0, -0.2]]
+    assert _round_trip(job).wri["curvature"] == curvature
+
+
+@pytest.mark.parametrize(
+    "formulation, expected",
+    [("centered", "metric_frozen"), ("original", "joint_schur")],
+)
+def test_wri_default_curvature(tmp_path, formulation, expected):
+    job = FWIOperatorJob(
+        "default_curvature",
+        _saved_simulation(tmp_path),
+        [1.0],
+        action="wri",
+        covector="normal.h5",
+        direction="direction.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0, "formulation": formulation},
+    )
+    assert job.to_fs()["fwi_operator"]["wri"]["curvature"] == expected
+    assert _round_trip(job).wri["curvature"] == expected
+
+
+def test_original_wri_rejects_centered_curvature(tmp_path):
+    with pytest.raises(ValueError, match="requires formulation centered"):
+        FWIOperatorJob(
+            "invalid_curvature",
+            _saved_simulation(tmp_path),
+            [1.0],
+            action="wri",
+            covector="normal.h5",
+            direction="direction.h5",
+            objective="objective.h5",
+            wri={"penalty": 10.0, "formulation": "original", "curvature": "exact_gn"},
+        )
+
+
+@pytest.mark.parametrize(
+    "transfer,length,wavelengths,frequency",
+    [
+        ("nodal", 0.0, None, None),
+        ("l2", 0.0, None, None),
+        ("l2", 125.0, None, None),
+        ("l2", 0.0, 0.1, 3.0),
+        ("l2", 0.0, 0.2, None),
+    ],
+)
+def test_mesh_adaptation_job_preserves_accepted_basis_and_round_trips(
+    tmp_path, transfer, length, wavelengths, frequency
+):
+    from frequensolve.imaging.jobs import MeshAdaptationJob
+
+    source = FWIOperatorJob(
+        "mesh_source",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+        covector="g.h5",
+    )
+    vector = ControlVectorFile(
+        {"model.vp": [0.2, 0.3]}, control_spaces={"model.vp": "accepted-basis"}
+    )
+    job = MeshAdaptationJob(
+        source,
+        input_vector=vector,
+        property_spaces={
+            "vp": {
+                "artifact": str(tmp_path / "stage.h5"),
+                "frequency": 8.0,
+                "epw": [1.0, 2.0],
+            }
+        },
+        source_identity="accepted-state",
+        frequency=8.0,
+        transfer=transfer,
+        smoothing_length=length,
+        smoothing_wavelengths=wavelengths,
+        smoothing_frequency=frequency,
+    )
+    payload = _assert_valid(job.to_fs())
+    request = payload["control_sensitivities"]["MeshAdaptation"]
+    assert request["transfer"] == transfer
+    assert request["smoothing_length_m"] == length
+    assert request["averaging_wavelengths"] == 0.5
+    assert "Smoothing" not in payload["control_sensitivities"]
+    assert ControlVectorFile.read(job.input_vector).control_spaces == {
+        "vp": "accepted-basis"
+    }
+    loaded = _round_trip(job)
+    assert isinstance(loaded, MeshAdaptationJob)
+    assert loaded.property_spaces == job.property_spaces
+    if wavelengths is not None:
+        assert request["smoothing_wavelengths"] == wavelengths
+        assert request["smoothing_frequency_hz"] == (frequency or job.frequency)
+        assert loaded.smoothing_wavelengths == wavelengths
+        assert loaded.smoothing_frequency == (frequency or job.frequency)
+    assert loaded.transfer == transfer
+    assert loaded.smoothing_length == length
+    assert loaded.source_identity == job.source_identity
+    assert loaded.postprocess_fetch_files() == job.postprocess_fetch_files()
+
+
+@pytest.mark.parametrize(
+    "quadrature", ["auto", "wavefield", "material_intersections", "tensor_points"]
+)
+def test_sensitivity_quadrature_round_trip(tmp_path, quadrature):
+    job = FWIOperatorJob(
+        "quadrature",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+        covector="gradient.h5",
+        sensitivity_quadrature=quadrature,
+    )
+    payload = _assert_valid(job.to_fs())
+    assert payload["control_sensitivities"]["quadrature"] == quadrature
+    assert _round_trip(job).sensitivity_quadrature == quadrature
+
+
+@pytest.mark.parametrize("action", ["jvp", "normal", "solve"])
+@pytest.mark.parametrize("quadrature", ["material_intersections", "tensor_points"])
+def test_intersected_quadrature_rejects_non_pullbacks(tmp_path, action, quadrature):
+    with pytest.raises(ValueError, match="supports pullbacks"):
+        FWIOperatorJob(
+            "quadrature",
+            _saved_simulation(tmp_path),
+            [4.0],
+            action=action,
+            sensitivity_quadrature=quadrature,
+        )
+
+
+def test_sensitivity_quadrature_rejects_unknown_policy(tmp_path):
+    with pytest.raises(ValueError, match="sensitivity_quadrature"):
+        FWIOperatorJob(
+            "quadrature",
+            _saved_simulation(tmp_path),
+            [4.0],
+            action="linearize",
+            sensitivity_quadrature="unknown",
+        )
+
+
+@pytest.mark.parametrize("quadrature", ["material_intersections", "tensor_points"])
+def test_rtm_intersection_quadrature_round_trip(tmp_path, quadrature):
+    job = ControlGradientJob(
+        "quadrature",
+        _saved_simulation(tmp_path, quadrature),
+        [4.0],
+        kind="rtm",
+        observed="observed.h5",
+        gradient="gradient.h5",
+        sensitivity_quadrature=quadrature,
+    )
+    assert (
+        _assert_valid(job.to_fs())["control_sensitivities"]["quadrature"] == quadrature
+    )
+    assert _round_trip(job).sensitivity_quadrature == quadrature
+
+
+@pytest.mark.parametrize("quadrature", ["material_intersections", "tensor_points"])
+def test_born_rejects_intersection_pullback_policy(tmp_path, quadrature):
+    with pytest.raises(ValueError, match="requires an RTM pullback"):
+        ControlGradientJob(
+            "quadrature",
+            _saved_simulation(tmp_path, quadrature),
+            [4.0],
+            kind="born",
+            direction="direction.h5",
+            sensitivity_quadrature=quadrature,
+        )
+
+
+@pytest.mark.parametrize("quadrature", ["material_intersections", "tensor_points"])
+def test_intersected_wri_rejects_implicit_curvature(tmp_path, quadrature):
+    with pytest.raises(ValueError, match="does not support curvature"):
+        FWIOperatorJob(
+            "quadrature",
+            _saved_simulation(tmp_path, quadrature),
+            [4.0],
+            action="wri",
+            wri={"penalty": 1.0},
+            direction="direction.h5",
+            covector="gradient.h5",
+            sensitivity_quadrature=quadrature,
+        )
+
+
+def test_sensitivity_quadrature_defaults_to_auto(tmp_path):
+    job = FWIOperatorJob(
+        "default_quadrature",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="linearize",
+        active=["model.vp"],
+        state="state.json",
+        covector="g.h5",
+    )
+    assert job.sensitivity_quadrature == "auto"
+    assert "control_sensitivities" not in _assert_valid(job.to_fs())
+    assert _round_trip(job).sensitivity_quadrature == "auto"
+
+
+def test_sensitivity_quadrature_defaults_keep_wri_curvature_discrete(tmp_path):
+    job = FWIOperatorJob(
+        "curvature_quadrature",
+        _saved_simulation(tmp_path),
+        [4.0],
+        action="wri",
+        covector="g.h5",
+        direction="direction.h5",
+        wri={"penalty": 10.0},
+    )
+    assert job.sensitivity_quadrature == "auto"
+    assert _assert_valid(job.to_fs())["control_sensitivities"]["quadrature"] == "auto"
+
+
+@pytest.mark.parametrize(
+    "quadrature", [None, "auto", "wavefield", "material_intersections", "tensor_points"]
+)
+@pytest.mark.parametrize("spectral", [False, True])
+def test_receiver_diagonal_quadrature_round_trip(tmp_path, quadrature, spectral):
+    options = {} if quadrature is None else {"sensitivity_quadrature": quadrature}
+    simulation = _saved_simulation(tmp_path)
+    if spectral:
+        job = ControlGradientJob(
+            "probe_quadrature",
+            simulation,
+            [4.0],
+            kind="rtm",
+            observed="observed.h5",
+            gradient="gradient.h5",
+            receiver_diagonal={},
+            kernel_derivative={
+                "axis": "fourier",
+                "residual": "derivative",
+                "order": 4,
+                "export_lower_orders": True,
+            },
+            **options,
+        )
+    else:
+        job = FWIOperatorJob(
+            "probe_quadrature",
+            simulation,
+            [4.0],
+            action="linearize",
+            active=["model.vp"],
+            state="state.json",
+            covector="gradient.h5",
+            receiver_diagonal={},
+            **options,
+        )
+    expected = quadrature or "auto"
+    assert job.sensitivity_quadrature == expected
+    payload = _assert_valid(job.to_fs())
+    if quadrature is not None:
+        assert payload["control_sensitivities"]["quadrature"] == expected
+    assert _round_trip(job).sensitivity_quadrature == expected
+
+
+@pytest.mark.parametrize("storage", ["auto", "memory", "disk"])
+def test_spectral_field_storage_roundtrip(tmp_path, storage):
+    from frequensolve.imaging.jobs import _kernel_derivative
+
+    request = {
+        "order": 3,
+        "residual": "derivative",
+        "field_storage": storage,
+        "field_memory_fraction": 0.75,
+    }
+    assert _kernel_derivative(request, residuals=("derivative",)) == request
+    job = FWIOperatorJob(
+        "spectral_storage",
+        _saved_simulation(tmp_path),
+        [1.0],
+        action="linearize",
+        covector="gradient.h5",
+        state="state.json",
+        active=["model.vp"],
+        kernel_derivative=request,
+    )
+    payload = job.to_fs()
+    _assert_valid(payload)
+    assert payload["kernel_derivative"] == request
+    assert _round_trip(job).kernel_derivative == request
+
+    with pytest.raises(ValueError, match="field_storage"):
+        _kernel_derivative(
+            {**request, "field_storage": "invalid"}, residuals=("derivative",)
+        )
+
+    for fraction in (-1, 1.01, float("nan"), float("inf"), True, "0.8"):
+        with pytest.raises(ValueError, match="field_memory_fraction"):
+            _kernel_derivative(
+                {**request, "field_memory_fraction": fraction},
+                residuals=("derivative",),
+            )

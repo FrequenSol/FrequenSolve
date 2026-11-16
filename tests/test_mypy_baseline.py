@@ -12,6 +12,7 @@ from scripts.check_mypy_baseline import (
     _counter_from_rows,
     _diagnostic_rows,
     _load_baseline,
+    _run_mypy,
     _write_baseline,
     parse_diagnostics,
     run,
@@ -67,6 +68,51 @@ def test_mypy_parser_tolerates_known_unused_config_status_line(tmp_path):
 def test_mypy_parser_rejects_unknown_plain_text(tmp_path):
     with pytest.raises(ValueError, match="Unexpected non-JSON mypy output"):
         parse_diagnostics("mypy crashed unexpectedly", tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "error"),
+    [
+        (1, "", "No module named mypy", RuntimeError),
+        (1, "", "", RuntimeError),
+        (1, '{"severity": "note"}', "", RuntimeError),
+        (2, "", "mypy: error: invalid configuration", RuntimeError),
+        (1, "{incomplete", "", ValueError),
+        (1, "mypy crashed unexpectedly", "", ValueError),
+    ],
+)
+def test_mypy_runner_rejects_failed_or_invalid_checker_output(
+    monkeypatch, tmp_path, returncode, stdout, stderr, error
+):
+    monkeypatch.setattr(
+        "scripts.check_mypy_baseline.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], returncode, stdout, stderr
+        ),
+    )
+
+    with pytest.raises(error):
+        _run_mypy(tmp_path)
+
+
+@pytest.mark.parametrize("has_errors", [False, True])
+def test_mypy_runner_preserves_valid_clean_and_error_results(
+    monkeypatch, tmp_path, has_errors
+):
+    diagnostic = Diagnostic("src/frequensolve/model.py", "arg-type")
+    output = (
+        _mypy_line(tmp_path / diagnostic.file, diagnostic.code) if has_errors else ""
+    )
+    monkeypatch.setattr(
+        "scripts.check_mypy_baseline.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], int(has_errors), output, ""
+        ),
+    )
+
+    assert _run_mypy(tmp_path) == (
+        Counter({diagnostic: 1}) if has_errors else Counter()
+    )
 
 
 def test_baseline_rows_roundtrip_deterministically():
@@ -260,3 +306,58 @@ def test_update_preserves_higher_ceiling_from_another_environment(
 
     assert run(["--update"]) == 0
     assert written == [expected | current]
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_saved_job_public_methods_keep_concrete_consumer_types(tmp_path, invalid):
+    root = Path(__file__).resolve().parents[1]
+    consumer = tmp_path / "job_consumer.py"
+    source = """from pathlib import Path
+from frequensolve.simulation.jobs.base import BaseJob
+class SavedJob:
+    @property
+    def job_file(self) -> Path:
+        return Path('job.json')
+loaded: BaseJob = BaseJob.load(SavedJob())
+path: Path = loaded.save()
+local, remote = loaded.save_for_remote('synthetic', Path('/remote'))
+local_path: Path = local
+remote_path: Path = remote
+count: int = loaded.n_tasks
+"""
+    if invalid:
+        source += "wrong: str = BaseJob.load(Path('job.json'))\nBaseJob.load(123)\nwrong_path: str = loaded.save()\n"
+    consumer.write_text(source)
+    # Dependencies are installed for this CI interpreter. Keep the consumer's
+    # grammar aligned with it (e.g. modern Pint on Python 3.13), while the
+    # separate Python 3.10 typecheck job retains the package support-floor gate.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--config-file",
+            str(root / "pyproject.toml"),
+            "--python-version",
+            f"{sys.version_info.major}.{sys.version_info.minor}",
+            "--follow-imports=silent",
+            "-O",
+            "json",
+            str(consumer),
+        ],
+        cwd=root,
+        env={**os.environ, "MYPYPATH": str(root / "src")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    diagnostics = [
+        json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")
+    ]
+    if invalid:
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert Counter(
+            row["code"] for row in diagnostics if row["severity"] == "error"
+        ) == Counter({"assignment": 2, "arg-type": 1})
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr

@@ -18,6 +18,9 @@ unfamiliar, check the :doc:`../glossary`.
    stampede3_getting_started
    frequensolve_directory
    physics_materials_boundaries
+   native_physics_acceptance
+
+   control_sensitivities
    imaging
    api_to_contracts
    velocity_models_coordinates
@@ -25,4 +28,11 @@ unfamiliar, check the :doc:`../glossary`.
    surveys_sources_receivers
    traces_paraview_outputs
    eikonal
+   transient
+   reservoir
    boreholes
+
+.. toctree::
+   :maxdepth: 1
+
+   agent_scientific_workflow

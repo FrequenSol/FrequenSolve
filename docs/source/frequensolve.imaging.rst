@@ -1,5 +1,5 @@
-Imaging
-=======
+Imaging API
+===========
 
 ``frequensolve.imaging`` is the imaging and inversion authoring API built on
 the Sauce imaging contracts. Import it as ``from frequensolve import imaging
@@ -38,6 +38,21 @@ Problem And Linearization
    :show-inheritance:
    :noindex:
 
+Spectral Attributes
+-------------------
+
+.. automodule:: frequensolve.imaging.spectral_attributes
+   :members:
+   :noindex:
+
+.. autoclass:: frequensolve.imaging.ReceiverPool
+   :members:
+   :noindex:
+
+.. autoclass:: frequensolve.imaging.SyntheticArray
+   :members:
+   :noindex:
+
 Operators
 ---------
 
@@ -50,6 +65,11 @@ Regularization, Smoothing And Preconditioners
 ---------------------------------------------
 
 .. automodule:: frequensolve.imaging.regularization
+   :members:
+   :show-inheritance:
+   :noindex:
+
+.. autoclass:: frequensolve.imaging.SourceEnergy
    :members:
    :show-inheritance:
    :noindex:
@@ -108,3 +128,22 @@ The readers and writers of the Sauce imaging artifacts
 ``ObjectiveReport`` and ``ExtensionSolveReport`` are documented under
 `Results`_; the remaining readers are contract-level helpers whose fields
 follow the schema they are named after.
+
+
+Experimental band and receiver-line objectives
+----------------------------------------------
+
+.. automodule:: frequensolve.imaging.awi
+   :members:
+
+.. automodule:: frequensolve.imaging.hv
+   :members:
+
+Coarse and receiver-block preconditioners
+-----------------------------------------
+
+.. autoclass:: frequensolve.imaging.CoarseCorrection
+   :members:
+
+.. autoclass:: frequensolve.imaging.ReceiverBlockDiagonal
+   :members:

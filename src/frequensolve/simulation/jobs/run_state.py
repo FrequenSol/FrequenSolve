@@ -186,6 +186,9 @@ class JobRunStateMixin:
 
     if TYPE_CHECKING:
 
+        @property
+        def n_tasks(self) -> int: ...
+
         def export_context(self) -> ExportContext: ...
 
         def _input_fingerprint_payload(self) -> Dict[str, Any]: ...
@@ -526,6 +529,9 @@ class JobRunStateMixin:
         this mapping once and pass it through the batch.
         """
 
+        frozen = getattr(self, "_frozen_artifact_fingerprints", None)
+        if frozen is not None:
+            return dict(frozen)
         job_file = getattr(self, "_file", None)
         simulation_file = getattr(self.simulation, "_file", None)
         if job_file is None or simulation_file is None:
@@ -551,9 +557,32 @@ class JobRunStateMixin:
         ):
             return None
         job_fingerprint = self._sha256_file(job_file)
+        from frequensolve.simulation.overrides import expanded_simulation_hash
+
+        saved_job = json.loads(job_file.read_text())
+        if isinstance(saved_job.get("simulation"), Mapping):
+            from frequensolve.simulation.simulation import _file_status
+
+            key = (
+                str(simulation_file),
+                _file_status(simulation_file),
+                saved_job["simulation"],
+            )
+            cached = getattr(self, "_expanded_simulation_digest_cache", None)
+            if cached is not None and cached[0] == key:
+                simulation_digest = cached[1]
+            else:
+                simulation_digest = expanded_simulation_hash(
+                    saved_job,
+                    json.loads(simulation_file.read_text()),
+                    self._sha256_file(simulation_file),
+                )
+                self._expanded_simulation_digest_cache = (key, simulation_digest)
+        else:
+            simulation_digest = self._sha256_file(simulation_file)
         return {
             "job": job_fingerprint,
-            "simulation": self._sha256_file(simulation_file),
+            "simulation": simulation_digest,
             # Directly authored solver jobs predate the persisted request
             # digest. Sauce conservatively records the exact job-file digest
             # for those inputs, so the consumer must make the same fallback.
@@ -578,6 +607,15 @@ class JobRunStateMixin:
             return None
         if result.partition.task != task:
             return None
+        if result.partition.frequency != complex(self.f_list[task - 1]):
+            return None
+        if result.partition.task_count not in (None, self.n_tasks):
+            return None
+        fingerprints = self._artifact_contract_fingerprints()
+        if fingerprints is not None and any(
+            result.fingerprints.get(key) != value for key, value in fingerprints.items()
+        ):
+            return None
         return result
 
     def _load_task_catalog(self, tasks: Iterable[int]) -> TaskCatalog:
@@ -591,7 +629,7 @@ class JobRunStateMixin:
                 results={},
             )
 
-    def _retry_compatibility_hash(self):
+    def _retry_compatibility_hash(self) -> Optional[str]:
         """Match Sauce's retry identity while retaining full producer hashes."""
 
         try:
@@ -602,12 +640,18 @@ class JobRunStateMixin:
         return self._compatibility_hash_payloads(job, simulation)
 
     @staticmethod
-    def _compatibility_hash_payloads(job, simulation):
+    def _compatibility_hash_payloads(
+        job: Dict[str, Any], simulation: Dict[str, Any]
+    ) -> str:
         """Hash solver-independent inputs using the native canonical JSON form."""
         import copy
         import hashlib
 
-        job, simulation = copy.deepcopy(job), copy.deepcopy(simulation)
+        from frequensolve.simulation.overrides import effective_simulation_payload
+
+        job, simulation = copy.deepcopy(job), effective_simulation_payload(
+            job, simulation
+        )
         job["simulation"] = None
         job["preserve_task_outputs"] = None
         job.setdefault("artifact_contract", {})["output_request"] = None
@@ -634,8 +678,11 @@ class JobRunStateMixin:
         ).encode()
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
-    def _task_reuse_fingerprints(self):
+    def _task_reuse_fingerprints(self) -> Optional[Mapping[str, str]]:
         """Select the explicitly requested retry policy for task consumers."""
+        frozen = getattr(self, "_frozen_task_fingerprints", None)
+        if frozen is not None:
+            return dict(frozen)
         if self.preserve_task_outputs:
             digest = self._retry_compatibility_hash()
             if digest is not None:
@@ -776,13 +823,9 @@ class JobRunStateMixin:
             raise ValueError("Simulation must be saved before fingerprinting a task")
         if not policy.ignore_solver_options:
             return self._hash_json_file(self.simulation._file)
-        with open(self.simulation._file, "r") as f:
-            payload = json.load(f)
-        if isinstance(payload, Mapping):
-            payload = dict(payload)
-            for key in policy.ignored_simulation_keys:
-                payload.pop(key, None)
-        return self._hash_payload(payload)
+        return self._hash_json_file(
+            self.simulation._file, tuple(policy.ignored_simulation_keys)
+        )
 
     def task_policy_fingerprint_payload(
         self,
@@ -798,6 +841,12 @@ class JobRunStateMixin:
             raise IndexError(f"Task {task} is outside 1..{self.n_tasks}")
         job_data = self.to_fs(self.export_context())
         job_payload = self._fingerprint_job_payload(job_data)
+        if "simulation_overrides" in job_payload:
+            job_payload["simulation_overrides"] = {
+                key: value
+                for key, value in job_payload["simulation_overrides"].items()
+                if key not in policy.ignored_simulation_keys
+            }
         inputs = self._input_fingerprint_payload()
         return {
             "schema": "frequensolve-job-task-compatibility-fingerprint-1",

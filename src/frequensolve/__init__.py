@@ -81,6 +81,7 @@ def _load_public_api() -> None:
 
         __all__ = [
             "__version__",
+            "physics",
             *unique_exports(
                 *(modules[name].__all__ for name in _PUBLIC_EXPORT_ORDER),
                 _COLORMAP_EXPORTS,
@@ -90,8 +91,21 @@ def _load_public_api() -> None:
 
 
 def __getattr__(name: str) -> Any:
+    if name == "physics":
+        return importlib.import_module("frequensolve.physics")
     if name in _COLORMAP_EXPORTS:
-        colormaps = importlib.import_module("frequensolve.util.colormaps")
+        try:
+            colormaps = importlib.import_module("frequensolve.util.colormaps")
+        except ImportError as error:
+            cause = error.__cause__
+            if not (
+                isinstance(cause, ModuleNotFoundError)
+                and (cause.name or "").split(".")[0] == "matplotlib"
+            ):
+                raise
+            from frequensolve._optional import MissingOptionalValue
+
+            return MissingOptionalValue(name, error)
 
         return getattr(colormaps, name)
     _load_public_api()

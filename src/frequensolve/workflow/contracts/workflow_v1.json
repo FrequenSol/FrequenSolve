@@ -1,0 +1,113 @@
+{
+  "version": "frequensolve-agent-workflow.v1",
+  "profile": "local-scientific-workflow",
+  "transport": "stdio",
+  "tools": [
+    "workflow_discover",
+    "workflow_create_project",
+    "workflow_plan",
+    "workflow_results",
+    "workflow_study",
+    "workflow_present",
+    "workflow_workspace",
+    "workflow_saved_plans"
+  ],
+  "oauth_scope_suffixes": [
+    "read",
+    "workflow-prepare",
+    "workflow-results"
+  ],
+  "paid_authority": false,
+  "human_confirmation": "signed-in Cloud review of each paid stage",
+  "scientific_template": "qualified-acoustic-3d-2-20.v1",
+  "execution_environment": "sandbox",
+  "result_representation": "per-frequency native archives",
+  "download_maximum_bytes": 16777216,
+  "capacity_observations": "unavailable until a supported observation source exists",
+  "notebook_execution": "analysis-only local replay; no service attestation",
+  "scientific_study": "scientific-study.v1: saved question, exact execution bindings, local analysis and portable notebook",
+  "client_presentation": {
+    "version": "scientific-conversation.v1",
+    "tool": "workflow_present",
+    "chapters": [
+      "overview",
+      "model",
+      "plan",
+      "progress",
+      "results",
+      "reproduce"
+    ],
+    "content": [
+      "text",
+      "image/png"
+    ],
+    "fallback": "readable scientific text and bounded numeric tables",
+    "figure_labels": "input-order geometry labels with exact colocation; native result identities and small-selection magnitude values; no interpolation or rescaling",
+    "notebook_recovery": {
+      "binding_version": "study-notebook-binding.v1",
+      "matches": "study, project, plan revision, run, input/result fingerprints and exact frequency selection",
+      "current_result_metadata": "read-only; no ticket or download",
+      "reopening_executes_kernel": false,
+      "current_environment_reverified": false,
+      "unbound_or_different_context": "recoverable through workspace artifacts; not current-study evidence"
+    },
+    "host_ui_required": false,
+    "paid_authority": false
+  },
+  "workspace_navigation": {
+    "tool": "workflow_workspace",
+    "local_metadata_only": true,
+    "recursive": false,
+    "maximum_folder_entries": 1000,
+    "page_size": 25,
+    "pagination": "one page of direct local subfolders; retain earlier results and follow returned next_after cursors",
+    "empty_or_unreadable": "page-local observation only; does not establish missing Cloud work",
+    "recovery": "choose the existing allowed parent folder or restore local project files; no replacement project",
+    "cloud_ownership": "confirmed by subsequent scoped plan reads",
+    "notebook_history": {
+      "version": "notebook-history.v1",
+      "registration": "archive immutable previous and new bookmarks under the existing latest lock; preserve latest compatibility",
+      "discovery": "registered metadata only; no recursive scan of unregistered notebook folders",
+      "metadata_bytes_per_record": 16384,
+      "page_size": 25,
+      "automatic_candidate_limit": 128,
+      "directory_entry_limit": 1000,
+      "selection": "returned content-derived notebook_id; multiple matches require a choice",
+      "file_verification": "selected notebook only; maximum 32 files and 64 MiB",
+      "current_study_evidence": "exact context and current owned result manifest; unbound or uncertain records never attach"
+    },
+    "notebook_generation": {
+      "version": "notebook-attempt.v1",
+      "tool": "workflow_study notebook",
+      "request_bytes": 8192,
+      "record_bytes": 65536,
+      "intent": "exact request and local project identity before authoring; destination-bound nonblocking writer lock",
+      "recovery": "same request recovers the original receipt after registered saved-byte checks; no Cloud read or kernel",
+      "uncertainty": "active, failed, interrupted or edited attempts never automatically replay or overwrite files",
+      "partial_artifact": "only an unchanged authored notebook file; input/output bundle completeness remains unconfirmed",
+      "legacy": "older generation receipts are not invented; use registered notebook history",
+      "attestation": "original local replay, not a current environment check or service attestation"
+    },
+    "notebook_attempt_navigation": {
+      "version": "notebook-attempt-navigation.v1",
+      "tool": "workflow_workspace attempts or attempt",
+      "metadata_bytes_per_record": 65536,
+      "page_size": 25,
+      "directory_entry_limit": 1000,
+      "read_only": "no locks, journals, Cloud calls, transfers, kernels, resumption or replacement",
+      "selection": "returned attempt_key; original arguments stay model-managed",
+      "resume_request": "strict original schema, local project identity, context and path checks; no rewriting moved scope",
+      "inspection": "selected completed bundle uses registered byte checks; partial notebook checks only its authored file",
+      "uncertainty": "last-recorded pending state does not establish current process health or current-study evidence",
+      "pagination": "page-local metadata; retain earlier choices and uncertainty across concurrent additions"
+    },
+    "saved_plans": {
+      "tool": "workflow_saved_plans",
+      "read_only": true,
+      "identity": "existing local immutable project",
+      "pagination": "reuse only the same project's returned cursor",
+      "preparation_or_paid_authority": false
+    },
+    "notebooks": "latest generated bundle and recorded context; use reproduce for exact selected-study matching; saved-byte checks do not verify the current environment"
+  }
+}

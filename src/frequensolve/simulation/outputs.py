@@ -6,7 +6,20 @@ import copy
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Type,
+    Union,
+    cast,
+    overload,
+)
 
 import numpy as np
 import xarray as xr
@@ -24,6 +37,9 @@ from frequensolve.util.mixins import (
     fs_serialize,
     merge_extra,
 )
+
+if TYPE_CHECKING:
+    from frequensolve.physics import ReceiverExpression
 
 __all__ = [
     "AxisAlignedPlane",
@@ -100,6 +116,14 @@ def _as_list(value: Any) -> List[Any]:
 
 def _drop_none(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None}
+
+
+@overload
+def _choice(value: str, choices: set[str], field: str) -> str: ...
+
+
+@overload
+def _choice(value: None, choices: set[str], field: str) -> None: ...
 
 
 def _choice(value: Optional[str], choices: set[str], field: str) -> Optional[str]:
@@ -246,7 +270,7 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
     """
 
     name: str = ""
-    path: Union[str, Path] = None
+    path: Optional[Union[str, Path]] = None
     extra: Dict = field(default_factory=dict)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -291,8 +315,17 @@ class Output(TypeTaggedMixin, ExtraFieldsMixin):
 class TraceOutput(Output):
     """Receiver trace output request.
 
+    Released Sauce producers publish ``<path>/traces.h5``. Development
+    producers may publish immutable generation segments instead. Resolve
+    both layouts through the job's trace manifest.
+
     Args:
         path: Trace output directory relative to the job result directory.
+        keep_history: Keep each superseded pack under
+            ``<path>/history/<generation>/`` instead of discarding it, e.g. to
+            retain the traces of every FWI iteration run in one job directory.
+            Immutable generation producers retain superseded manifests and
+            segments in their original generation directories when enabled.
         **kwargs: Additional solver-facing trace output fields.
 
     Raises:
@@ -300,11 +333,20 @@ class TraceOutput(Output):
     """
 
     path: Optional[Union[str, Path]] = None
+    keep_history: bool = False
 
-    def __init__(self, path: Union[str, Path] = "traces", **kwargs):
+    def __init__(
+        self,
+        path: Union[str, Path] = "traces",
+        keep_history: bool = False,
+        **kwargs,
+    ):
         """Create a trace output request with a job-relative path."""
 
         self.path = _relative_output_path(path)
+        if not isinstance(keep_history, bool):
+            raise TypeError("keep_history must be a boolean")
+        self.keep_history = keep_history
         self._init_extra(None, **kwargs)
 
     def to_fs(self, ctx=None) -> Dict:
@@ -317,11 +359,11 @@ class TraceOutput(Output):
             JSON-compatible trace output payload.
         """
 
-        return merge_extra(
-            {"_type": self.__class__.__name__, "path": self.path},
-            self.extra,
-            self.__class__.__name__,
-        )
+        payload: Dict[str, Any] = {"_type": self.__class__.__name__, "path": self.path}
+        # Omitted when false so existing job fingerprints are unchanged.
+        if self.keep_history:
+            payload["keep_history"] = True
+        return merge_extra(payload, self.extra, self.__class__.__name__)
 
     @classmethod
     def from_fs(cls, data: Dict) -> "TraceOutput":
@@ -336,7 +378,11 @@ class TraceOutput(Output):
 
         data = copy.deepcopy(data)
         data.pop("_type", None)
-        return cls(path=data.pop("path", "traces"), **data)
+        return cls(
+            path=data.pop("path", "traces"),
+            keep_history=data.pop("keep_history", False),
+            **data,
+        )
 
 
 @dataclass(kw_only=True)
@@ -804,6 +850,15 @@ class VtkOutput(Output):
         live model geometry and material transforms. Requires a Sauce build
         supporting the ``property_mesh`` target. Only property items and VTU
         are supported.
+
+        For an assembled imaging covector, pass
+        ``source={"kind": "control_gradient", "control": "vp"}`` without
+        property items. Native export writes binary VTU rank pieces and a PVTU
+        index, with physical coordinates in metres and constrained control
+        coefficients interpolated to leaf vertices. It adds no wave solves.
+        The default gradient divides the assembled covector by constrained
+        lumped mass before interpolation; the raw covector is a separate array.
+        These are per-frequency gradient densities, not physical model updates.
         """
         if not str(space).strip():
             raise ValueError("property_mesh requires a named space")
@@ -931,15 +986,28 @@ class VtkOutput(Output):
                 or any(item.get("kind") != "property" for item in self._items_payload())
             ):
                 raise ValueError("property_mesh supports property items and VTU only")
+        if self.source and self.source.get("kind") == "control_gradient":
+            if self._inferred_target() != "property_mesh" or not self.source.get(
+                "control"
+            ):
+                raise ValueError(
+                    "control_gradient requires a property_mesh target and a control id"
+                )
+            if self.fields or self.properties or self.items:
+                raise ValueError(
+                    "control_gradient exports its covector; do not specify physical fields or properties"
+                )
 
-        payload = {
+        payload: Dict[str, Any] = {
             "_type": "ParaviewOutput",
             "name": self.name,
             "path": self.path,
-            "properties": self.properties,
-            "show_pml": self.show_pml,
-            "writer": self._writer_payload(),
         }
+        # The output-config schema requires an array when present; omit unset properties.
+        if self.properties is not None:
+            payload["properties"] = self.properties
+        payload["show_pml"] = self.show_pml
+        payload["writer"] = self._writer_payload()
         extra = copy.deepcopy(self.extra)
         if self.fields is not None:
             payload["fields"] = _canonical_field_list(self.fields)
@@ -1235,7 +1303,7 @@ class WavefieldOutput(Output):
 
     name: str = "wavefield"
     path: Union[str, Path] = "wavefields"
-    fields: Optional[List[str]] = None
+    fields: Optional[List[Union[str, ReceiverExpression]]] = None
     properties: Optional[List[str]] = None
     device: Optional[ReceiverDevice] = None
     grid: Optional[Dict[str, Any]] = None
@@ -1313,7 +1381,7 @@ class WavefieldOutput(Output):
         fields = self.fields if self.fields is not None else ["primary"]
         return [
             ReceiverComponent(name=str(field), field=str(field))
-            for field in canonical_fields(fields)
+            for field in canonical_fields(cast(Iterable[str], fields))
         ]
 
     def component_payloads(self, ctx=None) -> List[Dict[str, Any]]:
@@ -1354,7 +1422,7 @@ class WavefieldOutput(Output):
             payload["device"] = self.device.to_fs(ctx)
         else:
             fields = (
-                canonical_fields(self.fields)
+                canonical_fields(cast(Iterable[str], self.fields))
                 if self.fields is not None
                 else ["primary"]
             )
@@ -1913,6 +1981,11 @@ prop = output_property
 
 
 class _VtkFactory:
+    @staticmethod
+    def property_mesh(space: str, **kwargs: Any) -> VtkOutput:
+        """Create a visualization request on a frozen material-control mesh."""
+        return VtkOutput.property_mesh(space, **kwargs)
+
     field = staticmethod(field)
     prop = staticmethod(output_property)
     property = staticmethod(output_property)

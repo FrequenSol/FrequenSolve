@@ -98,9 +98,18 @@ support ordinary SI prefixes.
 Temperature receiver and wavefield output defaults to K. Configure
 `Outputs/Units/fields/temperature` or `Outputs/Units/dimensions/temperature`
 with `degC` or `degF` for absolute output, or a delta unit for temperature rise.
-Affine HDF5 value frames add an optional `value_frame_coordinate_offset` vector
-to the primal map: `coordinate = solver_to_coordinate * solver + offset`.
+Affine HDF5 value frames add an optional `value_convention_physical_offset` vector
+to the primal map: `physical = solver_to_physical_scale * solver + physical_offset`.
 Missing offsets mean zero; dual values and differences use only the scale.
+
+Value metadata uses the `value_convention_` prefix. Representations are
+`normalized`, `solver`, and `physical`; roles are `primal`, `dual`, and `diagonal`.
+`primal_units` declares the primal component units; dual and diagonal values
+transform inversely and inverse-square respectively under a primal unit change.
+`solver_to_physical_scale` maps primal solver values into those units, and
+`rhs_amplitude_scale` restores the per-RHS amplitude removed from normalized
+storage. Spatial positions and coordinate systems are separate metadata.
+The former `value_frame_*` names and representation aliases are not accepted.
 
 ## Conductive EM reference scaling
 

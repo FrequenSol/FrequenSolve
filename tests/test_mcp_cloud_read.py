@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 import pickle
@@ -30,7 +29,7 @@ def _resource_bytes(name: str) -> bytes:
 
 def _fixtures() -> list[dict[str, Any]]:
     return json.loads(
-        _resource_bytes("customer_cloud_read_v2_fixtures.json").decode("utf-8")
+        _resource_bytes("customer_cloud_read_v3_fixtures.json").decode("utf-8")
     )
 
 
@@ -272,18 +271,6 @@ def _fake_requests_module(*sessions: _FakeSession) -> SimpleNamespace:
     return SimpleNamespace(Session=create_session)
 
 
-def test_exact_cloud_contract_and_fixture_snapshots_are_vendored():
-    catalog = _resource_bytes("customer_cloud_read_v2.json")
-    fixtures = _resource_bytes("customer_cloud_read_v2_fixtures.json")
-
-    assert hashlib.sha256(catalog).hexdigest() == (
-        "c4442203f098f9b82217bdabdf7925298792078bc404f44e1eb1dd1a52f0322f"
-    )
-    assert hashlib.sha256(fixtures).hexdigest() == (
-        "56d8ca773b299c4818422ce53ac2aa43c487669ff3f9f8ae80d6efc192042027"
-    )
-
-
 def test_contract_contains_only_fixed_bounded_queries():
     catalog = cloud._load_contract()["catalog"]
 
@@ -319,7 +306,7 @@ def test_contract_contains_only_fixed_bounded_queries():
 
 
 @pytest.mark.parametrize("fixture", _fixtures(), ids=lambda item: item["operation"])
-def test_all_five_public_methods_project_exact_v2_fixture_outputs(fixture):
+def test_all_five_public_methods_project_exact_v3_fixture_outputs(fixture):
     operation = cloud._load_contract()["operationsByName"][fixture["operation"]]
     calls: list[dict[str, Any]] = []
     client = cloud.CloudReadClient(
@@ -501,7 +488,7 @@ def test_optional_output_nulls_are_pruned_recursively_in_list_items():
     output = json.loads(json.dumps(fixture["output"]))
     output["cursor"] = None
     output["items"][0]["durationSeconds"] = None
-    output["items"][0]["requestedComputeMode"] = None
+    output["items"][0]["slurmWallTimeSeconds"] = None
     operation = cloud._load_contract()["operationsByName"]["listMySimulations"]
     response = _graphql_response(
         operation["source"]["responseProjection"]["path"],
@@ -513,30 +500,21 @@ def test_optional_output_nulls_are_pruned_recursively_in_list_items():
 
     assert "cursor" not in result
     assert "durationSeconds" not in result["items"][0]
-    assert "requestedComputeMode" not in result["items"][0]
+    assert "slurmWallTimeSeconds" not in result["items"][0]
 
 
 def test_optional_output_nulls_are_pruned_in_nested_objects():
     fixture = next(
-        item for item in _fixtures() if item["operation"] == "getMySimulation"
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
     )
     output = json.loads(json.dumps(fixture["output"]))
-    output["durationSeconds"] = None
-    output["guardrail"] = {
-        "maxRuntimeMinutes": 60,
-        "message": None,
-    }
-    operation = cloud._load_contract()["operationsByName"]["getMySimulation"]
-    response = _graphql_response(
-        operation["source"]["responseProjection"]["path"],
-        output,
+    output["membership"]["role"] = None
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
     )
-    client = cloud.CloudReadClient(_transport_factory=lambda _: lambda *args: response)
-
-    result = client.get_simulation(simulation_id="sim-example-001")
-
-    assert "durationSeconds" not in result
-    assert result["guardrail"] == {"maxRuntimeMinutes": 60}
+    result = client.check_readiness()
+    assert "role" not in result["membership"]
+    assert result["membership"]["hasSeat"] is True
 
 
 @pytest.mark.parametrize(
@@ -1490,7 +1468,7 @@ if server is None:
 
 fixtures = json.loads(
     files('frequensolve.mcp_server')
-    .joinpath('contracts/customer_cloud_read_v2_fixtures.json')
+    .joinpath('contracts/customer_cloud_read_v3_fixtures.json')
     .read_text(encoding='utf-8')
 )
 fixture = next(
@@ -1525,4 +1503,146 @@ print(cloud.CLOUD_READ_CONTRACT_VERSION)
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "2.0.0"
+    assert result.stdout.strip() == "3.0.0"
+
+
+@pytest.mark.parametrize(
+    "retired_field", ["batchStatus", "requestedComputeMode", "guardrail"]
+)
+def test_slurm_read_rejects_retired_batch_output(retired_field):
+    fixture = next(
+        item for item in _fixtures() if item["operation"] == "getMySimulation"
+    )
+    output = {**fixture["output"], retired_field: "legacy"}
+    operation = cloud._load_contract()["operationsByName"]["getMySimulation"]
+    response = _graphql_response(
+        operation["source"]["responseProjection"]["path"], output
+    )
+    client = cloud.CloudReadClient(_transport_factory=lambda _: lambda *args: response)
+    with pytest.raises(cloud.CloudReadError):
+        client.get_simulation(simulation_id="sim-example-001")
+
+
+@pytest.mark.parametrize(
+    "state", ["READY", "UNAVAILABLE", "MISSING", "IN_PROGRESS", "FAILED", "UNKNOWN"]
+)
+def test_managed_slurm_readiness_is_preserved_through_fixed_cloud_read(state):
+    fixture = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )
+    output = json.loads(json.dumps(fixture["output"]))
+    output["infrastructure"]["compute"] = state
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    assert client.check_readiness()["infrastructure"]["compute"] == state
+
+
+@pytest.mark.parametrize("state", ["INTERNAL_ONLY", "BATCH_READY"])
+def test_unrecognized_compute_readiness_states_are_rejected(state):
+    fixture = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )
+    output = json.loads(json.dumps(fixture["output"]))
+    output["infrastructure"]["compute"] = state
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    with pytest.raises(cloud.CloudReadError) as exc_info:
+        client.check_readiness()
+    assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("status", ["AVAILABLE", "REVIEW_REQUIRED"])
+def test_readiness_retains_exact_credits_without_requiring_a_seat(status):
+    output = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )["output"]
+    output["membership"]["hasSeat"] = False
+    output["credits"]["status"] = status
+    output["credits"]["nextExpiryAt"] = "2026-08-01T00:00:00Z"
+    output["credits"]["nextExpiryCredits"] = "0.000000000000000001"
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    assert client.check_readiness() == output
+    assert (
+        cloud.validate_cloud_operation_output("getCloudReadiness", {}, output) == output
+    )
+    assert (
+        output["credits"]["availableCredits"] == "9007199254740993.123456789012345678"
+    )
+
+
+@pytest.mark.parametrize("status", ["NOT_AVAILABLE", "INACTIVE"])
+def test_unavailable_credits_remain_unknown_instead_of_zero(status):
+    output = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )["output"]
+    output["credits"] = {
+        "available": False,
+        "status": status,
+        "refreshedAt": "2026-07-24T12:00:00Z",
+        "availableCredits": None,
+        "heldCredits": None,
+        "totalCredits": None,
+        "nextExpiryAt": None,
+        "nextExpiryCredits": None,
+        "providerModifiedAt": None,
+    }
+    expected = {
+        key: value for key, value in output["credits"].items() if value is not None
+    }
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    assert client.check_readiness()["credits"] == expected
+    assert (
+        cloud.validate_cloud_operation_output("getCloudReadiness", {}, output)[
+            "credits"
+        ]
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"availableCredits": 1.5},
+        {"availableCredits": "-1"},
+        {"availableCredits": "NaN"},
+        {"availableCredits": "1e3"},
+        {"availableCredits": "1" * 65},
+        {"availableCredits": None},
+        {"available": False},
+        {"status": "INACTIVE"},
+        {"nextExpiryAt": "2026-08-01T00:00:00Z"},
+        {"nextExpiryCredits": "1"},
+        {"refreshedAt": "yesterday"},
+        {"creditUnitId": "private-provider-key"},
+    ],
+)
+def test_invalid_or_private_credit_projection_fails_closed_in_both_paths(change):
+    output = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )["output"]
+    output["credits"].update(change)
+    client = cloud.CloudReadClient(
+        _transport_factory=lambda _: lambda *args: {"data": output}
+    )
+    for operation in (
+        client.check_readiness,
+        lambda: cloud.validate_cloud_operation_output("getCloudReadiness", {}, output),
+    ):
+        with pytest.raises(cloud.CloudReadError) as exc_info:
+            operation()
+        assert exc_info.value.code == "UPSTREAM_UNAVAILABLE"
+
+
+def test_unavailable_credits_cannot_carry_stale_balances():
+    output = next(
+        item for item in _fixtures() if item["operation"] == "getCloudReadiness"
+    )["output"]
+    output["credits"].update(available=False, status="NOT_AVAILABLE")
+    with pytest.raises(cloud.CloudReadError):
+        cloud.validate_cloud_operation_output("getCloudReadiness", {}, output)

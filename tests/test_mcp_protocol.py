@@ -332,16 +332,12 @@ def test_authenticated_cloud_profile_requires_and_validates_host_execution(
         calls.append((operation, dict(arguments)))
         return {
             "membership": {"hasSeat": True, "subscriptionActive": True},
-            "scu": {
-                "meterVersion": "scu-v1",
-                "available": "20",
-                "reserved": "0",
-                "pending": "0",
-                "finalized": "1",
-                "credited": "0",
-                "reviewRequired": "0",
-            },
             "infrastructure": {"storage": "READY", "compute": "READY"},
+            "credits": {
+                "available": False,
+                "status": "NOT_AVAILABLE",
+                "refreshedAt": "2026-07-25T00:00:00Z",
+            },
         }
 
     monkeypatch.setattr(
@@ -410,16 +406,12 @@ def test_authenticated_host_executor_respects_the_declared_concurrency_limit():
                     await release_first.wait()
                 return {
                     "membership": {"hasSeat": True, "subscriptionActive": True},
-                    "scu": {
-                        "meterVersion": "scu-v1",
-                        "available": "20",
-                        "reserved": "0",
-                        "pending": "0",
-                        "finalized": "1",
-                        "credited": "0",
-                        "reviewRequired": "0",
-                    },
                     "infrastructure": {"storage": "READY", "compute": "READY"},
+                    "credits": {
+                        "available": False,
+                        "status": "NOT_AVAILABLE",
+                        "refreshedAt": "2026-07-25T00:00:00Z",
+                    },
                 }
             finally:
                 active -= 1
@@ -465,16 +457,12 @@ def test_hosted_executor_output_must_match_the_packaged_cloud_contract():
                 "subscriptionActive": True,
                 "accountId": "must-not-cross-boundary",
             },
-            "scu": {
-                "meterVersion": "scu-v1",
-                "available": "20",
-                "reserved": "0",
-                "pending": "0",
-                "finalized": "1",
-                "credited": "0",
-                "reviewRequired": "0",
-            },
             "infrastructure": {"storage": "READY", "compute": "READY"},
+            "credits": {
+                "available": False,
+                "status": "NOT_AVAILABLE",
+                "refreshedAt": "2026-07-25T00:00:00Z",
+            },
         }
 
     async def check() -> None:
@@ -724,16 +712,12 @@ def test_cloud_tools_map_to_only_the_five_fixed_read_operations(monkeypatch):
     responses = {
         "getCloudReadiness": {
             "membership": {"hasSeat": True, "subscriptionActive": True},
-            "scu": {
-                "meterVersion": "scu-v1",
-                "available": "20",
-                "reserved": "0",
-                "pending": "0",
-                "finalized": "1",
-                "credited": "0",
-                "reviewRequired": "0",
-            },
             "infrastructure": {"storage": "READY", "compute": "READY"},
+            "credits": {
+                "available": False,
+                "status": "NOT_AVAILABLE",
+                "refreshedAt": "2026-07-25T00:00:00Z",
+            },
         },
         "listMySimulations": {
             "items": [

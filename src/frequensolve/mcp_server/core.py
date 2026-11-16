@@ -393,6 +393,7 @@ def resource_payload(name: str) -> dict[str, JsonValue]:
                 "receiver_count": {"minimum": 1, "maximum": 1001},
             },
             "solver_contracts": identity["contracts"],
+            "numerical_tolerance_guidance": catalog.authoring_rules.solver.tolerance_guidance,
         }
     if normalized == "catalog":
         return _catalog_payload(catalog)

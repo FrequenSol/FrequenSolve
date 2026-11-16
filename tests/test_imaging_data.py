@@ -32,6 +32,9 @@ CONTRACT_ROOT = (
 OBJECTIVE_VECTOR_SCHEMA = (
     CONTRACT_ROOT / "outputs" / "fs-objective-vector-3" / "schema.json"
 )
+OBJECTIVE_VECTOR_V5_SCHEMA = (
+    CONTRACT_ROOT / "outputs" / "fs-objective-vector-5" / "schema.json"
+)
 STATE = "sha256:" + "ab" * 32
 
 
@@ -146,6 +149,33 @@ def test_observed_group_serializes_stems_and_stores():
     assert resolved.df.file == Path("/root/df.h5")
     with pytest.raises(ValueError):
         ObservedGroup("surface", derivatives={"ds": "x"})
+
+
+def test_time_domain_trace_store_supplies_observed_derivatives(tmp_path):
+    from frequensolve.seismic.trace_conversion import convert_traces
+
+    time_store = TraceStoreRef(
+        convert_traces(np.ones((2, 4)), tmp_path / "time.h5", dt=0.1, component="p")
+    )
+    spectra = tmp_path / "spectra.h5"
+    with h5py.File(spectra, "w") as h5:
+        h5["data/frequency/value"] = np.zeros((2, 1, 2), dtype=np.float32)
+    corrupt = tmp_path / "corrupt.h5"
+    corrupt.write_text("not hdf5")
+
+    assert time_store.has_time_samples
+    for ref in (
+        TraceStoreRef(spectra),
+        TraceStoreRef(corrupt),
+        TraceStoreRef(tmp_path / "absent.h5"),
+    ):
+        assert not ref.has_time_samples
+    group = ObservedGroup("surface", observed=time_store)
+    assert group.time_moments and group.df is None
+    assert "observed_derivatives" not in group.to_fs()
+    assert not ObservedGroup("surface", observed=time_store.file).time_moments
+    assert not ObservedGroup("surface", observed=TraceStoreRef(spectra)).time_moments
+    assert not ObservedGroup("zero").time_moments
 
 
 def test_observed_data_infers_frequencies_and_groups_from_forward_job(
@@ -365,7 +395,7 @@ def test_objective_vector_write_read_round_trip(tmp_path, space):
         "n_ranks": 1,
         "compatibility": "same_mesh_partition",
     }
-    shard = Path(manifest["shards"][0]["file"])
+    shard = tmp_path / manifest["shards"][0]["file"]
     assert shard == (tmp_path / "dual_rank_0.h5").resolve()
     assert manifest["shards"][0]["sha256"] == file_sha256(shard)
     assert manifest["terms"] == [layouts[0].manifest_entry()]
@@ -403,7 +433,7 @@ def test_objective_vector_reader_reassembles_multiple_shards(tmp_path, space):
         manifest_path, state_fingerprint=STATE, term_layout=layout
     )
     manifest = json.loads(manifest_path.read_text())
-    original = Path(manifest["shards"][0]["file"])
+    original = tmp_path / manifest["shards"][0]["file"]
 
     with h5py.File(original, "r") as h5:
         ids = h5["/terms/0/row_ids"][()]
@@ -440,7 +470,7 @@ def test_objective_vector_reader_rejects_corrupt_or_incomplete_files(tmp_path, s
         manifest_path, state_fingerprint=STATE, term_layout=single.term_layouts()
     )
     manifest = json.loads(manifest_path.read_text())
-    shard = Path(manifest["shards"][0]["file"])
+    shard = tmp_path / manifest["shards"][0]["file"]
 
     tampered = dict(manifest, state_fingerprint="sha256:" + "11" * 32)
     (tmp_path / "tampered.json").write_text(json.dumps(tampered))
@@ -522,3 +552,235 @@ def test_objective_vector_writer_covers_every_rank_including_empty(
         np.testing.assert_array_equal(
             restored.values[layout.indices], vector.values[layout.indices]
         )
+
+
+def test_zero_observed_data_resolves_without_a_trace_file():
+    from types import SimpleNamespace
+
+    data = ObservedData(None)
+    simulation = SimpleNamespace(
+        acquisition=SimpleNamespace(receiver_groups=[SimpleNamespace(name="surface")])
+    )
+    groups = data.resolve(simulation)
+    assert groups[0].to_fs() == {"name": "surface"}
+
+
+@pytest.mark.parametrize(
+    "schema",
+    ["fs-objective-vector-3", "fs-objective-vector-4", "fs-objective-vector-5"],
+)
+def test_objective_vectors_relocate_and_detect_corruption(tmp_path, space, schema):
+    import shutil
+
+    one = DataSpace(frequencies=[5.0], segments=space.segments)
+    vector = one.random(seed=6)
+    original = tmp_path / "original"
+    original.mkdir()
+    path = vector.write_objective_vector(
+        original / "dual.json",
+        state_fingerprint=STATE,
+        term_layout=one.term_layouts(),
+        schema=schema,
+    )
+    destination = tmp_path / "remote"
+    shutil.copytree(original, destination)
+    shutil.rmtree(original)
+    got = DataVector.read_objective_vector(
+        destination / path.name, one, state_fingerprint=STATE
+    )
+    np.testing.assert_array_equal(got.values, vector.values)
+    with pytest.raises(ValueError, match="another baseline"):
+        DataVector.read_objective_vector(
+            destination / path.name, one, state_fingerprint="sha256:" + "f" * 64
+        )
+    payload = next(destination.glob("*.h5"))
+    with h5py.File(payload, "r+") as h5:
+        h5["terms/0/values"][0, 0] += 1
+    with pytest.raises(ValueError, match="corrupt"):
+        DataVector.read_objective_vector(destination / path.name, one)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32], ids=["f8", "f4"])
+def test_objective_vector_v5_stores_canonical_rows_with_digests(tmp_path, space, dtype):
+    from frequensolve.imaging._block_digest import flat_block_digest
+
+    vector = space.random(seed=8)
+    layouts = space.term_layouts(frequency=10.0)
+    # Hand the writer rows out of canonical order; it stores row r at r - 1.
+    shuffled = []
+    for layout in layouts:
+        order = np.random.default_rng(2).permutation(layout.n_global_rows)
+        shuffled.append(
+            TermLayout(
+                layout.id,
+                layout.n_global_rows,
+                layout.row_ids[order],
+                layout.coordinate_keys[order],
+                indices=layout.indices[order],
+            )
+        )
+    path = vector.write_objective_vector(
+        tmp_path / "dual.json",
+        state_fingerprint=STATE,
+        term_layout=shuffled,
+        schema="fs-objective-vector-5",
+        dtype=dtype,
+    )
+    manifest = json.loads(path.read_text())
+    Draft202012Validator(json.loads(OBJECTIVE_VECTOR_V5_SCHEMA.read_text())).validate(
+        manifest
+    )
+    # One manifest and one data file, named relative to the manifest.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["dual.h5", "dual.json"]
+    assert manifest["file"] == "dual.h5"
+    assert {"partition", "shards", "sha256"}.isdisjoint(manifest)
+    basis = {k: v for k, v in manifest.items() if k != "manifest_fingerprint"}
+    assert manifest["manifest_fingerprint"] == canonical_json_sha256(basis)
+    with h5py.File(tmp_path / "dual.h5", "r") as h5:
+        for index, layout in enumerate(layouts):
+            order = np.argsort(layout.row_ids)
+            keys = h5[f"terms/{index}/coordinate_keys"][()]
+            values = h5[f"terms/{index}/values"][()]
+            assert keys.dtype == np.int32 and values.dtype == np.dtype(dtype)
+            np.testing.assert_array_equal(keys, layout.coordinate_keys[order])
+            expected = vector.values[layout.indices[order]]
+            np.testing.assert_array_equal(
+                values, np.column_stack((expected.real, expected.imag)).astype(dtype)
+            )
+            assert manifest["terms"][index]["digests"] == {
+                "coordinate_keys": flat_block_digest(keys),
+                "values": flat_block_digest(values),
+            }
+            assert manifest["terms"][index]["layout_fingerprint"] == (
+                layout.layout_fingerprint
+            )
+    restored = DataVector.read_objective_vector(
+        path, space, frequency=10.0, state_fingerprint=STATE
+    )
+    rows = np.concatenate([layout.indices for layout in layouts])
+    np.testing.assert_allclose(
+        restored.values[rows],
+        vector.values[rows],
+        rtol=1e-6 if dtype is np.float32 else 0,
+        atol=1e-6 if dtype is np.float32 else 0,
+    )
+    back = DataVector.read_term_layouts(path)
+    assert [layout.layout_fingerprint for layout in back] == [
+        layout.layout_fingerprint for layout in layouts
+    ]
+
+
+def test_objective_vector_v5_rejects_corruption_and_partition_options(tmp_path, space):
+    single = DataSpace(frequencies=[5.0], segments=space.segments)
+    vector = single.random(seed=9)
+    path = vector.write_objective_vector(
+        tmp_path / "v.json",
+        state_fingerprint=STATE,
+        term_layout=single.term_layouts(),
+        schema="fs-objective-vector-5",
+    )
+    with h5py.File(tmp_path / "v.h5", "r+") as h5:
+        keys = h5["terms/0/coordinate_keys"]
+        keys[0, 1] += 1
+    with pytest.raises(ValueError, match="coordinate_keys digest mismatch"):
+        DataVector.read_objective_vector(path, single)
+    # Without verification the changed key is caught against the layout.
+    with pytest.raises(ValueError, match="coordinate keys do not match"):
+        DataVector.read_objective_vector(path, single, verify=False)
+
+    manifest = json.loads(path.read_text())
+    tampered = dict(manifest, state_fingerprint="sha256:" + "11" * 32)
+    (tmp_path / "tampered.json").write_text(json.dumps(tampered))
+    with pytest.raises(ValueError, match="manifest fingerprint"):
+        DataVector.read_objective_manifest(tmp_path / "tampered.json")
+    incomplete = json.loads(path.read_text())
+    del incomplete["terms"][0]["digests"]
+    (tmp_path / "incomplete.json").write_text(json.dumps(incomplete))
+    with pytest.raises(ValueError, match="term 0 is incomplete"):
+        DataVector.read_objective_manifest(tmp_path / "incomplete.json")
+
+    layouts = single.term_layouts()
+    with pytest.raises(ValueError, match="not partitioned"):
+        vector.write_objective_vector(
+            tmp_path / "p.json",
+            state_fingerprint=STATE,
+            term_layout=layouts,
+            schema="fs-objective-vector-5",
+            n_ranks=2,
+        )
+    with pytest.raises(ValueError, match="omit dtype"):
+        vector.write_objective_vector(
+            tmp_path / "d.json",
+            state_fingerprint=STATE,
+            term_layout=layouts,
+            dtype=np.float32,
+        )
+    with pytest.raises(ValueError, match="float32 or float64"):
+        vector.write_objective_vector(
+            tmp_path / "i.json",
+            state_fingerprint=STATE,
+            term_layout=layouts,
+            schema="fs-objective-vector-5",
+            dtype=np.int32,
+        )
+
+
+def test_objective_vector_v5_reads_an_absolute_file_from_its_copy(tmp_path, space):
+    """A manifest naming an absolute (e.g. remote) data path reads a fetched copy."""
+    import shutil
+
+    single = DataSpace(frequencies=[5.0], segments=space.segments)
+    vector = single.random(seed=10)
+    path = vector.write_objective_vector(
+        tmp_path / "site" / "v.json",
+        state_fingerprint=STATE,
+        term_layout=single.term_layouts(),
+        schema="fs-objective-vector-5",
+    )
+    manifest = json.loads(path.read_text())
+    manifest["file"] = "/scratch/remote/project/v.h5"
+    del manifest["manifest_fingerprint"]
+    manifest["manifest_fingerprint"] = canonical_json_sha256(manifest)
+    local = tmp_path / "local"
+    local.mkdir()
+    (local / "v.json").write_text(json.dumps(manifest))
+    shutil.copy(tmp_path / "site" / "v.h5", local / "v.h5")
+    restored = DataVector.read_objective_vector(local / "v.json", single)
+    np.testing.assert_array_equal(restored.values, vector.values)
+
+
+def test_canonical_state_keeps_simulated_and_term_configuration(tmp_path):
+    from frequensolve.imaging._objective import ObjectiveState
+
+    cache = tmp_path / "state.h5"
+    with h5py.File(cache, "w") as h5:
+        term = h5.create_group("terms/0")
+        term["coordinate_keys"] = [[1, 2, 1], [1, 4, 1]]
+        term["n_global_rows"] = [2]
+        term["simulated"] = [[2.0, 1.0], [4.0, 2.0]]
+        term["objective_residual"] = [[1.0, 0.0], [2.0, 0.0]]
+    payload = {
+        "schema": "fs-objective-linearization-4",
+        "terms": [
+            {
+                "id": "waveform",
+                "receiver_group": "surface",
+                "normalization": {"scale": 1.0},
+                "cache": {"file": cache.name, "group": "/terms/0"},
+                "runtime": {"cache_fingerprint": file_sha256(cache)},
+            }
+        ],
+    }
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(payload))
+    state = ObjectiveState(path)
+    # Canonical states record no partition: any rank count reloads them.
+    assert (state.vector_schema, state.n_ranks) == ("fs-objective-vector-4", None)
+    np.testing.assert_array_equal(
+        state.terms["waveform"]["simulated"], [2 + 1j, 4 + 2j]
+    )
+    assert state.term_configs["waveform"][0]["normalization"] == {"scale": 1.0}
+    with h5py.File(cache, "r+") as h5:
+        h5["terms/0/simulated"][0, 0] += 1
+    with pytest.raises(ValueError, match="cache hash"):
+        ObjectiveState(path)

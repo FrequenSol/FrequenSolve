@@ -277,9 +277,70 @@ def plot_gather(
 ):
     """Plot a time-domain trace gather.
 
-    ``trace`` must have ``time`` and ``receiver`` dimensions.  The function
-    returns ``(fig, ax)`` and never mutates the input trace.
+    ``trace`` must have ``time`` and ``receiver`` dimensions. The function
+    returns ``(fig, ax)`` and never mutates the input trace. When a non-singleton
+    ``wavenumber`` dimension is present, every slice is shown in a labeled panel
+    with a shared amplitude range, and the return value is ``(fig, axes)`` where
+    ``axes`` is a one-dimensional array. In that case, ``ax`` may supply one axis
+    per wavenumber. The panels preserve k-domain values; no spatial inverse
+    transform or averaging is performed.
     """
+
+    trace = as_trace_array(trace, caller="plot_gather")
+    if "wavenumber" in trace.dims:
+        if "wavenumber" not in trace.coords:
+            raise ValueError(
+                "Wavenumber gathers require explicit wavenumber coordinates"
+            )
+        wavenumbers = coordinate_values(trace, "wavenumber", require_numeric=True)
+        if not len(wavenumbers) or not np.all(np.isfinite(wavenumbers)):
+            raise ValueError("Wavenumber coordinates must be nonempty and finite")
+        gathers = [
+            _prepare_time_gather(trace.isel(wavenumber=i), T_max=T_max, Tf=Tf)
+            for i in range(len(wavenumbers))
+        ]
+        amplitude = _amplitude_limit(
+            np.stack([trace_values(gather) for gather in gathers]), A
+        )
+        _apply_font_size(fontsize)
+        if ax is None:
+            fig, axes = _pyplot().subplots(
+                1,
+                len(gathers),
+                figsize=figsize,
+                squeeze=False,
+                sharex=True,
+                sharey=True,
+            )
+            axes = axes.ravel()
+        else:
+            axes = np.asarray(ax, dtype=object).reshape(-1)
+            if len(axes) != len(gathers):
+                raise ValueError("Provide one axis per wavenumber")
+            fig = axes[0].figure
+            if any(axis.figure is not fig for axis in axes):
+                raise ValueError("Wavenumber axes must belong to the same figure")
+        label = coordinate_label(trace, "wavenumber", "Wavenumber")
+        for axis, value, gather in zip(axes, wavenumbers, gathers):
+            plot_gather(
+                gather,
+                ax=axis,
+                A=amplitude,
+                units=units,
+                cmap=cmap,
+                fontsize=fontsize,
+                T_scale=T_scale,
+                aspect=aspect,
+                interpolation=interpolation,
+                title=f"{label} = {value:g}",
+                grid=grid,
+                colorbar=colorbar,
+                **imshow_kwargs,
+            )
+        if title is not None:
+            fig.suptitle(title)
+        _finalize_figure(fig, save=save, show=show)
+        return fig, axes
 
     trace = _prepare_time_gather(trace, T_max=T_max, Tf=Tf)
     values = trace_values(trace)

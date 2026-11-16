@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fs-receiver-state-bundle-1",
+  "type": "object",
+  "required": [
+    "schema",
+    "state_fingerprint",
+    "groups"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fs-receiver-state-bundle-1"
+    },
+    "state_fingerprint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "groups": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": [
+          "receiver_group",
+          "file",
+          "sha256"
+        ],
+        "properties": {
+          "receiver_group": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

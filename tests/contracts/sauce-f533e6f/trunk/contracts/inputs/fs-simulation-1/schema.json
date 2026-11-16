@@ -140,6 +140,15 @@
     "Discretization": {
       "type": "object",
       "properties": {
+        "material_quadrature": {
+          "type": "string",
+          "enum": [
+            "wavefield",
+            "material_intersections"
+          ],
+          "default": "wavefield",
+          "description": "Seismic compiled Forms volume integration. material_intersections partitions wavefield cells at loaded meshed-property boundaries, including curved physical geometry; uses CPU assembly and matching coefficient JVP/VJP integration. Faces keep their native rule. Requires meshed property spaces; tensor/depth partitions are not added. DPG total Gram differentiation remains a separate setting."
+        },
         "order": {
           "description": "Deprecated and no longer accepted. Use Mesh/adapt/order.",
           "deprecated": true,
@@ -531,6 +540,12 @@
             }
           },
           "additionalProperties": true
+        },
+        "root_patch": {
+          "$ref": "../../internal/fs-root-patch-1/schema.json",
+          "x-fs-visibility": "internal",
+          "x-fs-docs": false,
+          "description": "Prepared physical root selection against the authored Mesh/file fingerprint. Child IDs preserve parent geometry identity."
         }
       },
       "additionalProperties": true
@@ -622,7 +637,7 @@
               "type": "number",
               "exclusiveMinimum": 0.0,
               "maximum": 1.0,
-              "default": 1e-03,
+              "default": 0.001,
               "description": "Maximum relative FS_MG tolerance used by the inexact block solves. The effective tolerance tightens with the current coupled residual and never remains looser than the requested outer relative tolerance near convergence."
             },
             "inner_forcing": {
@@ -809,7 +824,12 @@
         },
         "fine_grid_comm_precision": {
           "type": "string",
-          "enum": ["auto", "configured", "native-residual", "native"],
+          "enum": [
+            "auto",
+            "configured",
+            "native-residual",
+            "native"
+          ],
           "default": "auto",
           "description": "CUDA finest-grid communication policy. auto follows comm_precision in TF32 mode and keeps native communication in strict FP32 mode. configured follows comm_precision for ordinary macro and smoother exchanges. native-residual keeps all macro/operator and residual exchanges native FP32 while smoothing follows comm_precision. native keeps both macro and smoother exchanges native FP32. Fresh FP32/FP64 residual recomputations always use native communication, regardless of this policy. Coarse-grid and transfer policies, CPU, and Metal are unchanged. This controls wire precision, not arithmetic precision."
         },
@@ -924,7 +944,7 @@
         "tolerance": {
           "type": "number",
           "exclusiveMinimum": 0.0,
-          "default": 1e-05
+          "default": 0.0001
         },
         "coarse_tol": {
           "type": "number",
@@ -987,7 +1007,12 @@
         },
         "forms_backend": {
           "type": "string",
-          "enum": ["auto", "cpu", "metal", "cuda"],
+          "enum": [
+            "auto",
+            "cpu",
+            "metal",
+            "cuda"
+          ],
           "default": "cpu",
           "description": "Backend for all supported Forms assembly stages, including fine macro construction and patch accumulation/inversion. Omission selects CPU assembly independently of gpu_backend. Explicit auto follows gpu_backend, including its compiled default. Explicit metal or cuda enables GPU assembly. CPU fallback remains for unsupported stages and numerical recovery. Metal uses FP32 for supported native-single/FP32 macros and retains device outputs for a compatible resident solver. This setting does not change the solve backend."
         },
@@ -1009,13 +1034,13 @@
         },
         "iterative_refinement": {
           "type": "boolean",
-          "default": false,
-          "description": "CPU FP32 builds only: verify and repair each iterative solve in FP64 against the ordinary convergence reference. The ordinary solve runs first, stopping at max(tolerance, refinement_inner_tolerance). Its residual is then recomputed in FP64 against the stored FP32 operator and normalized by the same per-RHS reference and active lanes the ordinary solve uses; while that misses tolerance, FP32 correction solves accumulate into an FP64 solution. The tolerance and reported residual apply to that FP64 iterate; the returned solution is its FP32 rounding, whose own residual can sit at the FP32 floor, so the gain is solution accuracy. Refinement stops early on an unstable or non-finite solve or a correction that does not reduce the residual, and reports that status. Costs one saved FP32 load and one FP64 solution per right-hand side (24 bytes per complex, 12 per real unknown and right-hand side) plus the FP64 fresh-residual workspace and one fresh residual per check. Ignored by FP64 builds and rejected for GPU solves and reduced-precision solve grids."
+          "default": true,
+          "description": "CPU and CUDA FP32: check the ordinary solve in FP64 and accumulate FP32 corrections into an FP64 solution. The initial solve stops at max(tolerance, refinement_inner_tolerance); successful refinement reports the FP64 iterate residual against the original convergence reference. The returned solution is rounded to FP32. A saved FP32 load and FP64 solution are allocated only when a correction is needed (24 bytes per complex or 12 per real unknown and RHS); fresh-residual scratch holds at most 16 RHS. Allocation failure on any rank or unsuccessful refinement resumes native iterations within the shared max_iter budget and reports native convergence. Under allocation failure, CPU fresh residuals use native arithmetic and FGMRES recovery is skipped. CUDA keeps the load copy and FP64 solution in host RAM; device scratch holds two global and two element vectors for at most 16 RHS plus an 8 MiB product panel. CUDA products and MPI assembly use FP64 and correction solves stay on CUDA; the first correction repeats the residual evaluation to avoid a full-size residual copy. CUDA supports dense and compact blocked native operators within the same scratch limits. Ignored by FP64 builds. When omitted, disabled for Metal, reduced-precision solve grids, and native-real CUDA solves; explicit true retains capability errors on those paths. The default follows the active runtime, including CPU fallback."
         },
         "refinement_max_steps": {
           "type": "integer",
           "minimum": 1,
-          "default": 10,
+          "default": 4,
           "description": "Maximum FP32 correction solves after the ordinary solve when iterative_refinement is enabled."
         },
         "refinement_inner_tolerance": {

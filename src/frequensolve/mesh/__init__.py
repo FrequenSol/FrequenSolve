@@ -7,5 +7,7 @@ from frequensolve.mesh.mesh_generators import *  # noqa: F403
 from frequensolve.mesh.mesh_generators import __all__ as _generators_all
 from frequensolve.mesh.mesh_manager import *  # noqa: F403
 from frequensolve.mesh.mesh_manager import __all__ as _manager_all
+from frequensolve.mesh.patches import *  # noqa: F403
+from frequensolve.mesh.patches import __all__ as _patch_all
 
-__all__ = unique_exports(_boundary_all, _generators_all, _manager_all)
+__all__ = unique_exports(_boundary_all, _generators_all, _manager_all, _patch_all)

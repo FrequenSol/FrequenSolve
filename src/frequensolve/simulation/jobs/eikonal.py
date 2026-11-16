@@ -469,10 +469,12 @@ class EikonalJob(BaseJob):
         self._validate_simulation_support()
 
     def _validate_simulation_support(self) -> None:
-        physics = str(getattr(self.simulation, "physics", "")).lower()
+        physics = str(getattr(self.effective_simulation, "physics", "")).lower()
         if physics != "acoustic":
             raise ValueError("fs-eikonal-1 supports acoustic simulations only")
-        dimension = canonical_dimension(getattr(self.simulation, "dimension", 0))
+        dimension = canonical_dimension(
+            getattr(self.effective_simulation, "dimension", 0)
+        )
         if dimension not in {2, 3}:
             raise ValueError("Eikonal supports only full-dimensional 2D and 3D")
         config = self.eikonal.to_fs()
@@ -484,13 +486,13 @@ class EikonalJob(BaseJob):
                     f"{section}.points[{index}].coordinates",
                     int(dimension),
                 )
-        if bool(getattr(self.simulation, "axisymmetric", False)):
+        if bool(getattr(self.effective_simulation, "axisymmetric", False)):
             raise ValueError("Eikonal does not support axisymmetric simulations")
 
     def _validate_acquisition_selectors(self, config: Mapping[str, Any]) -> None:
         """Check selector names when a local acquisition catalog is available."""
 
-        acquisition = getattr(self.simulation, "acquisition", None)
+        acquisition = getattr(self.effective_simulation, "acquisition", None)
         if acquisition is None:
             return
         sources = config["sources"]
@@ -552,6 +554,7 @@ class EikonalJob(BaseJob):
         job.preserve_task_outputs = data.get("preserve_task_outputs", False)
         if not isinstance(job.preserve_task_outputs, bool):
             raise TypeError("preserve_task_outputs must be a boolean")
+        job._restore_simulation_overrides(data)
         job._job_id = data.get("job_id")
         return job
 

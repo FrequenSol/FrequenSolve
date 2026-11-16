@@ -17,6 +17,11 @@ class Discretization(ExtraFieldsMixin):
         **kwargs: Optional solver-facing discretization settings. The default
             discretization requires no explicit fields.
 
+    ``Discretization(method="Galerkin", quadrature="ainsworth")`` selects
+    Ainsworth-Wajid volume quadrature on quadrilaterals and hexahedra in
+    supporting backends. Other element shapes and boundary integrals retain
+    their existing rules. The default is ``quadrature="gauss"``.
+
     Raises:
         ValueError: If legacy ``order`` is supplied here instead of through mesh
             adaptivity.

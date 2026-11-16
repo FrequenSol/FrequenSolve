@@ -8,12 +8,28 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Hashable,
+    Iterable,
+    Mapping,
+    Optional,
+    Sequence,
+    cast,
+)
 
 import blake3
 import h5py
 import numpy as np
 import xarray as xr
+
+if TYPE_CHECKING:
+    # NumPy arrays implement the buffer protocol; its older stubs omit that fact.
+    # A type-only import keeps this boundary free of new runtime dependencies.
+    from typing_extensions import Buffer
 
 __all__ = ["HDF5Reference", "SimulationStore", "hash_dataarray_payload"]
 
@@ -84,6 +100,22 @@ def _coordinate_reference(value: Any) -> Optional[str]:
     return reference.strip("/")
 
 
+def _coordinate_storage_values(coordinate: Any) -> np.ndarray:
+    """Store real coordinates as solver-compatible doubles; preserve labels."""
+    values = np.asarray(coordinate)
+    if values.dtype.kind not in {"i", "u", "f"}:
+        return values
+    if values.dtype.kind in {"i", "u"}:
+        outside = values > 2**53
+        if values.dtype.kind == "i":
+            outside |= values < -(2**53)
+        if any(int(value) != float(value) for value in values[outside]):
+            raise ValueError(
+                "Integer coordinates must be exactly representable as float64"
+            )
+    return values.astype(np.float64, copy=False)
+
+
 def _coordinate_references_available(
     h5: h5py.File,
     dset: h5py.Dataset,
@@ -96,6 +128,11 @@ def _coordinate_references_available(
         if reference is not None and (
             reference not in h5 or not isinstance(h5[reference], h5py.Dataset)
         ):
+            return False
+        coordinate = h5[reference] if reference is not None else dset.attrs[dim]
+        dtype = np.asarray(coordinate).dtype if reference is None else coordinate.dtype
+        # Re-export legacy integer coordinates even when the input hash matches.
+        if dtype.kind in {"i", "u", "f"} and dtype != np.dtype(np.float64):
             return False
     return True
 
@@ -111,7 +148,7 @@ def _write_dimension_coordinates(
     inline_bytes = 0
     coordinate_group = _coordinate_group_path(dataset)
     for index, (dim, coordinate) in enumerate(coordinates.items()):
-        values = np.asarray(coordinate)
+        values = _coordinate_storage_values(coordinate)
         estimated_bytes = _coordinate_value_nbytes(values)
         if inline_bytes + estimated_bytes <= _MAX_INLINE_COORDINATE_BYTES:
             dset.attrs[dim] = _h5_attr_value(values)
@@ -130,7 +167,16 @@ def _write_dimension_coordinates(
         dset.attrs[dim] = f"/{coordinate_dataset.name.strip('/')}"
 
 
-def _hash_update_json(hasher, value: Any) -> None:
+def _string_dimensions(dimensions: Iterable[Hashable]) -> tuple[str, ...]:
+    names = []
+    for dimension in dimensions:
+        if not isinstance(dimension, str):
+            raise ValueError("Simulation store dimension names must be strings")
+        names.append(dimension)
+    return tuple(names)
+
+
+def _hash_update_json(hasher: blake3.blake3, value: Any) -> None:
     payload = json.dumps(value, sort_keys=True, default=_json_default).encode("utf-8")
     hasher.update(payload)
 
@@ -166,7 +212,7 @@ def compact_hdf5_file(
     with h5py.File(path, "r") as source:
         raw_storage = 0
 
-        def add_storage(_name, obj):
+        def add_storage(_name: str, obj: h5py.Dataset | h5py.Group) -> None:
             nonlocal raw_storage
             if isinstance(obj, h5py.Dataset):
                 raw_storage += int(obj.id.get_storage_size())
@@ -224,7 +270,7 @@ def hash_dataarray_payload(
         values = values.astype(dtype, copy=False)
     hasher = blake3.blake3()
     _hash_update_json(hasher, {"dtype": str(values.dtype), "shape": values.shape})
-    hasher.update(memoryview(values).cast("B"))
+    hasher.update(memoryview(cast("Buffer", values)).cast("B"))
     _hash_update_json(hasher, {"dims": list(data.dims)})
     for dim in data.dims:
         coord = np.ascontiguousarray(data.coords[dim].values)
@@ -237,7 +283,7 @@ def hash_dataarray_payload(
                 "attrs": dict(data.coords[dim].attrs),
             },
         )
-        hasher.update(memoryview(coord).cast("B"))
+        hasher.update(memoryview(cast("Buffer", coord)).cast("B"))
     _hash_update_json(
         hasher, {"attrs": dict(data.attrs), "extra_attrs": dict(attrs or {})}
     )
@@ -360,7 +406,8 @@ class SimulationStore:
             attrs: Additional HDF5 attributes to write on the dataset.
             coordinate_dims: Dimensions whose coordinates should be described
                 by HDF5 attributes. Large values are stored in referenced
-                datasets. Defaults to every dimension.
+                datasets. Real numeric coordinates are stored as float64,
+                independently of the value dtype. Defaults to every dimension.
             interpolation_dims: Dimensions presented to the solver's spatial
                 xarray evaluator. When omitted, every data dimension is an
                 interpolation dimension. Remaining dimensions must form one
@@ -376,8 +423,9 @@ class SimulationStore:
 
         dataset = dataset.strip("/")
         attrs = dict(attrs or {})
-        interpolation_dims = tuple(
-            data.dims if interpolation_dims is None else interpolation_dims
+        data_dims = _string_dimensions(data.dims)
+        interpolation_dims = _string_dimensions(
+            data_dims if interpolation_dims is None else interpolation_dims
         )
         unknown_interpolation_dims = set(interpolation_dims) - set(data.dims)
         if unknown_interpolation_dims:
@@ -394,7 +442,7 @@ class SimulationStore:
             raise ValueError(
                 "Non-interpolation data must use one trailing component dimension"
             )
-        coordinate_dims = tuple(
+        coordinate_dims = _string_dimensions(
             interpolation_dims if coordinate_dims is None else coordinate_dims
         )
         unknown_dims = set(coordinate_dims) - set(data.dims)
@@ -549,7 +597,8 @@ class SimulationStore:
         This is intended for generated arrays that are too large to first
         materialize as a single NumPy or xarray object. Passing a callable that
         creates a fresh iterator lets an unchanged existing dataset be reused
-        after a hash-only pass.
+        after a hash-only pass. Real numeric dimension coordinates are stored
+        as float64 independently of the payload dtype.
         """
 
         dataset = dataset.strip("/")
@@ -576,7 +625,7 @@ class SimulationStore:
                     raise ValueError("Chunk iterator produced too many rows")
                 if dset is not None:
                     dset[offset:stop, ...] = values
-                hasher.update(memoryview(values).cast("B"))
+                hasher.update(memoryview(cast("Buffer", values)).cast("B"))
                 offset = stop
             if offset != shape[0]:
                 raise ValueError(
@@ -597,7 +646,7 @@ class SimulationStore:
                         "attrs": {},
                     },
                 )
-                hasher.update(memoryview(coord).cast("B"))
+                hasher.update(memoryview(cast("Buffer", coord)).cast("B"))
             _hash_update_json(hasher, {"attrs": {}, "extra_attrs": attrs})
             return hasher.hexdigest()
 
@@ -639,7 +688,7 @@ class SimulationStore:
                 dtype=dtype,
                 compression=compression,
             )
-            chunks = chunk_factory() if chunk_factory is not None else chunk_iter
+            chunks = chunk_iter() if callable(chunk_iter) else chunk_iter
             try:
                 digest = digest_chunks(chunks, dset=dset)
                 if dims:

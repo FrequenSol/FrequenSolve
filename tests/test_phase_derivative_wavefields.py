@@ -251,3 +251,33 @@ def test_base_frequency_job_does_not_advertise_derivative_wavefields(tmp_path):
     assert "derivative_order" not in payload
     assert job.wavefield_trace_outputs.groups == ["s_velocity"]
     assert list(job.wavefield_outputs) == ["s_velocity"]
+
+
+@pytest.mark.parametrize("policy", ["total", "frozen"])
+def test_forward_source_derivative_policy_roundtrip_and_fingerprint(tmp_path, policy):
+    simulation = _elastic_simulation(tmp_path)
+    job = FrequencyDomainJob(
+        "derivatives", simulation, [10.0], phase_derivatives=1, source_derivative=policy
+    )
+    loaded = BaseJob.load(job.save())
+    assert loaded.source_derivative == policy
+    assert loaded.to_fs()["source_derivative"] == policy
+    other = FrequencyDomainJob(
+        "derivatives",
+        simulation,
+        [10.0],
+        phase_derivatives=1,
+        source_derivative="frozen" if policy == "total" else "total",
+    )
+    assert job.task_fingerprint(1) != other.task_fingerprint(1)
+
+
+def test_forward_rejects_invalid_source_derivative_policy(tmp_path):
+    with pytest.raises(ValueError, match="source_derivative"):
+        FrequencyDomainJob(
+            "derivatives",
+            _elastic_simulation(tmp_path),
+            [10.0],
+            phase_derivatives=1,
+            source_derivative="unknown",
+        )

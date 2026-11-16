@@ -4,7 +4,11 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
+from frequensolve.orchestrator.sites.aws.graphql_client import (
+    CloudAPIError,
+    CloudTransportError,
+    GraphQLClient,
+)
 
 
 class CapturingGraphQLClient(GraphQLClient):
@@ -28,74 +32,14 @@ class CapturingGraphQLClient(GraphQLClient):
                     "error": None,
                 }
             }
-        if "deployComputeInfrastructure" in query:
-            return {
-                "deployComputeInfrastructure": {
-                    "stackId": "stack-2",
-                    "stackName": "compute-stack",
-                    "status": "CREATE_IN_PROGRESS",
-                    "outputs": {},
-                    "error": None,
-                }
-            }
         if "submitJob" in query:
             return {
                 "submitJob": {
                     "simulationId": "simulation-1",
-                    "batchJobId": "batch-1",
                     "status": "PENDING",
                 }
             }
         raise AssertionError(f"unexpected query: {query}")
-
-
-class AccountAuth:
-    def get_account_id(self):
-        return "account-123"
-
-
-class StackQueryCapturingGraphQLClient(GraphQLClient):
-    def __init__(self):
-        super().__init__("https://example.invalid/graphql", auth=AccountAuth())
-        self.last_query = ""
-        self.last_variables: Optional[Dict[str, Any]] = None
-
-    def execute(
-        self, query: str, variables: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        self.last_query = query
-        self.last_variables = variables
-        return {
-            "listStacks": {
-                "items": [
-                    {
-                        "stackId": "compute-stack",
-                        "outputs": "{}",
-                        "status": "CREATE_COMPLETE",
-                        "createdAt": "2026-05-24T00:00:00Z",
-                    }
-                ]
-            }
-        }
-
-
-class CapabilityGraphQLClient(GraphQLClient):
-    def __init__(self, query_fields=(), mutation_fields=()):
-        super().__init__("https://example.invalid/graphql", auth=object())
-        self.query_fields = query_fields
-        self.mutation_fields = mutation_fields
-
-    def execute(
-        self, query: str, variables: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        assert "__type" in query
-        assert variables is None
-        return {
-            "queryType": {"fields": [{"name": name} for name in self.query_fields]},
-            "mutationType": {
-                "fields": [{"name": name} for name in self.mutation_fields]
-            },
-        }
 
 
 class SimulationStatusGraphQLClient(GraphQLClient):
@@ -132,78 +76,27 @@ class SimulationStatusGraphQLClient(GraphQLClient):
         }
 
 
-def test_check_compute_stack_exists_filters_by_account_id():
-    client = StackQueryCapturingGraphQLClient()
-
-    assert client._check_compute_stack_exists() is True
-
-    assert "listStacks(filter: $filter)" in client.last_query
-    assert client.last_variables == {
-        "filter": {
-            "stackType": {"eq": "compute"},
-            "accountId": {"eq": "account-123"},
-            "or": [
-                {"status": {"eq": "CREATE_COMPLETE"}},
-                {"status": {"eq": "UPDATE_COMPLETE"}},
-                {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
-            ],
-        }
-    }
-
-
-def test_compute_provisioning_mode_detects_shared_runtime_catalog():
-    client = CapabilityGraphQLClient(
-        query_fields=("fetchAvailableComputeRuntimes",),
-        mutation_fields=("deployComputeInfrastructure",),
-    )
-
-    assert client.get_compute_provisioning_mode() == "shared"
-
-
-def test_compute_provisioning_mode_detects_legacy_per_user_mutation():
-    client = CapabilityGraphQLClient(
-        mutation_fields=("deployComputeInfrastructure",),
-    )
-
-    assert client.get_compute_provisioning_mode() == "per-user"
-
-
-def test_compute_provisioning_mode_rejects_unknown_contract():
-    client = CapabilityGraphQLClient(query_fields=("listStacks",))
-
-    with pytest.raises(RuntimeError, match="does not expose a supported compute"):
-        client.get_compute_provisioning_mode()
-
-
 def test_simulation_status_details_include_customer_safe_failure_message():
     client = SimulationStatusGraphQLClient()
 
     assert client.get_simulation_status_details("simulation-1") == {
         "id": "simulation-1",
+        "outputIdentity": None,
+        "strictRetryFingerprint": None,
         "status": "FAILED",
         "failureCode": "SCU_BALANCE_INSUFFICIENT",
         "failureMessage": "This simulation needs more SCUs.",
+        "executionSiteId": None,
+        "computePlacement": None,
+        "executionRegistrationFingerprint": None,
+        "logicalAttemptId": None,
+        "providerJobId": None,
+        "executionState": "failed",
+        "failureReason": "SCU_BALANCE_INSUFFICIENT",
+        "requestedResources": None,
+        "allocatedResources": None,
     }
     assert len(client.queries) == 1
-
-
-def test_simulation_status_details_fall_back_for_older_cloud_schemas():
-    client = SimulationStatusGraphQLClient(legacy=True)
-
-    assert client.get_simulation_status("simulation-legacy") == "FAILED"
-    assert len(client.queries) == 3
-
-
-def test_simulation_status_details_preserve_failures_on_partial_cloud_schema():
-    client = SimulationStatusGraphQLClient(partial=True)
-
-    details = client.get_simulation_status_details("simulation-partial")
-
-    assert details["failureCode"] == "SCU_BALANCE_INSUFFICIENT"
-    assert details["failureMessage"] == "This simulation needs more SCUs."
-    assert len(client.queries) == 2
-    assert "failureMessage" in client.queries[1]
-    assert "creditSettlementMode" not in client.queries[1]
 
 
 def test_simulation_status_returns_exact_credit_decimal_without_changing_outcome():
@@ -226,116 +119,11 @@ def test_simulation_status_returns_exact_credit_decimal_without_changing_outcome
     assert {key: result[key] for key in billing} == billing
 
 
-def test_cloud_log_queries_page_frequency_jobs_and_validate_events():
-    responses = iter(
-        [
-            {
-                "getSimulation": {
-                    "frequencyJobs": {
-                        "items": [
-                            {
-                                "frequencyIndex": 0,
-                                "batchJobId": "batch-1",
-                            }
-                        ],
-                        "nextToken": "page-2",
-                    }
-                }
-            },
-            {
-                "getSimulation": {
-                    "frequencyJobs": {
-                        "items": [
-                            {
-                                "frequencyIndex": 1,
-                                "batchJobId": "batch-2",
-                            }
-                        ],
-                        "nextToken": None,
-                    }
-                }
-            },
-            {
-                "getJobLogs": {
-                    "logs": [
-                        {
-                            "timestamp": "2026-09-06T14:00:00.000Z",
-                            "message": "solver complete",
-                        }
-                    ]
-                }
-            },
-        ]
-    )
-    client = GraphQLClient("https://example.invalid/graphql", auth=object())
-    client.calls = []
-
-    def execute(query, variables=None):
-        client.calls.append((query, variables))
-        return next(responses)
-
-    client.execute = execute
-
-    assert client.list_simulation_frequency_jobs("simulation-1") == [
-        {
-            "frequencyIndex": 0,
-            "batchJobId": "batch-1",
-        },
-        {
-            "frequencyIndex": 1,
-            "batchJobId": "batch-2",
-        },
-    ]
-    assert client.get_job_logs("batch-2") == [
-        {
-            "timestamp": "2026-09-06T14:00:00.000Z",
-            "message": "solver complete",
-        }
-    ]
-    assert [variables for _, variables in client.calls] == [
-        {
-            "id": "simulation-1",
-            "limit": 100,
-            "nextToken": None,
-        },
-        {
-            "id": "simulation-1",
-            "limit": 100,
-            "nextToken": "page-2",
-        },
-        {"batchJobId": "batch-2"},
-    ]
-
-
 def test_deploy_storage_stack_does_not_send_environment_argument():
     client = CapturingGraphQLClient()
 
     client.deploy_storage_stack()
 
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-
-def test_deploy_compute_stack_does_not_send_environment_argument():
-    client = CapturingGraphQLClient()
-
-    client.deploy_compute_stack()
-
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-
-def test_legacy_environment_argument_is_accepted_but_not_sent():
-    client = CapturingGraphQLClient()
-
-    client.deploy_storage_stack("staging")
-    assert "$environment" not in client.last_query
-    assert "environment:" not in client.last_query
-    assert client.last_variables in (None, {})
-
-    client.deploy_compute_stack("staging")
     assert "$environment" not in client.last_query
     assert "environment:" not in client.last_query
     assert client.last_variables in (None, {})
@@ -360,18 +148,13 @@ def test_submit_job_can_send_status_email_override_and_fresh_run():
     }
 
 
-def test_submit_job_preserves_legacy_positional_argument_order():
+def test_submit_job_rejects_removed_batch_arguments():
     client = CapturingGraphQLClient()
-
-    client.submit_job("project/jobs/job.json", 2, 4096, "run-name", True, False)
-
-    assert client.last_variables == {
-        "jobFileS3Key": "project/jobs/job.json",
-        "sendSimulationStatusEmail": True,
-        "vcpu": 2,
-        "memory": 4096,
-        "jobName": "run-name",
-    }
+    with pytest.raises(TypeError):
+        client.submit_job("project/job.json", 2, 4096)
+    with pytest.raises(TypeError):
+        client.submit_job("project/job.json", compute_mode="auto")
+    assert not client.last_query
 
 
 def test_submit_job_sends_optional_cloud_run_metadata():
@@ -391,7 +174,7 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     assert "simulationJobName: $simulationJobName" in client.last_query
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
-        "sendSimulationStatusEmail": None,
+        "forceRun": False,
         "projectName": "project",
         "projectDisplayName": "Project Alpha",
         "simulationName": "model",
@@ -399,113 +182,211 @@ def test_submit_job_sends_optional_cloud_run_metadata():
     }
 
 
-def test_submit_job_sends_managed_slurm_contract_and_reads_target_details():
-    client = CapturingGraphQLClient()
+def test_submit_job_sends_managed_site_contract():
+    import json
 
+    client = CapturingGraphQLClient()
+    resources = {"nodes": 2, "mpiRanks": 8, "wallTimeSeconds": 1800}
     result = client.submit_job(
         "project/jobs/model/job/job.json",
-        execution_backend="slurm",
-        slurm_partition="cpu-efa",
-        slurm_nodes=2,
-        slurm_ranks_per_node=4,
-        slurm_wall_time_seconds=1800,
+        cluster_id="frequensol-shared-us-east-1",
+        execution_resources=resources,
     )
-
-    assert "executionBackend: $executionBackend" in client.last_query
-    assert "providerAttemptId" in client.last_query
+    assert "executionSiteId: $executionSiteId" in client.last_query
+    assert "providerJobId" in client.last_query
     assert client.last_variables == {
         "jobFileS3Key": "project/jobs/model/job/job.json",
-        "sendSimulationStatusEmail": None,
-        "executionBackend": "slurm",
-        "computeMode": None,
-        "slurmPartition": "cpu-efa",
-        "slurmNodes": 2,
-        "slurmRanksPerNode": 4,
-        "slurmWallTimeSeconds": 1800,
+        "executionSiteId": "frequensol-shared-us-east-1",
+        "executionResources": json.dumps(resources),
+        "forceRun": False,
     }
     assert result["simulationId"] == "simulation-1"
 
 
-def test_submit_job_retries_legacy_cloud_without_optional_metadata(monkeypatch):
+@pytest.mark.parametrize(
+    "field", ["projectName", "simulationJobName", "forceRun", "executionSiteId"]
+)
+def test_submit_job_never_retries_a_different_contract(monkeypatch, field):
+    from unittest.mock import Mock
+
     client = CapturingGraphQLClient()
-    calls = []
-
-    def execute(query, variables=None):
-        calls.append((query, variables))
-        if len(calls) == 1:
-            raise RuntimeError(
-                "GraphQL errors: Unknown argument 'projectName' on field "
-                "'Mutation.submitJob'."
-            )
-        return {
-            "submitJob": {
-                "simulationId": "simulation-legacy",
-                "batchJobId": "",
-                "status": "PENDING",
-            }
-        }
-
+    execute = Mock(side_effect=RuntimeError(f"Unknown argument {field}"))
     monkeypatch.setattr(client, "execute", execute)
-
-    result = client.submit_job(
-        "project/jobs/model/job/job.json",
-        project_name="project",
-        simulation_name="model",
-        simulation_job_name="job",
-    )
-
-    assert result["simulationId"] == "simulation-legacy"
-    assert len(calls) == 2
-    assert "projectName" in calls[0][0]
-    assert "projectName" not in calls[1][0]
-    assert "projectName" in calls[0][1]
-    assert "projectName" not in calls[1][1]
-
-
-def test_submit_job_retries_legacy_cloud_when_only_later_metadata_is_set(
-    monkeypatch,
-):
-    client = CapturingGraphQLClient()
-    calls = []
-
-    def execute(query, variables=None):
-        calls.append((query, variables))
-        if len(calls) == 1:
-            raise RuntimeError(
-                "GraphQL errors: Unknown argument 'projectName' on field "
-                "'Mutation.submitJob'."
-            )
-        return {
-            "submitJob": {
-                "simulationId": "simulation-legacy",
-                "batchJobId": "",
-                "status": "PENDING",
-            }
-        }
-
-    monkeypatch.setattr(client, "execute", execute)
-
-    result = client.submit_job(
-        "project/jobs/model/job/job.json",
-        simulation_name="model",
-    )
-
-    assert result["simulationId"] == "simulation-legacy"
-    assert len(calls) == 2
-    assert calls[0][1]["simulationName"] == "model"
-    assert "simulationName" not in calls[1][1]
-
-
-def test_submit_job_explains_when_cloud_does_not_support_fresh_runs(monkeypatch):
-    client = CapturingGraphQLClient()
-
-    def reject_force_run(query, variables=None):
-        raise RuntimeError(
-            "GraphQL errors: Unknown argument 'forceRun' on field "
-            "'Mutation.submitJob'."
+    with pytest.raises(RuntimeError, match=field):
+        client.submit_job(
+            "project/job.json",
+            project_name="project",
+            simulation_job_name="job",
+            fresh=True,
         )
+    execute.assert_called_once()
 
-    monkeypatch.setattr(client, "execute", reject_force_run)
 
-    with pytest.raises(RuntimeError, match="Submit without force=True"):
-        client.submit_job("project/jobs/job.json", fresh=True)
+def test_cancel_simulation_passes_id_and_requires_api_acceptance(monkeypatch):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    calls = []
+
+    def execute(query, variables):
+        calls.append(variables)
+        return {"cancelSimulation": {"success": True, "error": None}}
+
+    monkeypatch.setattr(client, "execute", execute)
+    assert client.cancel_simulation("simulation-1") is None
+    assert calls == [{"simulationId": "simulation-1"}]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        {},
+        {"cancelSimulation": None},
+        {"cancelSimulation": {"success": False, "error": "private-token"}},
+        {"cancelSimulation": {"success": "true"}},
+        {"cancelSimulation": {"success": True, "error": "private-token"}},
+    ],
+)
+def test_cancel_simulation_rejects_unconfirmed_response(monkeypatch, response):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    monkeypatch.setattr(client, "execute", lambda *args: response)
+    with pytest.raises(RuntimeError) as error:
+        client.cancel_simulation("simulation-1")
+    assert "private-token" not in str(error.value)
+
+
+def test_cancel_simulation_sanitizes_transport_failure(monkeypatch):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+
+    def execute(*args):
+        raise CloudTransportError("private-token private-account")
+
+    monkeypatch.setattr(client, "execute", execute)
+    with pytest.raises(RuntimeError, match="connectivity") as error:
+        client.cancel_simulation("simulation-1")
+    assert "private-token" not in str(error.value)
+    assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize("failure", [CloudAPIError, RuntimeError])
+def test_cancel_simulation_preserves_sanitized_failure_category(monkeypatch, failure):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+
+    def execute(*args):
+        raise failure("private-token private-account")
+
+    monkeypatch.setattr(client, "execute", execute)
+    with pytest.raises(failure) as error:
+        client.cancel_simulation("simulation-1")
+    assert "private-token" not in str(error.value)
+    assert "connectivity" not in str(error.value)
+    assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "kind", ["timeout", "connection", "http", "graphql", "resolver"]
+)
+def test_cancel_simulation_classifies_real_request_failures(monkeypatch, kind):
+    from types import SimpleNamespace
+
+    import requests
+
+    auth = SimpleNamespace(get_id_token=lambda: "private-token")
+    client = GraphQLClient("https://example.invalid/graphql", auth=auth)
+
+    def post(*args, **kwargs):
+        if kind == "timeout":
+            raise requests.exceptions.Timeout("private-token")
+        if kind == "connection":
+            raise requests.exceptions.ConnectionError("private-token")
+
+        def check_status():
+            if kind == "http":
+                raise requests.exceptions.HTTPError("private-token")
+
+        body = (
+            {"errors": [{"message": "private-token"}]}
+            if kind == "graphql"
+            else {
+                "data": {
+                    "cancelSimulation": {"success": False, "error": "private-token"}
+                }
+            }
+        )
+        return SimpleNamespace(raise_for_status=check_status, json=lambda: body)
+
+    monkeypatch.setattr(requests, "post", post)
+    expected = (
+        CloudTransportError if kind in {"timeout", "connection"} else CloudAPIError
+    )
+    with pytest.raises(expected) as error:
+        client.cancel_simulation("simulation-1")
+    assert "private-token" not in str(error.value)
+    assert ("connectivity" in str(error.value)) == (expected is CloudTransportError)
+
+
+@pytest.mark.parametrize("options", [{"legacy": True}, {"partial": True}])
+def test_status_rejects_incompatible_schema_without_retry(options):
+    client = SimulationStatusGraphQLClient(**options)
+    with pytest.raises(RuntimeError, match="Cannot query field"):
+        client.get_simulation_status_details("simulation-1")
+    assert len(client.queries) == 1
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_compute_resolution_accepts_awsjson_and_preserves_selection(encoded):
+    import json
+
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    calls = []
+    value = {"executionSiteId": "research-cluster", "executionIdentity": "a" * 64}
+
+    def execute(query, variables):
+        calls.append(variables)
+        return {"resolveMyComputeCluster": json.dumps(value) if encoded else value}
+
+    client.execute = execute
+    assert client.resolve_compute_cluster(cluster_id="research-cluster") == value
+    assert calls == [{"executionSiteId": "research-cluster"}]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        {},
+        "invalid-json",
+        {"executionSiteId": "managed-batch", "executionIdentity": "a" * 64},
+        {"executionSiteId": "research", "executionIdentity": "not-a-fingerprint"},
+    ],
+)
+def test_compute_resolution_never_falls_back_on_invalid_response(value):
+    client = GraphQLClient("https://example.invalid/graphql", auth=object())
+    calls = []
+
+    def execute(*args):
+        calls.append(args)
+        return {"resolveMyComputeCluster": value}
+
+    client.execute = execute
+    with pytest.raises(RuntimeError, match="compute cluster resolution"):
+        client.resolve_compute_cluster(cluster_id="research-cluster")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("value", ["", "Upper", "managed-batch", 1])
+def test_compute_resolution_rejects_invalid_cluster_before_network(value):
+    client = CapturingGraphQLClient()
+    with pytest.raises(ValueError, match="cluster_id"):
+        client.resolve_compute_cluster(cluster_id=value)
+    assert not client.last_query
+
+
+def test_submit_sends_cluster_and_resolved_identity():
+    client = CapturingGraphQLClient()
+    client.submit_job(
+        "project/job.json",
+        cluster_id="research",
+        expected_compute_identity="a" * 64,
+    )
+    assert client.last_variables["executionSiteId"] == "research"
+    assert client.last_variables["expectedComputeIdentity"] == "a" * 64

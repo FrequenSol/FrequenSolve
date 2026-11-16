@@ -1,0 +1,143 @@
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+
+from frequensolve.seismic.traces import TraceDataset
+from frequensolve.simulation.jobs.artifacts import TraceManifest
+
+
+def _write_accumulated_packed_product(path: Path) -> None:
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    frequencies = np.array([0.2, 0.4, 0.1, 0.2, 0.3, 0.4])
+    laplace = np.array([-0.2, -0.2, -0.1, -0.1, -0.1, -0.1])
+    task_ids = np.array([1, 2, 1, 2, 3, 4], dtype=np.int32)
+    dataset_numbers = np.arange(1, 7, dtype=np.int32)
+
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("frequency", data=frequencies)
+        h5.create_dataset("laplace", data=laplace)
+        h5.create_dataset("task_id", data=task_ids)
+        h5.create_dataset(
+            "survey/packed_layout_kind",
+            data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
+        )
+
+        catalog = h5.require_group("survey/receiver_groups/_catalog")
+        catalog.create_dataset(
+            "group_name",
+            data=np.array(["surface"], dtype=string_dtype),
+        )
+        catalog.create_dataset(
+            "dataset_path",
+            data=np.array(["/surface"], dtype=string_dtype),
+        )
+        catalog.create_dataset(
+            "layout_kind",
+            data=np.array(["dense_trace_v1"], dtype=string_dtype),
+        )
+        trace_group = h5.require_group("survey/receiver_groups/surface/traces")
+        trace_group.create_dataset("receiver_id", data=np.array([101]))
+        trace_group.create_dataset("source_id", data=np.array([7]))
+        trace_group.create_dataset(
+            "component_name",
+            data=np.array(["p"], dtype=string_dtype),
+        )
+
+        h5.require_group("trace_index/datasets")
+        h5.create_dataset(
+            "trace_index/layout_kind",
+            data=np.array(["indexed_frequency_trace_v1"], dtype=string_dtype),
+        )
+        h5.create_dataset("trace_index/dataset_number", data=dataset_numbers)
+        h5.create_dataset("trace_index/frequency", data=frequencies)
+        h5.create_dataset("trace_index/laplace", data=laplace)
+        h5.create_dataset("trace_index/task_id", data=task_ids)
+        h5.create_dataset(
+            "trace_index/datasets/dataset_number",
+            data=dataset_numbers,
+        )
+        h5.create_dataset(
+            "trace_index/datasets/source_path",
+            data=np.array(["/surface"] * 6, dtype=string_dtype),
+        )
+        h5.create_dataset(
+            "trace_index/datasets/packed_path",
+            data=np.array(
+                [f"/trace_data/surface/{number:06d}" for number in dataset_numbers],
+                dtype=string_dtype,
+            ),
+        )
+
+        for number, value in zip(dataset_numbers, [20.0, 40.0, 1.0, 2.0, 3.0, 4.0]):
+            dataset = h5.create_dataset(
+                f"trace_data/surface/{number:06d}",
+                data=np.array([[[[value, 0.0]]]], dtype=np.float32),
+            )
+            dataset.attrs["dims"] = ["receiver", "component", "shot"]
+            dataset.attrs["receiver"] = np.array([101])
+            dataset.attrs["component"] = np.array(["p"], dtype=string_dtype)
+            dataset.attrs["shot"] = np.array([7])
+
+
+def _trace_manifest(tmp_path: Path) -> TraceManifest:
+    trace_dir = tmp_path / "results" / "traces"
+    return TraceManifest(
+        files=[trace_dir / "traces.h5"],
+        frequencies={1: 0.1, 2: 0.2, 3: 0.3, 4: 0.4},
+        laplace={1: -0.1, 2: -0.1, 3: -0.1, 4: -0.1},
+        groups=["surface"],
+        simulation=tmp_path / "simulation.json",
+        result_path=tmp_path / "results",
+        output_path=trace_dir,
+        project_path=tmp_path,
+    )
+
+
+def _wavenumber_dataset(tmp_path, coordinates):
+    trace_dir = tmp_path / "results" / "traces"
+    trace_dir.mkdir(parents=True)
+    packed = trace_dir / "traces.h5"
+    _write_accumulated_packed_product(packed)
+    with h5py.File(packed, "a") as h5:
+        wavenumber = h5.create_dataset("wavenumber", data=coordinates)
+        wavenumber.attrs["units"] = "1/m"
+        for number in range(1, 7):
+            path = f"trace_data/surface/{number:06d}"
+            values = h5[path][()]
+            del h5[path]
+            dataset = h5.create_dataset(
+                path, data=np.stack([values, 2 * values, 3 * values])
+            )
+            dataset.attrs["dims"] = ["receiver", "component", "source", "wavenumber"]
+            dataset.attrs["layout_kind"] = "dense_trace_v1"
+    return TraceDataset.from_manifest(_trace_manifest(tmp_path))
+
+
+def test_packed_wavenumbers_retain_physical_coordinates_through_time_transform(
+    tmp_path,
+):
+    from frequensolve.seismic.wavelet import RickerWavelet
+
+    coordinates = [-0.02, 0.0, 0.03]
+    traces = _wavenumber_dataset(tmp_path, coordinates)
+    try:
+        fd = traces.fd("surface", "p", source=7)
+        td = traces.td("surface", "p", 7, RickerWavelet(f=0.2))
+        for data in (fd, td):
+            np.testing.assert_array_equal(data.wavenumber, coordinates)
+            assert data.wavenumber.attrs["units"] == "1/m"
+        np.testing.assert_array_equal(fd.values.real[0, :, 0], [1, 2, 3])
+    finally:
+        traces.store.close()
+
+
+@pytest.mark.parametrize("coordinates", [[-0.02, 0.0], [-0.02, float("nan"), 0.03]])
+def test_packed_wavenumbers_reject_invalid_coordinates(tmp_path, coordinates):
+    traces = _wavenumber_dataset(tmp_path, coordinates)
+    try:
+        with pytest.raises(ValueError, match="Wavenumber coordinates do not match"):
+            traces.fd("surface", "p", source=7)
+    finally:
+        traces.store.close()

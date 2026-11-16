@@ -1,0 +1,19 @@
+{
+  "file": "dual_1.h5",
+  "manifest_fingerprint": "sha256:d19b5bf88b6436239069eaf3650beb47c6e8f43ef280af4f281a48f18590274f",
+  "schema": "fs-objective-vector-4",
+  "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "state_fingerprint": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "terms": [
+    {
+      "id": "primary",
+      "layout_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "n_global_rows": 404
+    },
+    {
+      "id": "secondary",
+      "layout_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "n_global_rows": 404
+    }
+  ]
+}

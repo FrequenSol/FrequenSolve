@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/03_imaging.ipynb
-Source SHA-256: 5d0babc480edb8d6b2b860c3fcec5b8f0a808868c426d1b968fe5690930b69b1
+Source SHA-256: 8632d14f26198f1338bd5155df1d23a2e984d72b5d12e7fe5e6470fefe6937e7
 """
 
 # %% source cell 5
@@ -67,12 +67,28 @@ def build_simulation(project, *, name, sediment_vp):
         name="sediment", properties={"Vp": vp_column, "Rho": 2.0 * u.g / u.cm**3}
     )
     model.add_surface(name="bottom", depth=MODEL_DEPTH * u.km)
+    from frequensolve.model import ModelSubdomain
+
+    model += ModelSubdomain(
+        name="fixed_pml_sediment",
+        mesh_block_id=3,
+        physics="acoustic",
+        properties={
+            "Vp": xr.DataArray(
+                sediment_start(below), dims=["z"], coords={"z": WATER_DEPTH + below}
+            ),
+            "Rho": 2.0 * u.g / u.cm**3,
+        },
+    )
     sim += model
     sim += model.hex_mesh_generator([12, 6])
     sim.mesh.set_adapt(elems_per_wave=2.0, order=4, f_low=3.0, f_high=10.0)
     sim += fs.BoundaryCondition(conditions=["free"], boundaries=["z_min"])
     sim += fs.BoundaryCondition(
-        conditions=["pml"], boundaries=["x_min", "x_max", "z_max"], pml_wavelengths=0.75
+        conditions=["pml"],
+        boundaries=["x_min", "x_max", "z_max"],
+        pml_wavelengths=0.75,
+        domain_extension={"remap": {"sediment": "fixed_pml_sediment"}},
     )
     acq = fs.Acquisition()
     acq.add_sources(

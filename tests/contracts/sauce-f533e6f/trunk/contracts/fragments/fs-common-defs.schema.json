@@ -112,7 +112,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Whether Scholte-wave mesh adaptivity is enabled."
         },
         "lower_bound": {
@@ -350,7 +350,8 @@
           "additionalProperties": true
         },
         "overrides": {
-          "type": "object"
+          "type": "object",
+          "description": "Partial settings merged after loading and verifying the source file. Objects merge recursively; arrays, scalars, and null replace base values. Omitted members survive. The source file is not modified."
         }
       },
       "oneOf": [
@@ -406,6 +407,102 @@
         }
       },
       "additionalProperties": true
+    },
+    "convolutionFilters": {
+      "type": "object",
+      "description": "Causal real discrete FIR coefficients, dimensionless, with no dt multiplier. Source shape is (encoding, source, tap); receiver shape is (encoding, component, receiver, tap). HDF5 combines leading encoding/component axes into channel.",
+      "required": [
+        "dt",
+        "shape"
+      ],
+      "properties": {
+        "dt": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "shape": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "taps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number"
+          }
+        },
+        "file": {
+          "$ref": "#/$defs/path"
+        },
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "taps"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "file"
+                ]
+              },
+              {
+                "required": [
+                  "dataset"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "file",
+            "dataset"
+          ],
+          "not": {
+            "required": [
+              "taps"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "lengthLimits": {
+      "description": "Two length endpoints, bare in the model length units or with explicit units.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/vec2"
+        },
+        {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/vec2"
+            },
+            "units": {
+              "$ref": "#/$defs/units"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     }
   }
 }

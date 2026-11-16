@@ -206,3 +206,14 @@ def test_v2_receiver_manifest_does_not_fall_back_to_legacy_receiver_name(tmp_pat
     assert manifest.files == [job._result_path / exact]
     assert manifest.existing_files == []
     assert not manifest.complete
+
+
+def test_trace_manifest_accepts_validated_downloaded_identity(tmp_path):
+    job = _job(tmp_path, [4.0])
+    remote = {key: _SHA256 for key in ("job", "simulation", "outputs")}
+    job._task_reuse_fingerprints = lambda: {key: "sha256:" + "1" * 64 for key in remote}
+    job.downloaded_task_fingerprints = lambda: [remote]
+    _write_task_result(job._result_path, 1, 4.0, [_trace_artifact("payloads/trace.h5")])
+    assert TraceManifest.from_job(job).files == [job._result_path / "payloads/trace.h5"]
+    job.downloaded_task_fingerprints = lambda: []
+    assert TraceManifest.from_job(job).files == []

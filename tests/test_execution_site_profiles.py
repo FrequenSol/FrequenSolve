@@ -1,0 +1,248 @@
+import pytest
+
+from frequensolve.orchestrator.sites.aws.execution_profile import (
+    ManagedExecutionProfile,
+    ManagedExecutionProfileError,
+)
+from frequensolve.orchestrator.sites.execution import ExecutionDetails
+
+
+def test_single_gpu_resource_serialization_and_invalid_shapes():
+    resources = {
+        "nodes": 1,
+        "mpi_ranks": 1,
+        "wall_time_seconds": 600,
+        "gpus_per_node": 1,
+    }
+    profile = ManagedExecutionProfile.from_mapping(
+        {"partition": "gpu", "execution_resources": resources}
+    )
+    assert profile.graphql_arguments()["execution_resources"]["gpusPerNode"] == 1
+    for override in (
+        {"gpus_per_node": True},
+        {"gpus_per_node": -1},
+        {"gpus_per_node": 3},
+        {"nodes": 2, "mpi_ranks": 2},
+        {"cpu": 16},
+        {"memory_mib": 62260},
+    ):
+        with pytest.raises(ManagedExecutionProfileError):
+            ManagedExecutionProfile.from_mapping(
+                {"execution_resources": {**resources, **override}}
+            )
+    assert (
+        "gpusPerNode"
+        not in ManagedExecutionProfile.from_mapping({}).graphql_arguments()[
+            "execution_resources"
+        ]
+    )
+
+
+@pytest.mark.parametrize("site_id", ["frequensol-shared-us-east-1", "research-slurm"])
+def test_named_site_uses_portable_submission_arguments(site_id):
+    profile = ManagedExecutionProfile.from_mapping({"cluster_id": site_id})
+    assert profile.graphql_arguments() == {
+        "cluster_id": site_id,
+        "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        [],
+        {"cluster_id": []},
+        {"cluster_id": "invalid site"},
+        {"cluster_id": "frequensol-shared-us-east-1", "execution_resources": []},
+        {"cluster_id": "frequensol-shared-us-east-1", "slurm_partition": "cpu-single"},
+        {"execution_resources": {"nodes": 1}},
+    ],
+)
+def test_invalid_profiles_have_actionable_errors(value):
+    with pytest.raises(ManagedExecutionProfileError):
+        ManagedExecutionProfile.from_mapping(value)
+
+
+def test_default_profile_leaves_site_selection_to_the_server():
+    assert ManagedExecutionProfile.from_mapping({}).graphql_arguments() == {
+        "execution_resources": {"nodes": 1, "mpiRanks": 1, "wallTimeSeconds": 3600},
+    }
+    with pytest.raises(ManagedExecutionProfileError):
+        ManagedExecutionProfile.from_mapping({"cluster_id": "managed-batch"})
+    details = ExecutionDetails.from_mapping(
+        {
+            "executionSiteId": "frequensol-shared-us-east-1",
+            "providerJobId": "opaque-id",
+            "executionState": "succeeded",
+        }
+    )
+    assert details.cluster_id == "frequensol-shared-us-east-1"
+    assert details.provider_job_id == "opaque-id"
+    assert details.state == "succeeded"
+
+
+def test_named_site_does_not_fall_back_to_another_backend():
+    from unittest.mock import Mock
+
+    from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
+
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(side_effect=RuntimeError("Unknown argument executionSiteId"))
+    with pytest.raises(RuntimeError, match="Unknown argument executionSiteId"):
+        client.submit_job(
+            job_file_s3_key="private/test/job.json",
+            cluster_id="frequensol-shared-us-east-1",
+        )
+    assert client.execute.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "status,expected", [("COMPLETED", "succeeded"), ("CANCELLED", "canceled")]
+)
+def test_normalized_state_covers_supported_status_aliases(status, expected):
+    from unittest.mock import Mock
+
+    from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
+
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(
+        return_value={"getSimulation": {"id": "test", "status": status}}
+    )
+    assert client.get_simulation_status_details("test")["executionState"] == expected
+    client.execute.return_value["getSimulation"]["executionState"] = "running"
+    assert client.get_simulation_status_details("test")["executionState"] == "running"
+
+
+def test_status_uses_current_identity_without_historical_provider_fallbacks():
+    from unittest.mock import Mock
+
+    from frequensolve.orchestrator.sites.aws.graphql_client import GraphQLClient
+
+    client = GraphQLClient.__new__(GraphQLClient)
+    client.execute = Mock(
+        return_value={
+            "getSimulation": {
+                "id": "test",
+                "status": "RUNNING",
+                "executionSiteId": "frequensol-shared-us-east-1",
+                "logicalAttemptId": "test:1",
+                "providerJobId": "current",
+                "providerAttemptId": "stale",
+                "batchJobId": "obsolete",
+                "requestedResources": '{"nodes":1,"mpiRanks":2,"wallTimeSeconds":600}',
+            }
+        }
+    )
+    details = client.get_simulation_status_details("test")
+    assert details["executionSiteId"] == "frequensol-shared-us-east-1"
+    assert details["logicalAttemptId"] == "test:1"
+    assert details["providerJobId"] == "current"
+    assert details["requestedResources"] == {
+        "nodes": 1,
+        "mpiRanks": 2,
+        "wallTimeSeconds": 600,
+    }
+    client.execute.return_value["getSimulation"]["providerJobId"] = None
+    assert client.get_simulation_status_details("test")["providerJobId"] is None
+
+
+def test_planner_memory_is_independent_and_preserved_in_graphql():
+    profile = ManagedExecutionProfile.from_mapping(
+        {
+            "execution_resources": {
+                "nodes": 1,
+                "mpi_ranks": 1,
+                "wall_time_seconds": 900,
+                "memory_mib": 1024,
+                "planner_memory_mib": 8192,
+            }
+        }
+    )
+    assert profile.graphql_arguments()["execution_resources"] == {
+        "nodes": 1,
+        "mpiRanks": 1,
+        "wallTimeSeconds": 900,
+        "memoryMiB": 1024,
+        "plannerMemoryMiB": 8192,
+    }
+
+
+@pytest.mark.parametrize("memory", [True, 0, -1, 1.5, "8192", 124519])
+def test_planner_memory_rejects_invalid_requests(memory):
+    with pytest.raises(ManagedExecutionProfileError):
+        ManagedExecutionProfile.from_mapping(
+            {
+                "execution_resources": {
+                    "nodes": 1,
+                    "mpi_ranks": 1,
+                    "wall_time_seconds": 900,
+                    "planner_memory_mib": memory,
+                }
+            }
+        )
+
+
+def test_adaptive_pool_profile_preserves_resources_and_rejects_planner_mix():
+    resources = {
+        "mode": "adaptive-allocation.v1",
+        "nodes": 1,
+        "mpi_ranks": 4,
+        "wall_time_seconds": 900,
+        "pool": {
+            "threads_per_rank": 2,
+            "memory_mib_per_node": 15360,
+            "partition": "cpu-single",
+        },
+    }
+    profile = ManagedExecutionProfile.from_mapping({"execution_resources": resources})
+    assert profile.graphql_arguments()["execution_resources"] == {
+        "mode": "adaptive-allocation.v1",
+        "nodes": 1,
+        "mpiRanks": 4,
+        "wallTimeSeconds": 900,
+        "pool": {
+            "threadsPerRank": 2,
+            "memoryMiBPerNode": 15360,
+            "partition": "cpu-single",
+        },
+    }
+    for changed in [{"planner_memory_mib": 8192}, {"mode": "auto"}, {"cpu": 8}]:
+        with pytest.raises(ManagedExecutionProfileError):
+            ManagedExecutionProfile.from_mapping(
+                {"execution_resources": {**resources, **changed}}
+            )
+
+
+def test_two_gpu_profile_preserves_rank_and_full_node_resources():
+    value = {
+        "nodes": 1,
+        "mpi_ranks": 2,
+        "gpus_per_node": 2,
+        "cpu": 64,
+        "memory_mib": 124518,
+        "wall_time_seconds": 600,
+    }
+    arguments = ManagedExecutionProfile.from_mapping(
+        {"partition": "gpu", "execution_resources": value}
+    ).graphql_arguments()
+    assert arguments["execution_resources"]["gpusPerNode"] == 2
+    assert arguments["execution_resources"]["mpiRanks"] == 2
+    for change in (
+        {"mpi_ranks": 1},
+        {"mpi_ranks": 3},
+        {"cpu": 32},
+        {"memory_mib": 124519},
+        {"nodes": 2},
+    ):
+        with pytest.raises(ManagedExecutionProfileError):
+            ManagedExecutionProfile.from_mapping(
+                {"execution_resources": {**value, **change}}
+            )
+    single = {**value, "mpi_ranks": 1, "gpus_per_node": 1}
+    assert (
+        ManagedExecutionProfile.from_mapping(
+            {"execution_resources": single}
+        ).execution_resources
+        == single
+    )

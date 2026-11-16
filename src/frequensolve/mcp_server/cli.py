@@ -9,13 +9,15 @@ from typing import TYPE_CHECKING, Iterable
 
 import click
 
+from frequensolve._cli_support import SupportedHostGroup
+
 if TYPE_CHECKING:
     from frequensolve.mcp_server._sdk_v2 import SafeMCPServer
 
 _ROOT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
-@click.group()
+@click.group(cls=SupportedHostGroup)
 @click.version_option(package_name="frequensolve")
 def main() -> None:
     """Serve or verify the FrequenSolve simulation-assistant MCP."""

@@ -1,5 +1,5 @@
 {
-  "schema": "frequensolve-optional-extra-contracts-1",
+  "schema": "frequensolve-optional-extra-contracts-2",
   "excluded_project_extras": [
     "dev",
     "docs"
@@ -26,7 +26,8 @@
         "frequensolve/_loading.py",
         "frequensolve/units.py"
       ],
-      "coverage_floor": 25.0
+      "coverage_floor": 25.0,
+      "coverage_branch_floor": 3
     },
     {
       "name": "fast-fft",
@@ -40,23 +41,28 @@
       "coverage_prefixes": [
         "frequensolve/util/fft.py"
       ],
-      "coverage_floor": 80.0
+      "coverage_floor": 80.0,
+      "coverage_branch_floor": 65
     },
     {
       "name": "cloud",
       "distribution": "wheel",
       "imports": [
         "boto3",
+        "dask.array",
         "requests"
       ],
       "selectors": [
         "tests/test_awssite_auth_retry.py",
-        "tests/test_cloud_cache_paths.py"
+        "tests/test_cloud_cache_paths.py",
+        "tests/test_cognito_login_challenges.py",
+        "tests/test_cloud_result_dependencies.py"
       ],
       "coverage_prefixes": [
         "frequensolve/orchestrator/sites/aws/"
       ],
-      "coverage_floor": 18.0
+      "coverage_floor": 18.0,
+      "coverage_branch_floor": 5
     },
     {
       "name": "mcp",
@@ -66,12 +72,14 @@
       ],
       "selectors": [
         "tests/test_mcp_protocol.py::test_official_client_initializes_and_lists_the_finite_closed_surface",
-        "tests/test_mcp_protocol.py::test_cli_doctor_uses_the_official_in_memory_client"
+        "tests/test_mcp_protocol.py::test_cli_doctor_uses_the_official_in_memory_client",
+        "tests/test_workflow_protocol.py"
       ],
       "coverage_prefixes": [
         "frequensolve/mcp_server/"
       ],
-      "coverage_floor": 20.0
+      "coverage_floor": 20.0,
+      "coverage_branch_floor": 3
     },
     {
       "name": "hpc",
@@ -94,7 +102,8 @@
       "coverage_prefixes": [
         "frequensolve/orchestrator/sites/hpc/"
       ],
-      "coverage_floor": 20.0
+      "coverage_floor": 20.0,
+      "coverage_branch_floor": 2
     },
     {
       "name": "parallel",
@@ -117,7 +126,8 @@
       "coverage_prefixes": [
         "frequensolve/orchestrator/sites/local/"
       ],
-      "coverage_floor": 22.0
+      "coverage_floor": 22.0,
+      "coverage_branch_floor": 8
     },
     {
       "name": "inversion",
@@ -131,7 +141,8 @@
       "coverage_prefixes": [
         "frequensolve/imaging/operators.py"
       ],
-      "coverage_floor": 22.0
+      "coverage_floor": 60,
+      "coverage_branch_floor": 35
     },
     {
       "name": "seismic-io",
@@ -149,7 +160,8 @@
       "coverage_prefixes": [
         "frequensolve/seismic/trace_record.py"
       ],
-      "coverage_floor": 55.0
+      "coverage_floor": 55.0,
+      "coverage_branch_floor": 30
     },
     {
       "name": "visual",
@@ -160,9 +172,7 @@
       ],
       "selectors": [
         "tests/test_seismic_plotting.py",
-        "tests/test_ex01_simple.py::test_model_plot",
-        "tests/test_ex01_simple.py::test_time_domain_wavelet_time_plot",
-        "tests/test_ex01_simple.py::test_time_domain_wavelet_freq_plot"
+        "tests/test_ex01_simple.py::test_model_plot"
       ],
       "pytest_args": [
         "--mpl",
@@ -179,7 +189,47 @@
       "environment": {
         "MPLBACKEND": "Agg",
         "PYVISTA_OFF_SCREEN": "true"
+      },
+      "coverage_branch_floor": 45,
+      "module_floors": {
+        "frequensolve/plotting/analysis.py": {
+          "lines": 20,
+          "branches": 10
+        },
+        "frequensolve/plotting/animate.py": {
+          "lines": 20,
+          "branches": 10
+        },
+        "frequensolve/plotting/layered.py": {
+          "lines": 20,
+          "branches": 10
+        },
+        "frequensolve/plotting/traces.py": {
+          "lines": 20,
+          "branches": 10
+        },
+        "frequensolve/plotting/vtu.py": {
+          "lines": 20,
+          "branches": 10
+        }
       }
+    },
+    {
+      "name": "notebook",
+      "distribution": "wheel",
+      "imports": [
+        "nbformat",
+        "nbclient",
+        "ipykernel"
+      ],
+      "selectors": [
+        "tests/test_workflow_artifacts.py::test_clean_notebook_and_failed_execution_evidence"
+      ],
+      "coverage_prefixes": [
+        "frequensolve/workflow/notebooks.py"
+      ],
+      "coverage_floor": 65.0,
+      "coverage_branch_floor": 30
     }
   ],
   "approval_markers": {

@@ -8,33 +8,16 @@ import traceback
 from pathlib import Path
 from typing import Any, Mapping
 
-from ._shared import CASE_SCHEMA, sanitize, utc_now, write_json
+from ._shared import CASE_SCHEMA, parse_timestamp, sanitize, utc_now, write_json
 
 TERMINAL_SUCCESS = {"SUCCEEDED", "COMPLETED", "COMPLETE", "SUCCESS"}
 
 
 def _iso_seconds(start: object, end: object) -> float | None:
-    import re
-    from datetime import datetime
-
-    if not isinstance(start, str) or not isinstance(end, str):
+    start_time, end_time = parse_timestamp(start), parse_timestamp(end)
+    if start_time is None or end_time is None:
         return None
-
-    def parse(value: str) -> datetime:
-        normalized = value.strip()
-        match = re.match(
-            r"^(.*T\d{2}:\d{2}:\d{2})\.(\d+)(Z|[+-]\d{2}:\d{2})$",
-            normalized,
-        )
-        if match:
-            fraction = (match.group(2) + "000000")[:6]
-            normalized = f"{match.group(1)}.{fraction}{match.group(3)}"
-        return datetime.fromisoformat(normalized.replace("Z", "+00:00"))
-
-    try:
-        return (parse(end) - parse(start)).total_seconds()
-    except ValueError:
-        return None
+    return (end_time - start_time).total_seconds()
 
 
 def _cloud_diagnostics(site: Any, simulation_id: str) -> dict[str, Any]:
@@ -130,10 +113,14 @@ def _derived_metrics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
         terminal_times = [
             item.get("endTime") for item in frequencies if isinstance(item, Mapping)
         ]
-        terminal_times = [value for value in terminal_times if isinstance(value, str)]
+        terminal_times = [
+            parsed
+            for value in terminal_times
+            if (parsed := parse_timestamp(value)) is not None
+        ]
         if terminal_times:
             metrics["packingAndProjectionSeconds"] = _iso_seconds(
-                max(terminal_times), provider.get("terminalAt")
+                max(terminal_times).isoformat(), provider.get("terminalAt")
             )
         metrics["frequencyQueueSeconds"] = [
             item["queueWaitSeconds"]

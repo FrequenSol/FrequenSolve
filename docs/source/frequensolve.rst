@@ -35,9 +35,9 @@ a class by task, start here:
    * - Declare an imaging problem: control spaces, observed data, misfit
      - :doc:`frequensolve.imaging` (``ControlSpace``, ``DepthProfile``,
        ``GridParameters``, ``ObservedData``, ``Misfit``, ``ImagingProblem``)
-   * - Run FWI, LSRTM, RTM, sensitivity kernels, or focusing
+   * - Run FWI, LSRTM, RTM, sensitivity kernels, or coherent focusing
      - :doc:`frequensolve.imaging` (``FWI``, ``Stage``, ``LSRTM``, ``rtm``,
-       ``sensitivity_kernel``, ``TimeReversalFocus``)
+       ``sensitivity_kernel``, ``Focusing``, ``SourceAperture``)
    * - Work with Jacobian and normal operators, penalties, smoothing
      - :doc:`frequensolve.imaging` (``Jacobian``, ``Normal``, ``Tikhonov``,
        ``TV``, ``Smoothing``, ``Diagonal``)

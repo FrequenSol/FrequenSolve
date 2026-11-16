@@ -23,6 +23,7 @@ Getting Started
 If you're new to FrequenSolve, follow this path:
 
 - :doc:`installation`
+- :doc:`acoustic_starter` for one small, explicitly submitted Cloud example
 - :doc:`quickstart` to build the compact FrequenSolve Python API workflow and see where site
   execution enters
 - :doc:`user_guide/simulation_assistant_mcp` when you want an agent to prepare
@@ -41,6 +42,7 @@ If you're new to FrequenSolve, follow this path:
    :caption: User Guide
 
    installation
+   acoustic_starter
    quickstart
    tutorials/index
    user_guide/index

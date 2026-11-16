@@ -37,6 +37,8 @@ class ExportContext:
         rel_path: Optional[Path] = None,
         store: Optional[Any] = None,
         default_length_units: Optional[Any] = None,
+        physics: Optional[str] = None,
+        dimension: Optional[Any] = None,
     ):
         self.project_path = (
             Path(project_path).resolve() if project_path is not None else None
@@ -44,6 +46,8 @@ class ExportContext:
         self.rel_path = Path(rel_path) if rel_path is not None else Path()
         self.store = store
         self.default_length_units = default_length_units
+        self.physics = physics
+        self.dimension = dimension
 
     @property
     def path(self) -> Optional[Path]:
@@ -74,6 +78,8 @@ class ExportContext:
             self.rel_path / rel_path,
             store=self.store,
             default_length_units=self.default_length_units,
+            physics=self.physics,
+            dimension=self.dimension,
         )
 
     def relative_to_project(self, path: Path) -> Path:

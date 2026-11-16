@@ -1,157 +1,199 @@
-"""Closed profile contract for FrequenSol-managed Cloud execution backends."""
+"""Closed profile contract for the managed Slurm execution site."""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 MANAGED_EXECUTION_PROFILE_FIELDS = frozenset(
-    {
-        "execution_backend",
-        "compute_mode",
-        "slurm_partition",
-        "slurm_nodes",
-        "slurm_ranks_per_node",
-        "slurm_wall_time",
-    }
+    {"cluster_id", "execution_resources", "partition", "allow_unverified_compute"}
 )
-
-_WALL_TIME = re.compile(
-    r"^(?P<days>\d{2})-(?P<hours>[0-2]\d):(?P<minutes>[0-5]\d):(?P<seconds>[0-5]\d)$"
-)
-_BATCH_MODES = frozenset({"auto", "spot_only", "on_demand_only"})
 
 
 class ManagedExecutionProfileError(ValueError):
-    """A named Cloud profile has an unsafe or unsupported execution shape."""
+    """The managed site profile has an unsupported execution shape."""
 
 
 @dataclass(frozen=True)
 class ManagedExecutionProfile:
-    """Validated execution settings sourced only from one named site profile."""
+    """Execution settings sourced from one named site profile."""
 
-    backend: str = "batch"
-    compute_mode: str | None = None
-    slurm_partition: str | None = None
-    slurm_nodes: int | None = None
-    slurm_ranks_per_node: int | None = None
-    slurm_wall_time: str | None = None
-    slurm_wall_time_seconds: int | None = None
-    emit_batch_fields: bool = False
+    cluster_id: str | None = None
+    execution_resources: dict[str, Any] = field(
+        default_factory=lambda: {
+            "nodes": 1,
+            "mpi_ranks": 1,
+            "wall_time_seconds": 3600,
+        }
+    )
+
+    partition: str | None = None
+    allow_unverified_compute: bool | None = None
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "ManagedExecutionProfile":
-        backend = values.get("execution_backend", "batch")
-        if not isinstance(backend, str) or backend not in {"batch", "slurm"}:
+        if not isinstance(values, Mapping):
+            raise ManagedExecutionProfileError("Execution profile must be a mapping")
+        if values.keys() - MANAGED_EXECUTION_PROFILE_FIELDS:
             raise ManagedExecutionProfileError(
-                "execution_backend must be exactly 'batch' or 'slurm'"
+                "Use cluster_id and execution_resources for managed execution"
             )
+        site_id = values.get("cluster_id")
+        if site_id is not None:
+            validate_cluster_id(site_id)
+        partition = values.get("partition")
+        if partition is not None:
+            validate_partition(partition)
+        allow = values.get("allow_unverified_compute")
+        if allow is not None and type(allow) is not bool:
+            raise ManagedExecutionProfileError(
+                "allow_unverified_compute must be a boolean"
+            )
+        resources = values.get("execution_resources")
+        if resources is None:
+            resources = {"nodes": 1, "mpi_ranks": 1, "wall_time_seconds": 3600}
+        if not isinstance(resources, Mapping):
+            raise ManagedExecutionProfileError("execution_resources must be a table")
+        if resources.get("mode") == "adaptive-allocation.v1":
+            from frequensolve.adaptive import AdaptivePool
 
-        compute_mode = values.get("compute_mode")
-        if compute_mode is not None:
-            if (
-                not isinstance(compute_mode, str)
-                or compute_mode.lower() not in _BATCH_MODES
+            if set(resources) != {
+                "mode",
+                "nodes",
+                "mpi_ranks",
+                "wall_time_seconds",
+                "pool",
+            }:
+                raise ManagedExecutionProfileError(
+                    "Adaptive resources require a pool without planner or frequency ceilings"
+                )
+            nodes = _bounded_integer(resources["nodes"], "nodes", 1, 2)
+            ranks = _bounded_integer(resources["mpi_ranks"], "mpi_ranks", 1, 8)
+            seconds = _bounded_integer(
+                resources["wall_time_seconds"], "wall_time_seconds", 60, 7200
+            )
+            if ranks % nodes or not isinstance(resources["pool"], Mapping):
+                raise ManagedExecutionProfileError(
+                    "Adaptive pool requires uniform ranks per node"
+                )
+            try:
+                pool = AdaptivePool.from_mapping(
+                    {
+                        "nodes": nodes,
+                        "ranks_per_node": ranks // nodes,
+                        "wall_time_seconds": seconds,
+                        **resources["pool"],
+                    }
+                )
+            except (ValueError, TypeError) as error:
+                raise ManagedExecutionProfileError(str(error)) from error
+            if set(resources["pool"]) != {
+                "threads_per_rank",
+                "memory_mib_per_node",
+                "partition",
+            } or (
+                pool.threads_per_rank > 64
+                or ranks * pool.threads_per_rank > 128
+                or pool.memory_mib_per_node
+                % (pool.ranks_per_node * pool.threads_per_rank)
+                != 0
+                or pool.memory_mib_per_node % (pool.ranks_per_node * 256) != 0
+                or pool.memory_mib_per_node > 124518
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", pool.partition)
             ):
-                raise ManagedExecutionProfileError(
-                    "compute_mode must be auto, spot_only, or on_demand_only"
-                )
-            compute_mode = compute_mode.lower()
-
-        slurm_values = {
-            name: values.get(name)
-            for name in (
-                "slurm_partition",
-                "slurm_nodes",
-                "slurm_ranks_per_node",
-                "slurm_wall_time",
-            )
-        }
-        supplied_slurm = [
-            name for name, value in slurm_values.items() if value is not None
-        ]
-
-        if backend == "batch":
-            if supplied_slurm:
-                raise ManagedExecutionProfileError(
-                    "Batch profiles cannot set Slurm fields: "
-                    + ", ".join(supplied_slurm)
-                )
+                raise ManagedExecutionProfileError("Unsupported managed adaptive pool")
             return cls(
-                backend="batch",
-                compute_mode=compute_mode or "auto",
-                emit_batch_fields=(
-                    "execution_backend" in values or "compute_mode" in values
-                ),
+                site_id,
+                {**resources, "pool": dict(resources["pool"])},
+                partition,
+                allow,
             )
-
-        if compute_mode is not None:
-            raise ManagedExecutionProfileError("Slurm profiles cannot set compute_mode")
-
-        missing = [name for name, value in slurm_values.items() if value is None]
-        if missing:
+        if (
+            resources.get("mode", "independent-frequency.v1")
+            != "independent-frequency.v1"
+        ):
+            raise ManagedExecutionProfileError("Unsupported execution mode")
+        resources = {k: v for k, v in resources.items() if k != "mode"}
+        required = {"nodes", "mpi_ranks", "wall_time_seconds"}
+        limits = {
+            "nodes": (1, 2),
+            "mpi_ranks": (1, 8),
+            "wall_time_seconds": (60, 7200),
+            "cpu": (1, 128),
+            "memory_mib": (1, 262144),
+            "planner_memory_mib": (1, 124518),
+            "gpus_per_node": (0, 2),
+        }
+        if not required <= resources.keys() or resources.keys() - limits.keys():
             raise ManagedExecutionProfileError(
-                "Slurm profiles must set: " + ", ".join(missing)
+                "execution_resources needs nodes, mpi_ranks, wall_time_seconds; optional cpu and memory_mib"
             )
-        partition = slurm_values["slurm_partition"]
-        if not isinstance(partition, str) or partition not in {
-            "cpu-single",
-            "cpu-efa",
-        }:
+        validated = {
+            key: _bounded_integer(value, key, *limits[key])
+            for key, value in resources.items()
+        }
+        nodes, ranks = validated["nodes"], validated["mpi_ranks"]
+        gpus = validated.get("gpus_per_node", 0)
+        if gpus and (nodes != 1 or ranks != gpus):
             raise ManagedExecutionProfileError(
-                "unsupported Slurm resource shape: slurm_partition must be "
-                "'cpu-single' or 'cpu-efa'"
+                "GPU execution requires one node and one MPI rank per GPU"
             )
-        nodes = _bounded_integer(slurm_values["slurm_nodes"], "slurm_nodes", 1, 2)
-        ranks = _bounded_integer(
-            slurm_values["slurm_ranks_per_node"], "slurm_ranks_per_node", 1, 4
-        )
-        if partition == "cpu-single" and (nodes != 1 or ranks != 1):
+        if gpus and validated.get("cpu", 64 if gpus == 2 else 32) not in (
+            (64,) if gpus == 2 else (32, 64)
+        ):
             raise ManagedExecutionProfileError(
-                "unsupported Slurm resource shape: cpu-single requires exactly "
-                "one node and one rank"
+                "Exclusive GPU execution reserves all 32 or 64 worker CPUs"
             )
-        if partition == "cpu-efa" and nodes < 2:
+        gpu_memory = 124518 if gpus == 2 or validated.get("cpu") == 64 else 62259
+        if gpus and validated.get("memory_mib", 0) > gpu_memory:
             raise ManagedExecutionProfileError(
-                "unsupported Slurm resource shape: cpu-efa requires an explicitly "
-                "distributed plan with at least two nodes"
+                "GPU worker memory exceeds its qualified capacity"
             )
-        if nodes * ranks > 8:  # Defensive if the per-field bounds change later.
+        if (
+            ranks % nodes
+            or ranks // nodes > 4
+            or (nodes == 1 and ranks != 1 and not gpus)
+        ):
             raise ManagedExecutionProfileError(
-                "unsupported Slurm resource shape: total MPI ranks cannot exceed 8"
-            )
-        wall_time = slurm_values["slurm_wall_time"]
-        wall_seconds = _wall_time_seconds(wall_time)
-        if wall_seconds < 60 or wall_seconds > 2 * 60 * 60:
-            raise ManagedExecutionProfileError(
-                "unsupported Slurm resource shape: wall time must be between one minute and two hours"
+                "Unsupported node/MPI-rank combination at managed-slurm"
             )
         return cls(
-            backend="slurm",
-            slurm_partition=partition,
-            slurm_nodes=nodes,
-            slurm_ranks_per_node=ranks,
-            slurm_wall_time=wall_time,
-            slurm_wall_time_seconds=wall_seconds,
+            cluster_id=site_id,
+            execution_resources=validated,
+            partition=partition,
+            allow_unverified_compute=allow,
         )
 
     def graphql_arguments(self) -> dict[str, Any]:
-        """Return the optional submitJob arguments for this profile."""
-
-        if self.backend == "batch":
-            if not self.emit_batch_fields:
-                return {}
-            return {
-                "execution_backend": "batch",
-                "compute_mode": self.compute_mode,
-            }
+        """Return the hosted submitJob arguments for this profile."""
+        names = {
+            "mpi_ranks": "mpiRanks",
+            "wall_time_seconds": "wallTimeSeconds",
+            "memory_mib": "memoryMiB",
+            "planner_memory_mib": "plannerMemoryMiB",
+            "gpus_per_node": "gpusPerNode",
+        }
         return {
-            "execution_backend": "slurm",
-            "slurm_partition": self.slurm_partition,
-            "slurm_nodes": self.slurm_nodes,
-            "slurm_ranks_per_node": self.slurm_ranks_per_node,
-            "slurm_wall_time_seconds": self.slurm_wall_time_seconds,
+            **({"partition": self.partition} if self.partition is not None else {}),
+            **(
+                {"allow_unverified_compute": self.allow_unverified_compute}
+                if self.allow_unverified_compute is not None
+                else {}
+            ),
+            **({"cluster_id": self.cluster_id} if self.cluster_id is not None else {}),
+            "execution_resources": {
+                names.get(k, k): (
+                    {
+                        "threadsPerRank": v["threads_per_rank"],
+                        "memoryMiBPerNode": v["memory_mib_per_node"],
+                        "partition": v["partition"],
+                    }
+                    if k == "pool"
+                    else v
+                )
+                for k, v in self.execution_resources.items()
+            },
         }
 
 
@@ -167,24 +209,42 @@ def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
     return value
 
 
-def _wall_time_seconds(value: Any) -> int:
-    if not isinstance(value, str):
+def validate_cluster_id(value: Any) -> str:
+    """Validate an explicit cluster without normalizing its identity."""
+    if (
+        not isinstance(value, str)
+        or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", value)
+        or value == "managed-batch"
+    ):
+        raise ManagedExecutionProfileError("Invalid cluster_id")
+    return value
+
+
+def validate_partition(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value
+    ):
+        raise ManagedExecutionProfileError("Invalid partition identifier")
+    return value
+
+
+def resolve_compute_options(
+    config: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Merge selectors independently; explicit False overrides configured True."""
+    result = {**config}
+    for key in ("cluster_id", "partition", "allow_unverified_compute"):
+        if key in overrides:
+            result[key] = overrides[key]
+    if "cluster_id" in result:
+        validate_cluster_id(result["cluster_id"])
+    if "partition" in result:
+        validate_partition(result["partition"])
+    allow = result.get("allow_unverified_compute", False)
+    if type(allow) is not bool:
+        raise ManagedExecutionProfileError("allow_unverified_compute must be a boolean")
+    if allow and "partition" not in result:
         raise ManagedExecutionProfileError(
-            "slurm_wall_time must use DD-HH:MM:SS format"
+            "Unverified compute requires an explicit partition"
         )
-    match = _WALL_TIME.fullmatch(value)
-    if match is None:
-        raise ManagedExecutionProfileError(
-            "slurm_wall_time must use DD-HH:MM:SS format"
-        )
-    parts = {name: int(component) for name, component in match.groupdict().items()}
-    if parts["hours"] > 23:
-        raise ManagedExecutionProfileError(
-            "slurm_wall_time must use DD-HH:MM:SS format"
-        )
-    return (
-        parts["days"] * 86_400
-        + parts["hours"] * 3_600
-        + parts["minutes"] * 60
-        + parts["seconds"]
-    )
+    return result

@@ -13,6 +13,7 @@ from frequensolve.imaging import (
     ModelOperator,
     Normal,
 )
+from frequensolve.imaging._artifacts import ControlVectorSetFile
 from tests.imaging_fakes import FakeImagingSite, layered_simulation
 
 pytestmark = pytest.mark.unit
@@ -112,10 +113,13 @@ def test_jacobian_memoizes_per_input_and_rejects_foreign_vectors(setup):
     jvps = [job for job in fake.jobs if job.action == "jvp"]
     assert len({job.name for job in jvps}) == 2  # distinct jobs per direction
     assert all(job.f_list == FREQUENCIES for job in jvps)
-    # the saved-state stem and a direction stem: Sauce reads each task's sibling
+    # the saved-state stem (Sauce reads each task's sibling) and one direction set every task reads as is
     assert jvps[0].state == problem.linearize().job.state_file()
-    assert jvps[0].direction.name == "direction.h5"
-    assert all(jvps[0].task_input(jvps[0].direction, t).is_file() for t in (1, 2))
+    assert jvps[0].direction is None and jvps[0].direction_set.name == "directions.h5"
+    assert ControlVectorSetFile.read(jvps[0].direction_set).n_vectors == 1
+    assert not any(
+        jvps[0].direction_set.with_name(f"directions_{t}.h5").exists() for t in (1, 2)
+    )
 
     other = problem.restrict(active=["vp"]).space.random(0)
     with pytest.raises(ValueError, match="different control space"):

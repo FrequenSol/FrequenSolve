@@ -16,6 +16,7 @@ from ._shared import (
     COMPARISON_SCHEMA,
     RUN_SCHEMA,
     append_jsonl,
+    parse_timestamp,
     read_json,
     safe_name,
     sanitize,
@@ -560,6 +561,7 @@ def _auto_baseline(
     candidate: Mapping[str, Any], history_root: Path, candidate_path: Path
 ) -> Path:
     candidates = []
+    candidate_time = parse_timestamp(candidate.get("finishedAt"))
     for path in history_root.glob("*/summary.json"):
         if path.resolve() == candidate_path.resolve():
             continue
@@ -567,6 +569,7 @@ def _auto_baseline(
             summary = read_json(path)
         except (OSError, json.JSONDecodeError):
             continue
+        finished = parse_timestamp(summary.get("finishedAt"))
         if (
             summary.get("schema") == RUN_SCHEMA
             and summary.get("backend") == candidate.get("backend")
@@ -575,10 +578,11 @@ def _auto_baseline(
             and summary.get("selectionFingerprint")
             == candidate.get("selectionFingerprint")
             and summary.get("successful") is True
-            and str(summary.get("finishedAt", ""))
-            < str(candidate.get("finishedAt", ""))
+            and finished is not None
+            and candidate_time is not None
+            and finished < candidate_time
         ):
-            candidates.append((str(summary.get("finishedAt")), path))
+            candidates.append((finished, path))
     if not candidates:
         raise FileNotFoundError(
             "No earlier successful baseline with the same profile, backend, and corpus fingerprint"

@@ -92,6 +92,64 @@ def test_plot_gather_returns_figure_and_axis():
     assert len(ax.images) == 1
 
 
+@pytest.mark.parametrize("supplied_axes", [False, True])
+def test_plot_gather_preserves_all_wavenumbers_and_shared_scale(
+    tmp_path, supplied_axes
+):
+    base = _time_trace()
+    trace = xr.concat([base, -2 * base, 3 * base], dim="wavenumber")
+    trace = trace.assign_coords(wavenumber=[-0.01, 0.0, 0.01])
+    trace.coords["wavenumber"].attrs["units"] = "1/km"
+    original = trace.copy(deep=True)
+    fig, supplied = plt.subplots(1, 3) if supplied_axes else (None, None)
+    target = tmp_path / "wavenumber-gathers.png"
+    try:
+        fig, axes = plot_gather(
+            trace,
+            ax=supplied,
+            title="2.5D pressure",
+            T_max=0.4,
+            interpolation="nearest",
+            grid=True,
+            save=target,
+        )
+        assert len(axes) == 3
+        assert fig._suptitle.get_text() == "2.5D pressure"
+        assert target.is_file() and target.stat().st_size > 0
+        xr.testing.assert_identical(trace, original)
+        expected = trace.sel(time=slice(None, 0.4))
+        limit = float(np.abs(expected).max())
+        for i, axis in enumerate(axes):
+            assert axis.figure is fig
+            if supplied_axes:
+                assert axis is supplied[i]
+            np.testing.assert_array_equal(
+                axis.images[0].get_array(), expected.isel(wavenumber=i).values
+            )
+            assert axis.images[0].get_clim() == (-limit, limit)
+            assert axis.images[0].get_interpolation() == "nearest"
+            assert (
+                axis.get_title()
+                == f"Wavenumber [1/km] = {trace.wavenumber[i].item():g}"
+            )
+            assert any(line.get_visible() for line in axis.get_xgridlines())
+    finally:
+        plt.close(fig)
+
+
+def test_plot_gather_rejects_ambiguous_wavenumber_axes():
+    trace = xr.concat([_time_trace(), _time_trace()], dim="wavenumber")
+    with pytest.raises(ValueError, match="explicit wavenumber coordinates"):
+        plot_gather(trace)
+    trace = trace.assign_coords(wavenumber=[-1.0, 1.0])
+    fig, axis = plt.subplots()
+    try:
+        with pytest.raises(ValueError, match="one axis per wavenumber"):
+            plot_gather(trace, ax=axis)
+    finally:
+        plt.close(fig)
+
+
 def test_diff_gathers_returns_three_axes():
     trace = _time_trace()
     fig, axes = diff_gathers(trace, 0.8 * trace)
@@ -726,6 +784,44 @@ def test_vtu_helpers_read_fields_and_plot(tmp_path):
     plotter.close()
 
 
+@pytest.mark.parametrize("cell_type", ["LINE", "QUAD"])
+def test_vtu_optional_edges_preserve_line_and_surface_geometry(cell_type):
+    pv = pytest.importorskip("pyvista")
+    points = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+    )
+    count = 2 if cell_type == "LINE" else 4
+    mesh = pv.UnstructuredGrid(
+        np.array([count, *range(count)]),
+        np.array([getattr(pv.CellType, cell_type)], dtype=np.uint8),
+        points[:count],
+    )
+    mesh.point_data["vp"] = np.linspace(1500.0, 2600.0, count)
+    has_edges = bool(mesh.extract_all_edges().n_points)
+    assert has_edges == (cell_type == "QUAD")
+    plotter, plotted = plot_vtu(
+        mesh, "vp", show_edges=True, show=False, return_mesh=True, scalar_bar=False
+    )
+    try:
+        assert plotted.n_points == count
+        np.testing.assert_array_equal(plotted.point_data["vp"], mesh.point_data["vp"])
+        assert len(plotter.renderer.actors) == 1 + int(has_edges)
+    finally:
+        plotter.close()
+
+
+def test_vtu_optional_edges_do_not_suppress_empty_input_error():
+    pv = pytest.importorskip("pyvista")
+    mesh = pv.UnstructuredGrid()
+    mesh.point_data["vp"] = np.array([])
+    plotter = pv.Plotter(off_screen=True)
+    try:
+        with pytest.raises(ValueError, match="Empty meshes"):
+            plot_vtu(mesh, "vp", show_edges=True, show=False, plotter=plotter)
+    finally:
+        plotter.close()
+
+
 def test_vtu_base_field_alias_accepts_unique_source_indexed_pressure(tmp_path):
     path = _write_source_indexed_pressure_vtu(tmp_path)
 
@@ -743,6 +839,31 @@ def test_vtu_base_field_alias_accepts_unique_source_indexed_pressure(tmp_path):
         plotted_mesh.point_data["pressure_1_re"],
     )
     plotter.close()
+
+
+@pytest.mark.parametrize("unit_suffix", ["[Pa]", "(Pa)"])
+def test_native_vtu_display_name_and_units_produce_one_scalar_bar_unit(
+    tmp_path, unit_suffix
+):
+    path = _write_source_indexed_pressure_vtu(tmp_path)
+    path.write_text(
+        path.read_text().replace(
+            'Name="pressure_1_abs"',
+            f'Name="pressure_1_abs" fs_display_name="Pressure (Magnitude) {unit_suffix}" fs_units="Pa"',
+        )
+    )
+    plotter, mesh = plot_vtu(
+        path, field="pressure", source=1, part="abs", show=False, return_mesh=True
+    )
+    try:
+        assert "Pressure (Magnitude) [Pa]" in mesh.point_data
+        np.testing.assert_allclose(
+            mesh.point_data["Pressure (Magnitude) [Pa]"],
+            mesh.point_data["pressure_1_abs"],
+        )
+        assert list(plotter.scalar_bars.keys()) == ["Pressure (Magnitude) [Pa]"]
+    finally:
+        plotter.close()
 
 
 def test_vtu_plot_accepts_source_number_for_source_indexed_fields(tmp_path):
@@ -1001,3 +1122,52 @@ def test_vtu_plot_supports_solver_tensor_component_fallbacks(tmp_path):
         plotted_mesh.point_data["velocity"][:, 2],
     )
     plotter.close()
+
+
+@pytest.mark.parametrize("cell_type", ["LINE", "QUADRATIC_EDGE", "QUAD"])
+def test_vtu_edge_overlay_handles_interface_and_surface_cells(cell_type):
+    pv = pytest.importorskip("pyvista")
+    points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    if cell_type == "LINE":
+        points = points[:2]
+    elif cell_type == "QUAD":
+        points = np.array(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+        )
+    mesh = pv.UnstructuredGrid(
+        np.r_[len(points), np.arange(len(points))],
+        np.array([getattr(pv.CellType, cell_type)], dtype=np.uint8),
+        points,
+    )
+    values = np.arange(mesh.n_points, dtype=float) + 1.0
+    mesh.point_data["vp"] = values
+    plotter = pv.Plotter(off_screen=True, window_size=(240, 180))
+    try:
+        _, plotted = plot_vtu(
+            mesh,
+            "vp",
+            show_edges=True,
+            scalar_bar=False,
+            plotter=plotter,
+            show=False,
+            return_mesh=True,
+        )
+        np.testing.assert_allclose(plotted.point_data["vp"], values)
+        assert plotted.n_cells == 1
+        assert len(plotter.renderer.actors) == (2 if cell_type == "QUAD" else 1)
+        pixels = plotter.screenshot(return_img=True)
+        assert pixels.shape[:2] == (180, 240)
+        assert np.ptp(pixels) > 0
+    finally:
+        plotter.close()
+
+
+def test_vtu_edge_overlay_does_not_allow_empty_input():
+    pv = pytest.importorskip("pyvista")
+    mesh = pv.UnstructuredGrid()
+    plotter = pv.Plotter(off_screen=True)
+    try:
+        with pytest.raises(ValueError):
+            plot_vtu(mesh, show_edges=True, plotter=plotter, show=False)
+    finally:
+        plotter.close()

@@ -52,7 +52,7 @@ class CombinedArtifactCatalog:
     ) -> Mapping[tuple[str, object], tuple[ArtifactRecord, ...]]:
         """Return dependency-local record groups without filesystem discovery."""
 
-        scopes = {
+        scopes: dict[tuple[str, object], tuple[ArtifactRecord, ...]] = {
             ("task", int(task)): tuple(self.task_catalog.query(task=int(task)))
             for task in _task_ids(self.task_catalog)
         }

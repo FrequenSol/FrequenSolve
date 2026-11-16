@@ -1,0 +1,73 @@
+{
+  "valid_manifests": [
+    {
+      "schema_version": "project-identity.v1",
+      "project_id": "11111111-1111-4111-8111-111111111111"
+    }
+  ],
+  "invalid_manifests": [
+    null,
+    {},
+    {
+      "schema_version": "project-identity.v2",
+      "project_id": "11111111-1111-4111-8111-111111111111"
+    },
+    {
+      "schema_version": "project-identity.v1",
+      "project_id": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+    },
+    {
+      "schema_version": "project-identity.v1",
+      "project_id": "../project"
+    },
+    {
+      "schema_version": "project-identity.v1",
+      "project_id": "11111111-1111-4111-8111-111111111111",
+      "account_id": "fake-owner"
+    }
+  ],
+  "references": [
+    {
+      "value": {
+        "kind": "legacy",
+        "project_key": "project"
+      },
+      "token": "[\"legacy\",\"project\"]"
+    },
+    {
+      "value": {
+        "kind": "legacy",
+        "project_key": "11111111-1111-4111-8111-111111111111"
+      },
+      "token": "[\"legacy\",\"11111111-1111-4111-8111-111111111111\"]"
+    },
+    {
+      "value": {
+        "kind": "immutable",
+        "project_id": "11111111-1111-4111-8111-111111111111"
+      },
+      "token": "[\"immutable\",\"11111111-1111-4111-8111-111111111111\"]"
+    },
+    {
+      "value": {
+        "kind": "legacy",
+        "project_key": "surveys/\u65e5\u672c/\ud83e\uddea"
+      },
+      "token": "[\"legacy\",\"surveys/\u65e5\u672c/\ud83e\uddea\"]"
+    }
+  ],
+  "invalid_references": [
+    {
+      "kind": "immutable",
+      "project_key": "11111111-1111-4111-8111-111111111111"
+    },
+    {
+      "kind": "legacy",
+      "project_key": "bad\u0000key"
+    },
+    {
+      "kind": "legacy",
+      "project_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+  ]
+}

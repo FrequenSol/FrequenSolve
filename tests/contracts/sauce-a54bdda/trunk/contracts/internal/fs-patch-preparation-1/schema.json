@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frequensolve.local/contracts/internal/fs-patch-preparation-1/schema.json",
+  "title": "fs-patch-preparation-1",
+  "x-fs-contract": "fs-patch-preparation-1",
+  "x-fs-visibility": "internal",
+  "x-fs-docs": false,
+  "type": "object",
+  "required": [
+    "units"
+  ],
+  "properties": {
+    "units": {
+      "const": "m"
+    },
+    "patches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "padding"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "padding": {
+            "type": "number",
+            "minimum": 0
+          },
+          "roots": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "uniqueItems": true,
+            "minItems": 1
+          },
+          "lower": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "upper": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          },
+          "points": {
+            "type": "array",
+            "description": "Assigned physical sources and union of retained receiver points, in metres, with original acquisition IDs.",
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "id",
+                "coordinates"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "source",
+                    "receiver"
+                  ]
+                },
+                "id": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "group": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "coordinates": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 3,
+                  "items": {
+                    "type": "number"
+                  }
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "kind": {
+                        "const": "receiver"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "group"
+                    ]
+                  },
+                  "else": {
+                    "not": {
+                      "required": [
+                        "group"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "roots"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "lower"
+                  ]
+                },
+                {
+                  "required": [
+                    "upper"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "lower",
+              "upper"
+            ],
+            "not": {
+              "required": [
+                "roots"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

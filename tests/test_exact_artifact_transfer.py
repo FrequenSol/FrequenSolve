@@ -385,6 +385,10 @@ def test_rsync_exact_transfer_uses_null_files_from(monkeypatch, tmp_path):
         calls.append((argv, kwargs))
         option = next(value for value in argv if value.startswith("--files-from="))
         listed.extend(Path(option.split("=", 1)[1]).read_bytes().split(b"\0")[:-1])
+        for item in listed:
+            output = Path(argv[-1]) / item.decode()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"data")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     site = SimpleNamespace(
@@ -405,15 +409,47 @@ def test_rsync_exact_transfer_uses_null_files_from(monkeypatch, tmp_path):
         "/remote/results",
         tmp_path / "local",
         ("traces/a.h5", "images/manifest.json"),
-        missing_ok=True,
     )
 
     argv, _ = calls[0]
     assert "--relative" in argv
     assert "--from0" in argv
-    assert "--ignore-missing-args" in argv
+    assert "--ignore-missing-args" not in argv
     assert listed == [b"traces/a.h5", b"images/manifest.json"]
     assert argv[-2] == "user@login.example.edu:/remote/results/"
+
+
+@pytest.mark.parametrize("method", ["rsync", "sftp"])
+def test_optional_transfers_skip_only_missing_files(tmp_path, method):
+    class SFTP:
+        def get(self, remote, local):
+            if remote.endswith("missing"):
+                raise FileNotFoundError(remote)
+            if remote.endswith("denied"):
+                Path(local).write_bytes(b"partial")
+                raise PermissionError(remote)
+            Path(local).write_bytes(b"data")
+
+        def stat(self, remote):
+            return SimpleNamespace(st_size=4)
+
+        def close(self):
+            pass
+
+    site = SimpleNamespace(
+        transfer_method=method,
+        login_client=SimpleNamespace(open_sftp=SFTP),
+    )
+    manager = SlurmTransferManager(site)
+    (tmp_path / "missing").write_bytes(b"stale")
+    assert manager.get_files(
+        "/remote", tmp_path, ["present", "missing"], missing_ok=True
+    ) == [tmp_path / "present"]
+    (tmp_path / "denied").write_bytes(b"complete")
+    with pytest.raises(PermissionError):
+        manager.get_files("/remote", tmp_path, ["denied"], missing_ok=True)
+    assert (tmp_path / "denied").read_bytes() == b"complete"
+    assert not list(tmp_path.glob("*.partial"))
 
 
 @pytest.mark.parametrize(
@@ -811,7 +847,11 @@ def test_site_catalog_fetch_uses_only_index_then_fixed_task_results(tmp_path):
     assert not (result_path / "_fs_run/run_manifest.json").exists()
 
 
-def test_site_catalog_fetches_only_explicit_fixed_operation_results(tmp_path):
+@pytest.mark.parametrize("postprocess_only", [False, True])
+@pytest.mark.parametrize("operation_status", ["current", "failed", "stale", "missing"])
+def test_site_catalog_fetches_only_explicit_fixed_operation_results(
+    tmp_path, postprocess_only, operation_status
+):
     result_path = tmp_path / "results"
     fingerprint = "sha256:" + "a" * 64
     task_result = {
@@ -835,10 +875,21 @@ def test_site_catalog_fetches_only_explicit_fixed_operation_results(tmp_path):
         "status": {"state": "success", "code": 0},
         "artifacts": [],
     }
-    remote = {
-        "_fs_run/tasks/task_000001/result.json": json.dumps(task_result).encode(),
-        "_fs_run/operations/smooth/result.json": json.dumps(operation_result).encode(),
-    }
+    if operation_status == "failed":
+        operation_result["status"] = {"state": "failed", "code": 1}
+    if operation_status == "stale":
+        operation_result["fingerprints"] = dict(
+            task_result["fingerprints"], job="sha256:" + "b" * 64
+        )
+    remote = {}
+    if not postprocess_only:
+        remote["_fs_run/tasks/task_000001/result.json"] = json.dumps(
+            task_result
+        ).encode()
+    if operation_status != "missing":
+        remote["_fs_run/operations/smooth/result.json"] = json.dumps(
+            operation_result
+        ).encode()
     calls = []
 
     class Transfer:
@@ -866,6 +917,7 @@ def test_site_catalog_fetches_only_explicit_fixed_operation_results(tmp_path):
             return Path("/remote/results")
 
     job = SimpleNamespace(
+        postprocess_only=postprocess_only,
         n_tasks=1,
         f_list=(complex(2.0, 0.1),),
         _result_path=result_path,
@@ -873,17 +925,26 @@ def test_site_catalog_fetches_only_explicit_fixed_operation_results(tmp_path):
         staged_artifact_fingerprints=lambda site: task_result["fingerprints"],
     )
 
+    if operation_status in {"failed", "stale"} or (
+        postprocess_only and operation_status == "missing"
+    ):
+        with pytest.raises(RuntimeError):
+            Site().fetch_artifact_catalog(job, operations=("smooth",))
+        return
     catalog = Site().fetch_artifact_catalog(job, operations=("smooth",))
-
-    assert set(catalog.operations) == {"smooth"}
-    assert calls == [
-        ("_fs_run/tasks.h5",),
-        ("_fs_run/tasks/task_000001/result.json",),
-        ("_fs_run/operations/smooth/result.json",),
-    ]
-    assert (
-        result_path / "_fs_run/operations/smooth/result.json"
-    ).read_bytes() == remote["_fs_run/operations/smooth/result.json"]
+    assert set(catalog.operations) == (
+        {"smooth"} if operation_status == "current" else set()
+    )
+    expected = (
+        []
+        if postprocess_only
+        else [("_fs_run/tasks.h5",), ("_fs_run/tasks/task_000001/result.json",)]
+    )
+    assert calls == expected + [("_fs_run/operations/smooth/result.json",)]
+    if operation_status == "current":
+        assert (
+            result_path / "_fs_run/operations/smooth/result.json"
+        ).read_bytes() == remote["_fs_run/operations/smooth/result.json"]
 
 
 def test_slurm_fetch_outputs_keeps_required_control_postprocessing(tmp_path):

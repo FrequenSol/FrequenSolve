@@ -1,6 +1,22 @@
 """Deterministic Hypothesis profiles for FrequenSolve contract tests."""
 
 import os
+import sys
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def close_test_figures():
+    """Release figures created by this test without importing optional plotting."""
+    pyplot = sys.modules.get("matplotlib.pyplot")
+    original = set(pyplot.get_fignums()) if pyplot is not None else set()
+    yield
+    pyplot = sys.modules.get("matplotlib.pyplot")
+    if pyplot is not None:
+        for number in set(pyplot.get_fignums()) - original:
+            pyplot.close(number)
+
 
 try:
     from hypothesis import HealthCheck, settings

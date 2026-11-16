@@ -7,13 +7,14 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence, Union
 
 from frequensolve.simulation.artifact_catalog import CombinedArtifactCatalog
 from frequensolve.simulation.artifact_contract import (
     ArtifactContractError,
     ArtifactRecord,
 )
+from frequensolve.simulation.task_index import TaskIndex
 
 __all__ = [
     "TRACE_MANIFEST_VERSION",
@@ -83,7 +84,7 @@ class TracePackSegment:
     schema: str
     generation: str
     bytes: int
-    artifact: ArtifactRecord
+    artifact: Optional[ArtifactRecord]
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,7 @@ class TracePackEntry:
 class TracePackManifest:
     """Validated trace family and its explicit segment index."""
 
-    artifact: ArtifactRecord
+    artifact: Optional[ArtifactRecord]
     generation: str
     family_id: str
     family_kind: str
@@ -113,24 +114,103 @@ class TracePackManifest:
     entries: tuple[TracePackEntry, ...]
 
     @classmethod
-    def from_tasks(cls, catalog, frequencies, *, family_id="traces", fingerprints=None):
+    def from_file(cls, path):
+        """Read an explicit standalone indexed file; return None for legacy shards."""
+        import h5py
+        import numpy as np
+
+        from .trace_store import TraceStore
+
+        path = Path(path).resolve()
+        with h5py.File(path, "r") as h5:
+            if not TraceStore._is_indexed_packed_h5(h5):
+                return None
+            index = h5["trace_index"]
+            numbers = np.asarray(index["dataset_number"][()]).reshape(-1)
+            frequencies = np.asarray(index["frequency"][()]).reshape(-1)
+            laplace = (
+                np.asarray(index["laplace"][()]).reshape(-1)
+                if "laplace" in index
+                else np.zeros(len(numbers))
+            )
+            if (
+                numbers.dtype.kind not in "iu"
+                or np.any(numbers < 1)
+                or len(set(numbers)) != len(numbers)
+                or not len(numbers)
+                or len(frequencies) != len(numbers)
+                or len(laplace) != len(numbers)
+                or not np.isfinite(frequencies).all()
+                or not np.isfinite(laplace).all()
+            ):
+                raise ArtifactContractError("Invalid standalone packed trace index")
+            entries = tuple(
+                TracePackEntry(
+                    task,
+                    complex(frequency, damping),
+                    "file",
+                    int(number),
+                    path.name,
+                    "standalone",
+                )
+                for task, (number, frequency, damping) in enumerate(
+                    zip(numbers, frequencies, laplace), 1
+                )
+            )
+        return cls(
+            None,
+            "standalone",
+            "traces",
+            "traces",
+            "simulated_traces",
+            "/trace_data",
+            "/trace_index",
+            (
+                TracePackSegment(
+                    "file",
+                    path.name,
+                    path,
+                    _PACKED_SCHEMA,
+                    "standalone",
+                    path.stat().st_size,
+                    None,
+                ),
+            ),
+            entries,
+        )
+
+    @classmethod
+    def from_tasks(
+        cls,
+        catalog: CombinedArtifactCatalog,
+        frequencies: Sequence[Union[float, complex]],
+        *,
+        family_id: str = "traces",
+        fingerprints: Optional[Mapping[str, str]] = None,
+    ) -> Optional["TracePackManifest"]:
         """Resolve packed datasets from authoritative per-task artifact records."""
-        segments = {}
+        segments: dict[str, TracePackSegment] = {}
         entries = []
         first = None
         for task, frequency in enumerate(frequencies, 1):
+            actual_frequency: Optional[complex]
             task_catalog = catalog.task_catalog
-            indexed = getattr(task_catalog, "tasks", None)
-            row = (indexed if indexed is not None else task_catalog.results).get(task)
-            if row is None or not row.successful:
-                return None
-            actual_frequency = (
-                row.frequency if indexed is not None else row.partition.frequency
-            )
+            if isinstance(task_catalog, TaskIndex):
+                entry = task_catalog.tasks.get(task)
+                if entry is None or not entry.successful:
+                    return None
+                actual_frequency = entry.frequency
+                actual_fingerprints = entry.fingerprints
+            else:
+                result = task_catalog.results.get(task)
+                if result is None or not result.successful:
+                    return None
+                actual_frequency = result.partition.frequency
+                actual_fingerprints = result.fingerprints
             if actual_frequency != complex(frequency):
                 return None
             if fingerprints is not None and any(
-                row.fingerprints.get(key) != value
+                actual_fingerprints.get(key) != value
                 for key, value in fingerprints.items()
             ):
                 return None

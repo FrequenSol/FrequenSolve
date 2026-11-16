@@ -9,7 +9,8 @@ test:
 	-m "not integration and not cloud and not hpc and not interactive and not visual" \
 	--cov=src/ --cov-branch --cov-config="$(CURDIR)/pyproject.toml" --cov-report=term --cov-report=xml --cov-report=json:tests/output/coverage.json \
 	tests/
-	python scripts/check_coverage_thresholds.py tests/output/coverage.json
+	python scripts/check_coverage_thresholds.py tests/output/coverage.json \
+		--risk-baseline tests/risk-coverage-baseline.json
 
 .PHONY: test-property-contracts
 test-property-contracts:
@@ -78,3 +79,10 @@ run-cloud-benchmarks:
 .PHONY: generate-cloud-benchmarks
 generate-cloud-benchmarks:
 	python scripts/generate_cloud_benchmark_workloads.py
+
+PYTHON ?= python3
+
+.PHONY: test-execution-site-contracts
+test-execution-site-contracts:
+	$(PYTHON) -c "import boto3, requests"
+	PYTHONPATH="$(CURDIR)/src" $(PYTHON) -m pytest -q tests/test_execution_site_contracts.py tests/test_execution_site_profiles.py tests/test_awssite_submit_resources.py tests/test_graphql_client_environment.py tests/test_graphql_client_transport.py tests/test_awssite_auth_retry.py

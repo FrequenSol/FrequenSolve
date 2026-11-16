@@ -104,7 +104,8 @@ def test_planar_plot_sampling_preserves_bilinear_quads(adapted_artifact):
         _rasterize_planar_field(mesh, "control", resolution=0)
 
 
-def test_vector_mesh_checks_basis_identity(adapted_artifact, tmp_path):
+@pytest.mark.parametrize("distributed", [False, True])
+def test_vector_mesh_checks_basis_identity(adapted_artifact, tmp_path, distributed):
     pytest.importorskip("pyvista")
     from tests.imaging_fakes import layered_simulation
 
@@ -122,13 +123,14 @@ def test_vector_mesh_checks_basis_identity(adapted_artifact, tmp_path):
                     "id": 1,
                     "name": "model.vp",
                     "binding": [1, 1, 1],
-                    "layout": [1, 7, 2, 1],
+                    "layout": [1, 4 if distributed else 7, 2, 1],
                     "units": "",
                     "actions": 3,
                     "transform": 0,
                     "scaling": [0.0, 1.0, -1e300, 1e300],
                     "basis_identity": geometry.control_identity("identity"),
-                    "distributed": False,
+                    "distributed": distributed,
+                    "global_dofs": 7,
                 }
             ],
             "active_blocks": [1],
@@ -196,3 +198,107 @@ def test_control_space_identity_keys_are_normalized():
     assert state.control_spaces == {"model.vp": "basis"}
     with pytest.raises(ValueError, match="unknown block"):
         im.ControlStateFile({"vp": [1]}, control_spaces={"rho": "basis"})
+
+
+def test_unpublished_v2_schema_is_rejected(adapted_artifact, tmp_path):
+    path, _ = adapted_artifact
+    prototype = tmp_path / "prototype.h5"
+    with h5py.File(path) as src, h5py.File(prototype, "w") as dst:
+        src.copy("property_space", dst)
+        del dst["property_space/schema"]
+        dst["property_space/schema"] = np.bytes_("fs-property-space-2")
+    with pytest.raises(ValueError, match="fs-property-space-2"):
+        im.PropertyMesh.read(prototype, material=2)
+
+
+def test_packed_v3_preserves_root_constraints(adapted_artifact, tmp_path):
+    from frequensolve.imaging._property_records import encode_record
+
+    path, _ = adapted_artifact
+    expected = im.PropertyMesh.read(path, material=2)
+    packed = tmp_path / "packed-v3.h5"
+    with h5py.File(path) as src, h5py.File(packed, "w") as dst:
+        src.copy("property_space", dst)
+        g = dst["property_space"]
+        root = g["roots/1"]
+        ptr = root["offset"][:]
+        index, weight, ids = (root[k][:] for k in ("index", "weight", "global_ids"))
+        # Plotting consumes constraints but need not decode the native tree/vertex words.
+        header = np.r_[
+            root["meta"][:],
+            1,
+            0,
+            0,
+            2,
+            3,
+            0,
+            len(ptr),
+            len(index),
+            len(ids),
+            len(ids) + 1,
+            0,
+        ]
+        integers = np.r_[
+            header,
+            [0, 1],
+            [1, 2, 3],
+            ptr,
+            index,
+            np.ones(len(ids)),
+            np.zeros(len(ids) + 1),
+        ].astype("i4")
+        record = encode_record(integers, ids, weight)
+        g["root_directory"] = np.array([[1, 15, 2, 5], [2, 25, 2, 5]], dtype="i4")
+        g["root_geometry"] = np.zeros((2, 4, 2))
+        g["root_linear_geometry"] = [1, 1]
+        g["payload_offsets"] = np.arange(3) * len(record)
+        integers[2] = 2
+        g["payload"] = np.r_[record, encode_record(integers, ids, weight)]
+        g["visualization_offsets"] = [0, 3, 6]
+        g["visualization_points_m"] = np.tile(
+            root["visualization_points_m"][:], (2, 1, 1)
+        )
+        g["visualization_kind"] = np.tile(root["visualization_kind"][:], 2)
+        del g["roots"]
+        del g["schema"]
+        g["schema"] = np.bytes_("fs-property-space-3")
+    actual = im.PropertyMesh.read(packed, material=2)
+    np.testing.assert_array_equal(actual.points, np.tile(expected.points, (2, 1)))
+    np.testing.assert_allclose(
+        actual.basis.toarray(), np.tile(expected.basis.toarray(), (2, 1))
+    )
+    assert actual.identity == expected.identity
+    with h5py.File(packed, "a") as h5:
+        h5["property_space/payload_offsets"][1] = -1
+    with pytest.raises(ValueError, match="offsets"):
+        im.PropertyMesh.read(packed, material=2)
+
+
+@pytest.mark.parametrize(
+    "dimension,power,nodes", [(2, 0, 1), (2, 7, 1100), (3, 52, 350)]
+)
+def test_reference_vertex_decoder_handles_word_and_block_boundaries(
+    tmp_path, dimension, power, nodes
+):
+    from frequensolve.imaging.property_mesh import read_reference_vertices
+
+    shape = (nodes, 2**dimension, dimension)
+    rng = np.random.default_rng(93)
+    values = rng.integers(0, 2**power + 1, size=shape, dtype=np.uint64)
+    values.flat[0], values.flat[-1] = 0, 2**power
+    width = power + 1
+    bits = (
+        ((values.ravel()[:, None] >> np.arange(width, dtype=np.uint64)) & 1)
+        .astype(np.uint8)
+        .ravel()
+    )
+    bits = np.pad(bits, (0, (-len(bits)) % 32))
+    packed = np.packbits(bits, bitorder="little").view("<i4")
+    path = tmp_path / "vertices.h5"
+    with h5py.File(path, "w") as root:
+        root["vertices"] = np.r_[
+            np.array([1, dimension, 2**dimension, nodes, power], dtype=np.int32), packed
+        ]
+        root["vertices"].attrs["encoding"] = "dyadic-reference-i32-v1"
+        decoded = read_reference_vertices(root)
+    np.testing.assert_array_equal(decoded, np.ldexp(values.astype(float), -power))

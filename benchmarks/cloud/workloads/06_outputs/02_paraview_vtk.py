@@ -1,7 +1,7 @@
 """Generated Cloud benchmark workload.
 
 Source tutorial: 06_outputs/02_paraview_vtk.ipynb
-Source SHA-256: 018ae1445a1e56a81d0a58c27344af5bc7bf0c370fe467dec300eac7ada2610e
+Source SHA-256: 446a3bf377b6946f4caf3ebe10de6269fc653f29bb8289aa2543cb76f19f3f2c
 """
 
 # %% source cell 4
@@ -104,11 +104,15 @@ job = fs.FrequencyDomainJob(
     outputs=[domain_output, surface_output, grid_output],
 )
 result = site.submit(job).wait()
+result.raise_for_status()
 
 # %% source cell 12
 volume_files = result.output_files(base="pv_volume", suffix=".vtu", existing=True)
 interface_files = result.output_files(base="pv_interface", suffix=".vtu", existing=True)
-grid_files = result.output_files(base="pv_grid", suffix=".vtu", existing=True)
+grid_files = result.output_files(base="pv_grid", suffix=".vtr", existing=True)
+assert volume_files, "Missing requested volume VTU output"
+assert interface_files, "Missing requested interface VTU output"
+assert grid_files, "Missing requested Cartesian-grid VTR output"
 {
     "volume": [str(path) for path in volume_files],
     "interface": [str(path) for path in interface_files],

@@ -25,7 +25,7 @@ from frequensolve.units import ureg as u
 pytestmark = pytest.mark.integration
 
 
-def _run(tmp_path, method, density, source_units):
+def _run(tmp_path, method, density, source_units, airgun=None):
     executable = os.environ.get("FS_SAUCE_EXECUTABLE")
     if not executable:
         pytest.skip("set FS_SAUCE_EXECUTABLE to a local solver")
@@ -62,7 +62,13 @@ def _run(tmp_path, method, density, source_units):
     )
     frequencies = np.array([2.0, 4.0])
     signature = GainDelay(gain=0.7 + 0.2j, delay=0.037)
-    acq.source_signature = SourceSignature(signature, frequencies=frequencies)
+    if airgun is None:
+        acq.source_signature = SourceSignature(signature, frequencies=frequencies)
+    else:
+        acq = airgun.acquisition(
+            [[0.25, 0.5]], frequencies=frequencies, out_of_plane_thickness=400 * u.m
+        )
+        signature = airgun.volume_rate()
     node = ReceiverNode(
         name="hydrophone",
         components=[
@@ -78,6 +84,7 @@ def _run(tmp_path, method, density, source_units):
         precision="single" if str(solver).endswith("_s") else "double",
         tolerance=1e-6 if str(solver).endswith("_s") else 1e-8,
         max_iter=300,
+        grids=2,
     )
     job = FrequencyDomainJob("volume-rate", sim, frequencies.tolist())
     result = LocalSite(solver=solver, n_workers=1, threads_per_worker=2).run(
@@ -103,6 +110,17 @@ def _run(tmp_path, method, density, source_units):
     actual = gather.transpose("frequency", "receiver").values
     np.testing.assert_allclose(actual, expected, rtol=0.015, atol=1e-5)
     return actual
+
+
+def test_airgun_signature_against_planar_green_function(tmp_path):
+    from frequensolve.seismic import AirgunSignature, SampledWavelet
+
+    airgun = AirgunSignature(
+        SampledWavelet([0, 1, -0.5, 0], dt=0.01, units="bar*m"),
+        ghost="excluded",
+        water_density=1025 * u.kg / u.m**3,
+    )
+    _run(tmp_path, "DPG", 1.025, 0.0025 * u.m**3 / u.s, airgun=airgun)
 
 
 @pytest.mark.parametrize("density", [1.0, 2.2])

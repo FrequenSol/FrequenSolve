@@ -22,13 +22,32 @@ also accepts earlier version-three per-term files with `cache.group: "/"`.
 
 The cache contains base and frequency-tangent receiver values, static
 and robust weights, objective factors, metric weights, phase floors, active
-masks, value frames, and explicit `row_ids`, `coordinate_keys`, and
+masks, value conventions, and explicit `row_ids`, `coordinate_keys`, and
 `n_global_rows` datasets relative to each term group. Coordinate keys are `(encoded RHS, receiver/sample ID,
 component)`; the term ID supplies the outer namespace. IDs are one-based.
 Dense rows follow Fortran `(RHS, component, receiver)` order. Sparse rows follow
 encoded RHS then active trace catalog order; keys retain the original trace ID.
 Zero-weight sparse traces are absent. Dense averaged/DAS rows identify output
 channels rather than quadrature points.
+
+Newly generated term caches also contain `objective_residual`, with the same
+complex storage shape and row order as `simulated`. It is the observed-minus-
+simulated comparison error after projection, preprocessing and source fitting,
+multiplied by the frozen square-root static, metric and IRLS weights and the
+objective factor (term weight, reduction mass and component normalization).
+Inactive comparison rows are zero. Thus its real Jacobian pullback equals the
+baseline objective covector. Frequency weights applied by a caller remain
+external. Readers may still reuse earlier version-three caches without this
+optional dataset for derivative actions, but cannot derive an LSQR right-hand
+side from those caches alone.
+
+Sparse term caches may contain `rhs_required`, one zero/one integer per
+original acquisition RHS. A zero denotes a source deliberately omitted by the
+scheduled acquisition; it has no cached receiver rows. Required source batches
+must all finish before publication. Their original IDs are retained in row keys,
+and a first required batch may begin above RHS one. Readers of earlier caches
+without this dataset require every RHS. Cached selections are covered by the
+shard hash and current acquisition compatibility checks.
 
 Local cache coordinates are validated against the current execution layout;
 matching array extents alone are insufficient. Replicated receiver views may be
@@ -55,5 +74,5 @@ A loaded state must remain immutable for the lifetime of derivative actions.
 The rank cache is assembled in task scratch and atomically replaced only after
 all term groups are complete. Its exact hash and each group selector participate
 in state validation. This preserves detection of payload corruption, changed
-coordinates, incompatible value frames and stale objective configuration.
+coordinates, incompatible value conventions and stale objective configuration.
 Legacy per-term files from an earlier run are not automatically deleted.

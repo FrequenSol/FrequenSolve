@@ -28,6 +28,32 @@ from frequensolve.seismic.sparse_survey import (
     SparseTraceTable,
 )
 from frequensolve.units import ureg
+
+
+@pytest.mark.parametrize("selected", [[], [0], [4], [1, 1], [True], [1.5]])
+def test_active_physical_source_ids_reject_invalid_selection(selected):
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(kind="scalar", coords=[[0, 0]] * 3),
+        active_sources=selected,
+    )
+    with pytest.raises(ValueError, match="source IDs"):
+        acquisition.to_fs()
+
+
+def test_active_physical_source_ids_preserve_catalog_and_roundtrip():
+    acquisition = Acquisition(
+        source_geometry=SourceGeometry.points(
+            kind="scalar", coords=[[0, 0], [1, 0], [2, 0]]
+        ),
+        active_sources=[1, 3],
+    )
+    payload = acquisition.to_fs()
+    _sauce_acquisition_validator().validate(payload)
+    restored = Acquisition.from_fs(payload)
+    assert restored.known_source_field_count() == 3
+    assert restored.extra["active_sources"] == [1, 3]
+
+
 from frequensolve.util.mixins import ExportContext
 from frequensolve.util.store import SimulationStore
 
@@ -930,44 +956,45 @@ def test_large_encoded_receiver_names_are_materialized_in_hdf5(tmp_path):
 
 
 def test_encoded_reference_coordinates_preserve_explicit_and_implicit_metadata():
-    geometry = SourceGeometry.points(
-        kind="scalar",
-        coords=[[0.0, 0.05], [1.0, 0.05]],
-        names=["left", "right"],
-        units="km",
-        system="survey",
-    )
-    explicit = Acquisition(
-        source_geometry=geometry,
-        source_encoding=SourceEncoding.dense(
-            [[1.0, 0.0]],
-            names=["explicit"],
-            reference_coordinates=CoordinateValue(
-                [750.0, 40.0],
-                units="m",
-                system="survey",
+    with pytest.warns(DeprecationWarning, match="reference_coordinates is deprecated"):
+        geometry = SourceGeometry.points(
+            kind="scalar",
+            coords=[[0.0, 0.05], [1.0, 0.05]],
+            names=["left", "right"],
+            units="km",
+            system="survey",
+        )
+        explicit = Acquisition(
+            source_geometry=geometry,
+            source_encoding=SourceEncoding.dense(
+                [[1.0, 0.0]],
+                names=["explicit"],
+                reference_coordinates=CoordinateValue(
+                    [750.0, 40.0],
+                    units="m",
+                    system="survey",
+                ),
             ),
-        ),
-    )
-    implicit = Acquisition(
-        source_geometry=geometry,
-        source_encoding=SourceEncoding.named(
-            [EncodedSource.named("midpoint", {"left": 1.0, "right": -1.0})]
-        ),
-    )
+        )
+        implicit = Acquisition(
+            source_geometry=geometry,
+            source_encoding=SourceEncoding.named(
+                [EncodedSource.named("midpoint", {"left": 1.0, "right": -1.0})]
+            ),
+        )
 
-    explicit_reference = explicit.source_coords(1, preserve_metadata=True)
-    implicit_reference = implicit.source_coords(1, preserve_metadata=True)
+        explicit_reference = explicit.source_coords(1, preserve_metadata=True)
+        implicit_reference = implicit.source_coords(1, preserve_metadata=True)
 
-    assert isinstance(explicit_reference, CoordinateValue)
-    assert explicit_reference.value == [750.0, 40.0]
-    assert explicit_reference.units == "m"
-    assert explicit_reference.system == "survey"
-    assert isinstance(implicit_reference, CoordinateValue)
-    assert implicit_reference.value == [0.5, 0.05]
-    assert implicit_reference.units == "km"
-    assert implicit_reference.system == "survey"
-    assert np.allclose(implicit.source_coords(1), [0.5, 0.05])
+        assert isinstance(explicit_reference, CoordinateValue)
+        assert explicit_reference.value == [750.0, 40.0]
+        assert explicit_reference.units == "m"
+        assert explicit_reference.system == "survey"
+        assert isinstance(implicit_reference, CoordinateValue)
+        assert implicit_reference.value == [0.5, 0.05]
+        assert implicit_reference.units == "km"
+        assert implicit_reference.system == "survey"
+        assert np.allclose(implicit.source_coords(1), [0.5, 0.05])
 
 
 @pytest.mark.parametrize("encoding_type", ["Named", "JsonDense"])
@@ -1520,6 +1547,81 @@ def test_deprecated_helpers_preserve_zero_based_logical_source_names():
             "source_2",
             "source_3",
         ]
+
+
+def test_list_fields_reads_device_components_for_named_and_all_groups():
+    from frequensolve.seismic.receivers import ReceiverNode
+
+    acquisition = Acquisition()
+    pressure = ReceiverNode(name="hydrophone")
+    pressure.add_component(name="p", field="pressure")
+    velocity = ReceiverNode(name="geophone")
+    velocity.add_component(name="vz", field="velocity", direction=[0.0, 1.0])
+    acquisition.add_receiver_group("pressure", pressure, [[0.25, 0.1]])
+    acquisition.add_receiver_group("velocity", velocity, [[0.75, 0.2]])
+    assert acquisition.list_fields() == ["pressure:p", "velocity:vz"]
+    assert acquisition.list_fields("velocity") == ["velocity:vz"]
+    assert Acquisition().list_fields() == []
+    with pytest.raises(ValueError, match="not found"):
+        acquisition.list_fields("absent")
+    coordinates = acquisition.receiver_coords()
+    np.testing.assert_allclose(coordinates["pressure"], [[0.25, 0.1]])
+    np.testing.assert_allclose(acquisition.receiver_coords("velocity"), [[0.75, 0.2]])
+
+
+@pytest.mark.parametrize("index", [0, -1, 3])
+def test_one_based_source_lookups_reject_out_of_range_indices(index):
+    acquisition = Acquisition()
+    acquisition.add_sources(kind="scalar", coords=[[0.25, 0.1], [0.75, 0.2]])
+    with pytest.raises(IndexError, match="out of range"):
+        acquisition.source(index)
+    with pytest.raises(IndexError, match="out of range"):
+        acquisition.source_coords(index)
+    with pytest.raises(IndexError, match="out of range"):
+        acquisition.source_coords(index, preserve_metadata=True)
+    np.testing.assert_allclose(acquisition.source_coords(1), [0.25, 0.1])
+    np.testing.assert_allclose(acquisition.source_coords(2), [0.75, 0.2])
+
+
+@pytest.mark.parametrize("use_context", [False, True])
+@pytest.mark.parametrize("kind", ["hdf5_geometry", "sps_geometry", "hdf5_encoding"])
+def test_mutated_file_backed_sources_cannot_export_missing_paths(
+    tmp_path, use_context, kind
+):
+    from frequensolve.util.mixins import ExportContext
+
+    if kind == "hdf5_geometry":
+        source = SourceGeometry.hdf5("sources.h5", dataset="sources", kind="scalar")
+        with pytest.raises(AttributeError):
+            source.file = None
+    elif kind == "sps_geometry":
+        source = SourceGeometry.sps("sources.sps", kind="scalar")
+        with pytest.raises(AttributeError):
+            source.source_file = None
+    else:
+        source = SourceEncoding.hdf5("encoding.h5", dataset="coefficients")
+        with pytest.raises(AttributeError):
+            source.file = None
+    context = ExportContext(project_path=tmp_path) if use_context else None
+    assert source.to_fs(context)
+
+
+def test_dense_reference_coordinates_reject_removed_coefficients():
+    geometry = SourceGeometry.inline(
+        kind="scalar", sources=[PointSource(coordinates=[0.25, 0.1], kind="scalar")]
+    )
+    field = EncodedSource.dense([1.0], name="one")
+    encoding = SourceEncoding(encoding_type="JsonDense", fields=[field])
+    field.coefficients = None
+    with pytest.raises(ValueError, match="requires coefficients"):
+        encoding.reference_coordinates(geometry)
+
+
+def test_legacy_source_group_reports_unconfigured_path():
+    group = SourceGroup(source=PointSource(coordinates=[0.25, 0.1], kind="scalar"))
+    with pytest.warns(DeprecationWarning, match="_path"):
+        with pytest.raises(ValueError, match="path has not been configured"):
+            _ = group._path
 
 
 @pytest.mark.parametrize("encoding_kind", ["identity", "dense", "frequency"])

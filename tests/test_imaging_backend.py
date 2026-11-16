@@ -1,13 +1,16 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
+from jsonschema import Draft202012Validator
 
 from frequensolve.imaging._artifacts import ControlStateFile, ControlVectorFile
 from frequensolve.imaging._backend import (
     Backend,
     LinearizationCache,
     LinearizationEntry,
+    background_checkpoint_files,
     content_fingerprint,
     fingerprint,
     frequency_weights,
@@ -20,6 +23,7 @@ from frequensolve.imaging._backend import (
     total_value,
     write_task_objective_vectors,
 )
+from frequensolve.imaging._objective import ObjectiveState
 from frequensolve.imaging.data import DataSpace, DataVector
 from frequensolve.imaging.jobs import FWIOperatorJob
 from frequensolve.mesh.mesh_generators import HexMeshGenerator
@@ -35,6 +39,11 @@ pytestmark = pytest.mark.unit
 ACTIVE = ["model.vp", "model.rho"]
 SIZES = {"model.vp": 5, "model.rho": 3}
 FREQUENCIES = [4.0, 6.0]
+# Sauce's published version-2 background checkpoint contract.
+BACKGROUND_V2 = (
+    Path(__file__).parent
+    / "contracts/sauce-f533e6f/trunk/contracts/outputs/fs-background-state-2"
+)
 
 
 def _simulation(tmp_path):
@@ -60,6 +69,70 @@ def _simulation(tmp_path):
     sim.acquisition = acq
     sim.save()
     return sim
+
+
+def test_wri_observed_energy_reduction_and_fixed_calibration(tmp_path):
+    import h5py
+
+    job = FWIOperatorJob(
+        "wri",
+        _simulation(tmp_path),
+        FREQUENCIES,
+        action="wri",
+        covector="gradient.h5",
+        objective="objective.h5",
+        wri={"penalty": 10.0},
+        weights=[1.0, 2.0],
+    )
+    for task, denominator, value, gradient in [(1, 2.0, 3.0, 4.0), (2, 8.0, 7.0, 10.0)]:
+        path = job.report_file(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, "w") as h:
+            h["value"] = value
+            h["penalty"] = 10.0
+            h["observed_energy"] = denominator / 10
+            h["objective_normalization"] = denominator
+            h["objective_normalization"].attrs["policy"] = ["observed_energy"]
+        ControlVectorFile(
+            {"model.vp": [gradient]},
+            state_fingerprint="state",
+            control_registry_fingerprint="registry",
+        ).write(job.covector_file(task))
+    assert job.wri_normalization_divisor() == pytest.approx(18.0)
+    np.testing.assert_allclose(job.wri_reduction_weights(), [2 / 18, 16 / 18])
+    assert job.objective_value() == pytest.approx((2 * 3 + 16 * 7) / 18)
+    np.testing.assert_allclose(
+        reduce_covectors(job).blocks["model.vp"], [(2 * 4 + 16 * 10) / 18]
+    )
+    job.wri["objective_normalization"] = 18.0
+    np.testing.assert_allclose(job.wri_reduction_weights(), [1, 2])
+
+
+def test_wri_calibration_payload_requires_no_covector(tmp_path):
+    job = FWIOperatorJob(
+        "calibration",
+        _simulation(tmp_path),
+        FREQUENCIES,
+        action="wri",
+        objective="calibration.h5",
+        wri={"penalty": 10.0, "normalization_only": True},
+    )
+    payload = job.to_fs()["fwi_operator"]
+    assert payload["wri"]["normalization_only"]
+    assert "model_covector" not in payload
+
+
+@pytest.mark.parametrize("normalization", [0.0, -1.0, float("nan"), "current_residual"])
+def test_wri_rejects_invalid_normalization(tmp_path, normalization):
+    with pytest.raises(ValueError, match="normalization"):
+        FWIOperatorJob(
+            "wri",
+            _simulation(tmp_path),
+            FREQUENCIES,
+            action="wri",
+            covector="g.h5",
+            wri={"penalty": 10.0, "objective_normalization": normalization},
+        )
 
 
 @pytest.fixture
@@ -178,6 +251,29 @@ def test_linearize_reduces_task_covectors_reports_state_and_manifest(setup):
     assert manifest.state_size == sum(SIZES.values())
 
 
+def test_covector_reduction_preserves_material_basis_identities(setup):
+    sim, _, backend = setup
+    job = _linearize(backend, sim)
+    identities = {"model.vp": "sha256:" + "a" * 64}
+    for task in (1, 2):
+        part = ControlVectorFile.read(job.covector_file(task))
+        part.control_spaces = identities
+        part.write(job.covector_file(task))
+    assert reduce_covectors(job).control_spaces == identities
+
+
+@pytest.mark.parametrize("other", [{}, {"model.vp": "sha256:" + "b" * 64}])
+def test_covector_reduction_rejects_incompatible_material_bases(setup, other):
+    sim, _, backend = setup
+    job = _linearize(backend, sim)
+    for task, identities in ((1, {"model.vp": "sha256:" + "a" * 64}), (2, other)):
+        part = ControlVectorFile.read(job.covector_file(task))
+        part.control_spaces = identities
+        part.write(job.covector_file(task))
+    with pytest.raises(ValueError, match="material basis identities"):
+        reduce_covectors(job)
+
+
 def test_linearize_without_control_state_uses_zero_baseline(setup):
     sim, fake, backend = setup
     job = _linearize(backend, sim)
@@ -219,7 +315,7 @@ def test_objective_vectors_round_trip_per_task(setup):
     state_fp = "sha256:" + "a" * 64
     paths = write_task_objective_vectors(job, r, space, state_fp)
     assert [p.name for p in paths] == ["dual_1.json", "dual_2.json"]
-    assert all(p.with_name(f"{p.stem}_rank_0.h5").is_file() for p in paths)
+    assert all(DataVector.shard_path(p).is_file() for p in paths)
     back = read_task_objective_vectors(job, space, state_fingerprint=state_fp)
     np.testing.assert_allclose(back.values, r.values)
     for task in (1, 2):
@@ -273,7 +369,10 @@ def test_jvp_vjp_normal_are_adjoint_consistent_through_files(setup):
         objective_vector=backend.staging_dir("duals") / "r.json",
         covector="vjp.h5",
     )
-    write_task_objective_vectors(vjp, r, space, lin.state_fingerprint)
+    # Duals take the saved state's format (canonical version 5 here).
+    options = ObjectiveState(linearize.state_file(1)).vector_options()
+    assert options == {"schema": "fs-objective-vector-5", "dtype": np.float64}
+    write_task_objective_vectors(vjp, r, space, lin.state_fingerprint, **options)
     backend.run(vjp)
     jh_r = reduce_covectors(vjp)
     np.testing.assert_allclose(
@@ -319,7 +418,7 @@ def test_jvp_vjp_normal_are_adjoint_consistent_through_files(setup):
         "normal",
         "vjp",
     ]
-    assert all(s["options"] == {"n_ranks": 2} for s in fake.submissions)
+    assert all(s["options"] == {"n_ranks": 2, "fetch": True} for s in fake.submissions)
 
 
 def test_direction_bound_to_another_state_fails_the_run(setup):
@@ -375,7 +474,7 @@ def test_smoothing_postprocess_writes_weighted_aggregate_and_raw(setup):
     result = backend.run(job, postprocess_only=True)
     assert result.successful
     np.testing.assert_allclose(read_smoothed_covector(job).pack(ACTIVE), expected)
-    assert fake.submissions[-1]["options"] == {"n_ranks": 2}
+    assert fake.submissions[-1]["options"] == {"n_ranks": 2, "fetch": True}
 
     plain = _linearize(backend, sim)
     with pytest.raises(ValueError, match="no smoothing postprocess"):
@@ -496,6 +595,305 @@ def test_linearization_cache_evicts_lru_entries_inside_workdir(tmp_path):
         LinearizationCache(workdir, capacity=0)
 
 
+def _checkpoint(path, size, schema="fs-background-data-2"):
+    """A task-catalog record of one background checkpoint file."""
+
+    return {
+        "id": f"export:{path}",
+        "role": "checkpoint",
+        "representation": "hdf5",
+        "schema": schema,
+        "path": path,
+        "retention": "durable",
+        "bytes": size,
+    }
+
+
+def _background_linearize(sim, name):
+    """A finished two-rank, two-batch linearize laid out like a remote Sauce run.
+
+    Only the task manifest, rank 0's shard manifest and the task result (which
+    records rank 0's payloads, as Sauce does) were fetched; every payload stays
+    on the site.
+    """
+    job = FWIOperatorJob(
+        name,
+        sim,
+        [4.0],
+        action="linearize",
+        active=ACTIVE,
+        state="state.json",
+        background="background.json",
+    )
+    manifest = job.background_file(1)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    shards, records = [], []
+    for rank in range(2):
+        shard = manifest.with_name(f"{manifest.stem}_gen_7_rank_{rank}.json")
+        payloads = [f"{shard.stem}_batch_{batch}.h5" for batch in range(2)]
+        if rank == 0:
+            shard.write_text(json.dumps({"shards": [{"file": p} for p in payloads]}))
+            records += [
+                _checkpoint(payload, 1000, "fs-solution-hdf5-3") for payload in payloads
+            ]
+        shards.append({"file": shard.name})
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "fs-background-state-1",
+                "ranks": 2,
+                "batches": 2,
+                "shards": shards,
+            }
+        )
+    )
+    _task_result(job, records)
+    return job
+
+
+def _task_result(job, records):
+    """Commit task 1 of ``job`` with Sauce's artifact ``records``."""
+
+    result = job._result_path / "_fs_run" / "tasks" / "task_000001" / "result.json"
+    result.parent.mkdir(parents=True)
+    result.write_text(
+        json.dumps(
+            {
+                "schema": "fs-task-result-2",
+                "partition": {
+                    "task": 1,
+                    "task_count": 1,
+                    "frequency": {"real": 4.0, "imag": 0.0},
+                },
+                "fingerprints": {
+                    key: "sha256:" + digit * 64
+                    for key, digit in (
+                        ("job", "1"),
+                        ("simulation", "2"),
+                        ("outputs", "3"),
+                    )
+                },
+                "status": {"state": "success", "code": 0},
+                "artifacts": records,
+            }
+        )
+    )
+
+
+def test_background_checkpoint_release_covers_every_rank_and_the_site(tmp_path):
+    sim = _simulation(tmp_path)
+    fake = FakeImagingSite(SIZES, seed=7)
+    backend = Backend(fake, sim.project_path)
+    job = _background_linearize(sim, "capture")
+    files, size = background_checkpoint_files(job)
+    stem = "background_1_gen_7_rank"
+    assert files == sorted(
+        ["background_1.json", f"{stem}_0.json", f"{stem}_1.json"]
+        + [f"{stem}_{rank}_batch_{batch}.h5" for rank in (0, 1) for batch in (0, 1)]
+    )
+    local = sum(
+        (job._result_path / name).stat().st_size
+        for name in files
+        if (job._result_path / name).is_file()
+    )
+    # Rank 0 payloads from the catalog; rank 1 payloads estimated from them.
+    assert size == local + 4 * 1000
+
+    assert backend.release_background(job) == size
+    assert job.background is None
+    assert fake.removed == [("capture", tuple(files))]
+    assert not (job._result_path / "background_1.json").exists()
+    assert backend.release_background(job) == 0  # already released
+    assert background_checkpoint_files(job) == ([], 0)
+
+
+def test_background_checkpoint_files_read_per_rank_hdf5_shards(tmp_path):
+    sim = _simulation(tmp_path)
+    job = FWIOperatorJob(
+        "capture",
+        sim,
+        FREQUENCIES,
+        action="linearize",
+        active=ACTIVE,
+        state="state.json",
+        background="background.json",
+    )
+    expected = []
+    for task in (1, 2):
+        manifest = job.background_file(task)
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        shards = [f"{manifest.stem}/generations/run_9/rank_{r:05d}.h5" for r in (0, 1)]
+        (manifest.parent / shards[0]).parent.mkdir(parents=True)
+        (manifest.parent / shards[0]).write_bytes(b"0" * 500)  # rank 1 stays remote
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-background-state-1",
+                    "ranks": 2,
+                    "batches": [{"source_first": 1, "n_sources": 2}],
+                    "shards": [{"file": name, "digest": "sha256:0"} for name in shards],
+                }
+            )
+        )
+        expected += [manifest.name, *shards]
+    files, size = background_checkpoint_files(job)
+    assert files == sorted(expected)
+    manifests = sum(job.background_file(task).stat().st_size for task in (1, 2))
+    assert size == manifests + 4 * 500
+
+
+def _background_v2(job, task, layout, *, run="run_7f3a9c2e"):
+    """Publish Sauce's example manifest of ``layout`` for one task of ``job``.
+
+    Returns the HDF5 files it names, relative to the result directory.
+    """
+
+    payload = json.loads((BACKGROUND_V2 / "examples" / f"{layout}.json").read_text())
+    folder = f"{job.background_file(task).stem}/generations/{run}"
+    if layout == "shared":
+        files = [f"{folder}/fields.h5"]
+        payload["file"] = files[0]
+    else:
+        files = [f"{folder}/rank_{rank:05d}.h5" for rank in range(payload["ranks"])]
+        payload["shards"] = [{"file": name} for name in files]
+    Draft202012Validator(
+        json.loads((BACKGROUND_V2 / "schema.json").read_text())
+    ).validate(payload)
+    job.background_file(task).parent.mkdir(parents=True, exist_ok=True)
+    job.background_file(task).write_text(json.dumps(payload))
+    return files
+
+
+@pytest.mark.parametrize("layout", ["rank", "shared"])
+def test_background_checkpoint_files_follow_version2_manifests(tmp_path, layout):
+    job = FWIOperatorJob(
+        "capture",
+        _simulation(tmp_path),
+        [4.0],
+        action="linearize",
+        active=ACTIVE,
+        state="state.json",
+        background="background.json",
+    )
+    files = _background_v2(job, 1, layout)
+    manifest = job.background_file(1).stat().st_size
+    # A remote run: its task catalog records every file, which stays on the site.
+    _task_result(job, [_checkpoint(name, 700) for name in files])
+
+    assert background_checkpoint_files(job) == (
+        sorted(["background_1.json", *files]),
+        manifest + 700 * len(files),
+    )
+    # A file present on this machine counts its own size.
+    local = job._result_path / files[0]
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"0" * 500)
+    expected = manifest + 500 + 700 * (len(files) - 1)
+    assert background_checkpoint_files(job)[1] == expected
+
+
+@pytest.mark.parametrize("schema", ["fs-background-state-2", "fs-background-state-1"])
+def test_release_background_removes_the_directories_it_empties(tmp_path, schema):
+    sim = _simulation(tmp_path)
+    fake = FakeImagingSite(SIZES, seed=7)
+    job = FWIOperatorJob(
+        "capture",
+        sim,
+        FREQUENCIES,
+        action="linearize",
+        active=ACTIVE,
+        state="state.json",
+        background="background.json",
+    )
+    root = job._result_path
+    for task in (1, 2):
+        files = _background_v2(job, task, "rank")
+        if schema == "fs-background-state-1":
+            job.background_file(task).write_text(
+                json.dumps(
+                    {
+                        "schema": schema,
+                        "ranks": 2,
+                        "batches": [{"source_first": 1, "n_sources": 2}],
+                        "shards": [
+                            {"file": name, "digest": "sha256:" + "0" * 64}
+                            for name in files
+                        ],
+                    }
+                )
+            )
+        for name in files:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(b"0" * 500)
+    run = "background_1/generations/run_7f3a9c2e"
+    (root / run / "notes.txt").write_text("not part of the checkpoint")
+    files, size = background_checkpoint_files(job)
+
+    assert Backend(fake, sim.project_path).release_background(job) == size
+    assert fake.removed == [("capture", tuple(files))]
+    remaining = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.relative_to(root).parts[0].startswith("background")
+    )
+    # Emptied run, generations and stem directories go; non-empty ones stay.
+    assert remaining == [
+        "background_1",
+        "background_1/generations",
+        run,
+        f"{run}/notes.txt",
+    ]
+
+
+def test_linearization_cache_releases_background_on_eviction_and_budget(tmp_path):
+    sim = _simulation(tmp_path)
+    fake = FakeImagingSite(SIZES, seed=7)
+    backend = Backend(fake, sim.project_path)
+    released = []
+
+    def release(entry):
+        released.append(entry.fingerprint)
+        return backend.release_background(entry.job)
+
+    cache = LinearizationCache(sim.project_path, capacity=2, release=release)
+    jobs = [_background_linearize(sim, f"lin{index}") for index in range(4)]
+    entries = [LinearizationEntry(f"fp{index}", job) for index, job in enumerate(jobs)]
+    cache.put(entries[0])
+    cache.put(entries[1])
+    assert released == [] and set(cache.background_bytes()) == {"fp0", "fp1"}
+    cache.put(entries[2])  # evicts fp0 with its checkpoint
+    assert released == ["fp0"] and jobs[0].background is None
+    assert jobs[1].background is not None
+
+    # A budget keeps the newest checkpoint and releases older retained ones.
+    cache.background_budget = 0
+    cache.put(entries[3])  # evicts fp1, budget releases fp2 but not fp3
+    assert released == ["fp0", "fp1", "fp2"]
+    assert jobs[3].background is not None
+    assert cache.background_bytes().keys() == {"fp3"}
+    with pytest.raises(ValueError, match="background_budget"):
+        cache.background_budget = -1
+
+    # A failing site deletion warns instead of failing the eviction.
+    def broken(entry):
+        raise OSError("ssh unavailable")
+
+    cache.release = broken
+    with pytest.warns(RuntimeWarning, match="ssh unavailable"):
+        cache.clear()
+
+
+def test_backend_records_submitted_jobs(setup):
+    sim, fake, backend = setup
+    with backend.recording() as outer:
+        first = _linearize(backend, sim)
+        with backend.recording() as inner:
+            second = _linearize(backend, sim)
+    third = _linearize(backend, sim)
+    assert outer == [first, second] and inner == [second]
+    assert third not in outer
+
+
 def test_linearization_entry_from_job_reads_fingerprints(setup):
     sim, fake, backend = setup
     job = _linearize(backend, sim)
@@ -554,3 +952,150 @@ def test_fingerprint_is_stable_and_detects_changes(tmp_path):
     assert fingerprint(observed=first) != fingerprint(
         observed=content_fingerprint(path)
     )
+
+
+def test_stage_worker_accounting_includes_init_checks_and_shared_process_once(tmp_path):
+    from types import SimpleNamespace
+
+    from frequensolve.orchestrator.sites.base import JobStatus, RunResult
+
+    backend = Backend(FakeImagingSite(), tmp_path)
+    beginning = backend.timing_snapshot()
+    handle = SimpleNamespace(
+        backend={"mesh_result": {"duration_seconds": 2.0, "stdout": "init.log"}}
+    )
+    result = RunResult(
+        None,
+        JobStatus(
+            state="completed",
+            return_code=0,
+            raw={
+                "tasks": [
+                    {"duration_seconds": 3.0, "stdout": "shared.log"},
+                    {"duration_seconds": 3.0, "stdout": "shared.log"},
+                ],
+                "pack": {"duration_seconds": 0.5, "stdout": "pack.log"},
+                "smooth": {"duration_seconds": 0.25, "stdout": "smooth.log"},
+            },
+        ),
+    )
+    backend._record_timing(result, handle)
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 5.75
+    # Another evaluation (including rejected line-search trials or periodic
+    # combined checks) contributes to the same stage ledger.
+    backend._record_timing(result, handle)
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 11.5
+    backend._record_timing(
+        RunResult(None, JobStatus(state="skipped", return_code=0)), handle
+    )
+    assert backend.cost_since(beginning)["summed_worker_seconds"] == 11.5
+    backend._record_timing(
+        RunResult(None, JobStatus(state="completed", return_code=0)),
+        SimpleNamespace(backend={}),
+    )
+    cost = backend.cost_since(beginning)
+    assert cost["summed_worker_seconds"] is None
+    assert cost["unmeasured_native_runs"] == 1
+
+
+def test_backend_fetch_defaults_and_explicit_override(setup):
+    sim, fake, backend = setup
+    job = _linearize(backend, sim)
+    assert fake.submissions[-1]["options"]["fetch"] is True
+    remote_only = Backend(fake, sim.project_path, submit_options={"fetch": False})
+    remote_only.submit(job)
+    assert fake.submissions[-1]["options"]["fetch"] is False
+
+
+class _RemoteRecordingSite(FakeImagingSite):
+    """Fake remote site recording uploads under a remote project root."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.work_dir = Path("/remote/project")
+        self.uploads = []
+
+    def put(self, local_path, remote_path):
+        self.uploads.append((Path(local_path), Path(remote_path)))
+
+
+def test_remote_sites_receive_client_written_operator_inputs(tmp_path):
+    sim = _simulation(tmp_path)
+    # Imaging problems run derived simulations that know only their project path.
+    sim._project = None
+    site = _RemoteRecordingSite(SIZES, seed=7)
+    backend = Backend(site, sim.project_path)
+    ops = backend.staging_dir("ops", "0001")
+    for task in (1, 2):
+        (ops / f"direction_{task}.h5").write_bytes(b"d")
+    produced = Path(sim.project_path) / "jobs" / sim.name / "linearize" / "results"
+    produced.mkdir(parents=True)
+    (produced / "baseline.h5").write_bytes(b"b")
+    job = FWIOperatorJob(
+        backend.job_name("jvp"),
+        sim,
+        [4.0, 6.0],
+        action="jvp",
+        active=ACTIVE,
+        state="state.json",
+        direction=ops / "direction.h5",
+        control_state=produced / "baseline.h5",
+        objective_vector="jvp.json",
+    )
+
+    backend._stage_remote_inputs(job)
+
+    root = Path(sim.project_path).resolve()
+    # Local inputs travel even when they are inside a job result directory.
+    assert site.uploads == [
+        (
+            ops / f"direction_{task}.h5",
+            Path("/remote/project")
+            / (ops / f"direction_{task}.h5").resolve().relative_to(root),
+        )
+        for task in (1, 2)
+    ] + [
+        (
+            produced / "baseline.h5",
+            Path("/remote/project")
+            / (produced / "baseline.h5").resolve().relative_to(root),
+        )
+    ]
+    # Sites without a remote work directory read inputs in place.
+    site.uploads.clear()
+    site.work_dir = None
+    backend._stage_remote_inputs(job)
+    assert site.uploads == []
+
+
+def test_remote_staging_uploads_objective_vector_payloads(tmp_path):
+    sim = _simulation(tmp_path)
+    site = _RemoteRecordingSite(SIZES, seed=7)
+    backend = Backend(site, sim.project_path)
+    ops = backend.staging_dir("ops", "0002")
+    for task in (1, 2):
+        (ops / f"dual_{task}.h5").write_bytes(b"rows")
+        (ops / f"dual_{task}.json").write_text(json.dumps({"file": f"dual_{task}.h5"}))
+    job = FWIOperatorJob(
+        backend.job_name("vjp"),
+        sim,
+        [4.0, 6.0],
+        action="vjp",
+        active=ACTIVE,
+        state="state.json",
+        covector="vjp.h5",
+        objective_vector=ops / "dual.json",
+    )
+
+    backend._stage_remote_inputs(job)
+
+    assert sorted(local.name for local, _ in site.uploads) == [
+        "dual_1.h5",
+        "dual_1.json",
+        "dual_2.h5",
+        "dual_2.json",
+    ]
+    assert {remote.parent for _, remote in site.uploads} == {
+        Path("/remote/project")
+        / ops.resolve().relative_to(Path(sim.project_path).resolve())
+    }

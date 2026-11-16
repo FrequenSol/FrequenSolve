@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -176,7 +177,7 @@ def test_execute_maps_http_failure_without_provider_body(monkeypatch):
     )
 
     with pytest.raises(
-        RuntimeError, match=r"Cloud API request failed \(HTTPError\)"
+        graphql_client.CloudAPIError, match="Cloud API rejected the HTTP request"
     ) as exc_info:
         _client().execute("query { value }")
 
@@ -200,7 +201,7 @@ class PollingGraphQLClient(graphql_client.GraphQLClient):
         return value
 
 
-def test_wait_for_stack_ready_retries_transient_error_then_maps_success(
+def test_wait_for_storage_ready_retries_transient_error_then_maps_success(
     monkeypatch,
 ):
     client = PollingGraphQLClient(
@@ -221,12 +222,17 @@ def test_wait_for_stack_ready_retries_transient_error_then_maps_success(
         ]
     )
     clock = iter([0, 31, 31, 31])
-    monkeypatch.setattr(graphql_client.time, "time", lambda: next(clock))
     sleeps = []
-    monkeypatch.setattr(graphql_client.time, "sleep", sleeps.append)
+    real_clock = time.time
+    monkeypatch.setattr(
+        graphql_client,
+        "time",
+        SimpleNamespace(time=lambda: next(clock), sleep=sleeps.append),
+    )
+    # Library background threads must keep the real process-wide clock.
+    assert time.time is real_clock
 
-    assert client.wait_for_stack_ready(
-        "storage",
+    assert client.wait_for_storage_ready(
         timeout=60,
         poll_interval=2,
         expected_stack_id="stack-1",
@@ -239,12 +245,108 @@ def test_wait_for_stack_ready_retries_transient_error_then_maps_success(
     assert len(client.calls) == 2
 
 
-def test_wait_for_stack_ready_propagates_timeout_at_bound(monkeypatch):
+def test_wait_for_storage_ready_propagates_timeout_at_bound(monkeypatch):
     client = PollingGraphQLClient([])
     clock = iter([100, 105])
-    monkeypatch.setattr(graphql_client.time, "time", lambda: next(clock))
+    real_clock = time.time
+    monkeypatch.setattr(
+        graphql_client,
+        "time",
+        SimpleNamespace(time=lambda: next(clock)),
+    )
+    assert time.time is real_clock
 
     with pytest.raises(RuntimeError, match="timeout: 5s"):
-        client.wait_for_stack_ready("compute", timeout=5, poll_interval=0)
+        client.wait_for_storage_ready(timeout=5, poll_interval=0)
 
     assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("error", "retryable"),
+    [
+        (requests.exceptions.Timeout("private"), True),
+        (requests.exceptions.ConnectionError("private"), True),
+        (requests.exceptions.SSLError("private"), False),
+        (requests.exceptions.InvalidURL("private"), False),
+        (requests.exceptions.RequestException("private"), False),
+    ],
+)
+def test_only_transient_status_reads_signal_monitor_recovery(
+    monkeypatch, error, retryable
+):
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append(kwargs["json"]["query"])
+        raise error
+
+    monkeypatch.setattr(graphql_client.requests, "post", post)
+    expected = (
+        TransientStatusReadError if retryable else graphql_client.CloudTransportError
+    )
+    with pytest.raises(expected) as raised:
+        _client().get_simulation_status_details("synthetic-run-1")
+    assert len(calls) == 1
+    assert "private" not in str(raised.value)
+    if retryable:
+        assert "synthetic-run-1" in str(raised.value)
+        assert "do not resubmit" in str(raised.value)
+
+    # The shared executor never retries a mutation or turns it into a status signal.
+    with pytest.raises(graphql_client.CloudTransportError):
+        _client().execute("mutation Submit { submitJob }")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_retry_submission_argument_is_opt_in_for_older_backends(retry):
+    client = graphql_client.GraphQLClient.__new__(graphql_client.GraphQLClient)
+    captured = {}
+
+    def execute(document, variables):
+        captured.update(document=document, variables=variables)
+        return {"submitJob": {"simulationId": "new-run", "status": "PENDING"}}
+
+    client.execute = execute
+    client.submit_job("project/job.json", retry=retry)
+    assert ("$retry: Boolean" in captured["document"]) == retry
+    assert captured["variables"].get("retry") == (True if retry else None)
+
+
+def test_simulation_logs_use_owned_query_and_bounded_cursor(monkeypatch):
+    calls = []
+    page = {"available": True, "logs": [], "truncated": False, "nextToken": None}
+
+    def post(url, **kwargs):
+        calls.append(kwargs["json"])
+        return FakeResponse({"data": {"getJobLogs": page}})
+
+    monkeypatch.setattr(graphql_client.requests, "post", post)
+    client = _client()
+    assert (
+        client.get_simulation_logs(
+            "simulation-synthetic", frequency_index=2, before_byte="100"
+        )
+        == page
+    )
+    assert calls[0]["variables"] == {
+        "simulationId": "simulation-synthetic",
+        "frequencyIndex": 2,
+        "beforeByte": "100",
+    }
+    assert calls[0]["query"].lstrip().startswith("query ")
+    client.get_simulation_logs("simulation-synthetic")
+    assert calls[1]["variables"] == {"simulationId": "simulation-synthetic"}
+
+
+def test_simulation_logs_reject_missing_response(monkeypatch):
+    monkeypatch.setattr(
+        graphql_client.requests,
+        "post",
+        lambda *a, **kw: FakeResponse({"data": {"getJobLogs": None}}),
+    )
+    with pytest.raises(graphql_client.CloudAPIError, match="no valid"):
+        _client().get_simulation_logs("simulation-synthetic")

@@ -179,7 +179,6 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
     starter_config = sites.load_site_config(config_path)
     assert set(starter_config["sites"]) == {
         "cloud",
-        "cloud-batch",
         "cloud-slurm",
         "local",
         "hpc",
@@ -193,6 +192,7 @@ def test_site_factory_creates_starter_config_for_missing_default(monkeypatch, tm
         "sockets_per_node": 2,
         "memory_per_node": 262144,
         "gpus_per_node": 0,
+        "gpu_memory_per_gpu": 0,
     }
 
     site = sites.Site()
@@ -263,11 +263,11 @@ domain = "app.frequensol.com"
 [sites.cloud-slurm]
 type = "aws"
 domain = "app.frequensol.com"
-execution_backend = "slurm"
-slurm_partition = "cpu-efa"
-slurm_nodes = 2
-slurm_ranks_per_node = 4
-slurm_wall_time = "00-00:30:00"
+cluster_id = "frequensol-shared-us-east-1"
+[sites.cloud-slurm.execution_resources]
+nodes = 2
+mpi_ranks = 8
+wall_time_seconds = 1800
 """.strip()
     )
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
@@ -276,11 +276,8 @@ slurm_wall_time = "00-00:30:00"
 
     assert site.kwargs == {
         "domain": "app.frequensol.com",
-        "execution_backend": "slurm",
-        "slurm_partition": "cpu-efa",
-        "slurm_nodes": 2,
-        "slurm_ranks_per_node": 4,
-        "slurm_wall_time": "00-00:30:00",
+        "cluster_id": "frequensol-shared-us-east-1",
+        "execution_resources": {"nodes": 2, "mpi_ranks": 8, "wall_time_seconds": 1800},
         "_credential_profile": "cloud-slurm",
     }
 
@@ -294,56 +291,42 @@ default = "cloud-single"
 [sites.cloud-single]
 type = "aws"
 domain = "app.frequensol.com"
-execution_backend = "slurm"
-slurm_partition = "cpu-single"
-slurm_nodes = 1
-slurm_ranks_per_node = 1
-slurm_wall_time = "00-00:30:00"
+cluster_id = "frequensol-shared-us-east-1"
+[sites.cloud-single.execution_resources]
+nodes = 1
+mpi_ranks = 1
+wall_time_seconds = 1800
 """.strip()
     )
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
 
     site = sites.Site(config_path=config_path)
 
-    assert site.kwargs["slurm_partition"] == "cpu-single"
-    assert site.kwargs["slurm_nodes"] == 1
-    assert site.kwargs["slurm_ranks_per_node"] == 1
+    assert site.kwargs["cluster_id"] == "frequensol-shared-us-east-1"
+    assert site.kwargs["execution_resources"] == {
+        "nodes": 1,
+        "mpi_ranks": 1,
+        "wall_time_seconds": 1800,
+    }
 
 
 @pytest.mark.parametrize(
-    ("profile_body", "message"),
+    "profile_body,message",
     [
+        ('cluster_id = "managed-batch"', "Invalid cluster_id"),
+        ('execution_backend = "batch"', "Unsupported managed Cloud profile settings"),
+        ('compute_mode = "auto"', "Unsupported managed Cloud profile settings"),
         (
-            'execution_backend = "batch"\nslurm_nodes = 2',
-            "Batch profiles cannot set Slurm fields",
+            "[sites.cloud.execution_resources]\nnodes = 3\nmpi_ranks = 3\nwall_time_seconds = 1800",
+            "nodes must be from 1 through 2",
         ),
         (
-            'execution_backend = "slurm"\ncompute_mode = "auto"',
-            "Slurm profiles cannot set compute_mode",
+            "[sites.cloud.execution_resources]\nnodes = 1\nmpi_ranks = 2\nwall_time_seconds = 1800",
+            "Unsupported node/MPI-rank combination",
         ),
         (
-            'execution_backend = "slurm"\nslurm_partition = "cpu-efa"\n'
-            "slurm_nodes = 3\nslurm_ranks_per_node = 4\n"
-            'slurm_wall_time = "00-00:30:00"',
-            "slurm_nodes must be from 1 through 2",
-        ),
-        (
-            'execution_backend = "slurm"\nslurm_partition = "cpu-single"\n'
-            "slurm_nodes = 1\nslurm_ranks_per_node = 2\n"
-            'slurm_wall_time = "00-00:30:00"',
-            "cpu-single requires exactly one node and one rank",
-        ),
-        (
-            'execution_backend = "slurm"\nslurm_partition = "cpu-efa"\n'
-            "slurm_nodes = 1\nslurm_ranks_per_node = 4\n"
-            'slurm_wall_time = "00-00:30:00"',
-            "cpu-efa requires an explicitly distributed plan",
-        ),
-        (
-            'execution_backend = "slurm"\nslurm_partition = ["cpu-efa"]\n'
-            "slurm_nodes = 2\nslurm_ranks_per_node = 4\n"
-            'slurm_wall_time = "00-00:30:00"',
-            "slurm_partition must be 'cpu-single' or 'cpu-efa'",
+            "[sites.cloud.execution_resources]\nnodes = 2\nmpi_ranks = 3\nwall_time_seconds = 1800",
+            "Unsupported node/MPI-rank combination",
         ),
     ],
 )
@@ -372,7 +355,7 @@ def test_managed_cloud_resources_cannot_be_overridden_at_factory_call(
     monkeypatch.setattr(sites, "AWSSite", FakeSite)
 
     with pytest.raises(ValueError, match="only be selected through a named"):
-        sites.Site(config_path=config_path, execution_backend="slurm")
+        sites.Site(config_path=config_path, cluster_id="frequensol-shared-us-east-1")
     with pytest.raises(ValueError, match="direct Slurm-site overrides"):
         sites.Site(config_path=config_path, nodes=2)
 
@@ -760,3 +743,24 @@ def test_site_factory_does_not_create_missing_env_config(monkeypatch, tmp_path):
         sites.Site()
 
     assert not missing_path.exists()
+
+
+def test_site_factory_accepts_partition_and_override_in_cloud_config(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "site.toml"
+    config_path.write_text(
+        """default = "research"
+[sites.research]
+type = "aws"
+domain = "app.frequensol.com"
+cluster_id = "research-cluster"
+partition = "lab-mpi"
+allow_unverified_compute = true
+"""
+    )
+    monkeypatch.setattr(sites, "AWSSite", FakeSite)
+    site = sites.Site(config_path=config_path, profile="research")
+    assert site.kwargs["cluster_id"] == "research-cluster"
+    assert site.kwargs["partition"] == "lab-mpi"
+    assert site.kwargs["allow_unverified_compute"] is True

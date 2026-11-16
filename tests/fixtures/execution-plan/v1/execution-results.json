@@ -1,0 +1,478 @@
+{
+  "attested": {
+    "binding_digest": "sha256:9918dc1940704e3b7b22d8ff43fabeebef6747dd02eca647be2e15fd0b46307a",
+    "closure": {
+      "binding_digest": "sha256:9918dc1940704e3b7b22d8ff43fabeebef6747dd02eca647be2e15fd0b46307a",
+      "execution_id": "fake-run",
+      "not_started": [],
+      "outcome": "SUCCEEDED",
+      "result_digest": "sha256:df41b22ed4d5e6f9cf85ec52140b59ccb1f8c0ad11e58319943fb419ea503868",
+      "usage": [
+        {
+          "allocated_cpus": 16,
+          "allocated_memory_mib": 49540,
+          "evidence_digest": "sha256:d5f2b3127daf7e0edc174ef0bbab14a409bdb6d7248c87bf71e42f4895f60de0",
+          "frequency_index": 0,
+          "nodes": 2,
+          "outcome": "SUCCEEDED",
+          "processing_milliseconds": 1234,
+          "provider_attempt_id": "slurm:test-shared-cluster:123",
+          "terminal": true
+        },
+        {
+          "allocated_cpus": 16,
+          "allocated_memory_mib": 49540,
+          "evidence_digest": "sha256:34decb6ce148f9393fae20533c893ffc6b1f8bfc033e963b367b4af042268e5d",
+          "frequency_index": 1,
+          "nodes": 2,
+          "outcome": "SUCCEEDED",
+          "processing_milliseconds": 1234,
+          "provider_attempt_id": "slurm:test-shared-cluster:124",
+          "terminal": true
+        }
+      ],
+      "version": "frequency-execution-closure.v1"
+    },
+    "execution_id": "fake-run",
+    "native_closure_digest": "sha256:dc48c8d905754d5cf743c9729df72ed22c4f6e85f187ccf50bf0d99af29a30bb",
+    "submission_digest": "7dad47516850c1a2e95f7173f9b89378b0ee65483a98d8dc99b8077be2428965",
+    "usage_source": "root-supervised-solver-active.v1",
+    "version": "frequency-execution-attested-result.v1"
+  },
+  "command": {
+    "account_id": "example-tenant-a",
+    "artifacts": [
+      {
+        "frequency_index": 0,
+        "layout_digest": "sha256:a7596740952b2e9d9e3de2aae23d6049c382fea2e631785216052214b34719f8",
+        "manifest": {
+          "bucket": "fake-private-inputs",
+          "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "key": "execution-plan-artifacts/example-tenant-a/fake-user/fake-plan/fake-operation/layout-0/manifest.json",
+          "version_id": "fake-generated-version"
+        },
+        "native_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sizing_digest": "sha256:1694a989e089a2c17ccf76d95ec19f0f66e7a2d0164a996a26d5e96882934cbd"
+      },
+      {
+        "frequency_index": 1,
+        "layout_digest": "sha256:a7596740952b2e9d9e3de2aae23d6049c382fea2e631785216052214b34719f8",
+        "manifest": {
+          "bucket": "fake-private-inputs",
+          "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "key": "execution-plan-artifacts/example-tenant-a/fake-user/fake-plan/fake-operation/layout-0/manifest.json",
+          "version_id": "fake-generated-version"
+        },
+        "native_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sizing_digest": "sha256:1694a989e089a2c17ccf76d95ec19f0f66e7a2d0164a996a26d5e96882934cbd"
+      }
+    ],
+    "authority": {
+      "account_id": "example-tenant-a",
+      "installation_digest": "sha256:1f91599733a9855882800d356f55ffa656749b37c6e5df0d4f5595834a1edd7e",
+      "plan_id": "fake-plan",
+      "tenant": {
+        "accountId": "example-tenant-a",
+        "fairShare": 1,
+        "gid": 50000,
+        "name": "fst_056cf93fb1d81baa",
+        "roleArn": "arn:aws:iam::123456789012:role/test-tenant-0",
+        "roleId": "AROA00000000000000000",
+        "runningCpu": 128,
+        "runningMemoryMiB": 262144,
+        "uid": 50000
+      },
+      "user_id": "fake-user",
+      "version": "shared-plan-authority.v1"
+    },
+    "authorized_at": "2026-01-01T02:00:00.000Z",
+    "binding_digest": "sha256:9918dc1940704e3b7b22d8ff43fabeebef6747dd02eca647be2e15fd0b46307a",
+    "context": {
+      "artifacts_digest": "sha256:90c2180c0b3a4d4e0b139642218d28aa6c91fcdd264704b56301bcfe7c54ec83",
+      "catalog_digest": "sha256:73d8f229c535595fc83b9465b546f163b3377d11eccaaf1527eab67fdb67f984",
+      "execution_site_id": "frequensol-shared-us-east-1",
+      "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "memory_policy": {
+        "calibration_denominator": 100,
+        "calibration_numerator": 118,
+        "minimum_memory_mib": 0,
+        "worker_overhead_mib": 603
+      },
+      "runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "site_fingerprint": "sha256:895e3349b7d0c72f49ec231f158f0a03e97a2cfaa69520ced1793cc423cc0588",
+      "sizing_policy_version": "memory-fit-first.v1",
+      "solver_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "destination": {
+      "bucket": "fake-owned-bucket",
+      "result_s3_prefix": "fake-project/results/runs/fake-run/"
+    },
+    "execution_id": "fake-run",
+    "frequency_values": [
+      [
+        "15",
+        "-0.25"
+      ],
+      [
+        "20",
+        "-0.25"
+      ]
+    ],
+    "job_file_key": "fake-project/simulation/job.json",
+    "plan": {
+      "context": {
+        "artifacts_digest": "sha256:90c2180c0b3a4d4e0b139642218d28aa6c91fcdd264704b56301bcfe7c54ec83",
+        "catalog_digest": "sha256:73d8f229c535595fc83b9465b546f163b3377d11eccaaf1527eab67fdb67f984",
+        "execution_site_id": "frequensol-shared-us-east-1",
+        "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "memory_policy": {
+          "calibration_denominator": 100,
+          "calibration_numerator": 118,
+          "minimum_memory_mib": 0,
+          "worker_overhead_mib": 603
+        },
+        "runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "site_fingerprint": "sha256:895e3349b7d0c72f49ec231f158f0a03e97a2cfaa69520ced1793cc423cc0588",
+        "sizing_policy_version": "memory-fit-first.v1",
+        "solver_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "digest": "sha256:5e4e2e9ec96c0a46252e9f626caabf5f851ada6434d23c5b6a0391f273bdd3ae",
+      "limits": {
+        "max_concurrent_frequencies": 2,
+        "max_layout_evaluations": 8,
+        "max_nodes_per_frequency": 2,
+        "max_running_cpus": 127,
+        "max_wall_time_seconds": 900
+      },
+      "plan_id": "fake-plan",
+      "revision": 1,
+      "rows": [
+        {
+          "automatic": {
+            "layout": {
+              "cpus_per_rank": 8,
+              "node_type": "fake.arm",
+              "nodes": 2,
+              "partition": "cpu",
+              "ranks_per_node": 1
+            },
+            "memory_mib_per_node": 24770,
+            "wall_time_seconds": 900
+          },
+          "estimated_runtime_seconds": null,
+          "frequency": "15",
+          "frequency_index": 0,
+          "overrides": {},
+          "reason": "Fewest feasible nodes, then ranks, within the qualified CPU profile",
+          "requested": {
+            "layout": {
+              "cpus_per_rank": 8,
+              "node_type": "fake.arm",
+              "nodes": 2,
+              "partition": "cpu",
+              "ranks_per_node": 1
+            },
+            "memory_mib_per_node": 24770,
+            "wall_time_seconds": 900
+          },
+          "validation": {
+            "allocation_digest": "sha256:f401d2e75cad95d6c39815bf562ac5cf139b347a5474fbf4b062c950fc85158f",
+            "minimum_memory_mib_per_node": 24770,
+            "sizing_digest": "sha256:1694a989e089a2c17ccf76d95ec19f0f66e7a2d0164a996a26d5e96882934cbd",
+            "status": "valid"
+          }
+        },
+        {
+          "automatic": {
+            "layout": {
+              "cpus_per_rank": 8,
+              "node_type": "fake.arm",
+              "nodes": 2,
+              "partition": "cpu",
+              "ranks_per_node": 1
+            },
+            "memory_mib_per_node": 24770,
+            "wall_time_seconds": 900
+          },
+          "estimated_runtime_seconds": null,
+          "frequency": "20",
+          "frequency_index": 1,
+          "overrides": {},
+          "reason": "Fewest feasible nodes, then ranks, within the qualified CPU profile",
+          "requested": {
+            "layout": {
+              "cpus_per_rank": 8,
+              "node_type": "fake.arm",
+              "nodes": 2,
+              "partition": "cpu",
+              "ranks_per_node": 1
+            },
+            "memory_mib_per_node": 24770,
+            "wall_time_seconds": 900
+          },
+          "validation": {
+            "allocation_digest": "sha256:f401d2e75cad95d6c39815bf562ac5cf139b347a5474fbf4b062c950fc85158f",
+            "minimum_memory_mib_per_node": 24770,
+            "sizing_digest": "sha256:1694a989e089a2c17ccf76d95ec19f0f66e7a2d0164a996a26d5e96882934cbd",
+            "status": "valid"
+          }
+        }
+      ],
+      "version": "frequency-execution-plan.v1"
+    },
+    "plan_id": "fake-plan",
+    "revision": 1,
+    "snapshot": {
+      "bucket": "fake-private-inputs",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "key": "execution-plan-inputs/example-tenant-a/fake-user/fake-plan/fake-input-operation/manifest.json",
+      "version_id": "fake-provider-version"
+    },
+    "user_id": "fake-user",
+    "version": "frequency-execution-command.v1"
+  },
+  "index": {
+    "binding_digest": "sha256:9918dc1940704e3b7b22d8ff43fabeebef6747dd02eca647be2e15fd0b46307a",
+    "combined_packed_product": null,
+    "digest": "sha256:8379bbc4bb58e3aa45cef2467e35121c1f77bbd9a21f68dc4a482c40c38531b7",
+    "execution_id": "fake-run",
+    "frequencies": [
+      {
+        "actual": {
+          "allocated_cpus": 16,
+          "allocated_memory_mib": 49540,
+          "measured_memory": null,
+          "nodes": 2,
+          "processing_milliseconds": 1234,
+          "provider_attempt_id": "slurm:test-shared-cluster:123",
+          "reported_layout": {
+            "cpus_per_rank": 8,
+            "total_mpi_ranks": 2
+          },
+          "usage_evidence_digest": "sha256:d5f2b3127daf7e0edc174ef0bbab14a409bdb6d7248c87bf71e42f4895f60de0"
+        },
+        "archive": {
+          "file_count": 3,
+          "identity": {
+            "allocation_digest": "sha256:f401d2e75cad95d6c39815bf562ac5cf139b347a5474fbf4b062c950fc85158f",
+            "execution_id": "fake-run",
+            "frequency_index": 0,
+            "native_manifest_digest": "sha256:0d75fd50bbd50f5c8d9f4aa8480d0c2fec11f340ef9d4e885ba648832bb9caa5",
+            "native_outputs_digest": "sha256:51f36f5c053149e40088be8eb00d2c6e3e327e49c9a693d738fd613440792b45",
+            "native_result_digest": "sha256:67cd62bde59acc5febf5e75822908b6b72befe5470750c5e41d8608a76e3178a",
+            "output_directory": "fake-project/results",
+            "plan_digest": "sha256:5e4e2e9ec96c0a46252e9f626caabf5f851ada6434d23c5b6a0391f273bdd3ae",
+            "provider_id": "123",
+            "submission_digest": "7dad47516850c1a2e95f7173f9b89378b0ee65483a98d8dc99b8077be2428965",
+            "worker_result_digest": "sha256:b8c0136bc84e49278bda370700e49e58eef92173062223dc697844dc62b49b1a"
+          },
+          "manifest": {
+            "bucket": "fake-owned-bucket",
+            "digest": "sha256:08825160fe0563f8dc595ecea8113e1e50c98008b33bed126026c205cd30512b",
+            "key": "fake-project/results/runs/fake-run/frequency-results/frequency-000000/manifests/2a9d4272abc1ad75280bddfdedd89df858a612d4f8bb490bac1f5b65c6d58f97.json",
+            "version_id": "fake-native-archive-version"
+          },
+          "snapshot_digest": "sha256:2a9d4272abc1ad75280bddfdedd89df858a612d4f8bb490bac1f5b65c6d58f97",
+          "total_bytes": 100,
+          "version": "frequency-output-archive.v1"
+        },
+        "frequency": "15",
+        "frequency_index": 0,
+        "frequency_value": [
+          "15",
+          "-0.25"
+        ],
+        "native_error": null,
+        "requested": {
+          "layout": {
+            "cpus_per_rank": 8,
+            "node_type": "fake.arm",
+            "nodes": 2,
+            "partition": "cpu",
+            "ranks_per_node": 1
+          },
+          "memory_mib_per_node": 24770,
+          "wall_time_seconds": 900
+        },
+        "scientific": {
+          "converged": true,
+          "native_manifest_digest": "sha256:0d75fd50bbd50f5c8d9f4aa8480d0c2fec11f340ef9d4e885ba648832bb9caa5",
+          "native_result_digest": "sha256:67cd62bde59acc5febf5e75822908b6b72befe5470750c5e41d8608a76e3178a",
+          "outcome": "SUCCEEDED"
+        },
+        "state": "completed"
+      },
+      {
+        "actual": {
+          "allocated_cpus": 16,
+          "allocated_memory_mib": 49540,
+          "measured_memory": null,
+          "nodes": 2,
+          "processing_milliseconds": 1234,
+          "provider_attempt_id": "slurm:test-shared-cluster:124",
+          "reported_layout": {
+            "cpus_per_rank": 8,
+            "total_mpi_ranks": 2
+          },
+          "usage_evidence_digest": "sha256:34decb6ce148f9393fae20533c893ffc6b1f8bfc033e963b367b4af042268e5d"
+        },
+        "archive": {
+          "file_count": 3,
+          "identity": {
+            "allocation_digest": "sha256:f401d2e75cad95d6c39815bf562ac5cf139b347a5474fbf4b062c950fc85158f",
+            "execution_id": "fake-run",
+            "frequency_index": 1,
+            "native_manifest_digest": "sha256:846baedf05ad5dfcfd60478015f5dad9ce4ff68817c21e0d3897c229af25152e",
+            "native_outputs_digest": "sha256:71815894cc0df19344bb51cb4c6414efb4f821b878c563aa187dd783d27bec29",
+            "native_result_digest": "sha256:bbf3e3585d86d3c6986cd9cd471bda2fdc54e86c79328595b55b0e717f405991",
+            "output_directory": "fake-project/results",
+            "plan_digest": "sha256:5e4e2e9ec96c0a46252e9f626caabf5f851ada6434d23c5b6a0391f273bdd3ae",
+            "provider_id": "124",
+            "submission_digest": "7dad47516850c1a2e95f7173f9b89378b0ee65483a98d8dc99b8077be2428965",
+            "worker_result_digest": "sha256:e3a2c44bbf9e784af4d369921cf1105aa5cecd7432df99c9a7572548e2fade9c"
+          },
+          "manifest": {
+            "bucket": "fake-owned-bucket",
+            "digest": "sha256:535f299bebb2a1fbe1cbf09444b20ba85eacde1d31ad3f3c20637a4532aa5e9c",
+            "key": "fake-project/results/runs/fake-run/frequency-results/frequency-000001/manifests/91c3418284bfbff997c6592e240268f100c8ebdc6c01b4b2609a5fe8b2e3224d.json",
+            "version_id": "fake-native-archive-version"
+          },
+          "snapshot_digest": "sha256:91c3418284bfbff997c6592e240268f100c8ebdc6c01b4b2609a5fe8b2e3224d",
+          "total_bytes": 100,
+          "version": "frequency-output-archive.v1"
+        },
+        "frequency": "20",
+        "frequency_index": 1,
+        "frequency_value": [
+          "20",
+          "-0.25"
+        ],
+        "native_error": null,
+        "requested": {
+          "layout": {
+            "cpus_per_rank": 8,
+            "node_type": "fake.arm",
+            "nodes": 2,
+            "partition": "cpu",
+            "ranks_per_node": 1
+          },
+          "memory_mib_per_node": 24770,
+          "wall_time_seconds": 900
+        },
+        "scientific": {
+          "converged": true,
+          "native_manifest_digest": "sha256:846baedf05ad5dfcfd60478015f5dad9ce4ff68817c21e0d3897c229af25152e",
+          "native_result_digest": "sha256:bbf3e3585d86d3c6986cd9cd471bda2fdc54e86c79328595b55b0e717f405991",
+          "outcome": "SUCCEEDED"
+        },
+        "state": "completed"
+      }
+    ],
+    "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "native_closure_digest": "sha256:dc48c8d905754d5cf743c9729df72ed22c4f6e85f187ccf50bf0d99af29a30bb",
+    "outcome": "SUCCEEDED",
+    "plan_digest": "sha256:5e4e2e9ec96c0a46252e9f626caabf5f851ada6434d23c5b6a0391f273bdd3ae",
+    "plan_id": "fake-plan",
+    "plan_revision": 1,
+    "representation": "per-frequency-native-archives.v1",
+    "submission_digest": "7dad47516850c1a2e95f7173f9b89378b0ee65483a98d8dc99b8077be2428965",
+    "version": "frequency-execution-results.v1"
+  },
+  "native": {
+    "binding_digest": "sha256:9918dc1940704e3b7b22d8ff43fabeebef6747dd02eca647be2e15fd0b46307a",
+    "canceled": false,
+    "execution_id": "fake-run",
+    "frequencies": [
+      {
+        "frequency_index": 0,
+        "identity": "0ec0c289fbef047f565c4d29f34bb0216b77bdd5f95d6a4e323b30b9e403487e",
+        "observation": {
+          "allocation_milliseconds": 60000,
+          "native_result": {
+            "allocation_digest": "sha256:f401d2e75cad95d6c39815bf562ac5cf139b347a5474fbf4b062c950fc85158f",
+            "converged": true,
+            "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "native_manifest_digest": "sha256:0d75fd50bbd50f5c8d9f4aa8480d0c2fec11f340ef9d4e885ba648832bb9caa5",
+            "native_outputs_digest": "sha256:51f36f5c053149e40088be8eb00d2c6e3e327e49c9a693d738fd613440792b45",
+            "native_result_digest": "sha256:67cd62bde59acc5febf5e75822908b6b72befe5470750c5e41d8608a76e3178a",
+            "outcome": "SUCCEEDED",
+            "output_directory": "fake-project/results",
+            "reported_layout": {
+              "cpus_per_rank": 8,
+              "total_mpi_ranks": 2
+            },
+            "retained_outputs_digest": "sha256:2a9d4272abc1ad75280bddfdedd89df858a612d4f8bb490bac1f5b65c6d58f97",
+            "version": "verified-frequency-native-result.v1",
+            "worker_result_digest": "sha256:b8c0136bc84e49278bda370700e49e58eef92173062223dc697844dc62b49b1a"
+          },
+          "not_started": false,
+          "physically_stopped": true,
+          "provider_id": "123",
+          "restart_count": 0,
+          "state": "completed",
+          "usage": {
+            "allocated_cpus": 16,
+            "allocated_memory_mib": 49540,
+            "physical_evidence": {
+              "allocated_nodes": 2,
+              "cluster": "test-shared-cluster",
+              "end": "2026-01-01T00:01:00",
+              "start": "2026-01-01T00:00:00"
+            },
+            "provider_attempt_id": "slurm:test-shared-cluster:123"
+          }
+        },
+        "provider_id": "123",
+        "state": "completed"
+      },
+      {
+        "frequency_index": 1,
+        "identity": "c435b64a8178beac05a475b1a3cbb4bf60327b9d60a6b3a5e90f700015a56bd1",
+        "observation": {
+          "allocation_milliseconds": 60000,
+          "native_result": {
+            "allocation_digest": "sha256:f401d2e75cad95d6c39815bf562ac5cf139b347a5474fbf4b062c950fc85158f",
+            "converged": true,
+            "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "native_manifest_digest": "sha256:846baedf05ad5dfcfd60478015f5dad9ce4ff68817c21e0d3897c229af25152e",
+            "native_outputs_digest": "sha256:71815894cc0df19344bb51cb4c6414efb4f821b878c563aa187dd783d27bec29",
+            "native_result_digest": "sha256:bbf3e3585d86d3c6986cd9cd471bda2fdc54e86c79328595b55b0e717f405991",
+            "outcome": "SUCCEEDED",
+            "output_directory": "fake-project/results",
+            "reported_layout": {
+              "cpus_per_rank": 8,
+              "total_mpi_ranks": 2
+            },
+            "retained_outputs_digest": "sha256:91c3418284bfbff997c6592e240268f100c8ebdc6c01b4b2609a5fe8b2e3224d",
+            "version": "verified-frequency-native-result.v1",
+            "worker_result_digest": "sha256:e3a2c44bbf9e784af4d369921cf1105aa5cecd7432df99c9a7572548e2fade9c"
+          },
+          "not_started": false,
+          "physically_stopped": true,
+          "provider_id": "124",
+          "restart_count": 0,
+          "state": "completed",
+          "usage": {
+            "allocated_cpus": 16,
+            "allocated_memory_mib": 49540,
+            "physical_evidence": {
+              "allocated_nodes": 2,
+              "cluster": "test-shared-cluster",
+              "end": "2026-01-01T00:01:00",
+              "start": "2026-01-01T00:00:00"
+            },
+            "provider_attempt_id": "slurm:test-shared-cluster:124"
+          }
+        },
+        "provider_id": "124",
+        "state": "completed"
+      }
+    ],
+    "plan_digest": "sha256:5e4e2e9ec96c0a46252e9f626caabf5f851ada6434d23c5b6a0391f273bdd3ae",
+    "plan_id": "fake-plan",
+    "plan_revision": 1,
+    "submission_digest": "7dad47516850c1a2e95f7173f9b89378b0ee65483a98d8dc99b8077be2428965",
+    "version": "frequency-execution-native-closure.v1"
+  },
+  "version": "synthetic-saved-frequency-results-fixture.v1"
+}

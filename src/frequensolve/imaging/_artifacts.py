@@ -21,13 +21,25 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import h5py
 import numpy as np
 
 __all__ = [
     "CONTROL_VECTOR_SCHEMA",
+    "CONTROL_VECTOR_SET_SCHEMA",
     "CONTROL_STATE_SCHEMA",
     "CONTROL_REGISTRY_SCHEMA",
     "EXTENSION_VECTOR_SCHEMA",
@@ -36,6 +48,7 @@ __all__ = [
     "EXTENSION_SOLVE_SCHEMA",
     "REAL_INTERLEAVED",
     "ControlVectorFile",
+    "ControlVectorSetFile",
     "ControlStateFile",
     "RegistryBlock",
     "ControlRegistryManifest",
@@ -56,6 +69,7 @@ __all__ = [
 ]
 
 CONTROL_VECTOR_SCHEMA = "fs-control-vector-1"
+CONTROL_VECTOR_SET_SCHEMA = "fs-control-vector-set-1"
 CONTROL_STATE_SCHEMA = "fs-control-state-1"
 CONTROL_REGISTRY_SCHEMA = "fs-control-registry-1"
 EXTENSION_VECTOR_SCHEMA = "fs-extension-vector-1"
@@ -120,6 +134,28 @@ def unqualified_block_name(name: str) -> str:
 
 def _is_qualified(name: str) -> bool:
     return name.startswith(_QUALIFIED_PREFIXES)
+
+
+def _fractional_scales(value: Optional[Mapping[str, float]]) -> Dict[str, float]:
+    """Validate fixed positive native control scales and normalize block names."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "fractional_scales must map material block names to reference scales"
+        )
+    result = {}
+    for name, scale in value.items():
+        name = unqualified_block_name(name)
+        if name in result:
+            raise ValueError(f"duplicate fractional scale for {name!r}")
+        if isinstance(scale, (bool, np.bool_)):
+            raise ValueError("fractional reference scales must be finite and positive")
+        scale = float(scale)
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError("fractional reference scales must be finite and positive")
+        result[name] = scale
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +367,10 @@ class ControlVectorFile:
             measure (``/support_measure/<block>``).
         support_min_support: Optional relative support threshold the writer
             used (``/support_min_support``).
+        control_identity: Optional frequency-independent identity of the
+            control space and linearization inputs (``/control_identity``),
+            the same in every frequency task; Sauce writes it on every
+            covector so one direction set can serve all tasks.
     """
 
     blocks: Dict[str, np.ndarray]
@@ -341,6 +381,7 @@ class ControlVectorFile:
     support_measure: Dict[str, np.ndarray] = field(default_factory=dict)
     support_min_support: Optional[float] = None
     control_spaces: Dict[str, str] = field(default_factory=dict)
+    control_identity: Optional[str] = None
 
     def _block_key(self, name: str) -> str:
         key = _validate_block_name(name)
@@ -477,6 +518,8 @@ class ControlVectorFile:
                     "control_registry_fingerprint",
                     str(self.control_registry_fingerprint),
                 )
+                if self.control_identity is not None:
+                    _write_string(h5, "control_identity", str(self.control_identity))
             _write_support_datasets(
                 h5, self.support, self.support_measure, self.support_min_support
             )
@@ -520,12 +563,218 @@ class ControlVectorFile:
                 ),
                 native=native,
                 control_spaces={
-                    str(n): _read_string(h5["control_spaces"], n)
+                    str(n): cast(str, _read_string(h5["control_spaces"], n))
                     for n in h5.get("control_spaces", {})
                 },
                 support=support,
                 support_measure=measure,
                 support_min_support=min_support,
+                control_identity=(
+                    None if native else _read_string(h5, "control_identity")
+                ),
+            )
+
+
+@dataclass
+class ControlVectorSetFile:
+    """One ``fs-control-vector-set-1`` file: several control vectors as rows.
+
+    A direction set carries every direction of a job once, for every frequency
+    task. Sauce checks its ``control_identity`` (the control space and the
+    linearization inputs, the same in every task) instead of per-task
+    fingerprints, and rescales mechanism rows from ``scaling`` into each task's
+    coordinates. Sauce writes one covector set per task, whose rows are that
+    task's covectors and which also carries the task's fingerprints.
+
+    Args:
+        rows: Ordered mapping ``qualified block -> (n_vectors, n)`` real rows;
+            row ``i`` of every block is vector ``i``.
+        control_identity: Frequency-independent control identity of the
+            linearization the vectors belong to.
+        state_fingerprint: The writing task's state fingerprint (covector sets).
+        control_registry_fingerprint: The writing task's registry fingerprint.
+        scaling: ``block -> physical strength of one stored coordinate`` for
+            mechanism blocks, written in the reference coordinates.
+        support: Optional ``block -> bool mask`` shared by every row.
+        support_min_support: Optional relative support threshold.
+        control_spaces: ``block -> material basis identity``.
+    """
+
+    rows: Dict[str, np.ndarray]
+    control_identity: str
+    state_fingerprint: Optional[str] = None
+    control_registry_fingerprint: Optional[str] = None
+    scaling: Dict[str, float] = field(default_factory=dict)
+    support: Dict[str, np.ndarray] = field(default_factory=dict)
+    support_min_support: Optional[float] = None
+    control_spaces: Dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        rows: Dict[str, np.ndarray] = {}
+        count: Optional[int] = None
+        for name, values in dict(self.rows).items():
+            key = qualified_block_name(_validate_block_name(name))
+            if key in rows:
+                raise ValueError(f"duplicate control block {key!r}")
+            array = np.asarray(values, dtype=np.float64)
+            if array.ndim != 2:
+                raise ValueError(f"block {key!r} must hold one row per vector")
+            if count is None:
+                count = array.shape[0]
+            elif array.shape[0] != count:
+                raise ValueError("every block of a vector set needs the same rows")
+            if not np.all(np.isfinite(array)):
+                raise ValueError(f"block {key!r} must contain only finite values")
+            rows[key] = array
+        if not rows or not count:
+            raise ValueError("a vector set needs at least one block and one row")
+        self.rows = rows
+        if not str(self.control_identity or "").strip():
+            raise ValueError("a vector set requires a control_identity")
+        scaling: Dict[str, float] = {}
+        for name, value in dict(self.scaling).items():
+            key = qualified_block_name(_validate_block_name(name))
+            if key not in rows:
+                raise ValueError(f"scaling names {key!r}, which has no rows")
+            value = float(value)
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"scaling of {key!r} must be finite and positive")
+            scaling[key] = value
+        self.scaling = scaling
+        support: Dict[str, np.ndarray] = {}
+        for name, mask in dict(self.support).items():
+            key = qualified_block_name(_validate_block_name(name))
+            mask = np.asarray(mask, dtype=bool).reshape(-1)
+            if key not in rows or mask.size != rows[key].shape[1]:
+                raise ValueError(f"support of {key!r} does not match its rows")
+            support[key] = mask
+        self.support = support
+        self.support_min_support = _normalize_min_support(self.support_min_support)
+        self.control_spaces = {
+            qualified_block_name(_validate_block_name(k)): str(v)
+            for k, v in dict(self.control_spaces).items()
+        }
+
+    @property
+    def n_vectors(self) -> int:
+        """Number of vectors (rows) in the set."""
+
+        return int(next(iter(self.rows.values())).shape[0])
+
+    @property
+    def sizes(self) -> Dict[str, int]:
+        return {name: int(values.shape[1]) for name, values in self.rows.items()}
+
+    def vector(self, index: int) -> ControlVectorFile:
+        """Return vector ``index`` with the set's identities and support."""
+
+        if not 0 <= index < self.n_vectors:
+            raise IndexError(f"vector {index} of a set of {self.n_vectors}")
+        return ControlVectorFile(
+            {name: values[index] for name, values in self.rows.items()},
+            state_fingerprint=self.state_fingerprint,
+            control_registry_fingerprint=self.control_registry_fingerprint,
+            support=dict(self.support),
+            support_min_support=self.support_min_support,
+            control_spaces=dict(self.control_spaces),
+            control_identity=self.control_identity,
+        )
+
+    @classmethod
+    def from_vectors(
+        cls,
+        vectors: Sequence[ControlVectorFile],
+        *,
+        control_identity: str,
+        scaling: Optional[Mapping[str, float]] = None,
+    ) -> "ControlVectorSetFile":
+        """Stack vector files of one layout as the rows of a set."""
+
+        if not vectors:
+            raise ValueError("a vector set needs at least one vector")
+        first = vectors[0]
+        for vector in vectors[1:]:
+            if vector.names != first.names or vector.sizes != first.sizes:
+                raise ValueError("every vector of a set needs the same block layout")
+        return cls(
+            {name: np.stack([v.blocks[name] for v in vectors]) for name in first.names},
+            control_identity=control_identity,
+            scaling=dict(scaling or {}),
+            support=dict(first.support),
+            support_min_support=first.support_min_support,
+            control_spaces=dict(first.control_spaces),
+        )
+
+    def write(self, path: Union[str, Path]) -> Path:
+        """Write the vector set and return its path."""
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, "w") as h5:
+            controls = h5.create_group("controls")
+            for name, values in self.rows.items():
+                controls.create_dataset(name, data=values, dtype=np.float64)
+            for name, identity in self.control_spaces.items():
+                _write_string(h5, "control_spaces/" + name, identity)
+            _write_string(h5, "schema", CONTROL_VECTOR_SET_SCHEMA)
+            _write_string(h5, "packing", REAL_INTERLEAVED)
+            _write_string(h5, "control_identity", str(self.control_identity))
+            h5.create_dataset("n_vectors", data=np.int32(self.n_vectors))
+            for label in ("state_fingerprint", "control_registry_fingerprint"):
+                value = getattr(self, label)
+                if value is not None:
+                    _write_string(h5, label, str(value))
+            if self.scaling:
+                group = h5.create_group("scaling")
+                for name, value in self.scaling.items():
+                    group.create_dataset(name, data=float(value), dtype=np.float64)
+            _write_support_datasets(h5, self.support, {}, self.support_min_support)
+        return path
+
+    @classmethod
+    def read(cls, path: Union[str, Path]) -> "ControlVectorSetFile":
+        """Read a vector set."""
+
+        with h5py.File(path, "r") as h5:
+            schema = _read_string(h5, "schema")
+            if schema != CONTROL_VECTOR_SET_SCHEMA:
+                raise ValueError(
+                    f"{path} has schema {schema!r}; expected {CONTROL_VECTOR_SET_SCHEMA!r}"
+                )
+            packing = _read_string(h5, "packing")
+            if packing != REAL_INTERLEAVED:
+                raise ValueError(f"{path} has unsupported packing {packing!r}")
+            if "controls" not in h5:
+                raise ValueError(f"{path} has no /controls group")
+            rows = {
+                str(name): np.asarray(h5["controls"][name][()], dtype=np.float64)
+                for name in sorted(h5["controls"])
+            }
+            count = int(np.asarray(h5["n_vectors"][()]).reshape(-1)[0])
+            for name, values in rows.items():
+                if values.ndim != 2 or values.shape[0] != count:
+                    raise ValueError(
+                        f"{path}: /controls/{name} does not hold {count} rows"
+                    )
+            flat = {name: values[0] for name, values in rows.items()}
+            support, _, min_support = _read_support_datasets(h5, flat, path)
+            return cls(
+                rows,
+                control_identity=str(_read_string(h5, "control_identity") or ""),
+                state_fingerprint=_read_string(h5, "state_fingerprint"),
+                control_registry_fingerprint=_read_string(
+                    h5, "control_registry_fingerprint"
+                ),
+                scaling={
+                    str(n): float(np.asarray(h5["scaling"][n][()]).reshape(-1)[0])
+                    for n in h5.get("scaling", {})
+                },
+                support=support,
+                support_min_support=min_support,
+                control_spaces={
+                    str(n): cast(str, _read_string(h5["control_spaces"], n))
+                    for n in h5.get("control_spaces", {})
+                },
             )
 
 
@@ -766,7 +1015,7 @@ class ControlStateFile:
             support, measure, min_support = _read_support_datasets(h5, blocks, path)
             scaling, units = _read_scaling_datasets(h5, blocks, path)
             identities = {
-                str(n): _read_string(h5["control_spaces"], n)
+                str(n): cast(str, _read_string(h5["control_spaces"], n))
                 for n in h5.get("control_spaces", {})
             }
         return cls(
@@ -912,8 +1161,14 @@ class ControlRegistryManifest:
             pairing=str(data.get("pairing", "real_euclidean")),
             descriptor_rank=int(data.get("descriptor_rank", 0)),
             n_ranks=int(data.get("n_ranks", 1)),
+            # Current Sauce writes no rank descriptors (its fingerprint is
+            # partition-independent); earlier builds list every rank's
+            # fingerprint, some also a per-rank descriptor file.
             rank_descriptors=tuple(
-                {"file": str(item["file"]), "fingerprint": str(item["fingerprint"])}
+                {
+                    "fingerprint": str(item["fingerprint"]),
+                    **({"file": str(item["file"])} if "file" in item else {}),
+                }
                 for item in data.get("rank_descriptors", ())
             ),
             raw=dict(data),
@@ -1058,6 +1313,8 @@ class ExtensionVectorFile:
     fingerprint: Optional[str] = None
     baseline: Optional[str] = None
     role: str = "tangent"
+    # One tap vector for every frequency task: Sauce checks this instead of the per-task baseline.
+    control_identity: Optional[str] = None
 
     def __post_init__(self) -> None:
         role = str(self.role).strip().lower()
@@ -1120,16 +1377,22 @@ class ExtensionVectorFile:
     def write(self, path: Union[str, Path]) -> Path:
         """Write the vector file and return its path."""
 
-        if self.fingerprint is None or self.baseline is None:
+        if self.fingerprint is None or (
+            self.baseline is None and self.control_identity is None
+        ):
             raise ValueError(
-                f"{EXTENSION_VECTOR_SCHEMA} files require fingerprint and baseline"
+                f"{EXTENSION_VECTOR_SCHEMA} files require fingerprint and baseline "
+                "(or control_identity)"
             )
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(path, "w") as h5:
             _write_string(h5, "schema", EXTENSION_VECTOR_SCHEMA)
             _write_string(h5, "fingerprint", str(self.fingerprint))
-            _write_string(h5, "baseline", str(self.baseline))
+            if self.baseline is not None:
+                _write_string(h5, "baseline", str(self.baseline))
+            if self.control_identity is not None:
+                _write_string(h5, "control_identity", str(self.control_identity))
             _write_string(h5, "role", self.role)
             root = h5.create_group("fields")
             for p, field_ in enumerate(self.fields, start=1):
@@ -1187,6 +1450,7 @@ class ExtensionVectorFile:
                 fingerprint=_read_string(h5, "fingerprint"),
                 baseline=_read_string(h5, "baseline"),
                 role=_read_string(h5, "role") or "tangent",
+                control_identity=_read_string(h5, "control_identity"),
             )
 
 
@@ -1211,7 +1475,12 @@ def _require_schema(data: Mapping[str, Any], expected: str) -> None:
 
 @dataclass(frozen=True)
 class ObjectiveTermReport:
-    """One objective term of an ``fs-objective-report-1`` report."""
+    """One objective term of an ``fs-objective-report-1`` report.
+
+    ``source_projection`` holds the per-RHS source unknowns Sauce projected out
+    of the term at the saved baseline (``kind`` ``"delay"`` or ``"scalar"``);
+    it is empty when the term projects no source.
+    """
 
     id: str
     raw_sum: float
@@ -1222,6 +1491,30 @@ class ObjectiveTermReport:
     active_samples: int
     scale: Tuple[float, ...]
     robust: Dict[str, Any] = field(default_factory=dict)
+    source_projection: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def source_delay(self) -> Optional[Tuple[float, ...]]:
+        """Fitted per-RHS source delays in seconds, or ``None``."""
+
+        if self.source_projection.get("kind") != "delay":
+            return None
+        return tuple(float(v) for v in self.source_projection["delay_s"])
+
+    @property
+    def source_scalar(self) -> Optional[Tuple[complex, ...]]:
+        """Fitted per-RHS complex source factors, or ``None``."""
+
+        if self.source_projection.get("kind") != "scalar":
+            return None
+        return tuple(
+            complex(float(re), float(im))
+            for re, im in zip(
+                self.source_projection["real"],
+                self.source_projection["imag"],
+                strict=True,
+            )
+        )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ObjectiveTermReport":
@@ -1237,6 +1530,7 @@ class ObjectiveTermReport:
             active_samples=int(data["active_samples"]),
             scale=tuple(float(v) for v in data["scale"]),
             robust=dict(data.get("robust") or {}),
+            source_projection=dict(data.get("source_projection") or {}),
         )
 
 
@@ -1517,6 +1811,37 @@ class ExtensionSolveReport:
 # ---------------------------------------------------------------------------
 
 
+def _task_channel_to_output(
+    attrs: Mapping[str, Any], channel: int, values: np.ndarray
+) -> Tuple[np.ndarray, bool]:
+    """Convert one solver-stored task image channel to the aggregate's output units.
+
+    Task parts keep each frequency's solver frame; ``value_scale`` is the
+    solver-to-output factor, applied inversely to dual (gradient) channels.
+    Returns the values and whether they are now in output storage.
+    """
+
+    storage = _decode_attr(attrs.get("value_storage"))
+    if isinstance(storage, list):
+        storage = storage[0] if storage else None
+    if storage != "solver":
+        return values, False
+    roles = _decode_attr(
+        attrs.get("value_convention_roles", attrs.get("value_frame_roles"))
+    )
+    if isinstance(roles, str):
+        roles = [roles]
+    scales = np.asarray(attrs.get("value_scale", []), dtype=np.float64).reshape(-1)
+    if not isinstance(roles, list) or channel >= len(roles) or scales.size == 0:
+        return values, False
+    scale = scales[channel] if scales.size > 1 else scales[0]
+    if roles[channel] == "dual":
+        return values / scale, True
+    if roles[channel] == "primal":
+        return values * scale, True
+    return values, False
+
+
 @dataclass(kw_only=True)
 class ImageSet:
     """Reader for Cartesian image files written by imaging workflows.
@@ -1628,6 +1953,13 @@ class ImageSet:
         file = self.require_aggregate() if part is None else self.image_file(part)
         location = f"{root.rstrip('/')}/{group}" if group else root
         with h5py.File(file, "r") as h5:
+            if (
+                part is not None
+                and group == "raw"
+                and root == "/image"
+                and location not in h5
+            ):
+                location = root
             if location.strip("/") not in h5 and location not in h5:
                 raise KeyError(f"{file} has no image group {location!r}")
             h5group = h5[location]
@@ -1651,19 +1983,38 @@ class ImageSet:
                 coords = {
                     dim: np.linspace(x0[i], x1[i], n[i]) for i, dim in enumerate(dims)
                 }
-                array = xr.DataArray(
-                    data=h5data[:].reshape(n), dims=dims, coords=coords
-                )
+                values = h5data[:]
+                channel = None
+                if values.size != int(np.prod(n)):
+                    raw_labels = np.asarray(attrs.get("component", [])).reshape(-1)
+                    labels = [str(_decode(label)) for label in raw_labels]
+                    if group == "raw" and "numerator" in labels:
+                        channel = labels.index("numerator")
+                        values = values.reshape(len(labels), -1)[channel]
+                    else:
+                        raise ValueError(f"{file}:{h5data.name} is not a scalar image")
+                output = False
+                if part is not None:
+                    values, output = _task_channel_to_output(
+                        attrs, 0 if channel is None else channel, values
+                    )
+                array = xr.DataArray(data=values.reshape(n), dims=dims, coords=coords)
                 for dim, units in zip(dims, axis_units):
                     if units:
                         array.coords[dim].attrs["units"] = units
                 units = _decode_attr(attrs.get("units"))
+                if channel is not None and isinstance(units, list):
+                    units = units[channel]
                 if units:
                     array.attrs["units"] = units
                 for attr_name in ("coordinate_system", "value_scale", "value_storage"):
                     value = _decode_attr(attrs.get(attr_name))
+                    if channel is not None and isinstance(value, list):
+                        value = value[channel]
                     if value is not None:
                         array.attrs[attr_name] = value
+                if output:
+                    array.attrs["value_storage"] = "output"
                 images[prop] = array
         return images
 
@@ -1701,6 +2052,16 @@ class SmoothingConfig:
     uses them for vector processing; NativeRegularization uses them with
     model-energy/proximal callbacks in FWI/LSRTM. ``to_image_fs`` emits the
     separate ``Imaging.Smoothing`` contract for Cartesian shards.
+
+    Without explicit weights, ``wavelength_fraction`` (Sauce ``lambda``) counts
+    local wavelengths: Sauce sets the smoothing length ``L(x) = lambda*v(x)/f``
+    at every quadrature point from the local sizing wavespeed ``v(x)`` and the
+    job's largest frequency ``f`` (no ``2*pi``), so the strength varies with
+    velocity. Tikhonov/TV use ``alpha(x) = L(x)**(2*derivative_order)`` and TGV
+    ``alpha1(x) = L(x)``, ``alpha2(x) = tgv_ratio*L(x)**2``. A
+    ``reference_wavelength`` replaces ``L(x)`` by the uniform
+    ``lambda*reference_wavelength``. Values tuned against the former
+    ``lambda*v_min/(2*pi*f)`` length must be scaled by ``1/(2*pi)``.
     """
 
     kind: str = "tikhonov"
@@ -1811,30 +2172,45 @@ class SmoothingConfig:
             return self.alpha1 is None
         return self.alpha is None
 
+    def reference_length(self) -> float:
+        """Return the uniform smoothing length ``lambda*reference_wavelength``.
+
+        This is Sauce's ``L = lambda*v/f`` with the fixed wavelength ``v/f``
+        replaced by ``reference_wavelength`` (no ``2*pi``). Without a reference
+        wavelength the length is local, ``L(x) = lambda*v(x)/f``, and only Sauce
+        can evaluate it from the material model.
+        """
+
+        if self.reference_wavelength is None:
+            raise ValueError(
+                "a scalar smoothing length requires reference_wavelength; pass "
+                "lambda to Sauce, which sets L(x) = lambda*v(x)/f from the local "
+                "wavespeed of the material model"
+            )
+        return self.wavelength_fraction * self.reference_wavelength
+
     def resolved_alpha(self) -> float:
-        """Return the direct variational coefficient for local application."""
+        """Return the scalar Tikhonov/TV coefficient Sauce would use.
+
+        Explicit ``alpha`` wins; otherwise ``reference_length()**(2*p)`` for
+        derivative order ``p``. Spatially varying wavelength weights are not
+        resolvable here; send ``lambda`` to Sauce instead.
+        """
 
         if self.alpha is not None:
             return self.alpha
-        if self.reference_wavelength is None:
-            raise ValueError(
-                "local control smoothing requires alpha or reference_wavelength; "
-                "Sauce --smooth can derive wavelength from the material model"
-            )
-        length = self.wavelength_fraction * self.reference_wavelength / (2.0 * np.pi)
-        return length ** (2 * self.derivative_order)
+        return self.reference_length() ** (2 * self.derivative_order)
 
     def resolved_tgv_weights(self) -> Tuple[float, float]:
-        """Return the first- and second-order TGV weights."""
+        """Return the scalar TGV weights ``(L, tgv_ratio*L**2)`` Sauce would use.
+
+        Explicit ``alpha1``/``alpha2`` win; otherwise ``L`` is
+        :meth:`reference_length`.
+        """
 
         if self.alpha1 is not None and self.alpha2 is not None:
             return self.alpha1, self.alpha2
-        if self.reference_wavelength is None:
-            raise ValueError(
-                "local TGV smoothing requires alpha1/alpha2 or reference_wavelength; "
-                "Sauce --smooth can derive wavelength from the material model"
-            )
-        length = self.wavelength_fraction * self.reference_wavelength / (2.0 * np.pi)
+        length = self.reference_length()
         return length, self.tgv_ratio * length * length
 
     def _common_fs(self) -> Dict[str, Any]:
@@ -1857,6 +2233,7 @@ class SmoothingConfig:
     def to_control_fs(self) -> Dict[str, Any]:
         """Serialize the ``control_sensitivities.Smoothing`` Riesz-map contract."""
 
+        _require_control_smoothing(self)
         payload = self._common_fs()
         payload["input_role"] = self.input_role
         if self.reference_wavelength is not None:
@@ -1869,9 +2246,12 @@ class SmoothingConfig:
         """Serialize the ``Imaging.Smoothing`` Cartesian stacking contract.
 
         Cartesian image smoothing uses mixed first-order FEM fields, so a
-        second derivative order is rejected. A reference wavelength is resolved
-        into explicit coefficients because the image smoother has no
-        ``reference_wavelength`` field.
+        second derivative order is rejected. Without explicit weights, ``lambda``
+        is passed through and Sauce applies the local ``L(x) = lambda*v(x)/f``.
+        A reference wavelength is resolved into the equivalent uniform
+        coefficients (``alpha = L**2``; TGV ``alpha1 = L``,
+        ``alpha2 = tgv_ratio*L**2`` with ``L = lambda*reference_wavelength``)
+        because the image smoother has no ``reference_wavelength`` field.
         """
 
         if self.derivative_order != 1:
@@ -1915,3 +2295,42 @@ class SmoothingConfig:
             )
         payload.pop("normalize_coordinate", None)
         return cls(**payload)
+
+
+def _require_control_smoothing(config: SmoothingConfig) -> None:
+    if config.illumination_normalization != "none":
+        raise ValueError(
+            "Control smoothing does not apply illumination normalization; "
+            "use SourceEnergy for control-energy preconditioning"
+        )
+
+
+def control_smoothing(value: Any) -> Optional[SmoothingConfig]:
+    """Coerce smoothing for a control context, where illumination modes do not apply.
+
+    Illumination normalization is a Cartesian-image option; requesting it for
+    control smoothing is rejected when the configuration is supplied.
+    """
+
+    config = SmoothingConfig.from_value(value)
+    if config is not None:
+        _require_control_smoothing(config)
+    return config
+
+
+WORKSPACE_DEPRECATION = (
+    "workspace_mb is deprecated and ignored: Sauce allocates the indivisible "
+    "source-batch workspace at its required size"
+)
+
+
+def validate_mesh_transfer(method: str, length: float) -> None:
+    """Reject unsupported transfer methods and ambiguous smoothing requests."""
+    if method not in {"nodal", "l2"}:
+        raise ValueError("mesh_transfer must be 'nodal' or 'l2'")
+    if not np.isfinite(length) or length < 0:
+        raise ValueError(
+            "mesh_smoothing_length must be finite and nonnegative (meters)"
+        )
+    if method != "l2" and length != 0:
+        raise ValueError("mesh_smoothing_length requires mesh_transfer='l2'")

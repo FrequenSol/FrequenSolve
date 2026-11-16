@@ -1,4 +1,3 @@
-import asyncio
 import os
 import shutil
 import socket
@@ -10,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from frequensolve.orchestrator.sites.base import JobStatus, RunHandle
+from frequensolve.orchestrator.sites.base import JobStatus
 from frequensolve.orchestrator.sites.hpc import auth
 from frequensolve.orchestrator.sites.hpc.auth import SlurmAuthenticator
 from frequensolve.orchestrator.sites.hpc.site import SlurmSite
@@ -18,6 +17,7 @@ from frequensolve.orchestrator.sites.hpc.slurm_helpers import normalize_slurm_st
 from frequensolve.orchestrator.sites.hpc.transfer import SlurmTransferManager
 from frequensolve.orchestrator.utils import ssh as ssh_module
 from frequensolve.orchestrator.utils.ssh import SSHProxy
+from frequensolve.project import Project
 
 pytestmark = [pytest.mark.unit, pytest.mark.hpc_hermetic]
 
@@ -791,6 +791,82 @@ def test_directory_upload_failure_cleans_remote_archive_and_hides_stderr(tmp_pat
     assert any(command.startswith("rm -f /remote/tmp/") for command in commands)
 
 
+def test_project_resync_preserves_remote_jobs_through_atomic_sftp(tmp_path):
+    """Exercise project sync with real archive replacement, not captured targets."""
+    project = Project(name="project", path=tmp_path / "local" / "project")
+    project.new_simulation(name="acoustic", physics="acoustic", dimension=2)
+    remote = tmp_path / "remote" / "project"
+    remote_tmp = tmp_path / "remote-tmp"
+
+    class LocalSFTP:
+        put = staticmethod(shutil.copyfile)
+        get = staticmethod(shutil.copyfile)
+        stat = staticmethod(os.stat)
+        chmod = staticmethod(os.chmod)
+        posix_rename = staticmethod(os.replace)
+        remove = staticmethod(os.unlink)
+
+        def close(self):
+            pass
+
+    def run_cmd(command):
+        result = subprocess.run(command, shell=True, capture_output=True, check=False)
+        return (
+            None,
+            Stream(result.stdout.decode(), exit_status=result.returncode),
+            Stream(result.stderr.decode()),
+        )
+
+    def run(command):
+        _, stdout, stderr = run_cmd(command)
+        assert stdout.channel.recv_exit_status() == 0, stderr.read().decode()
+        return stdout.read().decode().strip()
+
+    site = _sftp_site(LocalSFTP())
+    site.work_dir = remote
+    site.remote_tmp_dir = remote_tmp
+    site.run_login = run
+    site.run_login_cmd = run_cmd
+    config = tmp_path / "site.toml"
+    config.write_text(f'[host]\ntmp_dir = "{tmp_path / "staging"}"\n')
+    site._site_config_path = config
+    manager = SlurmTransferManager(site)
+    site.put = manager.put
+
+    project._transfer(site)
+    stale_input = remote / "simulations" / "obsolete-input.txt"
+    stale_input.write_text("remove when replacing inputs")
+    completed = remote / "jobs" / "acoustic" / "first" / "results"
+    active = remote / "jobs" / "acoustic" / "second" / "results"
+    completed.mkdir(parents=True)
+    active.mkdir(parents=True)
+    log = completed / "solver.log"
+    trace = completed / "trace.bin"
+    log.write_text("completed first run\n")
+    trace.write_bytes(bytes(range(256)))
+    progress = active / "progress.log"
+    progress.write_text("second run still active\n")
+
+    for iteration in range(3):
+        new_input = project.path / "simulations" / "revision.txt"
+        new_input.write_text(str(iteration))
+        project._transfer(site)
+        assert (remote / "simulations" / "revision.txt").read_text() == str(iteration)
+        assert stale_input.read_text() == "remove when replacing inputs"
+        assert log.read_text() == "completed first run\n"
+        assert trace.read_bytes() == bytes(range(256))
+        assert progress.read_text() == "second run still active\n"
+
+    # Download only after the later syncs, matching submit(fetch=False).
+    downloaded = tmp_path / "downloaded"
+    manager.get(log, downloaded / "solver.log")
+    manager.get(trace, downloaded / "trace.bin")
+    assert (downloaded / "solver.log").read_bytes() == log.read_bytes()
+    assert (downloaded / "trace.bin").read_bytes() == trace.read_bytes()
+    assert list(remote.rglob("*.frequensolve-*")) == []
+    assert list(remote_tmp.iterdir()) == []
+
+
 @pytest.mark.parametrize("destination_exists", [False, True])
 def test_directory_upload_merges_inputs_only_after_valid_extraction(
     tmp_path, destination_exists
@@ -847,7 +923,11 @@ def test_directory_upload_merges_inputs_only_after_valid_extraction(
         return (
             None,
             Stream(result.stdout.decode(), exit_status=result.returncode),
-            Stream(result.stderr.decode()),
+            # Login shells (e.g. Stampede3 Lmod) report module swaps on stderr.
+            Stream(
+                "The following have been reloaded with a version change:\n"
+                + result.stderr.decode()
+            ),
         )
 
     site = _sftp_site(LocalSFTP())
@@ -1091,8 +1171,29 @@ def test_cancel_preserves_existing_repeat_call_and_error_behavior():
     assert calls == ["scancel 123", "scancel 123"]
 
 
+class _FinishedSFTP:
+    """A ``Popen`` stand-in for an SFTP transfer that has already exited."""
+
+    def __init__(self, argv, *, returncode=0, error="", stderr, **_):
+        self.argv = argv
+        self.returncode = returncode
+        self.sent = b""
+        stderr.write(error.encode())
+        self.stdin = SimpleNamespace(write=self._write, close=lambda: None)
+
+    def _write(self, data):
+        self.sent += data
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        raise AssertionError("a finished transfer is never killed")
+
+
 def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
     calls = []
+    transfers = []
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -1100,7 +1201,12 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
             return SimpleNamespace(returncode=0, stdout="81a4 3\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    def popen(argv, **kwargs):
+        transfers.append(_FinishedSFTP(argv, **kwargs))
+        return transfers[-1]
+
     monkeypatch.setattr(ssh_module.subprocess, "run", run)
+    monkeypatch.setattr(ssh_module.subprocess, "Popen", popen)
     proxy = SSHProxy("/tmp/verified-control", "scientist", "login.example.edu")
     sftp = proxy.open_sftp()
     local = tmp_path / "input.bin"
@@ -1117,18 +1223,44 @@ def test_ssh_proxy_sftp_reuses_verified_control_socket(monkeypatch, tmp_path):
 
     assert attributes.st_mode == 0o100644
     assert attributes.st_size == 3
-    assert [call[0][0] for call in calls] == [
-        "ssh",
-        "sftp",
-        "sftp",
-        "sftp",
-        "sftp",
-        "sftp",
+    # Metadata commands keep the fixed limit; quick transfers need no size probe.
+    assert [(argv[0], kwargs["timeout"]) for argv, kwargs in calls] == [
+        ("ssh", 120),
+        ("sftp", 120),
+        ("sftp", 120),
+        ("sftp", 120),
     ]
-    for argv, kwargs in calls:
+    # Data transfers have no total limit; they fail when they stop progressing.
+    assert [transfer.sent.split()[0] for transfer in transfers] == [b"put", b"get"]
+    for argv in [argv for argv, _ in calls] + [t.argv for t in transfers]:
         assert "ControlPath=/tmp/verified-control" in argv
-        assert kwargs["timeout"] == 120
-        assert "private-token" not in str(kwargs)
+    assert "private-token" not in str(calls)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "error"),
+    [
+        ('File "/remote/optional.json" not found.\n', FileNotFoundError),
+        ("stat remote: No such file or directory\n", FileNotFoundError),
+        ("remote open: Permission denied\n", OSError),
+        # Connection failures stay OSErrors but are retryable ConnectionErrors.
+        ("Connection closed\n", ConnectionError),
+        ("Control socket connect: No such file or directory\n", ConnectionError),
+    ],
+)
+def test_ssh_proxy_sftp_preserves_transfer_errors(monkeypatch, tmp_path, stderr, error):
+    monkeypatch.setattr(
+        ssh_module.subprocess,
+        "Popen",
+        lambda argv, **kwargs: _FinishedSFTP(
+            argv, returncode=1, error=stderr, **kwargs
+        ),
+    )
+    proxy = SSHProxy("/tmp/verified-control", "scientist", "login.example.edu")
+    with pytest.raises(error) as caught:
+        proxy.open_sftp().get("/remote/optional.json", str(tmp_path / "optional.json"))
+    assert type(caught.value) is error
+    assert str(caught.value) == stderr.strip()
 
 
 def test_slurm_wait_timeout_preserves_non_cancelling_behavior():
@@ -1142,21 +1274,4 @@ def test_slurm_wait_timeout_preserves_non_cancelling_behavior():
     result = run.wait(timeout=0, poll_interval=0, check=False)
 
     assert result.status.state == "timeout"
-    assert cancelled == []
-
-
-def test_attached_slurm_timeout_propagates_without_cancellation():
-    site = object.__new__(SlurmSite)
-    cancelled = []
-    site.cancel_job = lambda job_id: cancelled.append(job_id) or True
-
-    async def wait_for_timeout():
-        future = asyncio.get_running_loop().create_future()
-        run = RunHandle(site=site, job=SimpleNamespace(), id="128", mode="attached")
-        run.backend["future"] = future
-        with pytest.raises(asyncio.TimeoutError):
-            await site._wait_attached_run_async(run, timeout=0)
-
-    asyncio.run(wait_for_timeout())
-
     assert cancelled == []

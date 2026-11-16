@@ -84,6 +84,10 @@ Wavelet
 Acquisition Spectra
 -------------------
 
+.. automodule:: frequensolve.seismic.airgun
+   :members:
+   :noindex:
+
 .. automodule:: frequensolve.seismic.spectra
    :members:
    :noindex:

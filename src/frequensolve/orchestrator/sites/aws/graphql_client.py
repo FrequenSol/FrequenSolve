@@ -7,11 +7,14 @@ the FrequenSol AppSync API using Cognito authentication.
 
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 from frequensolve._optional import optional_dependency_error
+from frequensolve.orchestrator.sites.execution import normalize_execution_state
+from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
 
 try:
     import requests
@@ -56,6 +59,18 @@ def _redact_provider_message(message: object, secrets: set[str]) -> str:
     return safe[:500]
 
 
+class CloudTransportError(RuntimeError):
+    """The Cloud request could not obtain a response."""
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class CloudAPIError(RuntimeError):
+    """Cloud rejected the request at the HTTP, GraphQL, or resolver level."""
+
+
 class GraphQLClient:
     """GraphQL client for FrequenSol Cloud API.
 
@@ -73,6 +88,32 @@ class GraphQLClient:
         self.api_url = api_url
         self.auth = auth
 
+    def get_simulation_logs(
+        self,
+        simulation_id: str,
+        *,
+        frequency_index: Optional[int] = None,
+        before_byte: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Read one tenant-authorized planner/task log page without transfer tickets."""
+        variables: Dict[str, Any] = {"simulationId": simulation_id}
+        if frequency_index is not None:
+            variables["frequencyIndex"] = frequency_index
+        if before_byte is not None:
+            variables["beforeByte"] = before_byte
+        result = self.execute(
+            """query SimulationLogs($simulationId: String!, $frequencyIndex: Int, $beforeByte: String) {
+              getJobLogs(simulationId: $simulationId, frequencyIndex: $frequencyIndex, beforeByte: $beforeByte) {
+                logs { timestamp message }
+                available truncated nextToken
+              }
+            }""",
+            variables,
+        ).get("getJobLogs")
+        if not isinstance(result, dict):
+            raise CloudAPIError("Cloud returned no valid simulation log response")
+        return result
+
     def _get_headers(self) -> Dict[str, str]:
         """Get headers with ID token for AppSync authentication.
 
@@ -84,65 +125,6 @@ class GraphQLClient:
             "Authorization": id_token,  # AppSync expects just the token
             "Content-Type": "application/json",
         }
-
-    def get_compute_provisioning_mode(self) -> str:
-        """Discover whether the Cloud API uses shared or per-user compute.
-
-        The current Cloud API exposes ``fetchAvailableComputeRuntimes`` and
-        submits work to platform-managed shared queues. Older deployments
-        expose ``deployComputeInfrastructure`` for a per-user compute stack.
-        Inspecting both root operation types lets one client remain compatible
-        without blindly invoking a mutation that may not exist.
-
-        Returns:
-            ``"shared"`` for the runtime-catalog API or ``"per-user"`` for
-            the legacy compute-deployment API.
-
-        Raises:
-            RuntimeError: If the API exposes neither recognizable contract or
-                its capability response is incomplete.
-        """
-
-        capability_query = """
-            query FrequenSolveCloudComputeCapabilities {
-                queryType: __type(name: "Query") {
-                    fields {
-                        name
-                    }
-                }
-                mutationType: __type(name: "Mutation") {
-                    fields {
-                        name
-                    }
-                }
-            }
-        """
-        result = self.execute(capability_query)
-
-        def field_names(type_name: str) -> set[str]:
-            type_result = result.get(type_name)
-            if not isinstance(type_result, dict):
-                return set()
-            fields = type_result.get("fields")
-            if not isinstance(fields, list):
-                return set()
-            return {
-                field["name"]
-                for field in fields
-                if isinstance(field, dict) and isinstance(field.get("name"), str)
-            }
-
-        query_fields = field_names("queryType")
-        mutation_fields = field_names("mutationType")
-        if "fetchAvailableComputeRuntimes" in query_fields:
-            return "shared"
-        if "deployComputeInfrastructure" in mutation_fields:
-            return "per-user"
-        raise RuntimeError(
-            "The FrequenSolve Cloud API does not expose a supported compute "
-            "submission contract. Update FrequenSolve or contact the Cloud "
-            "environment owner before submitting a job."
-        )
 
     def execute(
         self, query: str, variables: Optional[Dict[str, Any]] = None
@@ -173,10 +155,16 @@ class GraphQLClient:
             )
             response.raise_for_status()
         except requests.exceptions.Timeout:
-            raise RuntimeError("Cloud API request timed out after 30 seconds") from None
+            raise CloudTransportError(
+                "Cloud API request timed out after 30 seconds", retryable=True
+            ) from None
+        except requests.exceptions.HTTPError:
+            raise CloudAPIError("Cloud API rejected the HTTP request") from None
         except requests.exceptions.RequestException as exc:
-            raise RuntimeError(
-                f"Cloud API request failed ({type(exc).__name__})"
+            raise CloudTransportError(
+                f"Cloud API request failed ({type(exc).__name__})",
+                retryable=isinstance(exc, requests.exceptions.ConnectionError)
+                and not isinstance(exc, requests.exceptions.SSLError),
             ) from None
 
         try:
@@ -208,7 +196,7 @@ class GraphQLClient:
                 )
                 for err in errors[:10]
             ]
-            raise RuntimeError(f"GraphQL errors: {'; '.join(error_messages)}")
+            raise CloudAPIError(f"GraphQL errors: {'; '.join(error_messages)}")
 
         data = result.get("data")
         if not isinstance(data, Mapping):
@@ -235,18 +223,6 @@ class GraphQLClient:
                 {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
             ],
         }
-        if account_id:
-            base_filter["accountId"] = {"eq": account_id}
-        return base_filter
-
-    def _build_compute_stack_filter(self, account_id: Optional[str] = None) -> dict:
-        """Build filter for compute stack queries.
-
-        Uses same criteria as submitJob backend: userId (via owner auth),
-        accountId (explicit), stackType. Ensures the Python client only considers
-        stacks that submitJob will accept.
-        """
-        base_filter = {"stackType": {"eq": "compute"}}
         if account_id:
             base_filter["accountId"] = {"eq": account_id}
         return base_filter
@@ -356,406 +332,204 @@ class GraphQLClient:
             "status": storage_stack.get("status", ""),
         }
 
-    def _check_compute_stack_exists(self) -> bool:
-        """Check if compute stack exists.
+    def resolve_compute_cluster(
+        self,
+        *,
+        cluster_id: Optional[str] = None,
+        execution_resources: Optional[Dict[str, Any]] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Resolve current access and immutable identity before local reuse."""
+        from .execution_profile import validate_cluster_id
 
-        Returns:
-            True if compute stack exists, False otherwise
-        """
-        account_id = (
-            self.auth.get_account_id() if hasattr(self.auth, "get_account_id") else None
+        if cluster_id is not None:
+            validate_cluster_id(cluster_id)
+        result = self.execute(
+            """query ResolveMyComputeCluster($executionSiteId: String, $partition: String, $allowUnverifiedCompute: Boolean, $executionResources: AWSJSON) {
+                resolveMyComputeCluster(executionSiteId: $executionSiteId, partition: $partition, allowUnverifiedCompute: $allowUnverifiedCompute, executionResources: $executionResources)
+            }""",
+            {
+                key: value
+                for key, value in {
+                    "executionSiteId": cluster_id,
+                    "partition": partition,
+                    "allowUnverifiedCompute": allow_unverified_compute,
+                    "executionResources": (
+                        json.dumps(execution_resources)
+                        if execution_resources is not None
+                        else None
+                    ),
+                }.items()
+                if value is not None
+            },
         )
-        filter_obj = self._build_compute_stack_filter(account_id)
-        filter_obj["or"] = [
-            {"status": {"eq": "CREATE_COMPLETE"}},
-            {"status": {"eq": "UPDATE_COMPLETE"}},
-            {"status": {"eq": "UPDATE_ROLLBACK_COMPLETE"}},
-        ]
-        variables = {"filter": filter_obj}
-        compute_query = """
-            query ListComputeStacks($filter: ModelStackFilterInput) {
-                listStacks(filter: $filter) {
-                    items {
-                        stackId
-                        outputs
-                        status
-                        createdAt
-                    }
-                }
-            }
-        """
-        try:
-            result = self.execute(compute_query, variables)
-            return (
-                "listStacks" in result
-                and result["listStacks"]["items"]
-                and len(result["listStacks"]["items"]) > 0
-            )
-        except Exception:
-            return False
-
-    def get_my_stack(self) -> Dict[str, str]:
-        """Query user's stack information.
-
-        Queries the Stack model for both storage and compute stacks separately.
-        Owner-based authorization ensures only the user's stacks are returned.
-
-        Returns:
-            Dict containing:
-                - stackId: CloudFormation compute stack ID
-                - bucketName: S3 bucket name for simulations (from storage stack)
-                - status: Combined stack status
-
-        Raises:
-            RuntimeError: If query fails or required stacks not found
-        """
-        import json
-
-        # Query storage stack
-        # Only usable states: CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE.
-        # ROLLBACK_COMPLETE = failed initial creation, no usable resources.
-        storage_query = """
-            query ListStorageStacks {
-                listStacks(filter: {
-                    stackType: { eq: "storage" }
-                    or: [
-                        { status: { eq: "CREATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } }
-                    ]
-                }) {
-                    items {
-                        stackId
-                        outputs
-                        status
-                        createdAt
-                    }
-                }
-            }
-        """
-
-        # Query compute stack
-        # Only usable states: CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE.
-        # ROLLBACK_COMPLETE = failed initial creation, no usable resources.
-        compute_query = """
-            query ListComputeStacks {
-                listStacks(filter: {
-                    stackType: { eq: "compute" }
-                    or: [
-                        { status: { eq: "CREATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_COMPLETE" } },
-                        { status: { eq: "UPDATE_ROLLBACK_COMPLETE" } }
-                    ]
-                }) {
-                    items {
-                        stackId
-                        outputs
-                        status
-                        createdAt
-                    }
-                }
-            }
-        """
-
-        logger.debug("Fetching stack information from API...")
-        logger.debug("Executing GraphQL query: listStacks (storage)")
-        storage_result = self.execute(storage_query)
-
-        logger.debug("Storage stack GraphQL result:")
-        logger.debug(f"  {json.dumps(storage_result, indent=2)}")
-
-        logger.debug("Executing GraphQL query: listStacks (compute)")
-        compute_result = self.execute(compute_query)
-
-        logger.debug("Compute stack GraphQL result:")
-        logger.debug(f"  {json.dumps(compute_result, indent=2)}")
-
-        # Check storage stack
+        resolved = result.get("resolveMyComputeCluster")
+        if isinstance(resolved, str):
+            try:
+                resolved = json.loads(resolved)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "Cloud returned malformed compute cluster resolution"
+                ) from exc
         if (
-            "listStacks" not in storage_result
-            or not storage_result["listStacks"]["items"]
+            not isinstance(resolved, dict)
+            or not isinstance(resolved.get("executionSiteId"), str)
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", resolved["executionSiteId"])
+            or resolved["executionSiteId"] == "managed-batch"
+            or (cluster_id is not None and resolved["executionSiteId"] != cluster_id)
+            or not isinstance(resolved.get("executionIdentity"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", resolved["executionIdentity"])
         ):
-            logger.debug("No storage stacks found in result")
             raise RuntimeError(
-                "No active storage stack found. Please deploy storage infrastructure first at "
-                "https://app.frequensol.com"
+                "Cloud returned an invalid compute cluster resolution; update the Cloud backend and retry"
             )
+        return resolved
 
-        # Check compute stack
-        if (
-            "listStacks" not in compute_result
-            or not compute_result["listStacks"]["items"]
-        ):
-            logger.debug("No compute stacks found in result")
-            raise RuntimeError(
-                "No active compute stack found. Please deploy compute infrastructure first at "
-                "https://app.frequensol.com"
-            )
-
-        # Get most recent storage stack (in case there are multiple)
-        storage_stacks = storage_result["listStacks"]["items"]
-        logger.debug(f"Found {len(storage_stacks)} storage stack(s)")
-
-        storage_stack = sorted(
-            storage_stacks, key=lambda s: s["createdAt"], reverse=True
-        )[0]
-        logger.debug("Using most recent storage stack:")
-        logger.debug(f"  Stack ID: {storage_stack.get('stackId')}")
-        logger.debug(f"  Status: {storage_stack.get('status')}")
-        logger.debug(f"  Outputs (raw): {storage_stack.get('outputs', 'NULL')}")
-
-        # Get most recent compute stack (in case there are multiple)
-        compute_stacks = compute_result["listStacks"]["items"]
-        logger.debug(f"Found {len(compute_stacks)} compute stack(s)")
-
-        compute_stack = sorted(
-            compute_stacks, key=lambda s: s["createdAt"], reverse=True
-        )[0]
-        logger.debug("Using most recent compute stack:")
-        logger.debug(f"  Stack ID: {compute_stack.get('stackId')}")
-        logger.debug(f"  Status: {compute_stack.get('status')}")
-        logger.debug(f"  Outputs (raw): {compute_stack.get('outputs', 'NULL')}")
-
-        # Parse outputs JSON from both stacks
-        storage_outputs = (
-            json.loads(storage_stack["outputs"]) if storage_stack.get("outputs") else {}
+    def request_project_identity(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.execute(
+            "mutation ProjectIdentity($input: AWSJSON!) { requestMyProjectIdentity(input: $input) }",
+            {"input": json.dumps(payload)},
         )
-        logger.debug("Parsed storage outputs:")
-        logger.debug(f"  {json.dumps(storage_outputs, indent=2)}")
-
-        compute_outputs = (
-            json.loads(compute_stack["outputs"]) if compute_stack.get("outputs") else {}
-        )
-        logger.debug("Parsed compute outputs:")
-        logger.debug(f"  {json.dumps(compute_outputs, indent=2)}")
-
-        # Merge outputs from both stacks
-        bucket_name = storage_outputs.get("StorageBucketName", "")
-
-        # Verify all required outputs are present
-        if not bucket_name:
-            raise RuntimeError(
-                "Storage stack outputs are incomplete. StorageBucketName not found. "
-                "Please check your storage infrastructure deployment at https://app.frequensol.com"
-            )
-
-        result_dict = {
-            "stackId": compute_stack["stackId"],
-            "bucketName": bucket_name,
-            "status": f"storage:{storage_stack['status']}, compute:{compute_stack['status']}",
-        }
-
-        logger.debug("Final merged result:")
-        logger.debug(f"  {json.dumps(result_dict, indent=2)}")
-
-        logger.debug(f"✓ Stack info loaded: bucket={bucket_name}")
-
-        return result_dict
+        value = result.get("requestMyProjectIdentity")
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            raise RuntimeError("Cloud project identity is unavailable")
+        return value
 
     def submit_job(
         self,
         job_file_s3_key: str,
-        vcpu: Optional[int] = None,
-        memory: Optional[int] = None,
+        *,
         job_name: Optional[str] = None,
         send_simulation_status_email: Optional[bool] = None,
         fresh: bool = False,
-        *,
+        retry: bool = False,
+        project_id: Optional[str] = None,
         project_name: Optional[str] = None,
         project_display_name: Optional[str] = None,
         simulation_name: Optional[str] = None,
         simulation_job_name: Optional[str] = None,
-        execution_backend: Optional[str] = None,
-        compute_mode: Optional[str] = None,
-        slurm_partition: Optional[str] = None,
-        slurm_nodes: Optional[int] = None,
-        slurm_ranks_per_node: Optional[int] = None,
-        slurm_wall_time_seconds: Optional[int] = None,
+        cluster_id: Optional[str] = None,
+        partition: Optional[str] = None,
+        allow_unverified_compute: Optional[bool] = None,
+        expected_compute_identity: Optional[str] = None,
+        execution_resources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Submit a simulation job.
+        """Submit through the current managed execution-site contract."""
+        from .execution_profile import validate_cluster_id
 
-        Args:
-            job_file_s3_key: S3 key of the job configuration file
-            vcpu: Number of vCPUs for the job (optional)
-            memory: Memory in MB for the job (optional)
-            job_name: Custom name for the job (optional)
-            send_simulation_status_email: If True/False, overrides cloud communication preferences for this run only
-            fresh: Force a fresh solver run when the backend supports it
-            project_name: Authored project name for Cloud display metadata
-            project_display_name: Optional authored project display name
-            simulation_name: Authored simulation name for Cloud display metadata
-            simulation_job_name: Authored FrequenSolve job name for Cloud display metadata
-
-        Returns:
-            Dict containing:
-                - simulationId: Database simulation record ID
-                - batchJobId: Internal job ID (for backwards compatibility)
-                - status: Initial job status (typically 'PENDING')
-
-        Raises:
-            RuntimeError: If job submission fails
+        if cluster_id is not None:
+            validate_cluster_id(cluster_id)
+        if expected_compute_identity is not None and (
+            not isinstance(expected_compute_identity, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", expected_compute_identity)
+        ):
+            raise ValueError("Invalid expected compute identity")
+        mutation = """
+            mutation SubmitJob(
+                $jobFileS3Key: String!, $jobName: String, $sendSimulationStatusEmail: Boolean,
+                $projectName: String, $projectDisplayName: String, $simulationName: String,
+                $simulationJobName: String, $executionSiteId: String, $executionResources: AWSJSON,
+                $expectedComputeIdentity: String, $partition: String, $allowUnverifiedCompute: Boolean,
+                $forceRun: Boolean
+            ) {
+                submitJob(jobFileS3Key: $jobFileS3Key, jobName: $jobName,
+                    sendSimulationStatusEmail: $sendSimulationStatusEmail,
+                    projectName: $projectName, projectDisplayName: $projectDisplayName,
+                    simulationName: $simulationName, simulationJobName: $simulationJobName,
+                    executionSiteId: $executionSiteId, executionResources: $executionResources,
+                    expectedComputeIdentity: $expectedComputeIdentity, partition: $partition, allowUnverifiedCompute: $allowUnverifiedCompute,
+                    forceRun: $forceRun) {
+                    simulationId status executionSiteId executionRegistrationFingerprint logicalAttemptId providerJobId executionState computePlacement
+                }
+            }
         """
-        metadata_fields = (
-            "projectName",
-            "projectDisplayName",
-            "simulationName",
-            "simulationJobName",
-        )
-        metadata = {
+        if project_id is not None:
+            from frequensolve.project_identity import ProjectIdentity
+
+            ProjectIdentity(project_id)
+            mutation = mutation.replace(
+                "$forceRun: Boolean", "$projectId: String, $forceRun: Boolean"
+            ).replace(
+                "forceRun: $forceRun)", "projectId: $projectId, forceRun: $forceRun)"
+            )
+        if retry:
+            # Ordinary submissions remain compatible with backends predating retries.
+            mutation = mutation.replace(
+                "$forceRun: Boolean", "$forceRun: Boolean, $retry: Boolean"
+            ).replace(
+                "forceRun: $forceRun)",
+                "forceRun: $forceRun, retry: $retry)",
+            )
+        variables = {
+            **({"projectId": project_id} if project_id is not None else {}),
+            "jobFileS3Key": job_file_s3_key,
+            "jobName": job_name,
+            "sendSimulationStatusEmail": send_simulation_status_email,
             "projectName": project_name,
             "projectDisplayName": project_display_name,
             "simulationName": simulation_name,
             "simulationJobName": simulation_job_name,
+            "executionSiteId": cluster_id,
+            "partition": partition,
+            "allowUnverifiedCompute": allow_unverified_compute,
+            "expectedComputeIdentity": expected_compute_identity,
+            "executionResources": (
+                json.dumps(execution_resources)
+                if execution_resources is not None
+                else None
+            ),
+            "forceRun": fresh,
+            "retry": retry if retry else None,
         }
-        metadata = {key: value for key, value in metadata.items() if value is not None}
-        execution_fields = execution_backend is not None
-
-        def build_mutation(include_metadata: bool) -> str:
-            force_var = "$forceRun: Boolean" if fresh else ""
-            force_arg = "forceRun: $forceRun" if fresh else ""
-            metadata_variables = ""
-            metadata_arguments = ""
-            if include_metadata:
-                metadata_variables = """
-                $projectName: String
-                $projectDisplayName: String
-                $simulationName: String
-                $simulationJobName: String
-                """
-                metadata_arguments = """
-                    projectName: $projectName
-                    projectDisplayName: $projectDisplayName
-                    simulationName: $simulationName
-                    simulationJobName: $simulationJobName
-                """
-            execution_variables = ""
-            execution_arguments = ""
-            execution_response = ""
-            if execution_fields:
-                execution_variables = """
-                $executionBackend: String
-                $computeMode: String
-                $slurmPartition: String
-                $slurmNodes: Int
-                $slurmRanksPerNode: Int
-                $slurmWallTimeSeconds: Int
-                """
-                execution_arguments = """
-                    executionBackend: $executionBackend
-                    computeMode: $computeMode
-                    slurmPartition: $slurmPartition
-                    slurmNodes: $slurmNodes
-                    slurmRanksPerNode: $slurmRanksPerNode
-                    slurmWallTimeSeconds: $slurmWallTimeSeconds
-                """
-                execution_response = """
-                    executionBackend
-                    executionTarget
-                    slurmPartition
-                    slurmNodes
-                    slurmRanksPerNode
-                    slurmWallTimeSeconds
-                    providerAttemptId
-                """
-            return f"""
-            mutation SubmitJob(
-                $jobFileS3Key: String!
-                $vcpu: Int
-                $memory: Int
-                $jobName: String
-                $sendSimulationStatusEmail: Boolean
-                {metadata_variables}
-                {execution_variables}
-                {force_var}
-            ) {{
-                submitJob(
-                    jobFileS3Key: $jobFileS3Key
-                    vcpu: $vcpu
-                    memory: $memory
-                    jobName: $jobName
-                    sendSimulationStatusEmail: $sendSimulationStatusEmail
-                    {metadata_arguments}
-                    {execution_arguments}
-                    {force_arg}
-                ) {{
-                    simulationId
-                    batchJobId
-                    status
-                    {execution_response}
-                }}
-            }}
-        """
-
-        variables: Dict[str, Any] = {
-            "jobFileS3Key": job_file_s3_key,
-            "sendSimulationStatusEmail": send_simulation_status_email,
-        }
-
-        if vcpu is not None:
-            variables["vcpu"] = vcpu
-        if memory is not None:
-            variables["memory"] = memory
-        if job_name is not None:
-            variables["jobName"] = job_name
-        variables.update(metadata)
-        if fresh:
-            variables["forceRun"] = True
-        if execution_fields:
-            variables.update(
-                {
-                    "executionBackend": execution_backend,
-                    "computeMode": compute_mode,
-                    "slurmPartition": slurm_partition,
-                    "slurmNodes": slurm_nodes,
-                    "slurmRanksPerNode": slurm_ranks_per_node,
-                    "slurmWallTimeSeconds": slurm_wall_time_seconds,
-                }
-            )
-
-        def execute_submission(include_metadata: bool) -> Dict[str, Any]:
-            request_variables = dict(variables)
-            if not include_metadata:
-                for key in metadata:
-                    request_variables.pop(key, None)
-            try:
-                return self.execute(
-                    build_mutation(include_metadata),
-                    request_variables,
-                )
-            except RuntimeError as exc:
-                error_message = str(exc)
-                unsupported_argument = (
-                    "Unknown argument" in error_message
-                    or "UnknownArgument" in error_message
-                )
-                unsupported_metadata = (
-                    include_metadata
-                    and unsupported_argument
-                    and any(key in error_message for key in metadata_fields)
-                )
-                if unsupported_metadata:
-                    logger.info(
-                        "Cloud run metadata is not supported by this environment; "
-                        "retrying the submission with the legacy mutation contract."
-                    )
-                    return execute_submission(False)
-                unsupported_force_run = (
-                    fresh and "forceRun" in error_message and unsupported_argument
-                )
-                if unsupported_force_run:
-                    raise RuntimeError(
-                        "Fresh Cloud reruns are not supported by this environment. "
-                        "Submit without force=True, rerun=True, or skip=False, or "
-                        "update the Cloud backend before retrying."
-                    ) from exc
-                raise
-
-        result = execute_submission(bool(metadata))
-
-        if "submitJob" not in result or not result["submitJob"]:
+        result = self.execute(
+            mutation,
+            {key: value for key, value in variables.items() if value is not None},
+        )
+        if not result.get("submitJob"):
             raise RuntimeError("Job submission failed: No response from API")
+        submission = result["submitJob"]
+        if isinstance(submission.get("computePlacement"), str):
+            submission["computePlacement"] = json.loads(submission["computePlacement"])
+        return submission
 
-        return result["submitJob"]
+    def cancel_simulation(self, simulation_id: str) -> None:
+        """Request cancellation; terminal state remains authoritative in Cloud."""
+        query = """
+            mutation CancelSimulation($simulationId: String!) {
+                cancelSimulation(simulationId: $simulationId) {
+                    success
+                    error
+                }
+            }
+        """
+        try:
+            result = self.execute(query, {"simulationId": simulation_id})
+        except CloudTransportError:
+            raise CloudTransportError(
+                "Cloud cancellation request failed; check connectivity and refresh "
+                "the simulation status before retrying"
+            ) from None
+        except CloudAPIError:
+            raise CloudAPIError(
+                "Cloud rejected cancellation; check API compatibility, access, "
+                "and the simulation status"
+            ) from None
+        except RuntimeError:
+            raise RuntimeError(
+                "Cloud cancellation request failed; refresh the simulation status "
+                "and check the Cloud configuration"
+            ) from None
+        response = result.get("cancelSimulation") if isinstance(result, dict) else None
+        if not isinstance(response, dict) or response.get("success") is not True:
+            raise CloudAPIError(
+                "Cloud did not accept cancellation; refresh the simulation status "
+                "and retry once an execution attempt is assigned"
+            )
+        if response.get("error"):
+            raise RuntimeError("Cloud returned an inconsistent cancellation response")
 
     def get_simulation_status_details(self, simulation_id: str) -> Dict[str, Any]:
         """Get simulation status and customer-safe failure details by ID.
@@ -775,79 +549,40 @@ class GraphQLClient:
                 getSimulation(id: $id) {
                     id
                     status
+                    outputIdentity
+                    strictRetryFingerprint
                     failureCode
                     failureMessage
                     creditSettlementMode
                     creditSettlementStatus
                     creditSettlementOperationId
                     creditSettlementAmount
-                    executionBackend
-                    executionTarget
-                    slurmPartition
-                    slurmNodes
-                    slurmRanksPerNode
-                    slurmWallTimeSeconds
-                    providerAttemptId
+                    requestedResources
+                    allocatedResources
+                    executionSiteId
+                    computePlacement
+                    executionRegistrationFingerprint
+                    logicalAttemptId
+                    providerJobId
+                    executionState
+                    failureReason
                 }
             }
         """
 
         variables = {"id": simulation_id}
 
-        def is_unsupported_field_error(
-            error_message: str, fields: tuple[str, ...]
-        ) -> bool:
-            return any(field in error_message for field in fields) and (
-                "Cannot query field" in error_message or "is undefined" in error_message
-            )
-
         try:
             result = self.execute(query, variables)
-        except RuntimeError as exc:
-            error_message = str(exc)
-            all_optional_fields = (
-                "failureCode",
-                "failureMessage",
-                "creditSettlementMode",
-                "creditSettlementStatus",
-                "creditSettlementOperationId",
-                "creditSettlementAmount",
-                "executionBackend",
-                "executionTarget",
-                "slurmPartition",
-                "slurmNodes",
-                "slurmRanksPerNode",
-                "slurmWallTimeSeconds",
-                "providerAttemptId",
-            )
-            if not is_unsupported_field_error(error_message, all_optional_fields):
+        except CloudTransportError as exc:
+            if not exc.retryable:
                 raise
-            failure_details_query = """
-                query GetSimulation($id: ID!) {
-                    getSimulation(id: $id) {
-                        id
-                        status
-                        failureCode
-                        failureMessage
-                    }
-                }
-            """
-            try:
-                result = self.execute(failure_details_query, variables)
-            except RuntimeError as failure_details_exc:
-                if not is_unsupported_field_error(
-                    str(failure_details_exc), ("failureCode", "failureMessage")
-                ):
-                    raise
-                status_only_query = """
-                    query GetSimulation($id: ID!) {
-                        getSimulation(id: $id) {
-                            id
-                            status
-                        }
-                    }
-                """
-                result = self.execute(status_only_query, variables)
+            raise TransientStatusReadError(
+                f"Could not read status for submitted simulation {simulation_id}. "
+                "The simulation may still be running. Observe this existing run "
+                "in Cloud or call wait() again on the retained run handle; "
+                "do not resubmit the job."
+            ) from None
 
         if "getSimulation" not in result or not result["getSimulation"]:
             raise RuntimeError(
@@ -861,9 +596,37 @@ class GraphQLClient:
                 f"Simulation status not found in response: {simulation_id}"
             )
 
+        def resources(name: str) -> Optional[Dict[str, Any]]:
+            value = details.get(name)
+            if isinstance(value, str):
+                value = json.loads(value)
+            return value if isinstance(value, dict) else None
+
+        normalized = {
+            "requestedResources": resources("requestedResources"),
+            "allocatedResources": resources("allocatedResources"),
+            "executionSiteId": details.get("executionSiteId"),
+            "computePlacement": (
+                json.loads(details["computePlacement"])
+                if isinstance(details.get("computePlacement"), str)
+                else details.get("computePlacement")
+            ),
+            "executionRegistrationFingerprint": details.get(
+                "executionRegistrationFingerprint"
+            ),
+            "logicalAttemptId": details.get("logicalAttemptId"),
+            "providerJobId": details.get("providerJobId"),
+            "executionState": normalize_execution_state(
+                details.get("executionState") or status
+            ),
+            "failureReason": details.get("failureReason") or details.get("failureCode"),
+        }
         return {
+            **normalized,
             "id": details.get("id"),
             "status": status,
+            "outputIdentity": details.get("outputIdentity"),
+            "strictRetryFingerprint": details.get("strictRetryFingerprint"),
             "failureCode": details.get("failureCode"),
             "failureMessage": details.get("failureMessage"),
             **{
@@ -873,13 +636,6 @@ class GraphQLClient:
                     "creditSettlementStatus",
                     "creditSettlementOperationId",
                     "creditSettlementAmount",
-                    "executionBackend",
-                    "executionTarget",
-                    "slurmPartition",
-                    "slurmNodes",
-                    "slurmRanksPerNode",
-                    "slurmWallTimeSeconds",
-                    "providerAttemptId",
                 )
                 if details.get(key) is not None
             },
@@ -890,93 +646,11 @@ class GraphQLClient:
 
         return str(self.get_simulation_status_details(simulation_id)["status"])
 
-    def list_simulation_frequency_jobs(
-        self, simulation_id: str
-    ) -> list[Dict[str, Any]]:
-        """Return every frequency job owned by one Cloud simulation."""
-
-        query = """
-            query GetSimulationFrequencyJobs(
-                $id: ID!
-                $limit: Int
-                $nextToken: String
-            ) {
-                getSimulation(id: $id) {
-                    frequencyJobs(limit: $limit, nextToken: $nextToken) {
-                        items {
-                            frequencyIndex
-                            batchJobId
-                        }
-                        nextToken
-                    }
-                }
-            }
-        """
-        rows: list[Dict[str, Any]] = []
-        next_token: Optional[str] = None
-        while True:
-            result = self.execute(
-                query,
-                {
-                    "id": simulation_id,
-                    "limit": 100,
-                    "nextToken": next_token,
-                },
-            )
-            simulation = result.get("getSimulation")
-            if not isinstance(simulation, Mapping):
-                raise RuntimeError("Cloud simulation was not found")
-            page = simulation.get("frequencyJobs")
-            if not isinstance(page, Mapping):
-                raise RuntimeError("Cloud API returned no frequency-job page")
-            items = page.get("items")
-            if not isinstance(items, list):
-                raise RuntimeError("Cloud API returned malformed frequency jobs")
-            rows.extend(dict(item) for item in items if isinstance(item, Mapping))
-            token = page.get("nextToken")
-            if token is None:
-                return rows
-            if not isinstance(token, str) or not token:
-                raise RuntimeError("Cloud API returned an invalid frequency-job cursor")
-            next_token = token
-
-    def get_job_logs(self, batch_job_id: str) -> list[Dict[str, str]]:
-        """Return authenticated CloudWatch log events for one Batch job."""
-
-        query = """
-            query GetJobLogs($batchJobId: String!) {
-                getJobLogs(batchJobId: $batchJobId) {
-                    logs {
-                        timestamp
-                        message
-                    }
-                }
-            }
-        """
-        result = self.execute(query, {"batchJobId": batch_job_id})
-        payload = result.get("getJobLogs")
-        logs = payload.get("logs") if isinstance(payload, Mapping) else None
-        if not isinstance(logs, list):
-            raise RuntimeError("Cloud API returned malformed Batch job logs")
-        events: list[Dict[str, str]] = []
-        for event in logs:
-            if (
-                not isinstance(event, Mapping)
-                or not isinstance(event.get("timestamp"), str)
-                or not isinstance(event.get("message"), str)
-            ):
-                raise RuntimeError("Cloud API returned a malformed log event")
-            events.append(
-                {"timestamp": event["timestamp"], "message": event["message"]}
-            )
-        return events
-
-    def deploy_storage_stack(self, environment: Optional[str] = None) -> Dict[str, Any]:
+    def deploy_storage_stack(self) -> Dict[str, Any]:
         """Deploy storage infrastructure stack.
 
         User ID is automatically extracted from the authentication context by AppSync.
-        ``environment`` is accepted for backward compatibility and ignored; the
-        backend derives the deployment environment from its own runtime context.
+        The backend derives the deployment environment from its runtime context.
 
         Returns:
             Dict containing stackId, stackName, status, outputs, error
@@ -1017,59 +691,8 @@ class GraphQLClient:
 
         return deploy_result
 
-    def deploy_compute_stack(
+    def wait_for_storage_ready(
         self,
-        environment: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Deploy compute infrastructure stack.
-
-        User ID is automatically extracted from the authentication context by AppSync.
-        Stack parameters are automatically fetched from user's compute settings in the database.
-        ``environment`` is accepted for backward compatibility and ignored; the
-        backend derives the deployment environment from its own runtime context.
-
-        Returns:
-            Dict containing stackId, stackName, status, outputs, error
-
-        Raises:
-            RuntimeError: If deployment fails
-        """
-        mutation = """
-            mutation DeployComputeInfrastructure {
-                deployComputeInfrastructure {
-                    stackId
-                    stackName
-                    status
-                    outputs
-                    error
-                }
-            }
-        """
-
-        logger.debug("Deploying compute stack...")
-        result = self.execute(mutation)
-
-        if "deployComputeInfrastructure" not in result:
-            raise RuntimeError("Compute stack deployment failed: No response from API")
-
-        deploy_result = result["deployComputeInfrastructure"]
-
-        if deploy_result.get("error"):
-            raise RuntimeError(
-                f"Compute stack deployment failed: {deploy_result['error']}"
-            )
-
-        logger.debug(
-            f"✓ Compute stack deployment initiated: {deploy_result.get('stackName', 'unknown')}"
-        )
-        logger.debug(f"  Stack ID: {deploy_result.get('stackId')}")
-        logger.debug(f"  Status: {deploy_result.get('status')}")
-
-        return deploy_result
-
-    def wait_for_stack_ready(
-        self,
-        stack_type: str,
         timeout: int = 1800,
         poll_interval: int = 15,
         expected_stack_id: Optional[str] = None,
@@ -1081,7 +704,6 @@ class GraphQLClient:
         (e.g., DELETE_COMPLETE from a previously deleted stack).
 
         Args:
-            stack_type: Type of stack to wait for ("storage" or "compute")
             timeout: Maximum time to wait in seconds (default: 1800 = 30 minutes)
             poll_interval: Interval between status checks in seconds (default: 15)
             expected_stack_id: Optional stack ID to match (helps avoid stale status)
@@ -1093,7 +715,7 @@ class GraphQLClient:
             RuntimeError: If stack creation fails, times out, or enters failed state
         """
         logger.debug(
-            f"Waiting for {stack_type} stack to be ready (timeout: {timeout}s, poll interval: {poll_interval}s)..."
+            f"Waiting for storage stack to be ready (timeout: {timeout}s, poll interval: {poll_interval}s)..."
         )
 
         start_time = time.time()
@@ -1106,7 +728,7 @@ class GraphQLClient:
             elapsed_time = time.time() - start_time
             if elapsed_time >= timeout:
                 raise RuntimeError(
-                    f"Timeout waiting for {stack_type} stack to be ready "
+                    f"Timeout waiting for storage stack to be ready "
                     f"(waited {elapsed_time:.0f}s, timeout: {timeout}s)"
                 )
 
@@ -1118,44 +740,23 @@ class GraphQLClient:
                     if hasattr(self.auth, "get_account_id")
                     else None
                 )
-                if stack_type == "storage":
-                    filter_obj = self._build_storage_stack_filter(account_id)
-                    # Relax status for polling - we want to see IN_PROGRESS too
-                    filter_obj.pop("or", None)  # Remove status filter to see any status
-                    variables = {"filter": filter_obj}
-                    query = """
-                        query ListStorageStacks($filter: ModelStackFilterInput) {
-                            listStacks(filter: $filter) {
-                                items {
-                                    stackId
-                                    outputs
-                                    status
-                                    createdAt
-                                }
+                filter_obj = self._build_storage_stack_filter(account_id)
+                # Relax status for polling - we want to see IN_PROGRESS too
+                filter_obj.pop("or", None)  # Remove status filter to see any status
+                variables = {"filter": filter_obj}
+                query = """
+                    query ListStorageStacks($filter: ModelStackFilterInput) {
+                        listStacks(filter: $filter) {
+                            items {
+                                stackId
+                                outputs
+                                status
+                                createdAt
                             }
                         }
-                    """
-                    result = self.execute(query, variables)
-                elif stack_type == "compute":
-                    filter_obj = self._build_compute_stack_filter(account_id)
-                    variables = {"filter": filter_obj}
-                    query = """
-                        query ListComputeStacks($filter: ModelStackFilterInput) {
-                            listStacks(filter: $filter) {
-                                items {
-                                    stackId
-                                    outputs
-                                    status
-                                    createdAt
-                                }
-                            }
-                        }
-                    """
-                    result = self.execute(query, variables)
-                else:
-                    raise ValueError(
-                        f"Invalid stack_type: {stack_type}. Must be 'storage' or 'compute'"
-                    )
+                    }
+                """
+                result = self.execute(query, variables)
 
                 stacks = result.get("listStacks", {}).get("items", [])
 
@@ -1163,7 +764,7 @@ class GraphQLClient:
                     # Stack not found yet, continue polling
                     if last_status != "NOT_FOUND":
                         logger.debug(
-                            f"{stack_type} stack not found yet, continuing to poll..."
+                            "storage stack not found yet, continuing to poll..."
                         )
                         last_status = "NOT_FOUND"
                     time.sleep(poll_interval)
@@ -1180,7 +781,7 @@ class GraphQLClient:
                         stack = matching_stack
                         status = stack.get("status", "")
                         logger.debug(
-                            f"Matched {stack_type} stack by stackId: {expected_stack_id}, status: {status}"
+                            f"Matched storage stack by stackId: {expected_stack_id}, status: {status}"
                         )
                     else:
                         logger.debug(
@@ -1204,7 +805,7 @@ class GraphQLClient:
                         # Fall back to all stacks if all are UNKNOWN (shouldn't happen, but be safe)
                         stacks_to_use = stacks
                         logger.warning(
-                            f"All {stack_type} stacks have UNKNOWN status, using most recent one"
+                            "All storage stacks have UNKNOWN status, using most recent one"
                         )
 
                     # Get most recent stack (by createdAt)
@@ -1217,12 +818,12 @@ class GraphQLClient:
 
                     # Log which stack we're using for debugging
                     logger.debug(
-                        f"Using most recent {stack_type} stack: {stack.get('stackId', 'unknown')} with status: {status}"
+                        f"Using most recent storage stack: {stack.get('stackId', 'unknown')} with status: {status}"
                     )
 
                 # Log status changes
                 if status != last_status:
-                    logger.debug(f"{stack_type} stack status: {status}")
+                    logger.debug(f"storage stack status: {status}")
                     last_status = status
 
                 # Before grace period expires, ignore terminal failure states that might be stale
@@ -1247,23 +848,16 @@ class GraphQLClient:
 
                 # Check for terminal success states
                 if status in ["CREATE_COMPLETE", "UPDATE_COMPLETE"]:
-                    logger.debug(f"✓ {stack_type} stack is ready: {status}")
-                    # Return stack info - for storage we need bucketName, for compute we need stackId
-                    if stack_type == "storage":
-                        outputs = (
-                            json.loads(stack["outputs"]) if stack.get("outputs") else {}
-                        )
-                        bucket_name = outputs.get("StorageBucketName", "")
-                        return {
-                            "stackId": stack.get("stackId", ""),
-                            "bucketName": bucket_name,
-                            "status": status,
-                        }
-                    else:  # compute
-                        return {
-                            "stackId": stack.get("stackId", ""),
-                            "status": status,
-                        }
+                    logger.debug(f"✓ storage stack is ready: {status}")
+                    outputs = (
+                        json.loads(stack["outputs"]) if stack.get("outputs") else {}
+                    )
+                    bucket_name = outputs.get("StorageBucketName", "")
+                    return {
+                        "stackId": stack.get("stackId", ""),
+                        "bucketName": bucket_name,
+                        "status": status,
+                    }
 
                 # Check for terminal failure states (only after grace period)
                 if status in [
@@ -1275,9 +869,7 @@ class GraphQLClient:
                     "UPDATE_ROLLBACK_COMPLETE",
                     "UPDATE_ROLLBACK_FAILED",
                 ]:
-                    error_msg = (
-                        f"{stack_type} stack creation failed with status: {status}"
-                    )
+                    error_msg = f"storage stack creation failed with status: {status}"
                     logger.error(error_msg)
                     raise RuntimeError(error_msg)
 
@@ -1293,7 +885,7 @@ class GraphQLClient:
 
                 # Unknown status - log warning but continue polling
                 logger.warning(
-                    f"Unknown {stack_type} stack status '{status}'. Continuing to poll..."
+                    f"Unknown storage stack status '{status}'. Continuing to poll..."
                 )
                 time.sleep(poll_interval)
 
@@ -1303,7 +895,7 @@ class GraphQLClient:
                 if "no active" in error_msg or "not found" in error_msg:
                     if last_status != "NOT_FOUND":
                         logger.debug(
-                            f"{stack_type} stack not found yet, continuing to poll..."
+                            "storage stack not found yet, continuing to poll..."
                         )
                         last_status = "NOT_FOUND"
                     time.sleep(poll_interval)
@@ -1313,7 +905,7 @@ class GraphQLClient:
             except Exception as e:
                 # For other errors, log and retry after interval
                 logger.warning(
-                    f"Error checking {stack_type} stack status: {e}. "
+                    f"Error checking storage stack status: {e}. "
                     f"Retrying in {poll_interval} seconds..."
                 )
                 time.sleep(poll_interval)

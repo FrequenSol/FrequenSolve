@@ -136,4 +136,8 @@ git diff -- benchmarks/cloud/workloads
 The manifest binds every script to its exact file SHA-256, semantic AST hash,
 generator runtime, and expected dynamic submission count. Historical corpus
 compatibility uses the semantic hash, so formatter-only refreshes do not discard
-valid timing history. Review generated behavioral changes like hand-written code.
+valid timing history. Canonical AST serialization preserves the original hashes
+across Python 3.10–3.14 despite empty-field/type-parameter representation changes.
+Timing comparisons use timezone-aware instants, including fractional seconds;
+missing or invalid timestamps do not supply duration evidence. Review generated
+behavioral changes like hand-written code.

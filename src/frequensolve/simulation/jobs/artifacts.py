@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -29,6 +29,7 @@ import numpy as np
 from frequensolve.simulation.artifact_catalog import load_artifact_catalog
 from frequensolve.simulation.artifact_contract import (
     ARTIFACT_CONTRACT_VERSION,
+    ArtifactCatalog,
     ArtifactContractError,
     ArtifactRecord,
     ArtifactRequest,
@@ -62,7 +63,9 @@ class RunMetadata:
     tasks: Mapping[int, TaskIndexEntry] = field(default_factory=dict)
 
     @classmethod
-    def read(cls, result_path: Union[str, Path]) -> "RunMetadata":
+    def read(
+        cls, result_path: Union[str, Path], *, tasks: Iterable[int] = ()
+    ) -> "RunMetadata":
         """Read the fixed task index and Python state without discovery."""
 
         result_path = _as_path(result_path)
@@ -75,16 +78,27 @@ class RunMetadata:
             state = {}
         index_path = result_path / "_fs_run" / "tasks.h5"
         index = TaskIndex.read(result_path) if index_path.is_file() else None
+        if index is None:
+            catalog = ArtifactCatalog.read_task_results(result_path, tasks=tasks)
+            artifacts = tuple(
+                artifact
+                for result in catalog.results.values()
+                for artifact in result.artifacts
+            )
+            task_status = {
+                task: result.state for task, result in catalog.results.items()
+            }
+            indexed_tasks: Mapping[int, TaskIndexEntry] = {}
+        else:
+            artifacts = index.artifacts
+            task_status = {task: entry.status for task, entry in index.tasks.items()}
+            indexed_tasks = index.tasks
         return cls(
             state=dict(state),
             result_path=result_path,
-            artifacts=() if index is None else index.artifacts,
-            task_status=(
-                {}
-                if index is None
-                else {task: entry.status for task, entry in index.tasks.items()}
-            ),
-            tasks={} if index is None else index.tasks,
+            artifacts=artifacts,
+            task_status=task_status,
+            tasks=indexed_tasks,
         )
 
     @property
@@ -178,7 +192,7 @@ class TraceManifest:
     result_path: Path
     output_path: Path
     project_path: Optional[Path] = None
-    laplace: Dict[int, float] = field(default_factory=dict)
+    laplace: Dict[Union[int, str], float] = field(default_factory=dict)
     components: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
     wavefields: Dict[str, Any] = field(default_factory=dict)
@@ -217,8 +231,10 @@ class TraceManifest:
             if project_path is not None
             else source_project
         )
+        artifacts: list[ArtifactRecord]
         receiver_output = output is None
         output = job.trace_outputs if receiver_output else output
+        assert output is not None
         result_path = cls._map_project_path(
             job._result_path, source_project, local_project
         )
@@ -234,6 +250,16 @@ class TraceManifest:
         run = RunMetadata.read(result_path)
         fingerprint_reader = getattr(job, "_task_reuse_fingerprints", None)
         fingerprints = fingerprint_reader() if callable(fingerprint_reader) else None
+        remote_reader = getattr(job, "downloaded_task_fingerprints", None)
+        if callable(remote_reader):
+            catalog = load_task_catalog(result_path, tasks=frequencies)
+            for candidate in [fingerprints, *remote_reader()]:
+                if candidate is not None and any(
+                    cls._task_fingerprints_match(catalog, task, candidate)
+                    for task in frequencies
+                ):
+                    fingerprints = candidate
+                    break
         pack = (
             cls._receiver_pack(
                 result_path,
@@ -243,7 +269,7 @@ class TraceManifest:
             if receiver_output
             else None
         )
-        wavefield_packs = ()
+        wavefield_packs: tuple[TracePackManifest, ...] = ()
         if not receiver_output:
             wavefield_packs = cls._sampled_wavefield_packs(
                 result_path, output.frequencies, fingerprints=fingerprints
@@ -265,7 +291,11 @@ class TraceManifest:
             entries = pack.entries_for(output.frequencies)
             segments = pack.selected_segments(entries)
             files = [segment.path for segment in segments]
-            artifacts = [pack.artifact, *(segment.artifact for segment in segments)]
+            artifacts = [
+                a
+                for a in [pack.artifact, *(segment.artifact for segment in segments)]
+                if a is not None
+            ]
         elif receiver_output:
             files, artifacts = cls._receiver_trace_artifacts(
                 result_path,
@@ -333,14 +363,85 @@ class TraceManifest:
             if manifest.groups != groups:
                 raise ValueError("Cannot combine trace manifests with different groups")
 
-        entries: Dict[float, tuple[Path, float]] = {}
+        if any(manifest.pack is not None for manifest in manifests) and not all(
+            manifest.pack is not None for manifest in manifests
+        ):
+            raise ValueError("Cannot combine packed traces with legacy trace shards")
+        if any(manifest.wavefield_packs for manifest in manifests):
+            raise ValueError("Combining packed wavefield families is not supported")
+
+        if all(manifest.pack is not None for manifest in manifests):
+            # Packed inputs have one file per segment, not one file per task.
+            # Keep the exact segment/dataset selection through the merge.
+            selected = {}
+            duplicates = []
+            for source_index, manifest in enumerate(manifests):
+                assert manifest.pack is not None
+                for entry in manifest.pack.entries:
+                    if entry.task not in manifest.frequencies:
+                        continue
+                    key = (entry.frequency.real, entry.frequency.imag)
+                    if key in selected:
+                        duplicates.append(key[0])
+                        if duplicate == "error":
+                            raise ValueError(
+                                f"Duplicate trace frequency: {entry.frequency}"
+                            )
+                        if duplicate == "first":
+                            continue
+                    selected[key] = (source_index, entry)
+            segments = {}
+            merged_entries = []
+            for task, key in enumerate(sorted(selected), 1):
+                source_index, entry = selected[key]
+                product = manifests[source_index].pack
+                assert product is not None and manifests[0].pack is not None
+                if product.family_id != manifests[0].pack.family_id:
+                    raise ValueError("Cannot combine different packed trace families")
+                segment = next(s for s in product.segments if s.id == entry.segment_id)
+                segment_id = f"source{source_index}/{segment.id}"
+                segments[segment_id] = replace(segment, id=segment_id)
+                merged_entries.append(replace(entry, task=task, segment_id=segment_id))
+            first = manifests[0]
+            assert first.pack is not None
+            pack = replace(
+                first.pack,
+                segments=tuple(segments.values()),
+                entries=tuple(merged_entries),
+            )
+            run = first.run
+            if duplicates:
+                run = replace(
+                    run,
+                    state={
+                        **run.state,
+                        "duplicate_frequencies": sorted(set(duplicates)),
+                    },
+                )
+            return replace(
+                first,
+                files=list(dict.fromkeys(s.path for s in segments.values())),
+                frequencies={e.task: e.frequency.real for e in merged_entries},
+                laplace={e.task: e.frequency.imag for e in merged_entries},
+                pack=pack,
+                run=run,
+                artifacts=[a for m in manifests for a in m.artifacts],
+            )
+
+        entries: Dict[tuple[float, float], tuple[Path, float]] = {}
         duplicates = []
         for manifest in manifests:
             ordered = sorted(
                 manifest.frequencies.items(), key=lambda item: int(item[0])
             )
             for (task_index, freq), file in zip(ordered, manifest.files):
-                if freq in entries:
+                laplace = float(
+                    manifest.laplace.get(
+                        task_index, manifest.laplace.get(str(task_index), 0.0)
+                    )
+                )
+                key = (freq, laplace)
+                if key in entries:
                     duplicates.append(freq)
                     if duplicate == "error":
                         raise ValueError(f"Duplicate trace frequency: {freq}")
@@ -351,13 +452,13 @@ class TraceManifest:
                         task_index, manifest.laplace.get(str(task_index), 0.0)
                     )
                 )
-                entries[freq] = (file, laplace)
+                entries[key] = (file, laplace)
 
         frequencies = {
-            index: float(freq) for index, freq in enumerate(sorted(entries), start=1)
+            index: float(freq[0]) for index, freq in enumerate(sorted(entries), start=1)
         }
         files = [entries[freq][0] for freq in sorted(entries)]
-        laplace = {
+        merged_laplace = {
             index: float(entries[freq][1])
             for index, freq in enumerate(sorted(entries), start=1)
         }
@@ -384,7 +485,7 @@ class TraceManifest:
             result_path=first.result_path,
             output_path=first.output_path,
             project_path=first.project_path,
-            laplace=laplace,
+            laplace=merged_laplace,
             components=first.components,
             sources=first.sources,
             wavefields=copy.deepcopy(first.wavefields),
@@ -738,7 +839,12 @@ class TraceManifest:
         return [record.path for record in records], records
 
     @staticmethod
-    def _sampled_wavefield_packs(result_path, frequencies, *, fingerprints=None):
+    def _sampled_wavefield_packs(
+        result_path: Path,
+        frequencies: Sequence[Union[float, complex]],
+        *,
+        fingerprints: Optional[Mapping[str, str]] = None,
+    ) -> tuple[TracePackManifest, ...]:
         """Resolve every sampled wavefield family from explicit task/pack records."""
         from frequensolve.seismic.trace_pack import TracePackManifest
 
@@ -831,7 +937,7 @@ class TraceManifest:
 
     @staticmethod
     def _require_task_frequency(
-        catalog,
+        catalog: Union[TaskIndex, ArtifactCatalog],
         task: int,
         expected: Union[float, complex],
     ) -> None:
@@ -852,7 +958,7 @@ class TraceManifest:
 
     @staticmethod
     def _task_fingerprints_match(
-        catalog,
+        catalog: Union[TaskIndex, ArtifactCatalog],
         task: int,
         expected: Optional[Mapping[str, str]],
     ) -> bool:
@@ -1015,7 +1121,7 @@ class WavefieldOutputHandle:
 
         from frequensolve.simulation.outputs import wavefield
 
-        self.job += wavefield(*args, **kwargs)
+        self.job.add_output(wavefield(*args, **kwargs))
         return self.job
 
     @property
@@ -1176,7 +1282,8 @@ class JobArtifactMixin:
         Returns:
             Path where receiver traces are expected.
         """
-        return self.trace_outputs.path
+        relative = self.trace_outputs.path.relative_to(self._result_path)
+        return self._result_read_path / relative
 
     @property
     def trace_outputs(self) -> TraceOutputSpec:
@@ -1186,7 +1293,7 @@ class JobArtifactMixin:
             ``TraceOutputSpec`` containing output path, job frequencies,
             receiver groups, components, and source ids.
         """
-        sim = self.simulation
+        sim = self.effective_simulation
         groups = []
         components = []
         sources = []
@@ -1286,6 +1393,7 @@ class JobArtifactMixin:
     def _wavefield_metadata(self) -> dict:
         """Build shared metadata for legacy and trace wavefield views."""
         wave_out = {}
+        simulation = self.effective_simulation
         self.outputs.ensure_unique_names()
         for out in self.outputs.wavefields:
             if out.grid is None:
@@ -1298,7 +1406,7 @@ class JobArtifactMixin:
                 if out.sources is not None
                 else [
                     str(source_id)
-                    for source_id in self.simulation.acquisition.source_field_ids()
+                    for source_id in simulation.acquisition.source_field_ids()
                 ]
             )
             for variant_name, derivative_order in _spectral_derivative_variants(

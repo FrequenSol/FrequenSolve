@@ -1,0 +1,73 @@
+{
+  "schema": "fs-reservoir-model-1",
+  "name": "two-component-gas-flood",
+  "temperature": 350,
+  "fluid": {
+    "components": [
+      {
+        "name": "methane",
+        "critical_temperature": 190.564,
+        "critical_pressure": 4599200.0,
+        "acentric_factor": 0.01142,
+        "molecular_weight": 0.016043,
+        "critical_volume": 9.86e-05
+      },
+      {
+        "name": "decane",
+        "critical_temperature": 617.7,
+        "critical_pressure": 2103000.0,
+        "acentric_factor": 0.4884,
+        "molecular_weight": 0.142286,
+        "critical_volume": 0.000617
+      }
+    ],
+    "water": {
+      "reference_pressure": {"value": 10, "units": "MPa"},
+      "reference_density": {"value": 1000, "units": "kg/m^3"},
+      "compressibility": {"value": 0.0004, "units": "1/MPa"},
+      "viscosity": {"value": 1, "units": "cP"}
+    }
+  },
+  "rock": {
+    "reference_pressure": {"value": 10, "units": "MPa"},
+    "reference_porosity": 0.2,
+    "compressibility": {"value": 0.0001, "units": "1/MPa"}
+  },
+  "relative_permeability": {"connate_water": 0.2, "residual_oil_water": 0.15, "residual_oil_gas": 0.1, "critical_gas": 0.02},
+  "Model": {
+    "schema": "fs-material-model-1",
+    "subdomains": [
+      {
+        "mesh_block_id": 1,
+        "physics": "reservoir:compositional",
+        "properties": {"kappa": {"value": 100, "units": "mD"}}
+      }
+    ]
+  },
+  "domain": {"length": {"value": 400, "units": "m"}, "height": {"value": 40, "units": "m"}, "root_elements": [8, 2]},
+  "wells": [
+    {
+      "name": "I1",
+      "type": "injector",
+      "location": {"value": [20, 20], "units": "m"},
+      "completion": {"radius": {"value": [10, 10], "units": "m"}}
+    },
+    {
+      "name": "P1",
+      "type": "producer",
+      "location": {"value": [380, 20], "units": "m"},
+      "completion": {"radius": {"value": [10, 10], "units": "m"}}
+    }
+  ],
+  "injection_streams": [{"name": "gas", "phase": "hydrocarbon", "composition": [0.99, 0.01]}],
+  "schedule": {
+    "phases": [{"duration": {"value": 100, "units": "day"}, "rate": {"value": 10, "units": "m^2/day"}, "stream": "gas"}]
+  },
+  "initial_state": {
+    "datum_elevation": {"value": 20, "units": "m"},
+    "datum_pressure": {"value": 10, "units": "MPa"},
+    "hydrostatic_density": {"value": 750, "units": "kg/m^3"},
+    "water_saturation": 0.2,
+    "composition": [0.3, 0.7]
+  }
+}

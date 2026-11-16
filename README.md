@@ -10,6 +10,10 @@ The commercial solver binaries and backend services are licensed separately. Thi
 ## Installation
 
 FrequenSolve supports Python 3.10 through 3.14 on macOS and Linux.
+Native Windows is unsupported for this release. On a Windows computer, run
+Python and your notebook kernel inside WSL2, a Linux container, or a remote
+Linux/macOS host. A remote solver does not make a native Windows client
+supported. See the [platform support boundary](docs/source/installation.rst).
 
 Create an isolated environment and install the released FrequenSolve Python
 API with:
@@ -91,7 +95,7 @@ lin = problem.linearize()          # value, gradient, jacobian, normal
 result = im.FWI(
     problem,
     stages=im.Stage.bands([[4.0], [4.0, 6.0, 8.0]], iterations=[10, 15]),
-    penalty=im.Tikhonov(alpha=1e-2),
+    regularization=im.Tikhonov(alpha=1e-2),
     checkpoint="checkpoint.h5",
 ).run()
 ```
@@ -217,6 +221,9 @@ python -m pytest -m hpc
 python -m pytest -m visual
 ```
 
+The [small native 3D acceptance guide](docs/guides/native-3d-acceptance.md)
+describes a focused local solver case and its remaining release-evidence limits.
+
 ## Documentation
 
 Build the Sphinx documentation locally with:
@@ -239,3 +246,41 @@ Fast solver contract updates are tracked in `docs/source/fast_solver_api_updates
 ## License And Support
 
 FrequenSolve Python API is open source under the MIT license. The fast solver is licensed separately; for solver access and support, contact support@frequensol.com.
+
+### Execution-site contract checks
+
+Install `python3 -m pip install -e ".[dev,cloud]"`, then run
+`make test-execution-site-contracts PYTHON=python3`. The Cloud extra supplies
+`boto3` and `requests`; these are needed even though provider calls are mocked. These checks are offline and use synthetic
+fixtures. The shared contracts and cross-repo exchange runner are owned by
+[Cloud](https://github.com/FrequenSol/cloud-amplify/tree/pre-dev/contracts/execution-site).
+They verify component agreement without claiming hosted Slurm acceptance.
+
+## Opt-in CPU sharing
+
+Managed cloud submissions default to CPU sharing off. Use
+`site.submit(job, allow_cpu_sharing=True)` to allow up to two eligible
+single-CPU frequency jobs per vCPU. The setting applies only to that submission;
+omit it or pass `False` for ordinary CPU allocation. Memory reservations are
+unchanged. Single-node, single-rank submissions are supported; frequencies that
+need more than one CPU remain unshared. This can improve throughput for small
+jobs but does not guarantee a speedup.
+
+Cloud freezes `resources.allowCpuSharing` and requires the registered capability
+`cpu-sharing-2x.v1` for opt-in requests. Register that capability only after the
+new runtime is installed and the existing `cpu-single` partition is verified as
+`OverSubscribe=YES:2` with consumable memory scheduling. The frequency manifest
+records each job's effective `allow_cpu_sharing`; eligible scripts request
+`--oversubscribe`. No additional sharing partition is used. Deploy runtime and
+partition support before advertising the capability. Older submissions remain
+compatible and do not request sharing. Run details display the saved preference.
+
+Mixed-mode scheduling can depend on arrival order. In the Slurm 25.11.6
+`select/cons_tres` live probe, enabled jobs waited behind a running disabled job
+even with another CPU idle. In the reverse order, a disabled job could run on
+the other CPU alongside an enabled job. Disabled jobs retained unshared CPU
+allocations; enabled-only jobs reached two jobs per CPU, subject to memory.
+Mixed submissions or mixed eligible/ineligible frequencies can therefore
+experience additional queue time. This option is intended for batches of small
+single-CPU frequency jobs; it is not a guarantee of faster execution for every
+simulation.

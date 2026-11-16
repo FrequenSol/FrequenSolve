@@ -90,6 +90,92 @@ def test_run_handle_wait_honors_submit_time_fetch_after_success():
     assert fetch_calls == ["run-1"]
 
 
+@pytest.mark.parametrize("precompleted", [False, True])
+def test_watch_fetches_before_terminal_yield_and_only_once(precompleted):
+    run = (
+        RunHandle.skipped(DummySite(), DummyJob()) if precompleted else successful_run()
+    )
+    fetch_calls = []
+    run._pending_fetch_fn = lambda handle: fetch_calls.append(handle.id)
+    if not precompleted:
+        states = iter(["running", "completed"])
+        run._status_fn = lambda handle: JobStatus(
+            state=next(states), job_id=handle.id, return_code=0
+        )
+
+    statuses = []
+    for status in run.watch():
+        statuses.append(status.state)
+        if status.is_complete:
+            assert fetch_calls == [run.id]
+            break
+        assert fetch_calls == []
+
+    assert statuses == (["skipped"] if precompleted else ["running", "completed"])
+    assert len(list(run.watch())) == 1
+    assert run.wait().successful
+    assert fetch_calls == [run.id]
+
+
+@pytest.mark.parametrize("precompleted", [False, True])
+@pytest.mark.parametrize("retry_method", ["watch", "wait"])
+def test_watch_download_failure_preserves_fetch_for_retry(precompleted, retry_method):
+    run = (
+        RunHandle.skipped(DummySite(), DummyJob()) if precompleted else successful_run()
+    )
+    fetch_calls = []
+
+    def fetch(handle):
+        fetch_calls.append(handle.id)
+        if len(fetch_calls) == 1:
+            raise RuntimeError("temporary download failure")
+
+    run._pending_fetch_fn = fetch
+    with pytest.raises(RuntimeError, match="temporary download failure"):
+        list(run.watch())
+
+    assert run._result.successful
+    assert run._pending_fetch_fn is fetch
+    if retry_method == "watch":
+        assert len(list(run.watch())) == 1
+    else:
+        assert run.wait().successful
+    assert run._pending_fetch_fn is None
+    assert run.wait().successful
+    assert fetch_calls == [run.id, run.id]
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "timeout"])
+def test_watch_does_not_fetch_unsuccessful_terminal_outputs(state):
+    run = failed_run()
+    run._status_fn = lambda handle: JobStatus(
+        state=state, job_id=handle.id, return_code=1
+    )
+    fetch_calls = []
+    run._pending_fetch_fn = lambda handle: fetch_calls.append(handle.id)
+
+    assert [status.state for status in run.watch()] == [state]
+    assert fetch_calls == []
+    with pytest.raises(RunFailedError):
+        run.wait()
+    assert fetch_calls == []
+
+
+def test_watch_local_timeout_does_not_fetch(monkeypatch):
+    from frequensolve.orchestrator.sites import base
+
+    times = iter([0.0, 2.0])
+    monkeypatch.setattr(base.time, "monotonic", lambda: next(times))
+    run = successful_run()
+    run._status_fn = lambda handle: JobStatus(state="running", job_id=handle.id)
+    fetch_calls = []
+    run._pending_fetch_fn = lambda handle: fetch_calls.append(handle.id)
+
+    assert [status.state for status in run.watch(timeout=1)] == ["running", "timeout"]
+    assert fetch_calls == []
+    assert run._result.status.state == "timeout"
+
+
 def test_precompleted_fetch_intent_retries_after_fetch_failure():
     fetch_calls = []
     run = RunHandle.skipped(DummySite(), DummyJob())
@@ -392,6 +478,96 @@ def test_failed_run_result_traces_raise_before_fetching_outputs():
     assert site.fetch_traces_called is False
 
 
+def polling_run(outcomes):
+    run = successful_run()
+    values = iter(outcomes)
+    calls = []
+
+    def poll(handle):
+        calls.append(handle.id)
+        value = next(values)
+        if isinstance(value, Exception):
+            raise value
+        return JobStatus(state=value, job_id=handle.id, return_code=0)
+
+    run._status_fn = poll
+    return run, calls
+
+
+def test_wait_recovers_transient_reads_and_resets_consecutive_failure_bound():
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    transient = TransientStatusReadError("observe existing run-1; do not resubmit")
+    run, calls = polling_run(
+        ["running", transient, transient, "running", transient, transient, "completed"]
+    )
+    fetched = []
+    run._pending_fetch_fn = lambda handle: fetched.append(handle.id)
+    assert run.wait().successful
+    assert calls == ["run-1"] * 7
+    assert fetched == ["run-1"]
+
+
+def test_wait_exhaustion_preserves_handle_for_later_recovery():
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    transient = TransientStatusReadError("observe existing run-1; do not resubmit")
+    run, calls = polling_run([transient] * 3 + ["completed"])
+    with pytest.raises(TransientStatusReadError, match="existing run-1"):
+        run.wait()
+    assert len(calls) == 3
+    assert run._result is None
+    assert run.wait().successful
+    assert len(calls) == 4
+
+
+def test_transient_read_does_not_restart_timeout_or_poll_after_deadline(monkeypatch):
+    from frequensolve.orchestrator.utils import progress
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    now = [0.0]
+    monkeypatch.setattr(progress.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        progress.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds)
+    )
+    run, calls = polling_run([TransientStatusReadError("temporary"), "completed"])
+    run.poll_interval = 2
+    result = run.wait(timeout=1, check=False)
+    assert result.status.state == "timeout"
+    assert len(calls) == 1
+
+
+def test_transient_read_does_not_block_other_runs():
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    first, first_calls = polling_run(
+        [TransientStatusReadError("temporary"), "completed"]
+    )
+    second, second_calls = polling_run(["completed"])
+    assert all(result.successful for result in wait_all([first, second]))
+    assert len(first_calls) == 2
+    assert len(second_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("access denied"), ValueError("malformed")]
+)
+def test_wait_does_not_retry_permanent_status_errors(error):
+    run, calls = polling_run([error, "completed"])
+    with pytest.raises(type(error), match=str(error)):
+        run.wait()
+    assert len(calls) == 1
+
+
+def test_terminal_failure_after_transient_read_still_raises():
+    from frequensolve.orchestrator.utils.status_errors import TransientStatusReadError
+
+    run, calls = polling_run([TransientStatusReadError("temporary"), "failed"])
+    with pytest.raises(RunFailedError):
+        run.wait()
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("state", ["failed", "cancelled", "timeout", "completed"])
 def test_result_preserves_failures_without_requiring_trace_outputs(state):
     class FailedOutputJob(DummyJob):
@@ -428,4 +604,29 @@ def test_successful_result_still_validates_trace_manifest():
     run = successful_run()
     run.job = BrokenOutputJob()
     with pytest.raises(ArtifactContractError, match="missing committed trace artifact"):
+        run.wait()
+
+
+@pytest.mark.parametrize("mode", ["batch", "attached"])
+def test_remote_completion_does_not_open_undownloaded_trace_payloads(mode):
+    class RemoteJob(DummyJob):
+        @property
+        def trace_manifest(self):
+            pytest.fail("Metadata-only completion must defer reading trace payloads")
+
+    run = successful_run()
+    run.mode, run.job = mode, RemoteJob()
+    result = run.wait()
+    assert result.successful and result.trace_manifest is None
+
+
+def test_remote_wait_preserves_requested_download_failure():
+    run = successful_run()
+    run.mode = "batch"
+
+    def fetch(_):
+        raise FileNotFoundError("required packed payload is missing")
+
+    run._pending_fetch_fn = fetch
+    with pytest.raises(FileNotFoundError, match="required packed payload"):
         run.wait()

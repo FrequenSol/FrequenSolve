@@ -50,6 +50,32 @@ def _project_with_trace_simulation(tmp_path):
     return project, sim
 
 
+@pytest.mark.parametrize("frequencies", [[3], [3, 7.5], [3 - 0.5j]])
+@pytest.mark.parametrize("grading", [{}, {"adapt_sources": 0, "adapt_receivers": 2}])
+def test_saved_job_reload_preserves_exact_input_fingerprints(
+    tmp_path, frequencies, grading
+):
+    _, simulation = _project_with_trace_simulation(tmp_path)
+    simulation.mesh.set_adapt(elems_per_wave=0.5, order=2, **grading)
+    job = FrequencyDomainJob("stable", simulation, frequencies)
+    job.save()
+    _commit_task_result(job, 1)
+    fingerprints = job._artifact_contract_fingerprints()
+    simulation_bytes = simulation._file.read_bytes()
+    job_bytes = job.job_file.read_bytes()
+
+    restored = FrequencyDomainJob.load(job.job_file)
+    restored.save()
+
+    assert restored.simulation._file.read_bytes() == simulation_bytes
+    assert restored.job_file.read_bytes() == job_bytes
+    assert restored._artifact_contract_fingerprints() == fingerprints
+    assert restored.plan_tasks()["strict_current_tasks"] == [1]
+    restored.simulation.mesh.adapt.order += 1
+    restored.save()
+    assert restored.plan_tasks()["strict_current_tasks"] == []
+
+
 def _commit_task_result(
     job,
     task,
@@ -923,7 +949,7 @@ def test_local_submit_autosaves_job_and_simulation(monkeypatch, tmp_path):
     monkeypatch.setattr(LocalSite, "_get_solver_path", lambda self: "/bin/echo")
     _, sim = _project_with_trace_simulation(tmp_path)
     job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
-    site = LocalSite()
+    site = LocalSite(solver_policy="off")
 
     monkeypatch.setattr(site, "_submit_local_tasks", lambda job, **kwargs: [])
 
@@ -945,7 +971,7 @@ def test_local_fetch_logs_selects_task_and_frequency(monkeypatch, tmp_path):
     first.write_text("ten hertz")
     second.write_text("twenty hertz")
 
-    site = LocalSite()
+    site = LocalSite(solver_policy="off")
 
     assert site.fetch_logs(job) == job._stdout_path
     assert site.fetch_logs(job, task=2) == second
@@ -1330,6 +1356,175 @@ def test_run_result_logs_delegates_when_local_cache_cannot_answer(
 
     assert result.logs(**kwargs) == fetched
     assert calls == [(job, kwargs)]
+
+
+def test_native_task_timings_stay_bound_to_the_completed_cloud_run(tmp_path):
+    from frequensolve.orchestrator.sites.aws.aws import AWSSite
+
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg", force=True)
+    _, sim = _project_with_trace_simulation(tmp_path)
+    authored = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0, 10.0])
+    authored.save()
+    first = AWSSite._snapshot_run_job(authored, "synthetic-first-run")
+    second = AWSSite._snapshot_run_job(authored, "synthetic-second-run")
+    for run, durations in [(first, [0.5, 1.25]), (second, [7.0, 9.0])]:
+        for task, elapsed in enumerate(durations, 1):
+            _commit_task_result(
+                run,
+                task,
+                timings={"setup": elapsed / 4, "solve_forward": elapsed * 3 / 4},
+            )
+        run.collect_task_results()
+    assert authored.task_timings() == []  # Authored jobs never select a sibling run.
+    assert [r["duration_seconds"] for r in first.task_timings()] == [0.5, 1.25]
+    assert [r["duration_seconds"] for r in second.task_timings()] == [7.0, 9.0]
+    assert first.frequency_summary() == {
+        "total": 2,
+        "succeeded": 2,
+        "failed": 0,
+        "not_run": 0,
+    }
+    assert [r["total_seconds"] for r in first.phase_timings()] == [0.5, 1.25]
+    assert [p.get_height() for p in first.plot_task_timings().patches] == [0.5, 1.25]
+    assert len(first.plot_phase_timings().patches) == 4
+    import matplotlib.pyplot as plt
+
+    plt.close("all")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema": "fs-timings-1", "task": 2, "elapsed_s": 50},
+        {"schema": "unknown", "task": 1, "elapsed_s": 50},
+        {"schema": "fs-timings-1", "task": 1},
+        [],
+        None,
+    ],
+)
+def test_per_task_timing_reader_does_not_invent_or_misattribute_durations(
+    tmp_path, payload
+):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    path = task_result_path(job._result_path, 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+    assert job.task_timings() == []
+
+
+def test_per_task_timings_reject_stale_metadata_after_job_frequency_edit(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    _commit_task_result(job, 1, timings={"solve_forward": 2.0})
+    assert job.task_timings()[0]["duration_seconds"] == 2.0
+    job.f_list = [10.0]
+    job.plan_tasks(apply=True)
+    assert job.task_timings() == []
+    assert job.phase_timings() == []
+
+
+@pytest.mark.parametrize(
+    "manifest_payload",
+    [
+        None,
+        [],
+        {"execution": {"command_line": ["solver", "--task", "2"]}},
+        {"inputs": {"task": {"frequency": 5.0, "outputs_hash": "stale"}}},
+    ],
+)
+def test_per_task_timings_require_a_matching_task_manifest(tmp_path, manifest_payload):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    _commit_task_result(job, 1, timings={"solve_forward": 2.0})
+    path = task_result_path(job._result_path, 1)
+    document = json.loads(path.read_text())
+    document["fingerprints"] = manifest_payload
+    path.write_text(json.dumps(document))
+    assert job.task_timings() == []
+    assert job.phase_timings() == []
+
+
+def test_per_task_timings_accept_matching_first_task_planner_metadata(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[5.0])
+    job.save()
+    _commit_task_result(job, 1, timings={"solve_forward": 2.0}, artifact=False)
+    assert job.task_timings()[0]["duration_seconds"] == 2.0
+    assert job.phase_timings()[0]["total_seconds"] == 2.0
+
+
+def test_job_loading_accepts_a_structural_saved_job_source(tmp_path):
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job_file = job.save()
+    loaded = BaseJob.load(SimpleNamespace(job_file=job_file))
+    assert loaded.job_file == job_file
+    assert loaded.f_list == [1.0]
+
+
+def test_job_staging_rejects_a_simulation_without_save_before_writing(tmp_path):
+    job = BaseJob(
+        name="unsaveable",
+        simulation=SimpleNamespace(),
+        workflow="forward",
+        f_list=[1.0],
+    )
+    with pytest.raises(TypeError, match="must support saving before staging"):
+        job.save()
+    assert job._file is None
+    assert not list(tmp_path.iterdir())
+
+
+def test_timing_axis_preserves_all_rows_when_one_frequency_is_unknown():
+    from frequensolve.simulation.jobs.timings import JobTimingMixin
+
+    labels = []
+    axes = SimpleNamespace(set_xlabel=labels.append)
+    rows = [
+        {"task": 1, "frequency": 2.0},
+        {"task": 2, "frequency": None},
+        {"task": 3, "frequency": 1.0},
+    ]
+    xs, actual, integer_axis = JobTimingMixin._timing_x_values(
+        rows, x="frequency", ax=axes
+    )
+    assert xs.tolist() == [1.0, 2.0, 3.0]
+    assert actual == rows
+    assert integer_axis
+    assert labels == ["Frequency task"]
+    rows[1]["frequency"] = 3.0
+    xs, actual, integer_axis = JobTimingMixin._timing_x_values(
+        rows, x="frequency", ax=axes
+    )
+    assert xs.tolist() == [1.0, 2.0, 3.0]
+    assert [row["task"] for row in actual] == [3, 1, 2]
+    assert not integer_axis
+
+
+@pytest.mark.parametrize(
+    "loader", [BaseJob.load, lambda path: fs.load(path, kind="job")]
+)
+@pytest.mark.parametrize("path_kind", ["pure", "custom"])
+def test_job_loading_preserves_generic_pathlike_inputs(tmp_path, loader, path_kind):
+    from pathlib import PurePath
+
+    _, sim = _project_with_trace_simulation(tmp_path)
+    job = FrequencyDomainJob(name="freq", simulation=sim, f_list=[1.0])
+    job_file = job.save()
+
+    class SavedPath:
+        def __fspath__(self):
+            return str(job_file)
+
+    source = PurePath(job_file) if path_kind == "pure" else SavedPath()
+    loaded = loader(source)
+    assert loaded.job_file == job_file
+    assert loaded.f_list == [1.0]
 
 
 def test_rebuilt_job_save_keeps_committed_tasks_current(tmp_path):

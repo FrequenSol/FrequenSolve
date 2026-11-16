@@ -40,19 +40,25 @@ class Stampede3Site(SlurmSite):
         default_queue: Deprecated compatibility alias for
             ``default_partition``.
         run_config: Optional per-run SLURM settings.
+        curvature_run_config: Optional SLURM settings for Sauce curvature
+            batch jobs; ``run_config`` is used when omitted.
         username: TACC username.
         credential: Keyring lookup name.
         ssh_key: Optional SSH private-key path.
         solver: Remote path to the ``FS_seismic`` solver router executable.
         work_dir: Remote base directory used to resolve relative FrequenSolve
-            paths. It may be on any writable remote filesystem and defaults to
-            ``$WORK/frequensolve``.
+            paths. It may be on any writable remote filesystem, may start with
+            ``$WORK`` or ``$SCRATCH``, and defaults to ``$WORK/frequensolve``.
+        storage: ``"scratch"`` moves the default ``work_dir`` to
+            ``$SCRATCH/frequensolve``; ``"work"`` (default) keeps ``$WORK``.
         scratch_dir: Optional remote scratch directory reserved for future
             model and high-I/O storage.
         modules: Environment modules loaded before solver execution.
         environment: Non-secret environment values exported before solver
             execution.
         verbose: Whether to enable verbose site logging.
+        background_layout: Files of a background capture, ``"rank"``
+            (default) or ``"shared"``.
     """
 
     credentials: TACCLoginCredentials
@@ -60,7 +66,6 @@ class Stampede3Site(SlurmSite):
     pool: PoolInfo
     transfer_method: Literal["rsync", "sftp"] = "rsync"
     _login_client: SSHClientClass
-    _compute_client: SSHClientClass
     _work_dir: Path
     _executable: str
 
@@ -90,6 +95,9 @@ class Stampede3Site(SlurmSite):
         environment: Optional[dict[str, object]] = None,
         run_config: Optional[SlurmRunConfig] = None,
         verbose: bool = False,
+        curvature_run_config: Optional[SlurmRunConfig] = None,
+        storage: Optional[str] = None,
+        background_layout: str = "rank",
     ):
         super().__init__(
             rel_path=rel_path,
@@ -108,4 +116,7 @@ class Stampede3Site(SlurmSite):
             environment=environment,
             run_config=run_config,
             verbose=verbose,
+            curvature_run_config=curvature_run_config,
+            storage=storage,
+            background_layout=background_layout,
         )

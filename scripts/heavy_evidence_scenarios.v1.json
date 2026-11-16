@@ -16,6 +16,22 @@
       }
     },
     {
+      "id": "local-3d-acoustic-reciprocity",
+      "kind": "local-solve",
+      "junit": {
+        "classname": "tests.test_native_3d_workflow",
+        "name": "test_native_3d_pressure_reciprocity"
+      }
+    },
+    {
+      "id": "local-2d-elastic-reciprocity",
+      "kind": "local-solve",
+      "junit": {
+        "classname": "tests.test_native_elastic_workflow",
+        "name": "test_native_elastic_velocity_reciprocity"
+      }
+    },
+    {
       "id": "acquisition-v2-init-sizing",
       "kind": "solver-contract",
       "junit": {

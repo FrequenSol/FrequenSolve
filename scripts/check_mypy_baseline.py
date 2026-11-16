@@ -26,17 +26,23 @@ PHASE_ONE_STRICT_PATHS = (
     "src/frequensolve/model/layered/model.py",
     "src/frequensolve/model/layered/surfaces.py",
     "src/frequensolve/model/model.py",
+    "src/frequensolve/seismic/acquisition.py",
+    "src/frequensolve/seismic/sources.py",
     "src/frequensolve/seismic/trace_geometry.py",
     "src/frequensolve/seismic/trace_record.py",
     "src/frequensolve/simulation/discretization.py",
+    "src/frequensolve/simulation/jobs/serialization.py",
     "src/frequensolve/simulation/sampling.py",
     "src/frequensolve/simulation/solver.py",
     "src/frequensolve/simulation/study.py",
     "src/frequensolve/units.py",
+    "src/frequensolve/util/store.py",
     "src/frequensolve/validation/",
 )
 
 PHASE_TWO_STRICT_PATHS = (
+    "src/frequensolve/simulation/jobs/remote.py",
+    "src/frequensolve/simulation/jobs/timings.py",
     "src/frequensolve/orchestrator/sites/base.py",
     "src/frequensolve/orchestrator/sites/local/",
     "src/frequensolve/orchestrator/utils/__init__.py",
@@ -182,7 +188,11 @@ def _run_mypy(root: Path) -> Counter[Diagnostic]:
     if result.returncode not in {0, 1}:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"mypy failed to produce diagnostics: {detail}")
-    return parse_diagnostics(result.stdout, root)
+    diagnostics = parse_diagnostics(result.stdout, root)
+    if result.returncode == 1 and not diagnostics:
+        detail = result.stderr.strip() or "exit status 1 without error diagnostics"
+        raise RuntimeError(f"mypy failed to produce diagnostics: {detail}")
+    return diagnostics
 
 
 def _load_baseline(

@@ -197,17 +197,11 @@ def test_local_submit_honors_the_job_postprocess_only_attribute(monkeypatch, tmp
 
 def test_slurm_submit_honors_the_job_postprocess_only_attribute(monkeypatch, tmp_path):
     monkeypatch.setattr(hpc, "SSHClientClass", DummySSHClientClass)
-    monkeypatch.setattr(DummySlurmSite, "provisioned", property(lambda self: True))
     site = DummySlurmSite("project/run")
     monkeypatch.setattr(site, "prepare_job", lambda *_, **__: None)
     monkeypatch.setattr(site, "_reattach_inflight_run", lambda *_, **__: None)
     monkeypatch.setattr(site, "is_run_current", lambda job: False)
     monkeypatch.setattr(site, "_remote_postprocess_needed", lambda job: False)
-    monkeypatch.setattr(
-        site,
-        "_submit_attached",
-        lambda *args, **kwargs: pytest.fail("attached sweep was submitted"),
-    )
     captured = {}
 
     def submit_batch(job, config, **kwargs):
@@ -220,7 +214,7 @@ def test_slurm_submit_honors_the_job_postprocess_only_attribute(monkeypatch, tmp
 
     assert run.id == "42"
     assert captured["smooth_only"] is True
-    with pytest.raises(ValueError, match="batch"):
+    with pytest.raises(RuntimeError, match="mode='batch'"):
         site.submit(_PostprocessOnlyJob(tmp_path), mode="attached")
     with pytest.raises(ValueError, match="postprocess_only"):
         site.submit(DummyJob(), postprocess_only=True)
@@ -298,7 +292,11 @@ def test_slurm_fetch_outputs_fetches_every_postprocess_role(monkeypatch, tmp_pat
 
     site.fetch_outputs(job)
 
-    assert calls[0] == {"requests": (), "include_defaults": True}
+    assert calls[0] == {
+        "requests": (),
+        "include_defaults": True,
+        "operations": ("pack",),
+    }
     assert calls[1]["operations"] == ("smooth",)
     assert calls[1]["include_defaults"] is False
     assert tuple(request.role for request in calls[1]["requests"]) == (

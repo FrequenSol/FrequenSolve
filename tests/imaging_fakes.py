@@ -16,8 +16,11 @@ Per action (``task`` is one-based; ``f`` its frequency; ``R`` the rows of
 ``f``; ``m`` the active slice of ``controls.state`` or zeros):
 
 ``linearize``
-    writes ``state_<task>.json`` (a stub holding the invented fingerprints,
-    active blocks, sizes, ``m`` and ``f``), ``<report stem>_<task>.json``
+    writes ``state_<task>.json`` (an ``fs-objective-linearization-5`` manifest
+    with one canonical ``state_<task>_cache.h5`` and per-dataset digests, or a
+    ``-3`` manifest with per-rank shards; either also holds the invented
+    fingerprints, active blocks, sizes, ``m`` and ``f``, under ``fake`` in
+    version 5), ``<report stem>_<task>.json``
     (``fs-objective-report-1`` with ``total = 0.5*||J[R] m - d[R]||^2`` and one
     term per receiver group), the covector ``Re(J[R]^H (J[R] m - d[R]))`` as
     ``<covector stem>_<task>.h5`` (``fs-control-vector-1`` with all-ones
@@ -41,10 +44,12 @@ coordinates (``J[R] (c_t dv)`` and ``c_t Re(J[R]^H r)``), exactly like Sauce.
 the normalized physical coordinate.
 ``jvp``
     reads ``direction`` and writes ``<objective_vector stem>_<task>.json`` with
-    ``J[R] dv`` (``fs-objective-vector-3``).
+    ``J[R] dv`` (``fs-objective-vector-5`` in the state's precision, or ``-3``
+    for a ``-3`` state).
 ``vjp``
-    reads the ``objective_vector`` input and writes ``Re(J[R]^H r[R])`` as the
-    task covector.
+    reads the ``objective_vector`` input (rejecting another format than its
+    state's dual, like Sauce) and writes ``Re(J[R]^H r[R])`` as the task
+    covector.
 
 Operator inputs (``state``, ``direction``, ``objective_vector`` of vjp,
 ``extension.direction``) resolve like Sauce's: a multi-task job reads the
@@ -78,14 +83,8 @@ complex matrix ``B`` of shape ``(data_space.size, n_taps)`` per linearization
     with ``reduced_normal`` the Schur action ``G*G dv - G*B_S (B_S*B_S +
     D)^-1 B_S*G dv`` on the physical ``direction``.
 
-Three more job kinds run on the same surrogate:
+Two more job kinds run on the same surrogate:
 
-``ControlGradientJob(kind="focus")``
-    the focusing objective of task ``t`` is ``softening * 0.5 *
-    ||J[R] m - d[R]||^2`` with ``m`` read from ``current`` (native vector) or
-    the authored coefficients; ``gradient_<t>.h5`` (native) and
-    ``objective_<t>.h5`` (``/value``) are written per task, then the
-    weighted sums ``gradient.h5``, ``gradient_raw.h5`` and ``objective.h5``.
 ``ImageKernelJob`` (``workflow="rtm"``)
     every task writes ``image_<t>.h5`` under ``save_path`` holding
     ``/frequency`` and ``/image/raw`` with one dataset per image filled by
@@ -108,7 +107,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import h5py
 import numpy as np
@@ -117,12 +116,19 @@ from frequensolve.geometry.grids import CartesianGrid
 from frequensolve.imaging._artifacts import (
     ControlStateFile,
     ControlVectorFile,
+    ControlVectorSetFile,
     ExtensionVectorField,
     ExtensionVectorFile,
     qualified_block_name,
     unqualified_block_name,
 )
-from frequensolve.imaging.data import DataSpace, DataVector
+from frequensolve.imaging._block_digest import flat_block_digest
+from frequensolve.imaging.data import (
+    DataSpace,
+    DataVector,
+    canonical_json_sha256,
+    file_sha256,
+)
 from frequensolve.imaging.jobs import (
     ControlGradientJob,
     FWIOperatorJob,
@@ -144,7 +150,13 @@ from frequensolve.simulation.artifact_contract import (
     task_result_path,
 )
 
-FAKE_STATE_SCHEMA = "fake-imaging-state-1"
+FAKE_STATE_SCHEMA = "fs-objective-linearization-5"
+LEGACY_STATE_SCHEMA = "fs-objective-linearization-3"
+# The objective-vector schema Sauce writes and reads for each state.
+_VECTOR_SCHEMAS = {
+    FAKE_STATE_SCHEMA: "fs-objective-vector-5",
+    LEGACY_STATE_SCHEMA: "fs-objective-vector-3",
+}
 FAKE_IMAGE_SCHEMA = "fs-image-hdf5-1"
 _ZERO_DIGEST = "sha256:" + "0" * 64
 _FAKE_JOBS = (FWIOperatorJob, ControlGradientJob, ImageKernelJob, SmoothJob)
@@ -190,6 +202,45 @@ class FakeLinearization:
         """Return ``Re(J^H (J m - d))`` summed over every frequency."""
 
         return np.real(self.J.conj().T @ self.residual)
+
+
+def seal_state_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """Set an ``fs-objective-linearization-5`` manifest's ``manifest_fingerprint``.
+
+    The fingerprint hashes the canonical JSON of every other key except
+    ``state_fingerprint`` (Sauce's rule).
+    """
+
+    manifest.pop("manifest_fingerprint", None)
+    manifest["manifest_fingerprint"] = canonical_json_sha256(
+        {k: v for k, v in manifest.items() if k != "state_fingerprint"}
+    )
+    return manifest
+
+
+def reseal_state(path: Union[str, Path]) -> Dict[str, Any]:
+    """Recompute the digests and fingerprints of an edited version-5 state.
+
+    Tests that change a cache or the manifest call this so the state stays
+    self-consistent: every dataset of each term group is digested again.
+    """
+
+    path = Path(path)
+    manifest = json.loads(path.read_text())
+    for term in manifest["terms"]:
+        cache = path.parent / term["cache"]["file"]
+        with h5py.File(cache, "r") as h5:
+            group = h5[term["cache"]["group"]]
+            digests = {
+                name: flat_block_digest(group[name][()])
+                for name in group
+                if isinstance(group[name], h5py.Dataset)
+            }
+        term["cache"]["digests"] = digests
+        term["runtime"]["cache_fingerprint"] = canonical_json_sha256(digests)
+    seal_state_manifest(manifest)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
 
 
 def _rows(space: DataSpace, frequency: Any) -> np.ndarray:
@@ -360,17 +411,6 @@ class FakeExtension:
         return GG - GB @ np.linalg.solve(self.normal_matrix(rows, solver), BG)
 
 
-def _write_scalar(path: Path, value: float) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with h5py.File(path, "w") as h5:
-        h5.create_dataset("value", data=float(value))
-
-
-def _read_scalar(path: Path) -> float:
-    with h5py.File(path, "r") as h5:
-        return float(h5["value"][()])
-
-
 class FakeImagingSite(BaseSite):
     """Execute ``fwi_operator`` jobs against a seeded linear surrogate.
 
@@ -379,7 +419,12 @@ class FakeImagingSite(BaseSite):
             Required when a job has no ``controls.state``; when it has one the
             file's sizes are used and checked against this table.
         seed: Seed of the surrogate.
-        n_ranks: Rank count recorded in objective-vector manifests.
+        n_ranks: Rank count of the emulated run, recorded in version-3
+            objective states and vectors and in the control registry;
+            version-5 states and vectors carry no partition.
+        state_schema: ``fs-objective-linearization-5`` (default) or ``-3``.
+        state_dtype: Stored value type of version-5 caches and vectors
+            (``float32`` emulates a single-precision build).
         support_masks: Optional ``qualified block -> bool mask`` written to
             ``/support/<block>`` of every state output and covector (blocks
             not listed are fully supported).  Emulates Sauce freezing DOFs.
@@ -400,8 +445,13 @@ class FakeImagingSite(BaseSite):
         verbose: Print status messages like other sites.
 
     ``submissions`` records one summary per submit and ``jobs`` the submitted
-    job objects in the same order.
+    job objects in the same order. Background checkpoints are written like
+    Sauce's (task manifest and the HDF5 file of the job's layout) and
+    ``removed`` records ``remove_result_files`` calls, which unlink files
+    (but, unlike ``LocalSite``, leave directories in place).
     """
+
+    supports_background_reuse = True
 
     def __init__(
         self,
@@ -409,15 +459,21 @@ class FakeImagingSite(BaseSite):
         *,
         seed: int = 0,
         n_ranks: int = 1,
+        state_schema: str = FAKE_STATE_SCHEMA,
+        state_dtype: Any = np.float64,
         support_masks: Optional[Mapping[str, Any]] = None,
         mechanism_baseline: float = 0.75,
         mechanism_scaling: float = 2.0e9,
         mechanism_reference_frequency: float = 4.0,
         mechanism_scaling_exponent: float = 2.0,
         mechanism_units: str = "N*m",
+        control_identity: bool = True,
         verbose: bool = False,
     ) -> None:
         super().__init__(verbose=verbose)
+        # Current Sauce writes a frequency-independent /control_identity on covectors and reads
+        # direction sets; False emulates an older solver that needs per-task direction copies.
+        self.emits_control_identity = bool(control_identity)
         self.mechanism_baseline = float(mechanism_baseline)
         self.mechanism_scaling = float(mechanism_scaling)
         self.mechanism_reference_frequency = float(mechanism_reference_frequency)
@@ -429,6 +485,10 @@ class FakeImagingSite(BaseSite):
         }
         self.seed = int(seed)
         self.n_ranks = int(n_ranks)
+        if state_schema not in _VECTOR_SCHEMAS:
+            raise ValueError(f"unsupported fake state schema {state_schema!r}")
+        self.state_schema = state_schema
+        self.state_dtype = np.dtype(state_dtype)
         self.support_masks: Dict[str, Any] = {
             qualified_block_name(name): (
                 mask if callable(mask) else np.asarray(mask, dtype=bool).reshape(-1)
@@ -437,7 +497,11 @@ class FakeImagingSite(BaseSite):
         }
         self.submissions: List[Dict[str, Any]] = []
         self.jobs: List[Any] = []
+        self.removed: List[Tuple[str, Tuple[str, ...]]] = []
         self.linearizations: Dict[str, FakeLinearization] = {}
+        self.direction_set_rows: Dict[str, int] = (
+            {}
+        )  # job name -> rows of its direction set
 
     def support_mask(self, name: str, size: int, frequency: Any = None) -> np.ndarray:
         """Return the configured support mask of ``name`` (all true by default).
@@ -664,6 +728,56 @@ class FakeImagingSite(BaseSite):
     def cancel_job(self, job_id: str) -> bool:
         return False
 
+    def remove_result_files(self, job: Any, relative_paths: Iterable[str]) -> None:
+        paths = tuple(relative_paths)
+        super().remove_result_files(job, paths)
+        self.removed.append((job.name, paths))
+        for name in paths:
+            (Path(job._result_path) / name).unlink(missing_ok=True)
+
+    @staticmethod
+    def _write_background(job: FWIOperatorJob, task: int, state_fp: str) -> None:
+        """Write a one-rank, one-batch ``fs-background-state-2`` checkpoint.
+
+        Laid out like Sauce's in the job's ``background_layout``: one file
+        per rank (``rank``, the default) or one shared file per task.
+        """
+
+        manifest = job.background_file(task)
+        layout = job.background_layout or "rank"
+        name = "fields.h5" if layout == "shared" else "rank_00000.h5"
+        data = f"{manifest.stem}/generations/fake/{name}"
+        payload = manifest.parent / data
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(b"\0" * 4096)
+        digest = hashlib.sha256(state_fp.encode("utf-8")).hexdigest()
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-background-state-2",
+                    "layout": layout,
+                    "storage": "full",
+                    "context": "fake",
+                    "state": state_fp,
+                    "build": "fake",
+                    "ranks": 1,
+                    "slabs": [{"columns": 256, "offset": 0}],
+                    "batches": [
+                        {
+                            "source_first": 1,
+                            "n_sources": 2,
+                            "digest": f"fs-block-sha256-1:{digest}",
+                        }
+                    ],
+                    **(
+                        {"file": data}
+                        if layout == "shared"
+                        else {"shards": [{"file": data}]}
+                    ),
+                }
+            )
+        )
+
     # -- execution ------------------------------------------------------------
 
     def _execute(self, job: Any) -> None:
@@ -673,8 +787,9 @@ class FakeImagingSite(BaseSite):
         if isinstance(job, SmoothJob):
             raise ValueError("SmoothJob runs as a postprocess-only submission")
         if isinstance(job, ControlGradientJob):
-            self._execute_focus(job)
-            return
+            raise NotImplementedError(
+                f"{type(self).__name__} does not execute control gradient jobs"
+            )
         if isinstance(job, ImageKernelJob):
             self._execute_images(job)
             return
@@ -753,7 +868,13 @@ class FakeImagingSite(BaseSite):
                 ext = self.extension_surrogate(lin, fields, sizes)
                 if job.extension.get("manifest") is not None:
                     self._write_extension_manifest(
-                        _task_path(job.extension_manifest_file(), task), ext
+                        _task_path(job.extension_manifest_file(), task),
+                        ext,
+                        (
+                            self.control_identity(lin)
+                            if self.emits_control_identity
+                            else None
+                        ),
                     )
                 if job.extension.get("covector") is not None:
                     rows = lin.rows(frequency)
@@ -778,7 +899,7 @@ class FakeImagingSite(BaseSite):
                     job.objective_vector_file(task),
                     state_fingerprint=lin.state_fingerprint,
                     term_layout=lin.space.term_layouts(frequency=frequency),
-                    n_ranks=self.n_ranks,
+                    **self._vector_options(),
                 )
             elif job.action == "vjp":
                 r = self._objective_vector(job, task, lin, frequency)
@@ -875,7 +996,10 @@ class FakeImagingSite(BaseSite):
             )
             report["background_gradient_stationary"] = True
         if job.reduced_normal is not None:
-            dv = self._direction(job, lin, task)
+            if job.direction_set is not None:
+                (dv,) = self._direction_rows(job, lin, frequency)
+            else:
+                dv = self._direction(job, lin, task)
             options = job.reduced_normal
             response_converged = int(options.get("max_iterations", 50)) > 0
             action = ext.reduced_normal_matrix(rows, G, solver) @ dv
@@ -909,7 +1033,13 @@ class FakeImagingSite(BaseSite):
         vector = ExtensionVectorFile.read(path)
         if vector.fingerprint != ext.fingerprint:
             raise ValueError(f"{path} belongs to another extension basis")
-        if vector.baseline != ext.baseline:
+        if vector.control_identity is not None:
+            # One tap vector for every task: checked against the linearization's identity.
+            if not self.emits_control_identity:
+                raise ValueError("this fake solver predates single-copy tap vectors")
+            if vector.control_identity != _sha256({"control_identity": ext.baseline}):
+                raise ValueError(f"{path} belongs to another linearization")
+        elif vector.baseline != ext.baseline:
             raise ValueError(f"{path} belongs to another objective state")
         if vector.role != "tangent":
             raise ValueError(f"{path} is not a tangent extension vector")
@@ -938,7 +1068,9 @@ class FakeImagingSite(BaseSite):
         ).write(path)
 
     @staticmethod
-    def _write_extension_manifest(path: Path, ext: FakeExtension) -> None:
+    def _write_extension_manifest(
+        path: Path, ext: FakeExtension, control_identity: Optional[str] = None
+    ) -> None:
         fields = []
         for field in ext.fields:
             entry: Dict[str, Any] = {
@@ -958,6 +1090,8 @@ class FakeImagingSite(BaseSite):
             "baseline": ext.baseline,
             "fields": fields,
         }
+        if control_identity is not None:
+            payload["control_identity"] = control_identity
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
@@ -990,6 +1124,14 @@ class FakeImagingSite(BaseSite):
             rows = lin.rows(frequency)
             residual = J[rows] @ m - d[rows]
             self._write_state(job, task, lin, frequency)
+            if job.background is not None:
+                self._write_background(job, task, state_fp)
+            if job.receiver_diagonal is not None:
+                ControlVectorFile.from_packed(
+                    np.sum(np.abs(J[rows]) ** 2, axis=0),
+                    lin.sizes,
+                    native=True,
+                ).write(job.diagonal_file(task))
             if job.objective is not None:
                 self._write_report(job, task, lin, frequency, residual)
             if job.covector is not None:
@@ -1027,14 +1169,17 @@ class FakeImagingSite(BaseSite):
             # directions and covectors are in the executing task's coordinates
             c = self.column_scale(lin.active, lin.sizes, frequency)
             if job.action == "jvp":
-                dv = self._direction(job, lin, task)
+                if job.direction_set is not None:
+                    (dv,) = self._direction_rows(job, lin, frequency)
+                else:
+                    dv = self._direction(job, lin, task)
                 values = np.zeros(lin.space.size, dtype=np.complex128)
                 values[rows] = J @ (c * dv)
                 DataVector(values, lin.space).write_objective_vector(
                     job.objective_vector_file(task),
                     state_fingerprint=lin.state_fingerprint,
                     term_layout=lin.space.term_layouts(frequency=frequency),
-                    n_ranks=self.n_ranks,
+                    **self._vector_options(),
                 )
             elif job.action == "vjp":
                 r = self._objective_vector(job, task, lin, frequency)
@@ -1044,6 +1189,36 @@ class FakeImagingSite(BaseSite):
                     c * np.real(J.conj().T @ r[rows]),
                     frequency=frequency,
                 )
+            elif (
+                job.direction_set is not None
+            ):  # one direction set, a covector set per task
+                rows = [
+                    c * np.real(J.conj().T @ (J @ (c * dv)))
+                    for dv in self._direction_rows(job, lin, frequency)
+                ]
+                parts = [ControlVectorFile.from_packed(row, lin.sizes) for row in rows]
+                ControlVectorSetFile(
+                    {
+                        name: np.stack([part.blocks[name] for part in parts])
+                        for name in lin.sizes
+                    },
+                    control_identity=self.control_identity(lin),
+                    state_fingerprint=lin.state_fingerprint,
+                    control_registry_fingerprint=lin.control_registry_fingerprint,
+                    support={
+                        name: self.support_mask(name, size, frequency)
+                        for name, size in lin.sizes.items()
+                    },
+                ).write(job.covector_set_file(task))
+            elif job.directions is not None:  # one normal job, several directions
+                for output, direction in enumerate(job.directions):
+                    dv = self._direction(job, lin, task, direction)
+                    self._write_covector(
+                        job.covector_file(task, output=output),
+                        lin,
+                        c * np.real(J.conj().T @ (J @ (c * dv))),
+                        frequency=frequency,
+                    )
             else:  # normal
                 dv = self._direction(job, lin, task)
                 self._write_covector(
@@ -1066,10 +1241,14 @@ class FakeImagingSite(BaseSite):
             self._postprocess_smooth(job)
             return
         if isinstance(job, ControlGradientJob):
-            self._aggregate_focus(job)
-            return
+            raise NotImplementedError(
+                f"{type(self).__name__} does not postprocess control gradient jobs"
+            )
         if isinstance(job, ImageKernelJob):
             self._aggregate_images(job)
+            return
+        if getattr(job, "regularization", None) is not None:
+            self._postprocess_job_regularization(job)
             return
         if not job.requires_postprocess():
             raise ValueError("postprocess requires a smoothing configuration")
@@ -1103,85 +1282,6 @@ class FakeImagingSite(BaseSite):
         )
         aggregate.write(job.covector_file(raw=True))
         aggregate.write(job.covector_file())
-
-    # -- focus ----------------------------------------------------------------
-
-    def _focus_coefficients(
-        self, job: ControlGradientJob
-    ) -> Tuple[List[str], Dict[str, int], np.ndarray]:
-        """Return the active blocks, their sizes and the packed ``m`` of a focus job."""
-
-        if job.current is not None:
-            current = ControlVectorFile.read(job.current)
-            names = list(job.active) if job.active is not None else list(current.names)
-            table = {qualified_block_name(n): int(current[n].size) for n in names}
-            return names, table, current.pack(names)
-        baselines = self._simulation_baselines(job.simulation)
-        for name, size in self.block_sizes.items():
-            baselines.setdefault(name, np.zeros(size))
-        names = (
-            list(job.active)
-            if job.active is not None
-            else [name for name in baselines if name.startswith("model.")]
-        )
-        missing = [n for n in names if qualified_block_name(n) not in baselines]
-        if missing:
-            raise ValueError(f"no authored coefficients for {', '.join(missing)}")
-        table = {
-            qualified_block_name(n): int(baselines[qualified_block_name(n)].size)
-            for n in names
-        }
-        m = np.concatenate([baselines[qualified_block_name(n)] for n in names])
-        return names, table, m
-
-    def _execute_focus(self, job: ControlGradientJob) -> None:
-        if job.kind != "focus":
-            raise NotImplementedError(
-                f"{type(self).__name__} executes focus control gradients only"
-            )
-        assert job.focus is not None
-        softening = float(job.focus["softening"])
-        names, sizes, m = self._focus_coefficients(job)
-        J, d, space = self.surrogate(job.simulation, names, sizes, job.f_list)
-        local = {qualified_block_name(n): sizes[qualified_block_name(n)] for n in names}
-        for task in range(1, job.n_tasks + 1):
-            rows = _rows(space, job.f_list[task - 1])
-            residual = J[rows] @ m - d[rows]
-            value = softening * 0.5 * float(np.vdot(residual, residual).real)
-            gradient = softening * np.real(J[rows].conj().T @ residual)
-            ControlVectorFile.from_packed(gradient, local, native=True).write(
-                job.gradient_file(task)
-            )
-            objective = job.objective_file(task)
-            assert objective is not None
-            _write_scalar(objective, value)
-        if job.requires_postprocess():
-            self._aggregate_focus(job)
-
-    def _aggregate_focus(self, job: ControlGradientJob) -> None:
-        """Weighted sums of the task gradients (native) and objectives."""
-
-        weights = (
-            np.ones(job.n_tasks) if job.weights is None else np.asarray(job.weights)
-        )
-        blocks: Dict[str, np.ndarray] = {}
-        total = 0.0
-        for task in range(1, job.n_tasks + 1):
-            path = job.gradient_file(task)
-            if not path.is_file():
-                raise FileNotFoundError(f"missing gradient part {path}")
-            part = ControlVectorFile.read(path, native=True)
-            for name, values in part.blocks.items():
-                blocks[name] = blocks.get(name, 0.0) + weights[task - 1] * values
-            objective = job.objective_file(task)
-            if objective is not None:
-                total += float(weights[task - 1]) * _read_scalar(objective)
-        aggregate = ControlVectorFile(blocks, native=True)
-        aggregate.write(job.gradient_file(raw=True))
-        aggregate.write(job.gradient_file())
-        objective = job.objective_file()
-        if objective is not None:
-            _write_scalar(objective, total)
 
     # -- images ---------------------------------------------------------------
 
@@ -1344,11 +1444,16 @@ class FakeImagingSite(BaseSite):
         if job.operation == "prepare":
             context = {
                 name: {
+                    "fractional_scale": job.fractional_scales.get(name, 1.0),
+                    "identity": source.control_spaces.get(
+                        name, f"fake-native-{name}-{len(v)}"
+                    ),
                     "amplitude": (
                         max(1.0, float(np.max(np.abs(v))))
                         if job.smoothing.normalize_amplitude
+                        and name not in job.fractional_scales
                         else 1.0
-                    )
+                    ),
                 }
                 for name, v in source.blocks.items()
             }
@@ -1359,8 +1464,25 @@ class FakeImagingSite(BaseSite):
         blocks = dict(source.blocks)
         value = 0.0
         for name, v in blocks.items():
+            if job.operation in {"mass", "mass_inverse", "mass_diagonal"}:
+                # Nonuniform SPD surrogate; different support sizes matter.
+                matrix = np.diag(np.linspace(0.5, 2.0, len(v)))
+                if len(v) > 1:
+                    matrix += np.diag(np.full(len(v) - 1, 0.05), 1)
+                    matrix += np.diag(np.full(len(v) - 1, 0.05), -1)
+                if job.operation == "mass_diagonal":
+                    blocks[name] = matrix.diagonal().copy()
+                else:
+                    blocks[name] = (
+                        matrix @ v
+                        if job.operation == "mass"
+                        else np.linalg.solve(matrix, v)
+                    )
+                continue
             a = context[name]["amplitude"]
             weight = np.sqrt(alpha) * a if job.smoothing.kind == "tv" else alpha
+            scale = context[name].get("fractional_scale", 1.0)
+            weight /= scale if job.smoothing.kind == "tv" else scale**2
             if job.operation == "proximal":
                 metric, lower, upper = (
                     ControlVectorFile.read(job.regularization_inputs[k], native=True)[
@@ -1375,11 +1497,46 @@ class FakeImagingSite(BaseSite):
                 )
                 v = np.clip(v, lower, upper)
                 blocks[name] = v
+            if job.operation == "gradient":
+                blocks[name] = weight * v
+            if job.operation == "diagonal":
+                blocks[name] = np.full_like(v, weight)
             value += weight * float(
                 np.abs(v).sum() if job.smoothing.kind == "tv" else 0.5 * (v @ v)
             )
         ControlVectorFile(blocks, native=True).write(job.gradient_file())
         job.result.write_text(
+            json.dumps(
+                {
+                    "schema": "fs-control-regularization-result-1",
+                    "value": value,
+                    "converged": True,
+                }
+            )
+        )
+
+    def _postprocess_job_regularization(self, job: FWIOperatorJob) -> None:
+        """Emulate a normal job's batched Tikhonov ``gradient`` postprocess.
+
+        Uses the same diagonal energy as :meth:`_postprocess_regularization`.
+        """
+
+        request = job.regularization
+        assert request is not None and request["operation"] == "gradient"
+        context = json.loads(Path(request["context"]).read_text())
+        alpha = request.get("alpha", 0.1)
+        value = 0.0
+        for source, output in zip(request["inputs"], request["outputs"]):
+            vector = ControlVectorFile.read(source, native=True)
+            blocks = {
+                name: alpha * v / context[name].get("fractional_scale", 1.0) ** 2
+                for name, v in vector.blocks.items()
+            }
+            value += sum(
+                0.5 * float(v @ blocks[name]) for name, v in vector.blocks.items()
+            )
+            ControlVectorFile(blocks, native=True).write(output)
+        Path(request["result"]).write_text(
             json.dumps(
                 {
                     "schema": "fs-control-regularization-result-1",
@@ -1595,18 +1752,62 @@ class FakeImagingSite(BaseSite):
                 ).reshape(-1)
         return baselines
 
+    @staticmethod
+    def control_identity(lin: FakeLinearization) -> str:
+        """Return the fake frequency-independent control identity of ``lin``."""
+
+        return _sha256({"control_identity": lin.state_fingerprint})
+
+    def _direction_rows(
+        self, job: FWIOperatorJob, lin: FakeLinearization, frequency: Any
+    ) -> List[np.ndarray]:
+        """Read every row of ``direction_set`` in the executing task's coordinates."""
+
+        if not self.emits_control_identity:
+            raise ValueError("this fake solver predates direction sets")
+        vectors = ControlVectorSetFile.read(job.direction_set)
+        if vectors.control_identity != self.control_identity(lin):
+            raise ValueError("direction set control identity mismatch")
+        self.direction_set_rows[job.name] = vectors.n_vectors
+        rows = []
+        for index in range(vectors.n_vectors):
+            vector = vectors.vector(index)
+            for name, stored in vectors.scaling.items():
+                if name.endswith(".mechanism"):
+                    vector.blocks[name] = vector.blocks[name] * (
+                        stored / self.mechanism_scale(frequency)
+                    )
+            dv = vector.pack(lin.active)
+            if dv.size != lin.J.shape[1]:
+                raise ValueError("direction size does not match the active subspace")
+            rows.append(dv)
+        return rows
+
     def _direction(
-        self, job: FWIOperatorJob, lin: FakeLinearization, task: int
+        self,
+        job: FWIOperatorJob,
+        lin: FakeLinearization,
+        task: int,
+        stem: Optional[Path] = None,
     ) -> np.ndarray:
-        if job.direction is None:
+        stem = job.direction if stem is None else stem
+        if stem is None:
             raise ValueError(f"action {job.action!r} requires a direction")
-        path = job.task_input(job.direction, task)
+        path = job.task_input(stem, task)
         vector = ControlVectorFile.read(path, native=False)
         self._check_binding(vector, lin, path)
         dv = vector.pack(lin.active)
         if dv.size != lin.J.shape[1]:
             raise ValueError("direction size does not match the active subspace")
         return dv
+
+    def _vector_options(self) -> Dict[str, Any]:
+        """Return the ``write_objective_vector`` format Sauce uses for its state."""
+
+        schema = _VECTOR_SCHEMAS[self.state_schema]
+        if schema == "fs-objective-vector-3":
+            return {"schema": schema, "n_ranks": self.n_ranks}
+        return {"schema": schema, "dtype": self.state_dtype}
 
     def _objective_vector(
         self,
@@ -1618,6 +1819,13 @@ class FakeImagingSite(BaseSite):
         if job.objective_vector is None:
             raise ValueError("vjp requires an objective_vector input")
         path = job.task_input(job.objective_vector, task)
+        state = self._load_state_payload(job, task)
+        expected = _VECTOR_SCHEMAS[state["schema"]]
+        schema = json.loads(path.read_text()).get("schema")
+        if schema != expected:
+            raise ValueError(
+                f"objective vector {path} is {schema!r}; the state reads {expected!r}"
+            )
         return DataVector.read_objective_vector(
             path,
             lin.space,
@@ -1647,7 +1855,7 @@ class FakeImagingSite(BaseSite):
         path.parent.mkdir(parents=True, exist_ok=True)
         f = complex(frequency)
         payload = {
-            "schema": FAKE_STATE_SCHEMA,
+            "schema": self.state_schema,
             "state_fingerprint": lin.state_fingerprint,
             "control_registry_fingerprint": lin.control_registry_fingerprint,
             "task": task,
@@ -1659,14 +1867,16 @@ class FakeImagingSite(BaseSite):
             "sizes": dict(lin.sizes),
             "m": lin.m.tolist(),
         }
-        from frequensolve.imaging.data import file_sha256
-
+        if self.state_schema == FAKE_STATE_SCHEMA:
+            self._write_canonical_state(path, payload, lin, frequency, task)
+            return
         payload["partition"] = {
             "n_ranks": self.n_ranks,
             "compatibility": "same_mesh_partition",
         }
+        simulated = lin.J @ lin.m
+        residual = simulated - lin.d
         payload["shards"] = []
-        residual = lin.J @ lin.m - lin.d
         for rank in range(self.n_ranks):
             shard = path.with_name(f"{path.stem}_rank_{rank}.json")
             cache = shard.with_suffix(".h5")
@@ -1684,6 +1894,13 @@ class FakeImagingSite(BaseSite):
                     group["objective_residual"] = np.column_stack(
                         (values.real, values.imag)
                     )
+                    # The surrogate's residual is simulated - observed (Sauce's
+                    # contract is the opposite); record it so readers adapt.
+                    group["objective_residual"].attrs[
+                        "convention"
+                    ] = "simulated_minus_observed"
+                    modeled = simulated[layout.indices[select]]
+                    group["simulated"] = np.column_stack((modeled.real, modeled.imag))
                     terms.append(
                         {
                             "id": layout.id,
@@ -1698,23 +1915,166 @@ class FakeImagingSite(BaseSite):
             payload["shards"].append({"file": str(shard), "sha256": file_sha256(shard)})
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
-    def _load_state(
-        self, job: FWIOperatorJob, task: int
-    ) -> Tuple[FakeLinearization, complex]:
+    def _write_canonical_state(
+        self,
+        path: Path,
+        payload: Dict[str, Any],
+        lin: FakeLinearization,
+        frequency: Any,
+        task: int,
+    ) -> None:
+        """Write an ``fs-objective-linearization-5`` manifest and its one cache.
+
+        The manifest has every field of the contract; the fake's own surrogate
+        data (fingerprints, active blocks, sizes, ``m`` and the frequencies)
+        sits under one ``fake`` key. Rows are stored in canonical row-id
+        order; every dataset of a term group is identified by its flattened
+        ``fs-block-sha256-1`` digest and the term's ``cache_fingerprint``
+        hashes those digests, like Sauce. Row values use ``state_dtype``.
+        """
+
+        simulated = lin.J @ lin.m
+        residual = simulated - lin.d
+        cache = path.with_name(f"{path.stem}_cache.h5")
+        rows = self.state_dtype
+        terms = []
+        with h5py.File(cache, "w") as h5:
+            for index, layout in enumerate(lin.space.term_layouts(frequency=frequency)):
+                n_rhs, n_components, _ = lin.space.segment(layout.id).shape
+                count = layout.n_global_rows
+                position = layout.row_ids - 1
+                keys = np.empty((count, 3), dtype=np.int32)
+                keys[position] = layout.coordinate_keys
+                datasets: Dict[str, np.ndarray] = {
+                    "metadata": np.array(
+                        [5, 0, n_rhs, n_components, 1, 0, 0], dtype=np.int32
+                    ),
+                    "n_global_rows": np.array([count], dtype=np.int64),
+                    "metric_weight": np.ones(n_components),
+                    "objective_factor": np.ones(n_components, dtype=np.float32),
+                    "phase_floor": np.zeros((n_components, n_rhs), dtype=np.float32),
+                    "active_mask": np.ones((n_components, n_rhs), dtype=np.int32),
+                    "rhs_required": np.ones(n_rhs, dtype=np.int32),
+                    "coordinate_keys": keys,
+                    "simulated_df": np.zeros((count, 2), dtype=rows),
+                    "static_weight": np.ones(count, dtype=rows),
+                    "robust_weight": np.ones(count, dtype=rows),
+                }
+                for name, values in (
+                    ("objective_residual", residual),
+                    ("simulated", simulated),
+                ):
+                    packed = np.empty((count, 2), dtype=rows)
+                    packed[position, 0] = values[layout.indices].real
+                    packed[position, 1] = values[layout.indices].imag
+                    datasets[name] = packed
+                group = h5.create_group(f"terms/{index}")
+                for name, data in datasets.items():
+                    group[name] = data
+                # The surrogate's residual is simulated - observed (Sauce's
+                # contract is the opposite); record it so readers adapt.
+                group["objective_residual"].attrs[
+                    "convention"
+                ] = "simulated_minus_observed"
+                digests = {
+                    name: flat_block_digest(data) for name, data in datasets.items()
+                }
+                terms.append(
+                    {
+                        "id": layout.id,
+                        "receiver_group": layout.id,
+                        "weight": 1.0,
+                        "reduction": "sum",
+                        "effective_weight_mass": 1.0,
+                        "scale": {
+                            "policy": "none",
+                            "components": list(lin.space.segment(layout.id).components),
+                            "dimensions": ["none"] * n_components,
+                            "units": ["1"] * n_components,
+                            "values": [1.0] * n_components,
+                        },
+                        "objective": {"kind": "l2", "delta": 1.0, "c2": 1.0, "nu": 1.0},
+                        "comparison": {
+                            "kind": "waveform",
+                            "derivative_axis": "frequency",
+                            "source_derivative": "frozen",
+                            "relative_amplitude_floor": 0.0,
+                        },
+                        "receiver_layout": "dense",
+                        "data_metric": {
+                            "pairing": "real_hermitian",
+                            "components": list(lin.space.segment(layout.id).components),
+                            "weights": [1.0] * n_components,
+                        },
+                        "layout_fingerprint": layout.layout_fingerprint,
+                        "cache": {
+                            "file": cache.name,
+                            "group": f"/terms/{index}",
+                            "digests": digests,
+                        },
+                        "runtime": {
+                            "n_rhs": n_rhs,
+                            "n_components": n_components,
+                            "n_inactive": 0,
+                            "n_global_rows": count,
+                            "cache_fingerprint": canonical_json_sha256(digests),
+                        },
+                    }
+                )
+        f = complex(frequency)
+        context = _sha256({"kind": "context", "state": lin.state_fingerprint})
+        manifest = {
+            "schema": FAKE_STATE_SCHEMA,
+            "task": task,
+            "frequency_hz": f.real,
+            "laplace_damping_hz": f.imag,
+            "resolved_context": context,
+            "fingerprints": {
+                "resolved_context": context,
+                "model": lin.state_fingerprint,
+                "observations": _ZERO_DIGEST,
+                "acquisition": _ZERO_DIGEST,
+                "source_signature": "none",
+                "preprocessing": _ZERO_DIGEST,
+                "objective_terms": _ZERO_DIGEST,
+            },
+            "runtime": {"n_terms": len(terms)},
+            "terms": terms,
+            "state_fingerprint": lin.state_fingerprint,
+            # Surrogate data Sauce does not write (validators drop this key).
+            "fake": {
+                key: value
+                for key, value in payload.items()
+                if key not in {"schema", "state_fingerprint", "task"}
+            },
+        }
+        seal_state_manifest(manifest)
+        path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _state_path(job: FWIOperatorJob, task: int) -> Path:
         # ``linearize`` writes ``<stem>_<task>``; a derivative action resolves
         # its ``state`` input like Sauce (task sibling first in a multi-task
         # job, the exact path otherwise).
         if job.action == "linearize":
-            path = job.state_file(task)
-        else:
-            if job.state is None:
-                raise ValueError(f"action {job.action!r} requires a state")
-            path = job.task_input(job.state, task)
+            return job.state_file(task)
+        if job.state is None:
+            raise ValueError(f"action {job.action!r} requires a state")
+        return job.task_input(job.state, task)
+
+    def _load_state_payload(self, job: FWIOperatorJob, task: int) -> Dict[str, Any]:
+        path = self._state_path(job, task)
         if not path.is_file():
             raise FileNotFoundError(f"missing objective state {path}")
         data = json.loads(path.read_text())
-        if data.get("schema") != FAKE_STATE_SCHEMA:
+        if data.get("schema") not in _VECTOR_SCHEMAS:
             raise ValueError(f"{path} is not a fake imaging state")
+        return {**data, **data.get("fake", {})}
+
+    def _load_state(
+        self, job: FWIOperatorJob, task: int
+    ) -> Tuple[FakeLinearization, complex]:
+        data = self._load_state_payload(job, task)
         frequency = complex(*data["frequency"])
         expected = complex(job.f_list[task - 1])
         if not np.isclose(frequency, expected):
@@ -1804,6 +2164,8 @@ class FakeImagingSite(BaseSite):
             name: self.support_mask(name, size, frequency)
             for name, size in lin.sizes.items()
         }
+        if self.emits_control_identity:
+            vector.control_identity = self.control_identity(lin)
         vector.write(path)
 
     def _write_manifest(
@@ -1853,7 +2215,6 @@ class FakeImagingSite(BaseSite):
             "blocks": blocks,
             "descriptor_rank": 0,
             "n_ranks": self.n_ranks,
-            "rank_descriptors": [],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
