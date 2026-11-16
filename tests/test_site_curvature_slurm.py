@@ -115,9 +115,10 @@ class FakeCluster:
         self.processed = 0
         self.bin.mkdir()
         self.install.mkdir()
-        scripts = {"task_affinity": 'exec "$@"\n'}
-        if linux:
-            scripts["uname"] = "echo Linux\n"
+        scripts = {
+            "task_affinity": 'exec "$@"\n',
+            "uname": "echo Linux\n" if linux else "echo Darwin\n",
+        }
         for name, version in _VERSIONS.items():
             # Each launcher records its command line, then starts the program.
             scripts[name] = (
