@@ -6,7 +6,7 @@ publishing through GitHub Actions.
 ## Prerequisites
 
 - A `v`-prefixed PEP 440 version tag for the release. Release candidate tags
-  look like `v0.2.0rc1`; final release tags look like `v0.2.0`.
+  look like `v0.7.1rc1`; final release tags look like `v0.7.1`.
 - FrequenSolve intentionally does not use a checked-in `VERSION` file.
   Versioneer reads the package version from the exact Git tag being built, with
   the leading `v` removed by `tag_prefix = "v"` in `pyproject.toml`.
@@ -32,9 +32,12 @@ Do not add PyPI passwords or API tokens to the repository.
 CI and release workflows prefer the repository secrets
 `FS_SOLVER_BUILDER_CLIENT_ID` and `FS_SOLVER_BUILDER_APP_PRIVATE_KEY`, falling back to
 `FREQUENSOLVER_BUILDER_CLIENT_ID` and `FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY`.
-Existing builder secrets continue to work without migration. Release-candidate
-dispatches accept either `solver_release` or the legacy `frequensolver_release`
-input; `solver_release` takes precedence when both are supplied.
+Existing builder secrets continue to work without migration. Candidate creation,
+final promotion, and package publication each require an explicit
+`solver_release` input. Select the intended current stable Sauce tag before
+starting; maintainers with Sauce access can inspect it with
+`gh api repos/FrequenSol/Sauce/releases/latest --jq .tag_name`.
+The release workflows do not inherit a solver choice from an older candidate.
 
 Runtime compatibility checks prefer `FS_SOLVER_POLICY`, then fall back to
 `FREQUENSOLVE_SOLVER_POLICY` and `FREQUENSOLVE_FREQUENSOLVER_POLICY`, in that
@@ -84,8 +87,9 @@ local equivalents.
 
 Use the release workflows for the normal maintainer flow:
 
-- Run `Create Release Candidate` with a final base version such as `0.2.0` and
-  the final `solver_release` tag selected for that package line. Choose
+- Run `Create Release Candidate` with a final base version such as `0.7.1` and
+  the final `solver_release` tag selected for that package line, such as `v0.7.0`.
+  Choose
   one explicit validation profile:
 
   - `standard` (the default) requires successful exact-tree `Required CI` for
@@ -102,16 +106,19 @@ Use the release workflows for the normal maintainer flow:
     `frequensolve-test-evidence.tar.gz` archive.
 
   After the selected profile passes, the workflow creates the next tag in the
-  release line, such as `v0.2.0rc1`, and publishes a GitHub prerelease. That
+  release line, such as `v0.7.1rc1`, and publishes a GitHub prerelease. That
   workflow explicitly dispatches `Publish Package`, which builds the package,
-  attaches the distributions, and publishes `0.2.0rc1` to TestPyPI.
+  attaches the distributions, and publishes `0.7.1rc1` to TestPyPI.
 - Run `Create Release` with an approved release candidate tag such as
-  `v0.2.0rc1`. The workflow derives the validation profile only from the sealed
-  evidence, revalidates its exact-SHA CI and profile-specific asset set, creates
-  `v0.2.0` on the same commit, and carries that asset set unchanged into the
+  `v0.7.1rc1` and the explicitly selected `solver_release=v0.7.0`. The workflow
+  rejects a candidate whose sealed solver pin differs from that choice before
+  creating a final tag. Create a new candidate when its solver pin is stale.
+  It derives the validation profile from the sealed evidence, revalidates
+  exact-SHA CI and the profile-specific asset set, creates
+  `v0.7.1` on the same commit, and carries that asset set unchanged into the
   final GitHub Release. The workflow explicitly dispatches `Publish Package`,
   which validates the evidence again, rebuilds from the final tag, attaches
-  the distributions to the GitHub Release, and publishes `0.2.0` to PyPI.
+  the distributions to the GitHub Release, and publishes `0.7.1` to PyPI.
 
 Release creation treats the profile-specific assets as one sealed set. A retry
 may replace the complete set while the GitHub Release is still a draft. A
@@ -122,8 +129,9 @@ extra, or incomplete published set fails before release notes or assets are
 changed. The v2 evidence shape remains supported with the current solver field names.
 
 `Publish Package` also supports manual `workflow_dispatch` for maintainers who
-need to retry publishing intentionally. Set the required `release_tag` input to
-the immutable release tag; the workflow checks out that exact tag and reads its
+need to retry publishing intentionally. Set both required inputs: `release_tag`
+to the immutable package tag and `solver_release` to the intended Sauce tag.
+The workflow checks out that exact tag and reads its
 matching release evidence before building. Keep `--ref` on the same tag so the
 reviewed workflow definition and the package source are aligned. Choose
 the publication target by publishing the matching GitHub Release: prereleases
@@ -135,8 +143,9 @@ Retry a release-candidate publish:
 ```bash
 gh workflow run release.yml \
   --repo FrequenSol/FrequenSolve \
-  --ref v0.2.0rc1 \
-  -f release_tag=v0.2.0rc1
+  --ref v0.7.1rc1 \
+  -f release_tag=v0.7.1rc1 \
+  -f solver_release=v0.7.0
 ```
 
 Retry a final release publish:
@@ -144,11 +153,16 @@ Retry a final release publish:
 ```bash
 gh workflow run release.yml \
   --repo FrequenSol/FrequenSolve \
-  --ref v0.2.0 \
-  -f release_tag=v0.2.0
+  --ref v0.7.1 \
+  -f release_tag=v0.7.1 \
+  -f solver_release=v0.7.0
 ```
 
-`Publish Package` requires the exact profile-specific evidence asset set and
+`Publish Package` is dispatch-only, so a release event cannot omit the explicit
+solver selection. Both release-creation workflows forward the selected tag.
+It rejects an evidence pin that differs from that tag and verifies the installed
+wheel's preferred solver release and commit before any package upload.
+It requires the exact profile-specific evidence asset set and
 reruns exact-SHA CI validation before it builds or publishes. For
 solver-backed evidence it also verifies the archive checksum and
 machine-readable heavy results. It materializes

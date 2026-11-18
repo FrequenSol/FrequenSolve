@@ -105,8 +105,13 @@ def _valid_sha(value: object) -> bool:
     return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
 
 
-def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
-    """Raise ``ValueError`` unless evidence proves the expected commit."""
+def validate_evidence(
+    evidence: dict[str, Any],
+    expected_commit: str,
+    *,
+    expected_solver_release: str | None = None,
+) -> None:
+    """Validate exact source evidence and an explicitly selected Solver release."""
 
     evidence = normalized_evidence(evidence)
     mismatches: list[str] = []
@@ -152,6 +157,17 @@ def validate_evidence(evidence: dict[str, Any], expected_commit: str) -> None:
         mismatches.append("ciRunUrl must identify ciRunId in FrequenSolve")
 
     solver_release = evidence.get("solverRelease", "")
+    if expected_solver_release is not None:
+        if not FINAL_RELEASE_RE.fullmatch(expected_solver_release):
+            mismatches.append(
+                "expected Solver release must be an immutable final tag vX.Y.Z"
+            )
+        elif solver_release != expected_solver_release:
+            mismatches.append(
+                f"solverRelease must match explicitly selected "
+                f"{expected_solver_release!r}, got {solver_release!r}; "
+                "create a new release candidate with the intended Solver pin"
+            )
     if not isinstance(solver_release, str) or not FINAL_RELEASE_RE.fullmatch(
         solver_release
     ):
@@ -303,6 +319,10 @@ def main() -> int:
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--commit", required=True)
     parser.add_argument(
+        "--solver-release",
+        help="Require this explicitly selected immutable Solver release tag.",
+    )
+    parser.add_argument(
         "--print-profile",
         action="store_true",
         help="Print only the validated evidence profile.",
@@ -315,7 +335,11 @@ def main() -> int:
         evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
         if not isinstance(evidence, dict):
             raise ValueError("release evidence must be an object")
-        validate_evidence(evidence, args.commit)
+        validate_evidence(
+            evidence,
+            args.commit,
+            expected_solver_release=args.solver_release,
+        )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         parser.error(str(exc))
 

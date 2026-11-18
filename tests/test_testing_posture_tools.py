@@ -233,6 +233,91 @@ def test_release_evidence_accepts_standard_exact_tree_ci_and_solver_identity():
     assert release_evidence_profile(evidence) == STANDARD_PROFILE
 
 
+@pytest.mark.parametrize("factory", [_standard_release_evidence, _release_evidence])
+def test_release_evidence_requires_explicitly_selected_solver(factory):
+    evidence = factory()
+
+    validate_evidence(evidence, COMMIT, expected_solver_release="v0.1.0")
+    with pytest.raises(ValueError, match="explicitly selected 'v0.7.0'"):
+        validate_evidence(evidence, COMMIT, expected_solver_release="v0.7.0")
+
+
+@pytest.mark.parametrize("release", ["", "latest", "main", "v0.7.0rc1", "v0.7.0\n"])
+def test_release_evidence_rejects_nonfinal_expected_solver(release):
+    with pytest.raises(ValueError, match="expected Solver release must be"):
+        validate_evidence(
+            _standard_release_evidence(),
+            COMMIT,
+            expected_solver_release=release,
+        )
+
+
+def test_corrected_sdk_manifest_pins_selected_sauce_release(tmp_path):
+    evidence = _standard_release_evidence()
+    evidence.update(
+        solverRelease="v0.7.0",
+        sauceRef="v0.7.0",
+        sauceCommit="1ecc95124c8555bde3284f8589f6476707ed321d",
+        solverReleaseUrl="https://github.com/FrequenSol/Sauce/releases/tag/v0.7.0",
+    )
+    validate_evidence(evidence, COMMIT, expected_solver_release="v0.7.0")
+    manifest = manifest_from_evidence(
+        evidence,
+        package_release="0.7.1",
+        package_commit=COMMIT,
+    )
+    path = tmp_path / "solver_compatibility.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = load_solver_compatibility(path)
+
+    assert loaded.package_release == "0.7.1"
+    assert loaded.preferred_solver.release == "v0.7.0"
+    assert loaded.preferred_solver.git_commit == evidence["sauceCommit"]
+    assert loaded.preferred_solver.release_url == evidence["solverReleaseUrl"]
+
+
+@pytest.mark.parametrize("solver_release", ["v0.2.0", "v0.7.0"])
+def test_promotion_cli_checks_solver_pin_before_accepting_evidence(
+    tmp_path, solver_release
+):
+    evidence = _standard_release_evidence()
+    evidence.update(
+        solverRelease=solver_release,
+        sauceRef=solver_release,
+        solverReleaseUrl=(
+            f"https://github.com/FrequenSol/Sauce/releases/tag/{solver_release}"
+        ),
+    )
+    path = tmp_path / "release-evidence.json"
+    original = json.dumps(evidence)
+    path.write_text(original, encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/validate_release_evidence.py"),
+            str(path),
+            "--commit",
+            COMMIT,
+            "--solver-release",
+            "v0.7.0",
+            "--print-profile",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if solver_release == "v0.7.0":
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == STANDARD_PROFILE
+    else:
+        assert result.returncode == 2
+        assert "explicitly selected 'v0.7.0', got 'v0.2.0'" in result.stderr
+        assert result.stdout == ""
+    assert path.read_text(encoding="utf-8") == original
+
+
 def test_release_evidence_maps_legacy_v2_to_solver_backed():
     evidence = _release_evidence()
     evidence = _legacy_release_evidence(evidence, LEGACY_SCHEMA)
