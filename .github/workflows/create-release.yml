@@ -7,6 +7,10 @@ on:
         description: Release candidate tag to promote, such as v0.2.0rc1
         required: true
         type: string
+      solver_release:
+        description: Required immutable Sauce release; must match the candidate evidence
+        required: true
+        type: string
       notes:
         description: Optional final release notes
         required: false
@@ -65,6 +69,7 @@ jobs:
           RC_TAG: ${{ github.event.inputs.release_candidate_tag }}
           FINAL_TAG: ${{ needs.resolve-release-line.outputs.final_tag }}
           EXPECTED_RC_SHA: ${{ needs.resolve-release-line.outputs.rc_sha }}
+          EXPECTED_SOLVER_RELEASE: ${{ inputs.solver_release }}
           NOTES: ${{ github.event.inputs.notes }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -118,6 +123,7 @@ jobs:
             python scripts/validate_release_evidence.py \
               "$evidence_file" \
               --commit "$rc_sha" \
+              --solver-release "$EXPECTED_SOLVER_RELEASE" \
               --print-profile
           )"
           case "$validation_profile" in
@@ -328,7 +334,8 @@ jobs:
           # skips existing distributions and replaces matching release assets.
           gh workflow run release.yml \
             --ref "$final_tag" \
-            -f "release_tag=$final_tag"
+            -f "release_tag=$final_tag" \
+            -f "solver_release=$EXPECTED_SOLVER_RELEASE"
 
           {
             echo "### Created release"

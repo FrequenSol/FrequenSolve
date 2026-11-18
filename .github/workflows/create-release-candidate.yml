@@ -10,7 +10,7 @@ on:
       target_ref:
         description: Repository ref to release from
         required: true
-        default: v2
+        default: main
         type: string
       validation_profile:
         description: Release validation profile
@@ -21,12 +21,8 @@ on:
           - standard
           - solver-backed
       solver_release:
-        description: Immutable final solver release preferred by this package, such as v0.1.0 (or use the legacy alias below)
-        required: false
-        type: string
-      frequensolver_release:
-        description: Legacy alias for solver_release; solver_release takes precedence
-        required: false
+        description: Required immutable Sauce release for this package, such as v0.7.0
+        required: true
         type: string
       notes:
         description: Optional release candidate notes
@@ -73,7 +69,7 @@ jobs:
         id: prepare
         env:
           TARGET_REF: ${{ inputs.target_ref }}
-          FS_SOLVER_RELEASE: ${{ inputs.solver_release || inputs.frequensolver_release }}
+          FS_SOLVER_RELEASE: ${{ inputs.solver_release }}
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
           set -euo pipefail
@@ -1023,7 +1019,8 @@ jobs:
           # skips existing distributions and replaces matching release assets.
           gh workflow run release.yml \
             --ref "$tag_name" \
-            -f "release_tag=$tag_name"
+            -f "release_tag=$tag_name" \
+            -f "solver_release=$solver_release"
 
           {
             echo "### Created release candidate"

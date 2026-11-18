@@ -5,12 +5,14 @@ permissions:
   actions: read
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
         description: Immutable release tag whose evidence and package should be published
+        required: true
+        type: string
+      solver_release:
+        description: Required immutable Sauce release; must match release evidence and wheel
         required: true
         type: string
 
@@ -25,15 +27,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+          ref: ${{ inputs.release_tag }}
 
       - name: Derive and validate publication target
         id: publication
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_TAG: ${{ github.event.release.tag_name }}
-          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -55,11 +54,6 @@ jobs:
           checkout_sha="$(git rev-parse 'HEAD^{commit}')"
           test "$tag_sha" = "$checkout_sha"
 
-          if [ "$EVENT_NAME" = release ]; then
-            test "$EVENT_TAG" = "$metadata_tag"
-            test "$EVENT_PRERELEASE" = "$metadata_prerelease"
-          fi
-
           publication_target="$(
             python scripts/plan_release_tags.py publication-target \
               --tag "$metadata_tag" \
@@ -71,7 +65,8 @@ jobs:
       - name: Require exact-SHA CI and profile-aware release evidence
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_SOLVER_RELEASE: ${{ inputs.solver_release }}
         run: |
           set -euo pipefail
           release_sha="$(git rev-parse 'HEAD^{commit}')"
@@ -99,6 +94,7 @@ jobs:
             python scripts/validate_release_evidence.py \
               "$evidence_file" \
               --commit "$release_sha" \
+              --solver-release "$EXPECTED_SOLVER_RELEASE" \
               --print-profile
           )"
           case "$validation_profile" in
@@ -165,7 +161,7 @@ jobs:
       - name: Verify release version
         id: version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           version="$(
             python scripts/validate_release_version.py \
@@ -177,7 +173,7 @@ jobs:
       - name: Build distributions
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           release_sha="$(git rev-parse 'HEAD^{commit}')"
@@ -207,9 +203,14 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Install and import release wheel
+        env:
+          EXPECTED_SOLVER_RELEASE: ${{ inputs.solver_release }}
         run: |
           python -m pip install --force-reinstall dist/*.whl
           python -I - <<'PY'
+          import json
+          import os
+
           import frequensolve as fs
 
           for name in ("Project", "LayeredModel", "LocalSite", "AWSSite"):
@@ -220,6 +221,12 @@ jobs:
               raise SystemExit("packaged Solver metadata version mismatch")
           if manifest.preferred_solver is None:
               raise SystemExit("release wheel has no preferred Solver")
+          if manifest.preferred_solver.release != os.environ["EXPECTED_SOLVER_RELEASE"]:
+              raise SystemExit("release wheel Solver pin differs from the selected release")
+          with open(".release-evidence/release-evidence.json", encoding="utf-8") as stream:
+              evidence = json.load(stream)
+          if manifest.preferred_solver.git_commit != evidence["sauceCommit"]:
+              raise SystemExit("release wheel Solver commit differs from release evidence")
           if manifest.validation_profile not in {"standard", "solver-backed"}:
               raise SystemExit("release wheel has no validation profile")
           if manifest.solver_backed != (
@@ -294,5 +301,5 @@ jobs:
       - name: Attach package distributions
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
