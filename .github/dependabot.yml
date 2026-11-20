@@ -3,7 +3,7 @@ version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
-    target-branch: "v2"
+    target-branch: "next"
     schedule:
       interval: "weekly"
       day: "tuesday"
