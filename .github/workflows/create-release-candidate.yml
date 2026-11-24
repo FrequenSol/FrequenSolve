@@ -60,7 +60,7 @@ jobs:
 
       - name: Generate evidence-read token
         id: generate-token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -152,7 +152,7 @@ jobs:
 
       - name: Generate dependency resolution token
         id: resolve-token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -182,7 +182,7 @@ jobs:
 
       - name: Generate downstream dispatch token
         id: dispatch-token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -265,7 +265,7 @@ jobs:
 
       - name: Generate first downstream wait token
         id: wait-token-1
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -287,7 +287,7 @@ jobs:
       - name: Generate second downstream wait token
         if: ${{ steps.wait-1.outputs.completed != 'true' }}
         id: wait-token-2
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -310,7 +310,7 @@ jobs:
       - name: Generate third downstream wait token
         if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' }}
         id: wait-token-3
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -333,7 +333,7 @@ jobs:
       - name: Generate fourth downstream wait token
         if: ${{ steps.wait-1.outputs.completed != 'true' && steps.wait-2.outputs.completed != 'true' && steps.wait-3.outputs.completed != 'true' }}
         id: wait-token-4
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
@@ -361,7 +361,7 @@ jobs:
 
       - name: Generate downstream evidence token
         id: evidence-token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.FS_SOLVER_BUILDER_CLIENT_ID || secrets.FREQUENSOLVER_BUILDER_CLIENT_ID }}
           private-key: ${{ secrets.FS_SOLVER_BUILDER_APP_PRIVATE_KEY || secrets.FREQUENSOLVER_BUILDER_APP_PRIVATE_KEY }}
