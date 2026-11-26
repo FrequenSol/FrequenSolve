@@ -75,6 +75,11 @@ no rank descriptors and its fingerprint is independent of the partition. These
 are targeted overlays and require a solver built from `88d8dada` or later;
 FrequenSolve still reads versions 3 and 4.
 
+The `fs-objective-linearization-5` schema is refreshed from Sauce v0.7.1,
+`a035ddd24ecc426b55579c87df2c31cac047274d`. It permits the optional comparison
+`source_delay` present in that solver's output. The historical example and
+the rest of the snapshot retain their original provenance.
+
 ## Background checkpoint version 2 overlay
 
 `fs-background-state-2` (contract, schema and examples), the fs-job-1

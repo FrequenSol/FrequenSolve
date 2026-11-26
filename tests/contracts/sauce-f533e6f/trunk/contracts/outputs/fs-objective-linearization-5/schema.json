@@ -201,6 +201,13 @@
             },
             "relative_amplitude_floor": {
               "type": "number"
+            },
+            "source_delay": {
+              "enum": [
+                "none",
+                "fit"
+              ],
+              "description": "Whether a per-RHS phase-slope source delay is projected out of the residual."
             }
           },
           "additionalProperties": false

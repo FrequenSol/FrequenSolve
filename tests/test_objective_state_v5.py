@@ -132,6 +132,21 @@ def test_sauce_example_digests_and_fingerprints_reproduce():
     assert canonical_json_sha256(vector_basis) == vector["manifest_fingerprint"]
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("source_delay", "valid"),
+    [(None, True), ("none", True), ("fit", True), ("unsupported", False)],
+)
+def test_v5_contract_accepts_supported_optional_source_delay(source_delay, valid):
+    manifest = json.loads((STATE_CONTRACT / "examples" / "canonical.json").read_text())
+    if source_delay is not None:
+        manifest["terms"][0]["comparison"]["source_delay"] = source_delay
+    validator = Draft202012Validator(
+        json.loads((STATE_CONTRACT / "schema.json").read_text())
+    )
+    assert validator.is_valid(manifest) is valid
+
+
 # ---------------------------------------------------------------------------
 # canonical JSON
 # ---------------------------------------------------------------------------
