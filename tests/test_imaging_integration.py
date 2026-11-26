@@ -212,7 +212,7 @@ def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
     """One job per action over two frequencies; mechanisms start at Sauce's baseline."""
 
     # Opposite-signed VP terms amplify wave-solve error in the frequency sum.
-    problem = _multi_frequency_source_problem(tmp_path, "scalar", wave_tolerance=1.0e-6)
+    problem = _multi_frequency_source_problem(tmp_path, "scalar", wave_tolerance=1.0e-7)
     frequencies = [FREQUENCY - 1.0, FREQUENCY]
     assert problem.space.blocks == ("model.vp", "source.1.mechanism")
 

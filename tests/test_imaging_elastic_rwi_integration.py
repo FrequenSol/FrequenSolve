@@ -264,7 +264,10 @@ def test_tti_all_fields_reduced_curvature_at_zero_residual(tmp_path):
         shutdown_on_completion=False,
     )
     try:
-        problem, _, _ = _case(tmp_path, site, "tti", "ip_is_rho", zero_residual=True)
+        # Resolve the native wave states below the inner stationarity floor.
+        problem, _, _ = _case(
+            tmp_path, site, "tti", "ip_is_rho", zero_residual=True, wave_tolerance=1e-7
+        )
         # An absolute floor is needed for fitting numerical noise at the exact
         # zero-residual solution; keep the normal production relative tolerance.
         rwi = problem.rwi(damping=1e-4, absolute_tolerance=1e-7)
