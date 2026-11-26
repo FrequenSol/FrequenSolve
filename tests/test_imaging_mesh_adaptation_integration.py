@@ -214,7 +214,9 @@ def test_material_averaging_reduces_thin_slow_feature_refinement(tmp_path, site)
     assert selected
     coefficients[np.unique(selected).astype(int)] = np.log(0.3)
     problem.state = im.ControlState(initial.space, coefficients)
-    target = dataclasses.replace(spec, frequency=FREQUENCY, epw=2.0)
+    # At this resolution the localized and averaged fields select distinct
+    # dyadic refinement levels for the same thin feature.
+    target = dataclasses.replace(spec, frequency=FREQUENCY, epw=1.5)
     localized = problem.with_controls({"vp": target}, mesh_averaging_wavelengths=0.01)
     averaged = problem.with_controls({"vp": target})
     from frequensolve.imaging.property_mesh import read_reference_vertices
@@ -227,8 +229,7 @@ def test_material_averaging_reduces_thin_slow_feature_refinement(tmp_path, site)
                     spans.append(np.ptp(read_reference_vertices(root), axis=1).min())
         return min(spans)
 
-    # Averages suppress peak refinement; a broader sizing field need not use
-    # fewer coefficients overall, especially near dyadic refinement thresholds.
+    # In this fixture, averaging suppresses peak refinement and uses fewer controls.
     assert minimum_cell_span(averaged) > minimum_cell_span(localized)
     assert averaged.full_space.full_size < localized.full_space.full_size
     # Sizing smooths only the reference used to choose the basis, not the model.
