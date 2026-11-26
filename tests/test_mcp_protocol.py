@@ -331,7 +331,7 @@ def test_authenticated_cloud_profile_requires_and_validates_host_execution(
     ) -> Mapping[str, Any]:
         calls.append((operation, dict(arguments)))
         return {
-            "membership": {"hasSeat": True, "subscriptionActive": True},
+            "membership": {"canExecute": True, "subscriptionActive": True},
             "infrastructure": {"storage": "READY", "compute": "READY"},
             "credits": {
                 "available": False,
@@ -405,7 +405,7 @@ def test_authenticated_host_executor_respects_the_declared_concurrency_limit():
                     first_entered.set()
                     await release_first.wait()
                 return {
-                    "membership": {"hasSeat": True, "subscriptionActive": True},
+                    "membership": {"canExecute": True, "subscriptionActive": True},
                     "infrastructure": {"storage": "READY", "compute": "READY"},
                     "credits": {
                         "available": False,
@@ -453,7 +453,7 @@ def test_hosted_executor_output_must_match_the_packaged_cloud_contract():
         del operation, arguments
         return {
             "membership": {
-                "hasSeat": True,
+                "canExecute": True,
                 "subscriptionActive": True,
                 "accountId": "must-not-cross-boundary",
             },
@@ -711,7 +711,7 @@ def test_cloud_tools_map_to_only_the_five_fixed_read_operations(monkeypatch):
     calls: list[tuple[str | None, str, dict[str, Any]]] = []
     responses = {
         "getCloudReadiness": {
-            "membership": {"hasSeat": True, "subscriptionActive": True},
+            "membership": {"canExecute": True, "subscriptionActive": True},
             "infrastructure": {"storage": "READY", "compute": "READY"},
             "credits": {
                 "available": False,
