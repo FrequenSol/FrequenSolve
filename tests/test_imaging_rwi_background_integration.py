@@ -78,7 +78,10 @@ def _recover_background(root, anisotropy, extra=None):
     )
     started = perf_counter()
     try:
-        problem, inner, expected = _case(root, site, anisotropy, "vp_vs_ip")
+        # Keep wave-solve error below the independent reflectivity stationarity check.
+        problem, inner, expected = _case(
+            root, site, anisotropy, "vp_vs_ip", wave_tolerance=1e-6
+        )
         active = ["vp"] + ([extra] if extra else [])
         rwi = problem.restrict(active=active).rwi(
             reflectivity=f"refl.{inner}", damping=1e-8
