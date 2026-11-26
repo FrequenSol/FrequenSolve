@@ -17,6 +17,10 @@ from frequensolve.model.layered import LayeredModel
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.seismic.acquisition import Acquisition
 from frequensolve.seismic.receivers import ReceiverNode
+from frequensolve.simulation.artifact_contract import (
+    ArtifactCatalog,
+    load_operation_result,
+)
 from frequensolve.simulation.discretization import Discretization
 from frequensolve.simulation.jobs import BaseJob, FrequencyDomainJob
 from frequensolve.simulation.solver import SolverConfig
@@ -131,33 +135,27 @@ def test_native_3d_pressure_reciprocity(tmp_path):
     metadata = loaded.run_metadata
     assert metadata.successful
     assert metadata.task_status == {1: "success"}
-    # The public metadata object exposes typed task artifacts and Python state.
-    # Build/workflow provenance remains in the fixed native run contract.
-    manifest = json.loads(
-        (loaded._result_path / "_fs_run" / "run_manifest.json").read_text()
-    )
-    assert manifest["build"]["git_commit"] == identity.identity.git_commit
-    assert len(manifest["build"]["git_commit"]) == 40
-    assert manifest["build"]["git_dirty"] is False
-    assert manifest["workflow"]["dimension"] == 3
-    assert manifest["workflow"]["physics"] == "acoustic"
-    assert manifest["workflow"]["finalized_by"] == "pack"
+    # The native commit records bind the solver and workflow to the packed traces.
+    result_path = loaded._result_path
+    task = ArtifactCatalog.read_task_results(result_path, tasks=[1]).results[1]
+    pack = load_operation_result(result_path, "pack")
+    assert task.state == "success" and task.code == 0
+    assert pack.state == "success" and pack.code == 0
+    build = pack.metadata["build"]
+    workflow = pack.metadata["workflow"]
+    assert build["git_commit"] == identity.identity.git_commit
+    assert len(build["git_commit"]) == 40
+    assert build["git_dirty"] is False
+    assert workflow["dimension"] == 3
+    assert workflow["physics"] == "acoustic"
+    assert pack.name == "pack"
     task_summary = {
         "succeeded": sum(s == "success" for s in metadata.task_status.values()),
         "failed": sum(s == "failed" for s in metadata.task_status.values()),
     }
     assert task_summary == {"succeeded": 1, "failed": 0}
-    task_manifest = json.loads(
-        (
-            loaded._result_path
-            / "_fs_run"
-            / "tasks"
-            / "task_000001"
-            / "run_manifest.json"
-        ).read_text()
-    )
-    assert task_manifest["solver"]["convergence"]["converged"] is True
-    assert Path(task_manifest["solver"]["executable"]).name == "fs3d_s"
+    assert task.solver["convergence"]["converged"] is True
+    assert Path(task.solver["executable"]).name == "fs3d_s"
     with loaded.traces.open() as traces:
         assert traces.groups == ["reciprocal"]
         data = traces.open_frequency_domain("reciprocal").compute()
@@ -194,13 +192,11 @@ def test_native_3d_pressure_reciprocity(tmp_path):
         assert relative_error < 1e-3
     receipt = {
         "schema": "frequensolve-native-3d-acceptance-1",
-        "build": manifest["build"],
-        "license": manifest.get("license"),
-        "workflow": manifest["workflow"],
+        "build": build,
+        "license": pack.metadata.get("license"),
+        "workflow": workflow,
         "task_summary": task_summary,
-        "input_hashes": {
-            key: value["hash"] for key, value in manifest["inputs"].items()
-        },
+        "input_hashes": task.fingerprints,
         "pressure_shape": list(values.shape),
         "relative_reciprocity_error": relative_error,
         "compatibility_warnings": compatibility_warnings,
