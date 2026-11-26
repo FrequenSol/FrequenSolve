@@ -198,7 +198,15 @@ def test_native_awi_gradient_checkpoint_reuse_and_lbfgs(
                     else ["forward", "incremental_forward", "adjoint", "adjoint"]
                 )
 
-        step = 1e-5 if method == "DPG" or meshed else 1e-3
+        if method == "DPG":
+            step = 1e-5
+        elif meshed:
+            # The Galerkin finite-filter difference is stable from 3e-5 to
+            # 3e-4 on the single-precision native output. Use the middle
+            # of this interval to avoid cancellation at the original step.
+            step = 1e-4
+        else:
+            step = 1e-3
         fd = (awi.value(x + step * direction) - awi.value(x - step * direction)) / (
             2 * step
         )
