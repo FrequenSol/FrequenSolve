@@ -30,7 +30,7 @@ on:
         type: string
 
 env:
-  REVIEWED_IMAGE_BUILDER: 725ff165f1ad06877a1849aac929c2f2842b7267
+  REVIEWED_IMAGE_BUILDER: 68fb7675608cb0cc4c6fc3ac6b3f4fd7ebaf42d6
 
 permissions:
   contents: write
