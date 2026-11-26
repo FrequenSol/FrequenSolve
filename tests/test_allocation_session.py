@@ -8,7 +8,9 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import h5py
@@ -904,25 +906,41 @@ def test_controller_heartbeat_is_independent_of_slow_run_status_writes(
         dict(generation="g", total_ranks=1, lease_timeout=5, heartbeat_interval=0.02),
     )
     original = controller_module._write_json_atomic
+    run = dict(id="a" * 32, state="running", rows=[])
+    run_status = tmp_path / "runs" / run["id"] / "status.json"
+    run_status.parent.mkdir()
+    controller_status = tmp_path / "status.json"
     run_writes = []
+    run_write_started = Event()
+    allow_run_write = Event()
+    heartbeat_written = Event()
 
-    def slow(path, payload):
-        if "runs" in Path(path).parts:
+    def write(path, payload):
+        if path == run_status:
             run_writes.append(path)
-            time.sleep(0.5)  # a stalled shared filesystem
+            run_write_started.set()
+            assert allow_run_write.wait(10), "run status write was never released"
+        heartbeat_during_wait = path == controller_status and run_write_started.is_set()
         original(path, payload)
+        if heartbeat_during_wait and not allow_run_write.is_set():
+            heartbeat_written.set()
 
-    monkeypatch.setattr(controller_module, "_write_json_atomic", slow)
+    monkeypatch.setattr(controller_module, "_write_json_atomic", write)
     controller._controller_status("ready")
+    before = json.loads(controller_status.read_text())["sequence"]
     heartbeat = controller_module.threading.Thread(target=controller._beat)
     heartbeat.start()
     try:
-        run = dict(id="a" * 32, state="running", rows=[])
-        (tmp_path / "runs" / run["id"]).mkdir()
-        before = json.loads((tmp_path / "status.json").read_text())["sequence"]
-        controller._status(run)
-        after = json.loads((tmp_path / "status.json").read_text())["sequence"]
-        assert after - before >= 5
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            writing = executor.submit(controller._status, run)
+            try:
+                assert run_write_started.wait(5), "run status write did not start"
+                assert heartbeat_written.wait(5), "heartbeat stalled with run status"
+                assert not run_status.exists()
+                assert json.loads(controller_status.read_text())["sequence"] > before
+            finally:
+                allow_run_write.set()
+            writing.result(timeout=5)
         # Unchanged run status is not rewritten every tick.
         controller._status(run)
         controller._status(run)
