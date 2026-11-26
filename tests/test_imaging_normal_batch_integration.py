@@ -14,7 +14,9 @@ import pytest
 
 from frequensolve import imaging as im
 from frequensolve.imaging import DepthProfile, ImagingProblem, ObservedData
+from frequensolve.imaging._artifacts import ControlVectorSetFile
 from frequensolve.imaging._native_regularization import bind_workflow_regularization
+from frequensolve.imaging.jobs import FWIOperatorJob
 from frequensolve.imaging.workflows import _task_counters
 from frequensolve.project import Project
 from frequensolve.simulation import FrequencyDomainJob
@@ -27,6 +29,13 @@ from tests.test_imaging_integration import (
 )
 
 pytestmark = pytest.mark.integration
+
+
+def _direction_count(job: FWIOperatorJob) -> int:
+    if job.direction_set is not None:
+        return ControlVectorSetFile.read(job.direction_set).n_vectors
+    assert job.directions is not None
+    return len(job.directions)
 
 
 def _spy(problem):
@@ -78,7 +87,9 @@ def test_batched_normal_matches_single_direction_jobs(tmp_path, layout):
     batch = lin.normal @ np.column_stack([d.values for d in directions])
 
     (job,) = jobs
-    assert job.action == "normal" and len(job.directions) == 3 and job.n_tasks == 2
+    assert job.action == "normal"
+    assert _direction_count(job) == 3
+    assert job.n_tasks == 2
     assert (job.background is not None) == background
     if background:
         counters = _task_counters(job)
@@ -98,7 +109,8 @@ def test_batched_normal_matches_single_direction_jobs(tmp_path, layout):
     before = len(jobs)
     regularized = lin.apply_normal_batch(fresh, regularization=native)
     (folded,) = jobs[before:]
-    assert folded.regularization is not None and len(folded.directions) == 2
+    assert folded.regularization is not None
+    assert _direction_count(folded) == 2
     operator = native.hessian_operator()
     for product, direction in zip(regularized, fresh):
         expected = lin.apply_normal(direction).values + np.asarray(operator @ direction)
