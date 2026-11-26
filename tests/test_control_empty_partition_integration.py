@@ -15,6 +15,7 @@ from frequensolve.mesh import BoundaryCondition
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project import Project
 from frequensolve.simulation import FrequencyDomainJob
+from tests.native_solver_fixture import native_candidate_solver
 from tests.test_imaging_integration import FREQUENCY, START_VP, _executable, _simulation
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(600)]
@@ -76,13 +77,17 @@ def test_meshed_controls_allow_water_only_rank(tmp_path):
         conditions=["free"], boundaries=["x_min", "x_max", "z_min", "z_max"]
     )
     simulation.save()
-    with LocalSite(
-        solver=_executable(),
-        n_workers=1,
-        threads_per_worker=2,
-        shutdown_on_completion=False,
-        solver_policy="warn",
-    ) as site:
+    solver = _executable()
+    with (
+        native_candidate_solver(solver),
+        LocalSite(
+            solver=solver,
+            n_workers=1,
+            threads_per_worker=2,
+            shutdown_on_completion=False,
+            solver_policy="warn",
+        ) as site,
+    ):
         observed = FrequencyDomainJob("observed", simulation, [FREQUENCY])
         assert site.run(observed, check=True).successful
         problem = im.ImagingProblem(

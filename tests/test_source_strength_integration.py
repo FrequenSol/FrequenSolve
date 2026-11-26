@@ -19,14 +19,22 @@ from frequensolve.project import Project
 from frequensolve.seismic import Acquisition, ReceiverNode
 from frequensolve.simulation import FrequencyDomainJob
 from frequensolve.units import ureg as u
+from tests.native_solver_fixture import native_candidate_solver
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.mark.parametrize(
-    "kind,units,default", [("scalar", "N*m", 1e9), ("volume_injection", "m^3/s", 1.0)]
+    "kind,recorded_kind,units,default",
+    [
+        ("scalar", "pressure_monopole", "m^3/s^2", 1.0),
+        ("isotropic_moment", "isotropic_moment", "N*m", 1e9),
+        ("volume_injection", "volume_injection", "m^3/s", 1.0),
+    ],
 )
-def test_default_and_specified_strengths_are_recorded(tmp_path, kind, units, default):
+def test_default_and_specified_strengths_are_recorded(
+    tmp_path, kind, recorded_kind, units, default
+):
     executable = os.environ.get("FS_SAUCE_EXECUTABLE") or os.environ.get(
         "LOCAL_SOLVER_EXECUTABLE"
     )
@@ -58,8 +66,9 @@ def test_default_and_specified_strengths_are_recorded(tmp_path, kind, units, def
     acq.add_receiver_group(name="line", device=hydrophone, coords=[[0.7, 0.2]])
     sim += acq
     job = FrequencyDomainJob("strength", sim, [3.0, 4.0])
-    site = LocalSite(solver=solver, n_workers=1, threads_per_worker=2)
-    result = site.run(job, check=True)
+    with native_candidate_solver(solver):
+        site = LocalSite(solver=solver, n_workers=1, threads_per_worker=2)
+        result = site.run(job, check=True)
     assert result.successful
 
     expected = [
@@ -71,7 +80,7 @@ def test_default_and_specified_strengths_are_recorded(tmp_path, kind, units, def
         gathers = [traces.fd("line", "p", source=i).load() for i in (1, 2, 3)]
     for gather, (strength, origin) in zip(gathers, expected):
         assert gather.attrs["units"] == "Pa"
-        assert gather.attrs["source_kind"] == kind
+        assert gather.attrs["source_kind"] == recorded_kind
         assert gather.attrs["source_strength_units"] == units
         assert gather.attrs["source_strength_origin"] == origin
         np.testing.assert_allclose(
