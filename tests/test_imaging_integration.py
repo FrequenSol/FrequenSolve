@@ -61,7 +61,13 @@ def _executable() -> Path:
 
 
 def _simulation(
-    project: Project, name: str, vp_lower: float, *, robust=False, source_kind="scalar"
+    project: Project,
+    name: str,
+    vp_lower: float,
+    *,
+    robust=False,
+    source_kind="scalar",
+    wave_tolerance: float = 1.0e-4,
 ):
     simulation = project.new_simulation(name=name, physics="acoustic", dimension=2)
     if robust:
@@ -103,8 +109,7 @@ def _simulation(
     )
     simulation += acquisition
     simulation += Discretization()
-    # Single-precision FS_MG stalls near 1e-5; the e2e acoustic fixture uses 1e-4.
-    simulation += SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)
+    simulation += SolverConfig(solve_on="final", max_iter=300, tolerance=wave_tolerance)
     simulation.save()
     return simulation
 
@@ -164,16 +169,26 @@ def test_imaging_problem_linearizes_against_sauce(tmp_path):
     assert np.isfinite(moved) and moved != lin.value
 
 
-def _multi_frequency_source_problem(tmp_path, source_kind):
+def _multi_frequency_source_problem(tmp_path, source_kind, *, wave_tolerance=1.0e-4):
     from frequensolve.orchestrator.sites.local import LocalSite
 
-    site = LocalSite(solver=_executable(), n_workers=1)
+    site = LocalSite(solver=_executable(), n_workers=1, threads_per_worker=2)
     project = Project(name="multi", path=tmp_path / "project", load_if_exists=False)
     truth = _simulation(
-        project, "truth", TRUTH_VP, robust=True, source_kind=source_kind
+        project,
+        "truth",
+        TRUTH_VP,
+        robust=True,
+        source_kind=source_kind,
+        wave_tolerance=wave_tolerance,
     )
     initial = _simulation(
-        project, "initial", START_VP, robust=True, source_kind=source_kind
+        project,
+        "initial",
+        START_VP,
+        robust=True,
+        source_kind=source_kind,
+        wave_tolerance=wave_tolerance,
     )
     frequencies = [FREQUENCY - 1.0, FREQUENCY]
 
@@ -196,7 +211,8 @@ def _multi_frequency_source_problem(tmp_path, source_kind):
 def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
     """One job per action over two frequencies; mechanisms start at Sauce's baseline."""
 
-    problem = _multi_frequency_source_problem(tmp_path, "scalar")
+    # Opposite-signed VP terms amplify wave-solve error in the frequency sum.
+    problem = _multi_frequency_source_problem(tmp_path, "scalar", wave_tolerance=1.0e-6)
     frequencies = [FREQUENCY - 1.0, FREQUENCY]
     assert problem.space.blocks == ("model.vp", "source.1.mechanism")
 
@@ -331,7 +347,9 @@ def test_source_positions_are_metres_in_sauce_and_km_in_the_simulation(tmp_path)
 # ---------------------------------------------------------------------------
 
 
-def _extension_simulation(project: Project, name: str, vp_lower: float):
+def _extension_simulation(
+    project: Project, name: str, vp_lower: float, *, wave_tolerance: float = 1.0e-4
+):
     """Return the layered case configured for Sauce's extension actions.
 
     Mirrors ``test/e2e/model_extension_case.py`` (``control_sensitivity_case
@@ -344,7 +362,7 @@ def _extension_simulation(project: Project, name: str, vp_lower: float):
     simulation += SolverConfig(
         solve_on="final",
         max_iter=600,
-        tolerance=1.0e-4,
+        tolerance=wave_tolerance,
         relaxed_assembly=False,
         schur_precision="fp64",
     )
@@ -356,10 +374,10 @@ def _extension_simulation(project: Project, name: str, vp_lower: float):
 def test_extended_problem_solves_against_sauce(tmp_path):
     from frequensolve.orchestrator.sites.local import LocalSite
 
-    site = LocalSite(solver=_executable(), n_workers=1)
+    site = LocalSite(solver=_executable(), n_workers=1, threads_per_worker=2)
     project = Project(name="fwime", path=tmp_path / "project", load_if_exists=False)
     truth = _extension_simulation(project, "truth", TRUTH_VP)
-    initial = _extension_simulation(project, "initial", START_VP)
+    initial = _extension_simulation(project, "initial", START_VP, wave_tolerance=1.0e-6)
 
     observed_job = FrequencyDomainJob("observed", truth, [FREQUENCY])
     result = site.run(observed_job, check=True)
@@ -380,6 +398,8 @@ def test_extended_problem_solves_against_sauce(tmp_path):
             lag_scale=20 * u.ms,
             tolerance=1.0e-5,
             max_iterations=200,
+            # The Schur correction nearly cancels the direct model action.
+            reduced_normal={"relative_tolerance": 1.0e-6},
         )
     )
     report = xp.capabilities()
