@@ -60,7 +60,15 @@ def _executable() -> Path:
     )
 
 
-def _simulation(project: Project, name: str, vp_lower: float, *, robust=False):
+def _simulation(
+    project: Project,
+    name: str,
+    vp_lower: float,
+    *,
+    robust=False,
+    source_kind="scalar",
+    wave_tolerance: float = 1.0e-4,
+):
     simulation = project.new_simulation(name=name, physics="acoustic", dimension=2)
     if robust:
         # Robust runtime scaling derives its unit scales from the task
@@ -91,7 +99,7 @@ def _simulation(project: Project, name: str, vp_lower: float, *, robust=False):
         pml_constant=20.0,
     )
     acquisition = Acquisition()
-    acquisition.add_sources(kind="scalar", coords=[[0.5, 0.08]])
+    acquisition.add_sources(kind=source_kind, coords=[[0.5, 0.08]])
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acquisition.add_receiver_group(
@@ -101,8 +109,7 @@ def _simulation(project: Project, name: str, vp_lower: float, *, robust=False):
     )
     simulation += acquisition
     simulation += Discretization()
-    # Single-precision FS_MG stalls near 1e-5; the e2e acoustic fixture uses 1e-4.
-    simulation += SolverConfig(solve_on="final", max_iter=300, tolerance=1.0e-4)
+    simulation += SolverConfig(solve_on="final", max_iter=300, tolerance=wave_tolerance)
     simulation.save()
     return simulation
 
@@ -162,21 +169,33 @@ def test_imaging_problem_linearizes_against_sauce(tmp_path):
     assert np.isfinite(moved) and moved != lin.value
 
 
-def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
-    """One job per action over two frequencies; mechanisms start at Sauce's baseline."""
-
+def _multi_frequency_source_problem(tmp_path, source_kind, *, wave_tolerance=1.0e-4):
     from frequensolve.orchestrator.sites.local import LocalSite
 
-    site = LocalSite(solver=_executable(), n_workers=1)
+    site = LocalSite(solver=_executable(), n_workers=1, threads_per_worker=2)
     project = Project(name="multi", path=tmp_path / "project", load_if_exists=False)
-    truth = _simulation(project, "truth", TRUTH_VP, robust=True)
-    initial = _simulation(project, "initial", START_VP, robust=True)
+    truth = _simulation(
+        project,
+        "truth",
+        TRUTH_VP,
+        robust=True,
+        source_kind=source_kind,
+        wave_tolerance=wave_tolerance,
+    )
+    initial = _simulation(
+        project,
+        "initial",
+        START_VP,
+        robust=True,
+        source_kind=source_kind,
+        wave_tolerance=wave_tolerance,
+    )
     frequencies = [FREQUENCY - 1.0, FREQUENCY]
 
     observed_job = FrequencyDomainJob("observed", truth, frequencies)
     assert site.run(observed_job, check=True).successful
 
-    problem = ImagingProblem(
+    return ImagingProblem(
         initial,
         controls=ControlSpace(
             vp=DepthProfile("vp", "layer_2", count=4),
@@ -187,6 +206,14 @@ def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
         site=site,
         name="multi",
     )
+
+
+def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
+    """One job per action over two frequencies; mechanisms start at Sauce's baseline."""
+
+    # Opposite-signed VP terms amplify wave-solve error in the frequency sum.
+    problem = _multi_frequency_source_problem(tmp_path, "scalar", wave_tolerance=1.0e-6)
+    frequencies = [FREQUENCY - 1.0, FREQUENCY]
     assert problem.space.blocks == ("model.vp", "source.1.mechanism")
 
     # the state is Sauce's baseline: a nonzero mechanism with its scaling
@@ -225,16 +252,16 @@ def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
     assert staged.scaling == {"source.1.mechanism": state.scaling["source.1.mechanism"]}
     assert np.isfinite(moved.value) and moved.value != lin.value
 
-    # The mechanism gradient against a central difference of the objective.
-    # Each task stores the mechanism in its own nondimensional units
-    # (robust scaling depends on the task frequency), so the covector parts
-    # must be converted to the reference coordinate (s_ref = task 1's scale)
-    # before they are summed; the dot tests above cannot see a missing
-    # conversion.  The objective is quadratic in the (linear) source, so the
-    # central difference is exact up to single-precision noise.
+
+def test_multi_frequency_source_covector_uses_reference_scale(tmp_path):
+    # Volume injection has distinct physical mechanism scales at the two
+    # frequencies in this 2D fixture. Convert each task covector to the
+    # reference scale before comparing its sum to a central difference.
+    problem = _multi_frequency_source_problem(tmp_path, "volume_injection")
+    lin = problem.linearize()
     name = "source.1.mechanism"
     s_ref = problem.mechanism_scaling[name]
-    assert s_ref == state.scaling[name]
+    assert s_ref == problem.state.scaling[name]
     scales = [
         ControlStateFile.read(lin.job.state_output_file(task)).scaling[name]
         for task in (1, 2)
@@ -246,6 +273,7 @@ def test_multi_frequency_operators_and_source_baseline_against_sauce(tmp_path):
     e = np.zeros_like(x)
     e[index] = h
     fd = (problem.value(x + e) - problem.value(x - e)) / (2.0 * h)
+    assert np.isfinite(fd) and fd != 0.0
     converted = float(lin.gradient.values[index])
     # the pre-fix reduction: task parts summed in their own coordinates
     raw = sum(
@@ -319,7 +347,9 @@ def test_source_positions_are_metres_in_sauce_and_km_in_the_simulation(tmp_path)
 # ---------------------------------------------------------------------------
 
 
-def _extension_simulation(project: Project, name: str, vp_lower: float):
+def _extension_simulation(
+    project: Project, name: str, vp_lower: float, *, wave_tolerance: float = 1.0e-4
+):
     """Return the layered case configured for Sauce's extension actions.
 
     Mirrors ``test/e2e/model_extension_case.py`` (``control_sensitivity_case
@@ -332,7 +362,7 @@ def _extension_simulation(project: Project, name: str, vp_lower: float):
     simulation += SolverConfig(
         solve_on="final",
         max_iter=600,
-        tolerance=1.0e-4,
+        tolerance=wave_tolerance,
         relaxed_assembly=False,
         schur_precision="fp64",
     )
@@ -344,10 +374,10 @@ def _extension_simulation(project: Project, name: str, vp_lower: float):
 def test_extended_problem_solves_against_sauce(tmp_path):
     from frequensolve.orchestrator.sites.local import LocalSite
 
-    site = LocalSite(solver=_executable(), n_workers=1)
+    site = LocalSite(solver=_executable(), n_workers=1, threads_per_worker=2)
     project = Project(name="fwime", path=tmp_path / "project", load_if_exists=False)
     truth = _extension_simulation(project, "truth", TRUTH_VP)
-    initial = _extension_simulation(project, "initial", START_VP)
+    initial = _extension_simulation(project, "initial", START_VP, wave_tolerance=1.0e-6)
 
     observed_job = FrequencyDomainJob("observed", truth, [FREQUENCY])
     result = site.run(observed_job, check=True)
@@ -368,6 +398,8 @@ def test_extended_problem_solves_against_sauce(tmp_path):
             lag_scale=20 * u.ms,
             tolerance=1.0e-5,
             max_iterations=200,
+            # The Schur correction nearly cancels the direct model action.
+            reduced_normal={"relative_tolerance": 1.0e-6},
         )
     )
     report = xp.capabilities()

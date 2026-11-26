@@ -29,8 +29,43 @@ from frequensolve.solver import (
     query_local_solver_identity,
     query_remote_solver_identity,
 )
+from tests import native_solver_fixture
 
 COMMIT = "a" * 40
+
+
+def test_native_fixture_permits_only_the_expected_source_warning(tmp_path, monkeypatch):
+    executable = tmp_path / "solver"
+    identified = SolverIdentityQuery(
+        identity=SolverIdentity(version="v0.1.0", build_id="test", git_commit=COMMIT)
+    )
+    monkeypatch.setattr(
+        native_solver_fixture, "query_local_solver_identity", lambda _: identified
+    )
+    with pytest.warns(SolverCompatibilityWarning, match=r"0\+unreleased"):
+        with native_solver_fixture.native_candidate_solver(executable):
+            warnings.warn(
+                "Solver compatibility warning\n\nFrequenSolve 0+unreleased "
+                "does not contain a released preferred Solver declaration.",
+                SolverCompatibilityWarning,
+            )
+
+    with pytest.raises(SolverCompatibilityWarning, match="configured solver"):
+        with native_solver_fixture.native_candidate_solver(executable):
+            warnings.warn(
+                "The configured solver does not match the release.",
+                SolverCompatibilityWarning,
+            )
+
+
+def test_native_fixture_rejects_an_unidentified_solver(tmp_path, monkeypatch):
+    unavailable = SolverIdentityQuery(identity=None, error="identity command failed")
+    monkeypatch.setattr(
+        native_solver_fixture, "query_local_solver_identity", lambda _: unavailable
+    )
+    with pytest.raises(pytest.fail.Exception, match="identity command failed"):
+        with native_solver_fixture.native_candidate_solver(tmp_path / "solver"):
+            pytest.fail("An unidentified solver reached native integration.")
 
 
 @pytest.fixture(autouse=True)
