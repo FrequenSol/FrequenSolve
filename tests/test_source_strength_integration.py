@@ -19,6 +19,7 @@ from frequensolve.project import Project
 from frequensolve.seismic import Acquisition, ReceiverNode
 from frequensolve.simulation import FrequencyDomainJob
 from frequensolve.units import ureg as u
+from tests.native_solver_fixture import native_candidate_solver
 
 pytestmark = pytest.mark.integration
 
@@ -58,8 +59,9 @@ def test_default_and_specified_strengths_are_recorded(tmp_path, kind, units, def
     acq.add_receiver_group(name="line", device=hydrophone, coords=[[0.7, 0.2]])
     sim += acq
     job = FrequencyDomainJob("strength", sim, [3.0, 4.0])
-    site = LocalSite(solver=solver, n_workers=1, threads_per_worker=2)
-    result = site.run(job, check=True)
+    with native_candidate_solver(solver):
+        site = LocalSite(solver=solver, n_workers=1, threads_per_worker=2)
+        result = site.run(job, check=True)
     assert result.successful
 
     expected = [
