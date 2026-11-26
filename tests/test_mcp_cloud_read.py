@@ -29,7 +29,7 @@ def _resource_bytes(name: str) -> bytes:
 
 def _fixtures() -> list[dict[str, Any]]:
     return json.loads(
-        _resource_bytes("customer_cloud_read_v3_fixtures.json").decode("utf-8")
+        _resource_bytes("customer_cloud_read_v4_fixtures.json").decode("utf-8")
     )
 
 
@@ -306,7 +306,7 @@ def test_contract_contains_only_fixed_bounded_queries():
 
 
 @pytest.mark.parametrize("fixture", _fixtures(), ids=lambda item: item["operation"])
-def test_all_five_public_methods_project_exact_v3_fixture_outputs(fixture):
+def test_all_five_public_methods_project_exact_v4_fixture_outputs(fixture):
     operation = cloud._load_contract()["operationsByName"][fixture["operation"]]
     calls: list[dict[str, Any]] = []
     client = cloud.CloudReadClient(
@@ -514,7 +514,7 @@ def test_optional_output_nulls_are_pruned_in_nested_objects():
     )
     result = client.check_readiness()
     assert "role" not in result["membership"]
-    assert result["membership"]["hasSeat"] is True
+    assert result["membership"]["canExecute"] is True
 
 
 @pytest.mark.parametrize(
@@ -1369,7 +1369,7 @@ def test_requests_transport_sends_only_fixed_document_and_bounded_request():
     assert "private-test-id-token" not in repr(transport)
     assert "appsync-api" not in repr(transport)
     result = transport(
-        "query Fixed { membership { hasSeat } }",
+        "query Fixed { membership { canExecute } }",
         {},
         10.0,
         16_384,
@@ -1378,7 +1378,7 @@ def test_requests_transport_sends_only_fixed_document_and_bounded_request():
     assert result == {"data": {"membership": {}}}
     captured = session.calls[0]
     assert captured["json"] == {
-        "query": "query Fixed { membership { hasSeat } }",
+        "query": "query Fixed { membership { canExecute } }",
         "variables": {},
     }
     assert captured["timeout"] == 10.0
@@ -1468,7 +1468,7 @@ if server is None:
 
 fixtures = json.loads(
     files('frequensolve.mcp_server')
-    .joinpath('contracts/customer_cloud_read_v3_fixtures.json')
+    .joinpath('contracts/customer_cloud_read_v4_fixtures.json')
     .read_text(encoding='utf-8')
 )
 fixture = next(
@@ -1503,7 +1503,7 @@ print(cloud.CLOUD_READ_CONTRACT_VERSION)
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "3.0.0"
+    assert result.stdout.strip() == "4.0.0"
 
 
 @pytest.mark.parametrize(
@@ -1558,7 +1558,7 @@ def test_readiness_retains_exact_credits_without_requiring_a_seat(status):
     output = next(
         item for item in _fixtures() if item["operation"] == "getCloudReadiness"
     )["output"]
-    output["membership"]["hasSeat"] = False
+    output["membership"]["canExecute"] = False
     output["credits"]["status"] = status
     output["credits"]["nextExpiryAt"] = "2026-08-01T00:00:00Z"
     output["credits"]["nextExpiryCredits"] = "0.000000000000000001"

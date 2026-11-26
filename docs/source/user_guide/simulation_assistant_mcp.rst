@@ -242,7 +242,7 @@ Read-only Cloud tools
 
 Four Cloud tools help an agent monitor the signed-in user's work:
 
-- check seat, subscription, prepaid Credits balances, storage, and compute
+- check execution access, subscription, prepaid Credits balances, storage, and compute
   readiness;
 - list a bounded page of the user's simulations;
 - read one simulation summary or its bounded stored diagnostics; and
@@ -255,15 +255,15 @@ anything. Missing and unauthorized simulation IDs receive the same safe
 response. The ``cloud_*`` monitoring tools are Cloud-only; they do not monitor
 jobs submitted to SLURM/HPC sites.
 
-The ``frequensol.customer-cloud-read`` version ``3.0.0`` contract reports
+The ``frequensol.customer-cloud-read`` version ``4.0.0`` contract reports
 prepaid Credits from the Cloud billing projection. Amounts are exact decimal
 strings, including available, held and total Credits; optional rollover,
 overdraft and next-expiry amounts remain separate. No SCU conversion is made.
 An unavailable or inactive balance reports its status and refresh time without
 inventing a zero balance. ``REVIEW_REQUIRED`` means the balance can be read but
-needs account review; it does not authorize a simulation. A user without an
-assigned seat can still inspect these readiness details. Missing or unavailable
-compute readiness never implies that a scheduler is healthy or accepts jobs.
+needs account review. Members with ``canExecute=false`` can still inspect
+readiness. The Cloud service evaluates execution access, balance and
+infrastructure conditions when considering admission.
 
 The SDK and hosted service must use the same approved contract and package
 release. An older host cannot provide this Credits contract merely because a
