@@ -159,6 +159,7 @@ from frequensolve.simulation import (
     VtkOutput,
 )
 from frequensolve.solver import SolverCompatibilityWarning, query_local_solver_identity
+from frequensolve.units import ureg as u
 
 # =============================================================================
 # Test Parameters
@@ -206,8 +207,9 @@ BOUNDARY_PARAMS = {
 
 ACQUISITION_PARAMS = {
     "source": {
-        "kind": "scalar",
+        "kind": "pressure_monopole",
         "coords": [[0.5, 0.05]],
+        "amplitude": 1.0 * u("m^3/s^2"),
     },
     "receivers": {
         "name": "surface_hydrophones",
@@ -972,6 +974,19 @@ def test_time_domain_simulation_basic(time_domain_results):
     assert td_results is not None, "Should have simulation results"
     assert td_results.groups, "Should have at least one receiver group"
 
+    group = ACQUISITION_PARAMS["receivers"]["name"]
+    pressure = td_results.fd(group, "p", source=1)
+    assert pressure.attrs["units"] == "Pa"
+    assert pressure.attrs["source_kind"] == "pressure_monopole"
+    assert pressure.attrs["source_strength_units"] == "m^3/s^2"
+    assert pressure.attrs["source_strength"] == 1.0
+    samples = pressure.values
+    assert np.isfinite(samples).all()
+    norm = np.linalg.norm(samples)
+    assert norm > 0.0
+    # The acquisition and layered model are mirrored about the source.
+    assert np.linalg.norm(samples - samples[:, ::-1]) < 1e-3 * norm
+
 
 # -----------------------------------------------------------------------------
 # Visualization Tests
@@ -1010,8 +1025,6 @@ def test_model_plot(simulation):
 
 @pytest.mark.integration
 @pytest.mark.visual
-# Containerized solver builds produced an equivalent plot at RMS 2.098; keep
-# the threshold narrowly above that measured cross-runner variation.
 @pytest.mark.mpl_image_compare(tolerance=2.2)
 def test_time_domain_common_frequency_plot(time_domain_results):
     """Test the common frequency plot from time domain simulation.
