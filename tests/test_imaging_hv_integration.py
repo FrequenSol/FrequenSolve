@@ -9,6 +9,7 @@ from frequensolve.mesh import BoundaryCondition, BoundaryConditions
 from frequensolve.model.layered import LayeredModel
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project import Project
+from frequensolve.seismic import SourceSignature, TabulatedSpectrum
 from frequensolve.simulation import Discretization, FrequencyDomainJob, SolverConfig
 from frequensolve.units import ureg
 from tests.test_imaging_integration import _executable, _simulation
@@ -19,9 +20,17 @@ pytestmark = [pytest.mark.integration, pytest.mark.timeout(600)]
 @pytest.mark.parametrize("curved,meshed", [(False, False), (True, False), (True, True)])
 def test_hv_native_gradient_and_frequency_weight(tmp_path, curved, meshed):
     project = Project(name="hv", path=tmp_path / "project", load_if_exists=False)
-    truth = _simulation(project, "truth", 2.5)
-    initial = _simulation(project, "initial", 2.2)
+    truth = _simulation(project, "truth", 2.5, source_kind="pressure_monopole")
+    initial = _simulation(project, "initial", 2.2, source_kind="pressure_monopole")
+    frequency = 5.0
     for sim in (truth, initial):
+        # The H/V objective is calibrated in Pa. Retain the original scalar
+        # excitation at this frequency with an explicit pressure spectrum.
+        sim.acquisition.source_signature = SourceSignature(
+            TabulatedSpectrum([frequency], [2j * np.pi * frequency**2 / 10_000.0]),
+            frequencies=[frequency],
+            spectral_derivative="frozen",
+        )
         if curved:
             # HV must retain authored line coordinates through the metadata/root-map
             # shortcut. Reconstructing them from curved-element eta perturbs the line.
@@ -69,7 +78,7 @@ def test_hv_native_gradient_and_frequency_weight(tmp_path, curved, meshed):
         shutdown_on_completion=False,
         solver_policy="warn",
     ) as site:
-        observed = FrequencyDomainJob("observed", truth, [5.0])
+        observed = FrequencyDomainJob("observed", truth, [frequency])
         assert site.run(observed, check=True).successful
         base = im.ImagingProblem(
             initial,
@@ -77,7 +86,7 @@ def test_hv_native_gradient_and_frequency_weight(tmp_path, curved, meshed):
                 im.MeshParameters(
                     "vp",
                     "layer_2",
-                    frequency=5,
+                    frequency=frequency,
                     epw=1,
                     artifact=str(project.path / "vp.h5"),
                 )
@@ -136,5 +145,6 @@ def test_hv_native_gradient_and_frequency_weight(tmp_path, curved, meshed):
         np.testing.assert_allclose(
             weighted.gradient.values, 0.3 * lin.gradient.values, rtol=1e-7, atol=1e-10
         )
-        with pytest.raises(NotImplementedError, match="first-order"):
-            _ = lin.normal
+        assert lin.normal.shape == (lin.space.size, lin.space.size)
+        with pytest.raises(NotImplementedError, match="residual-space"):
+            _ = lin.jacobian

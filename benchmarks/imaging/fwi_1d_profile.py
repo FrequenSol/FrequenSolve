@@ -39,8 +39,14 @@ from frequensolve.mesh import BoundaryCondition
 from frequensolve.model.layered import LayeredModel
 from frequensolve.orchestrator.sites.local import LocalSite
 from frequensolve.project import Project
-from frequensolve.seismic import Acquisition, ReceiverNode
+from frequensolve.seismic import (
+    Acquisition,
+    ReceiverNode,
+    SourceSignature,
+    TabulatedSpectrum,
+)
 from frequensolve.simulation import Discretization, FrequencyDomainJob, SolverConfig
+from frequensolve.units import ureg
 
 DEFAULT_EXECUTABLE = Path("/tmp/FS_stage-imaging-merge/agent/install/fs2d_s")
 
@@ -213,7 +219,20 @@ def _simulation(
         pml_constant=20.0,
     )
     acquisition = Acquisition()
-    acquisition.add_sources(kind="scalar", coords=[list(SOURCE)])
+    acquisition.add_sources(
+        kind="pressure_monopole",
+        coords=[list(SOURCE)],
+        amplitude=1.0 * ureg.m**3 / ureg.s**2,
+    )
+    # Preserve the archived scalar excitation with an explicit pressure-source
+    # calibration. The dimensionless spectrum multiplies 1 m³/s² and retains
+    # the historical phase and squared-frequency weighting of the objective.
+    source_spectrum = 2j * np.pi * np.square(frequencies) / 10_000.0
+    acquisition.source_signature = SourceSignature(
+        TabulatedSpectrum(frequencies, source_spectrum),
+        frequencies=frequencies,
+        spectral_derivative="frozen",
+    )
     hydrophone = ReceiverNode(name="hydrophone")
     hydrophone.add_component(name="p", field="pressure")
     acquisition.add_receiver_group(
